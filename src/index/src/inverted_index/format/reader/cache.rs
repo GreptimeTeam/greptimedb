@@ -145,11 +145,13 @@ pub struct InvertedIndexCache {
 }
 
 impl InvertedIndexCache {
-    pub fn new(index_metadata_cap: u64, index_cap: u64) -> Self {
+    /// Creates `InvertedIndexCache` with provided `index_metadata_cap` and `index_content_cap`.
+    pub fn new(index_metadata_cap: u64, index_content_cap: u64) -> Self {
+        common_telemetry::debug!("Building InvertedIndexCache with metadata size: {index_metadata_cap}, content size: {index_content_cap}");
         let index_metadata = moka::sync::CacheBuilder::new(index_metadata_cap)
             .name("inverted_index_metadata")
             .build();
-        let index_cache = moka::sync::CacheBuilder::new(index_cap)
+        let index_cache = moka::sync::CacheBuilder::new(index_content_cap)
             .name("inverted_index_content")
             .build();
         Self {

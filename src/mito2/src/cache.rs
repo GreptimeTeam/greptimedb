@@ -182,6 +182,8 @@ pub struct CacheManagerBuilder {
     sst_meta_cache_size: u64,
     vector_cache_size: u64,
     page_cache_size: u64,
+    index_metadata_size: u64,
+    index_content_size: u64,
     write_cache: Option<WriteCacheRef>,
 }
 
@@ -207,6 +209,18 @@ impl CacheManagerBuilder {
     /// Sets write cache.
     pub fn write_cache(mut self, cache: Option<WriteCacheRef>) -> Self {
         self.write_cache = cache;
+        self
+    }
+
+    /// Sets cache size for index metadata.
+    pub fn index_metadata_size(mut self, bytes: u64) -> Self {
+        self.index_metadata_size = bytes;
+        self
+    }
+
+    /// Sets cache size for index content.
+    pub fn index_content_size(mut self, bytes: u64) -> Self {
+        self.index_content_size = bytes;
         self
     }
 
@@ -247,8 +261,8 @@ impl CacheManagerBuilder {
                 .build()
         });
 
-        // todo(hl): make it configurable.
-        let inverted_index_cache = InvertedIndexCache::new(1024 * 16, 1024 * 16);
+        let inverted_index_cache =
+            InvertedIndexCache::new(self.index_metadata_size, self.index_content_size);
         CacheManager {
             sst_meta_cache,
             vector_cache,

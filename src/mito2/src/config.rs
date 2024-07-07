@@ -84,6 +84,10 @@ pub struct MitoConfig {
     pub vector_cache_size: ReadableSize,
     /// Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
     pub page_cache_size: ReadableSize,
+    /// Cache size for metadata of inverted index. Setting it to 0 to disable the cache.
+    pub inverted_index_metadata_cache_size: ReadableSize,
+    /// Cache size for inverted index content. Setting it to 0 to disable the cache.
+    pub inverted_index_cache_size: ReadableSize,
     /// Whether to enable the experimental write cache.
     pub enable_experimental_write_cache: bool,
     /// File system path for write cache, defaults to `{data_home}/write_cache`.
@@ -133,6 +137,8 @@ impl Default for MitoConfig {
             sst_meta_cache_size: ReadableSize::mb(128),
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
+            inverted_index_metadata_cache_size: ReadableSize::mb(32),
+            inverted_index_cache_size: ReadableSize::mb(32),
             enable_experimental_write_cache: false,
             experimental_write_cache_path: String::new(),
             experimental_write_cache_size: ReadableSize::mb(512),
