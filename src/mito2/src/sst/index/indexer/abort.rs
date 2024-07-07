@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use common_telemetry::warn;
-use puffin::puffin_manager::PuffinWriter;
 
 use crate::sst::index::Indexer;
 
 impl Indexer {
     pub(crate) async fn do_abort(&mut self) {
         self.do_abort_inverted_index().await;
-        self.do_abort_puffin_writer().await;
+        self.do_abort_fulltext_index().await;
+        self.puffin_manager = None;
     }
 
     async fn do_abort_inverted_index(&mut self) {
@@ -44,24 +44,22 @@ impl Indexer {
         }
     }
 
-    async fn do_abort_puffin_writer(&mut self) {
-        let Some(puffin_writer) = self.puffin_writer.take() else {
+    async fn do_abort_fulltext_index(&mut self) {
+        let Some(mut indexer) = self.fulltext_indexer.take() else {
             return;
         };
-
-        let err = match puffin_writer.finish().await {
-            Ok(_) => return,
-            Err(err) => err,
+        let Err(err) = indexer.abort().await else {
+            return;
         };
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to abort puffin writer, region_id: {}, file_id: {}, err: {}",
+                "Failed to abort full-text index, region_id: {}, file_id: {}, err: {}",
                 self.region_id, self.file_id, err
             );
         } else {
             warn!(
-                err; "Failed to abort puffin writer, region_id: {}, file_id: {}",
+                err; "Failed to abort full-text index, region_id: {}, file_id: {}",
                 self.region_id, self.file_id,
             );
         }

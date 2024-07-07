@@ -32,6 +32,8 @@ pub const TIME_INDEX_KEY: &str = "greptime:time_index";
 pub const COMMENT_KEY: &str = "greptime:storage:comment";
 /// Key used to store default constraint in arrow field's metadata.
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
+/// Key used to store fulltext options in column metadata.
+pub const FULLTEXT_KEY: &str = "greptime:fulltext";
 
 /// Schema of a column, used as an immutable struct.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +242,18 @@ impl ColumnSchema {
             }
         }
     }
+
+    /// Retrieves the fulltext options for the column.
+    pub fn fulltext_options(&self) -> Result<Option<FulltextOptions>> {
+        match self.metadata.get(FULLTEXT_KEY) {
+            None => Ok(None),
+            Some(json) => {
+                let options =
+                    serde_json::from_str(json).context(error::DeserializeSnafu { json })?;
+                Ok(Some(options))
+            }
+        }
+    }
 }
 
 impl TryFrom<&Field> for ColumnSchema {
@@ -294,6 +308,25 @@ impl TryFrom<&ColumnSchema> for Field {
         )
         .with_metadata(metadata))
     }
+}
+
+/// Fulltext options for a column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FulltextOptions {
+    /// Whether the fulltext index is enabled.
+    pub enable: bool,
+    /// The fulltext analyzer to use.
+    pub analyzer: FulltextAnalyzer,
+    /// Whether the fulltext index is case-sensitive.
+    pub case_sensitive: bool,
+}
+
+/// Fulltext analyzer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FulltextAnalyzer {
+    #[default]
+    English,
+    Chinese,
 }
 
 #[cfg(test)]

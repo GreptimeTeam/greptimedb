@@ -22,7 +22,7 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
-use crate::config::InvertedIndexConfig;
+use crate::config::{FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
@@ -153,6 +153,7 @@ impl AccessLayer {
                 intermediate_manager: self.intermediate_manager.clone(),
                 index_options: request.index_options,
                 inverted_index_config: request.inverted_index_config,
+                fulltext_index_config: request.fulltext_index_config,
             }
             .build()
             .await;
@@ -204,6 +205,7 @@ pub(crate) struct SstWriteRequest {
     /// Configs for index
     pub(crate) index_options: IndexOptions,
     pub(crate) inverted_index_config: InvertedIndexConfig,
+    pub(crate) fulltext_index_config: FulltextIndexConfig,
 }
 
 /// Creates a fs object store with atomic write dir.
