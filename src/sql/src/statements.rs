@@ -40,13 +40,13 @@ use common_time::timezone::Timezone;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN};
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, COMMENT_KEY,
+};
 use datatypes::types::{cast, TimestampType};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
-pub use option_map::OptionMap;
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::{ExactNumberInfo, UnaryOperator};
-pub use transform::{get_data_type_by_alias_name, transform_statements};
 
 use crate::ast::{
     ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, TimezoneInfo,
@@ -54,9 +54,14 @@ use crate::ast::{
 };
 use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
-    ConvertValueSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, ParseSqlValueSnafu, Result,
-    SerializeColumnDefaultConstraintSnafu, TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
+    ConvertValueSnafu, FulltextInvalidValueSnafu, InvalidCastSnafu, InvalidSqlValueSnafu,
+    ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu,
+    TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
 };
+use crate::statements::create::Column;
+pub use crate::statements::option_map::OptionMap;
+pub use crate::statements::transform::{get_data_type_by_alias_name, transform_statements};
+use crate::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
 
 fn parse_string_to_value(
     column_name: &str,
@@ -352,31 +357,31 @@ pub fn has_primary_key_option(column_def: &ColumnDef) -> bool {
 
 // TODO(yingwen): Make column nullable by default, and checks invalid case like
 // a column is not nullable but has a default value null.
-/// Create a `ColumnSchema` from `ColumnDef`.
-pub fn column_def_to_schema(
-    column_def: &ColumnDef,
+/// Create a `ColumnSchema` from `Column`.
+pub fn column_to_schema(
+    column: &Column,
     is_time_index: bool,
     timezone: Option<&Timezone>,
 ) -> Result<ColumnSchema> {
-    let is_nullable = column_def
-        .options
+    let is_nullable = column
+        .options()
         .iter()
         .all(|o| !matches!(o.option, ColumnOption::NotNull))
         && !is_time_index;
 
-    let name = column_def.name.value.clone();
-    let data_type = sql_data_type_to_concrete_data_type(&column_def.data_type)?;
+    let name = column.name().value.clone();
+    let data_type = sql_data_type_to_concrete_data_type(column.data_type())?;
     let default_constraint =
-        parse_column_default_constraint(&name, &data_type, &column_def.options, timezone)?;
+        parse_column_default_constraint(&name, &data_type, column.options(), timezone)?;
 
     let mut column_schema = ColumnSchema::new(name, data_type, is_nullable)
         .with_time_index(is_time_index)
         .with_default_constraint(default_constraint)
         .context(error::InvalidDefaultSnafu {
-            column: &column_def.name.value,
+            column: &column.name().value,
         })?;
 
-    if let Some(ColumnOption::Comment(c)) = column_def.options.iter().find_map(|o| {
+    if let Some(ColumnOption::Comment(c)) = column.options().iter().find_map(|o| {
         if matches!(o.option, ColumnOption::Comment(_)) {
             Some(&o.option)
         } else {
@@ -386,6 +391,40 @@ pub fn column_def_to_schema(
         let _ = column_schema
             .mut_metadata()
             .insert(COMMENT_KEY.to_string(), c.to_string());
+    }
+
+    if let Some(fulltext_opts) = &column.extensions.fulltext_options {
+        let mut options = FulltextOptions {
+            enable: true,
+            ..Default::default()
+        };
+        if let Some(analyzer) = fulltext_opts.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
+            match analyzer.to_ascii_lowercase().as_str() {
+                "english" => options.analyzer = FulltextAnalyzer::English,
+                "chinese" => options.analyzer = FulltextAnalyzer::Chinese,
+                _ => {
+                    return FulltextInvalidValueSnafu {
+                        msg: format!("{analyzer}, expected: 'English' | 'Chinese'"),
+                    }
+                    .fail();
+                }
+            }
+        }
+        if let Some(case_sensitive) = fulltext_opts.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
+            match case_sensitive.to_ascii_lowercase().as_str() {
+                "true" => options.case_sensitive = true,
+                "false" => options.case_sensitive = false,
+                _ => {
+                    return FulltextInvalidValueSnafu {
+                        msg: format!("{case_sensitive}, expected: 'true' | 'false'"),
+                    }
+                    .fail();
+                }
+            }
+        }
+        column_schema = column_schema
+            .with_fulltext_options(options)
+            .context(SetFulltextOptionSnafu)?;
     }
 
     Ok(column_schema)
@@ -438,6 +477,7 @@ pub fn sql_column_def_to_grpc_column_def(
         semantic_type: semantic_type as _,
         comment: String::new(),
         datatype_extension: datatype_ext,
+        options: Default::default(),
     })
 }
 
@@ -554,6 +594,7 @@ pub fn sql_location_to_grpc_add_column_location(
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
 
     use api::v1::ColumnDataType;
     use common_time::timestamp::TimeUnit;
@@ -563,6 +604,7 @@ mod tests {
 
     use super::*;
     use crate::ast::TimezoneInfo;
+    use crate::statements::create::ColumnExtensions;
     use crate::statements::ColumnOption;
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
@@ -1065,15 +1107,18 @@ mod tests {
     }
 
     #[test]
-    pub fn test_column_def_to_schema() {
-        let column_def = ColumnDef {
-            name: "col".into(),
-            data_type: SqlDataType::Double,
-            collation: None,
-            options: vec![],
+    pub fn test_column_to_schema() {
+        let column_def = Column {
+            column_def: ColumnDef {
+                name: "col".into(),
+                data_type: SqlDataType::Double,
+                collation: None,
+                options: vec![],
+            },
+            extensions: ColumnExtensions::default(),
         };
 
-        let column_schema = column_def_to_schema(&column_def, false, None).unwrap();
+        let column_schema = column_to_schema(&column_def, false, None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1083,7 +1128,7 @@ mod tests {
         assert!(column_schema.is_nullable());
         assert!(!column_schema.is_time_index());
 
-        let column_schema = column_def_to_schema(&column_def, true, None).unwrap();
+        let column_schema = column_to_schema(&column_def, true, None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1093,23 +1138,26 @@ mod tests {
         assert!(!column_schema.is_nullable());
         assert!(column_schema.is_time_index());
 
-        let column_def = ColumnDef {
-            name: "col2".into(),
-            data_type: SqlDataType::String(None),
-            collation: None,
-            options: vec![
-                ColumnOptionDef {
-                    name: None,
-                    option: ColumnOption::NotNull,
-                },
-                ColumnOptionDef {
-                    name: None,
-                    option: ColumnOption::Comment("test comment".to_string()),
-                },
-            ],
+        let column_def = Column {
+            column_def: ColumnDef {
+                name: "col2".into(),
+                data_type: SqlDataType::String(None),
+                collation: None,
+                options: vec![
+                    ColumnOptionDef {
+                        name: None,
+                        option: ColumnOption::NotNull,
+                    },
+                    ColumnOptionDef {
+                        name: None,
+                        option: ColumnOption::Comment("test comment".to_string()),
+                    },
+                ],
+            },
+            extensions: ColumnExtensions::default(),
         };
 
-        let column_schema = column_def_to_schema(&column_def, false, None).unwrap();
+        let column_schema = column_to_schema(&column_def, false, None).unwrap();
 
         assert_eq!("col2", column_schema.name);
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
@@ -1122,24 +1170,27 @@ mod tests {
     }
 
     #[test]
-    pub fn test_column_def_to_schema_timestamp_with_timezone() {
-        let column_def = ColumnDef {
-            name: "col".into(),
-            // MILLISECOND
-            data_type: SqlDataType::Timestamp(Some(3), TimezoneInfo::None),
-            collation: None,
-            options: vec![ColumnOptionDef {
-                name: None,
-                option: ColumnOption::Default(Expr::Value(SqlValue::SingleQuotedString(
-                    "2024-01-30T00:01:01".to_string(),
-                ))),
-            }],
+    pub fn test_column_to_schema_timestamp_with_timezone() {
+        let column = Column {
+            column_def: ColumnDef {
+                name: "col".into(),
+                // MILLISECOND
+                data_type: SqlDataType::Timestamp(Some(3), TimezoneInfo::None),
+                collation: None,
+                options: vec![ColumnOptionDef {
+                    name: None,
+                    option: ColumnOption::Default(Expr::Value(SqlValue::SingleQuotedString(
+                        "2024-01-30T00:01:01".to_string(),
+                    ))),
+                }],
+            },
+            extensions: ColumnExtensions::default(),
         };
 
         // with timezone "Asia/Shanghai"
 
-        let column_schema = column_def_to_schema(
-            &column_def,
+        let column_schema = column_to_schema(
+            &column,
             false,
             Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
         )
@@ -1159,7 +1210,7 @@ mod tests {
         );
 
         // without timezone
-        let column_schema = column_def_to_schema(&column_def, false, None).unwrap();
+        let column_schema = column_to_schema(&column, false, None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1173,6 +1224,40 @@ mod tests {
             matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
                          if ts.to_iso8601_string() == "2024-01-30 00:01:01+0000")
         );
+    }
+
+    #[test]
+    fn test_column_to_schema_with_fulltext() {
+        let column = Column {
+            column_def: ColumnDef {
+                name: "col".into(),
+                data_type: SqlDataType::Text,
+                collation: None,
+                options: vec![],
+            },
+            extensions: ColumnExtensions {
+                fulltext_options: Some(
+                    HashMap::from_iter([
+                        (
+                            COLUMN_FULLTEXT_OPT_KEY_ANALYZER.to_string(),
+                            "English".to_string(),
+                        ),
+                        (
+                            COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE.to_string(),
+                            "true".to_string(),
+                        ),
+                    ])
+                    .into(),
+                ),
+            },
+        };
+
+        let column_schema = column_to_schema(&column, false, None).unwrap();
+        assert_eq!("col", column_schema.name);
+        assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
+        let fulltext_options = column_schema.fulltext_options().unwrap().unwrap();
+        assert_eq!(fulltext_options.analyzer, FulltextAnalyzer::English);
+        assert!(fulltext_options.case_sensitive);
     }
 
     #[test]

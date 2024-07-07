@@ -116,6 +116,7 @@ impl<'a> StatementToRegion<'a> {
                 datatype: datatype.into(),
                 semantic_type: semantic_type.into(),
                 datatype_extension,
+                options: column_schema.build_grpc_options(),
             };
             schema.push(grpc_column_schema);
 

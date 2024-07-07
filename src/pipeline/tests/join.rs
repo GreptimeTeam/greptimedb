@@ -37,12 +37,14 @@ lazy_static! {
             datatype: ColumnDataType::String.into(),
             semantic_type: SemanticType::Field.into(),
             datatype_extension: None,
+            options: Default::default(),
         },
         ColumnSchema {
             column_name: "greptime_timestamp".to_string(),
             datatype: ColumnDataType::TimestampNanosecond.into(),
             semantic_type: SemanticType::Timestamp.into(),
             datatype_extension: None,
+            options: Default::default(),
         },
     ];
 }

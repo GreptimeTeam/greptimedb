@@ -97,6 +97,7 @@ impl TableBuilder {
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as i32,
             datatype_extension: None,
+            options: Default::default(),
         });
 
         schema.push(ColumnSchema {
@@ -104,6 +105,7 @@ impl TableBuilder {
             datatype: ColumnDataType::Float64 as i32,
             semantic_type: SemanticType::Field as i32,
             datatype_extension: None,
+            options: Default::default(),
         });
 
         Self {
@@ -159,6 +161,7 @@ impl TableBuilder {
                         datatype: ColumnDataType::String as i32,
                         semantic_type: SemanticType::Tag as i32,
                         datatype_extension: None,
+                        options: Default::default(),
                     });
                     row.push(Value {
                         value_data: tag_value,

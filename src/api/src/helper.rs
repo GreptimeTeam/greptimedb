@@ -1843,6 +1843,7 @@ mod tests {
             null_mask: vec![2],
             datatype: ColumnDataType::Boolean as i32,
             datatype_extension: None,
+            options: Default::default(),
         };
         assert!(is_column_type_value_eq(
             column1.datatype,

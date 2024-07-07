@@ -53,6 +53,7 @@ pub fn column_schemas_to_proto(
                 datatype: datatype.0 as i32,
                 semantic_type,
                 datatype_extension: datatype.1,
+                options: schema.build_grpc_options(),
             }
         })
         .collect();

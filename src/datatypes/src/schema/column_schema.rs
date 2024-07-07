@@ -32,8 +32,10 @@ pub const TIME_INDEX_KEY: &str = "greptime:time_index";
 pub const COMMENT_KEY: &str = "greptime:storage:comment";
 /// Key used to store default constraint in arrow field's metadata.
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
-/// Key used to store fulltext options in column metadata.
+/// Key used to store fulltext options in arrow field's metadata.
 pub const FULLTEXT_KEY: &str = "greptime:fulltext";
+/// Key used to store fulltext options in gRPC column options.
+pub const FULLTEXT_GRPC_KEY: &str = "fulltext";
 
 /// Schema of a column, used as an immutable struct.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +256,35 @@ impl ColumnSchema {
             }
         }
     }
+
+    pub fn with_fulltext_options(mut self, options: FulltextOptions) -> Result<Self> {
+        self.metadata.insert(
+            FULLTEXT_KEY.to_string(),
+            serde_json::to_string(&options).context(error::SerializeSnafu)?,
+        );
+        Ok(self)
+    }
+
+    /// Builds the gRPC options for the column. See [options](api::v1::ColumnDef::options)
+    pub fn build_grpc_options(&self) -> HashMap<String, String> {
+        let mut options = HashMap::new();
+
+        if let Some(fulltext_options) = self.metadata.get(FULLTEXT_KEY) {
+            options.insert(FULLTEXT_GRPC_KEY.to_string(), fulltext_options.to_string());
+        }
+
+        options
+    }
+
+    /// Applies the gRPC options to the column schema.
+    pub fn apply_grpc_options(mut self, options: &HashMap<String, String>) -> Self {
+        if let Some(fulltext_options) = options.get(FULLTEXT_GRPC_KEY) {
+            self.metadata
+                .insert(FULLTEXT_KEY.to_string(), fulltext_options.to_string());
+        }
+
+        self
+    }
 }
 
 impl TryFrom<&Field> for ColumnSchema {
@@ -312,6 +343,7 @@ impl TryFrom<&ColumnSchema> for Field {
 
 /// Fulltext options for a column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
 pub struct FulltextOptions {
     /// Whether the fulltext index is enabled.
     pub enable: bool,
@@ -327,6 +359,15 @@ pub enum FulltextAnalyzer {
     #[default]
     English,
     Chinese,
+}
+
+impl fmt::Display for FulltextAnalyzer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FulltextAnalyzer::English => write!(f, "English"),
+            FulltextAnalyzer::Chinese => write!(f, "Chinese"),
+        }
+    }
 }
 
 #[cfg(test)]

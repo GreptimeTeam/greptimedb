@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, Column, ColumnDataType,
+    AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, ColumnDataType,
     ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
     DropColumns, ExpireAfter, RenameTable, SemanticType, TableName,
 };
@@ -34,13 +34,13 @@ use query::sql::{
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
+use sql::ast::{ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::create::{
-    CreateExternalTable, CreateFlow, CreateTable, CreateView, TIME_INDEX,
+    Column as SqlColumn, CreateExternalTable, CreateFlow, CreateTable, CreateView, TIME_INDEX,
 };
 use sql::statements::{
-    column_def_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
+    column_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
 };
 use sql::util::extract_tables_from_query;
 use table::requests::{TableOptions, FILE_TABLE_META_KEY};
@@ -57,25 +57,6 @@ use crate::error::{
 pub struct CreateExprFactory;
 
 impl CreateExprFactory {
-    pub fn create_table_expr_by_columns(
-        &self,
-        table_name: &TableReference<'_>,
-        columns: &[Column],
-        engine: &str,
-    ) -> Result<CreateTableExpr> {
-        let column_exprs = ColumnExpr::from_columns(columns);
-        let create_expr = common_grpc_expr::util::build_create_table_expr(
-            None,
-            table_name,
-            column_exprs,
-            engine,
-            "Created on insertion",
-        )
-        .context(BuildCreateExprOnInsertionSnafu)?;
-
-        Ok(create_expr)
-    }
-
     pub fn create_table_expr_by_column_schemas(
         &self,
         table_name: &TableReference<'_>,
@@ -290,13 +271,13 @@ pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
 }
 
 fn find_primary_keys(
-    columns: &[ColumnDef],
+    columns: &[SqlColumn],
     constraints: &[TableConstraint],
 ) -> Result<Vec<String>> {
     let columns_pk = columns
         .iter()
         .filter_map(|x| {
-            if x.options.iter().any(|o| {
+            if x.options().iter().any(|o| {
                 matches!(
                     o.option,
                     ColumnOption::Unique {
@@ -305,7 +286,7 @@ fn find_primary_keys(
                     }
                 )
             }) {
-                Some(x.name.value.clone())
+                Some(x.name().value.clone())
             } else {
                 None
             }
@@ -372,7 +353,7 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
 }
 
 fn columns_to_expr(
-    column_defs: &[ColumnDef],
+    column_defs: &[SqlColumn],
     time_index: &str,
     primary_keys: &[String],
     timezone: Option<&Timezone>,
@@ -382,15 +363,14 @@ fn columns_to_expr(
 }
 
 fn columns_to_column_schemas(
-    column_defs: &[ColumnDef],
+    columns: &[SqlColumn],
     time_index: &str,
     timezone: Option<&Timezone>,
 ) -> Result<Vec<ColumnSchema>> {
-    column_defs
+    columns
         .iter()
         .map(|c| {
-            column_def_to_schema(c, c.name.to_string() == time_index, timezone)
-                .context(ParseSqlSnafu)
+            column_to_schema(c, c.name().to_string() == time_index, timezone).context(ParseSqlSnafu)
         })
         .collect::<Result<Vec<ColumnSchema>>>()
 }
@@ -442,6 +422,7 @@ pub fn column_schemas_to_defs(
                 semantic_type,
                 comment,
                 datatype_extension: datatype.1,
+                options: schema.build_grpc_options(),
             })
         })
         .collect()

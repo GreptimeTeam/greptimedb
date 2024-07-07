@@ -270,6 +270,7 @@ impl WriteRequest {
             datatype: datatype as i32,
             semantic_type: column.semantic_type as i32,
             datatype_extension: datatype_ext,
+            options: column.column_schema.build_grpc_options(),
         });
 
         Ok(())

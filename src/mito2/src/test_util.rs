@@ -933,6 +933,7 @@ pub(crate) fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api
         datatype: datatype as i32,
         semantic_type: metadata.semantic_type as i32,
         datatype_extension,
+        options: metadata.column_schema.build_grpc_options(),
     }
 }
 

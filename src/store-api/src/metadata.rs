@@ -77,6 +77,7 @@ impl ColumnMetadata {
         .into();
         ColumnSchema::new(&column_def.name, data_type, column_def.is_nullable)
             .with_time_index(column_def.semantic_type() == SemanticType::Timestamp)
+            .apply_grpc_options(&column_def.options)
             .with_default_constraint(default_constrain)
             .context(ConvertDatatypesSnafu)
     }

@@ -50,6 +50,7 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
             .context(error::InvalidColumnDefaultConstraintSnafu {
                 column: &column_def.name,
             })?
-            .with_metadata(metadata),
+            .with_metadata(metadata)
+            .apply_grpc_options(&column_def.options),
     )
 }

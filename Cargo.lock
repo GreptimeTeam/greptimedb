@@ -2010,6 +2010,7 @@ dependencies = [
  "common-time",
  "datatypes",
  "paste",
+ "prost 0.12.6",
  "snafu 0.8.3",
  "table",
 ]
@@ -4198,7 +4199,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=a70a6af9c69e40f9a918936a48717343402b4393#a70a6af9c69e40f9a918936a48717343402b4393"
+source = "git+https://github.com/zhongzc/greptime-proto.git?branch=zhongzc/fulltext-options#50003973a21060f6c0e3143dfde30ef1f70a40a7"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -8531,6 +8532,7 @@ dependencies = [
  "prost 0.12.6",
  "rand",
  "regex",
+ "serde_json",
  "session",
  "snafu 0.8.3",
  "sql",
@@ -10592,6 +10594,7 @@ dependencies = [
  "itertools 0.10.5",
  "lazy_static",
  "regex",
+ "serde_json",
  "snafu 0.8.3",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "sqlparser_derive 0.1.1",

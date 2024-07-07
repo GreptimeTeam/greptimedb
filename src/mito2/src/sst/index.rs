@@ -289,7 +289,7 @@ mod tests {
 
     use api::v1::SemanticType;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, FulltextOptions, FULLTEXT_KEY};
+    use datatypes::schema::{ColumnSchema, FulltextOptions};
     use object_store::services::Memory;
     use object_store::ObjectStore;
     use puffin_manager::PuffinManagerFactory;
@@ -340,17 +340,13 @@ mod tests {
         }
 
         if with_fulltext {
-            let opts = serde_json::to_string(&FulltextOptions {
-                enable: true,
-                ..Default::default()
-            })
-            .unwrap();
-
-            let mut column_schema =
-                ColumnSchema::new("text", ConcreteDataType::string_datatype(), true);
-            column_schema
-                .mut_metadata()
-                .insert(FULLTEXT_KEY.to_string(), opts);
+            let column_schema =
+                ColumnSchema::new("text", ConcreteDataType::string_datatype(), true)
+                    .with_fulltext_options(FulltextOptions {
+                        enable: true,
+                        ..Default::default()
+                    })
+                    .unwrap();
 
             let column = ColumnMetadata {
                 column_schema,

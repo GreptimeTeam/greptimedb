@@ -46,6 +46,7 @@ pub fn columns_to_rows(columns: Vec<Column>, row_count: u32) -> Result<Rows> {
             datatype: column.datatype,
             semantic_type: column.semantic_type,
             datatype_extension: column.datatype_extension.clone(),
+            options: column.options.clone(),
         };
         schema.push(column_schema);
 
@@ -196,11 +197,20 @@ pub fn column_schema(
                     .context(ColumnDataTypeSnafu)?
                     .to_parts();
 
+            let column_schema = table_info
+                .meta
+                .schema
+                .column_schema_by_name(column_name)
+                .context(ColumnNotFoundSnafu {
+                    msg: format!("unable to find column {column_name} in table schema"),
+                })?;
+
             Ok(ColumnSchema {
                 column_name: column_name.clone(),
                 datatype: datatype as i32,
                 semantic_type: semantic_type(table_info, column_name)?.into(),
                 datatype_extension,
+                options: column_schema.build_grpc_options(),
             })
         })
         .collect::<Result<Vec<_>>>()
