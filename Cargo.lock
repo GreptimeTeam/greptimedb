@@ -8532,7 +8532,6 @@ dependencies = [
  "prost 0.12.6",
  "rand",
  "regex",
- "serde_json",
  "session",
  "snafu 0.8.3",
  "sql",
