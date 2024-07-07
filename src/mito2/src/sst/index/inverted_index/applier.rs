@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_telemetry::warn;
 use index::inverted_index::format::reader::cache::{
-    CachedInvertedIndexBlobReader, InvertedIndexCache, InvertedIndexCacheRef,
+    CachedInvertedIndexBlobReader, InvertedIndexCacheRef,
 };
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{

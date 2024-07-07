@@ -19,7 +19,6 @@ mod in_list;
 mod regex_match;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_telemetry::warn;
@@ -27,7 +26,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
-use index::inverted_index::format::reader::cache::{InvertedIndexCache, InvertedIndexCacheRef};
+use index::inverted_index::format::reader::cache::InvertedIndexCacheRef;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
 use object_store::ObjectStore;

@@ -17,7 +17,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_base::BitVec;
 use greptime_proto::v1::index::InvertedIndexMetas;
-use puffin::file_metadata::FileMetadata;
 use snafu::ResultExt;
 use uuid::Uuid;
 
@@ -26,6 +25,7 @@ use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::metrics::INDEX_CACHE_STATS;
 use crate::inverted_index::FstMap;
 
+/// Inverted index blob reader with cache.
 pub struct CachedInvertedIndexBlobReader<R> {
     file_id: Uuid,
     inner: R,
@@ -46,6 +46,8 @@ impl<R> CachedInvertedIndexBlobReader<R>
 where
     R: InvertedIndexReader,
 {
+    /// Gets given range of index data from cache, and loads from source if the file
+    /// is not already cached.
     async fn get_or_load(
         &mut self,
         offset: u64,
@@ -94,17 +96,17 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
     }
 
     async fn metadata(&mut self) -> crate::inverted_index::error::Result<Arc<InvertedIndexMetas>> {
-        if let Some(cached) = self.cache.get_metadata(self.file_id) {
+        if let Some(cached) = self.cache.get_index_metadata(self.file_id) {
             INDEX_CACHE_STATS
-                .with_label_values(&["metadata", "hit"])
+                .with_label_values(&["index_metadata", "hit"])
                 .inc();
             Ok(cached)
         } else {
             INDEX_CACHE_STATS
-                .with_label_values(&["metadata", "miss"])
+                .with_label_values(&["index_metadata", "miss"])
                 .inc();
             let meta = self.inner.metadata().await?;
-            self.cache.put_metadata(self.file_id, meta.clone());
+            self.cache.put_index_metadata(self.file_id, meta.clone());
             Ok(meta)
         }
     }
@@ -129,11 +131,6 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MetadataKey {
-    file_id: Uuid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IndexKey {
     file_id: Uuid,
 }
@@ -142,17 +139,13 @@ pub type InvertedIndexCacheRef = Arc<InvertedIndexCache>;
 
 pub struct InvertedIndexCache {
     /// Cache for inverted index metadata
-    index_metadata: moka::sync::Cache<MetadataKey, Arc<InvertedIndexMetas>>,
-    file_metadata: moka::sync::Cache<MetadataKey, Arc<FileMetadata>>,
+    index_metadata: moka::sync::Cache<IndexKey, Arc<InvertedIndexMetas>>,
     /// Cache for inverted index content.
     index: moka::sync::Cache<IndexKey, Arc<Vec<u8>>>,
 }
 
 impl InvertedIndexCache {
-    pub fn new(file_metadata_cap: u64, index_metadata_cap: u64, index_cap: u64) -> Self {
-        let file_metadata = moka::sync::CacheBuilder::new(file_metadata_cap)
-            .name("inverted_index_file_metadata")
-            .build();
+    pub fn new(index_metadata_cap: u64, index_cap: u64) -> Self {
         let index_metadata = moka::sync::CacheBuilder::new(index_metadata_cap)
             .name("inverted_index_metadata")
             .build();
@@ -161,32 +154,21 @@ impl InvertedIndexCache {
             .build();
         Self {
             index_metadata,
-            file_metadata,
             index: index_cache,
         }
     }
 }
 
 impl InvertedIndexCache {
-    pub fn get_file_metadata(&self, file_id: Uuid) -> Option<Arc<FileMetadata>> {
-        self.file_metadata.get(&MetadataKey { file_id })
-    }
-
-    pub fn put_file_metadata(&self, file_id: Uuid, metadata: Arc<FileMetadata>) {
-        self.file_metadata.insert(MetadataKey { file_id }, metadata)
-    }
-
     pub fn get_index_metadata(&self, file_id: Uuid) -> Option<Arc<InvertedIndexMetas>> {
-        self.index_metadata.get(&MetadataKey { file_id })
+        self.index_metadata.get(&IndexKey { file_id })
     }
 
     pub fn put_index_metadata(&self, file_id: Uuid, metadata: Arc<InvertedIndexMetas>) {
-        self.index_metadata
-            .insert(MetadataKey { file_id }, metadata)
+        self.index_metadata.insert(IndexKey { file_id }, metadata)
     }
 
-    // todo(hl): align index file content to pages with size like 4096 bytes so that we won't
-    // have too many cache entries.
+    // todo(hl): align index file content to pages with size like 4096 bytes.
     pub fn get_index(&self, key: IndexKey) -> Option<Arc<Vec<u8>>> {
         self.index.get(&key)
     }

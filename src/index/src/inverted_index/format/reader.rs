@@ -31,7 +31,7 @@ mod footer;
 #[mockall::automock]
 #[async_trait]
 pub trait InvertedIndexReader: Send {
-    /// Seeks to given offset and reads all data to dest.
+    /// Reads all data to dest.
     async fn read_all(&mut self, dest: &mut Vec<u8>) -> Result<usize>;
 
     /// Seeks to given offset and reads data with exact size as provided.
