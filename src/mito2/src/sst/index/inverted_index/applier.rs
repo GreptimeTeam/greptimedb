@@ -16,11 +16,10 @@ pub mod builder;
 
 use std::sync::Arc;
 
-use futures::{AsyncRead, AsyncSeek};
+use common_telemetry::warn;
 use index::inverted_index::format::reader::cache::{
     CachedInvertedIndexBlobReader, InvertedIndexCache,
 };
-use common_telemetry::warn;
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
@@ -60,7 +59,8 @@ pub(crate) struct SstIndexApplier {
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
 
-    index_cache: Option<Arc<InvertedIndexCache>>,
+    /// In-memory cache for inverted index.
+    inverted_index_cache: Option<Arc<InvertedIndexCache>>,
 }
 
 pub(crate) type SstIndexApplierRef = Arc<SstIndexApplier>;
@@ -85,7 +85,7 @@ impl SstIndexApplier {
             file_cache,
             index_applier,
             puffin_manager_factory,
-            index_cache,
+            inverted_index_cache: index_cache,
         }
     }
 
@@ -108,7 +108,7 @@ impl SstIndexApplier {
             }
         };
 
-        if let Some(index_cache) = &self.index_cache {
+        if let Some(index_cache) = &self.inverted_index_cache {
             let mut index_reader = CachedInvertedIndexBlobReader::new(
                 file_id.into(),
                 InvertedIndexBlobReader::new(blob),
