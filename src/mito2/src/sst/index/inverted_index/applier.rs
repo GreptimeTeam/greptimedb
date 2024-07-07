@@ -17,9 +17,6 @@ pub mod builder;
 use std::sync::Arc;
 
 use common_telemetry::warn;
-use index::inverted_index::format::reader::cache::{
-    CachedInvertedIndexBlobReader, InvertedIndexCacheRef,
-};
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
@@ -30,6 +27,7 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
+use crate::cache::index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
 use crate::error::{ApplyIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::FileId;

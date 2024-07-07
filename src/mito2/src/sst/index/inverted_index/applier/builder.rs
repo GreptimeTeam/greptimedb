@@ -26,7 +26,6 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
-use index::inverted_index::format::reader::cache::InvertedIndexCacheRef;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
 use object_store::ObjectStore;
@@ -35,6 +34,7 @@ use store_api::metadata::RegionMetadata;
 use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
+use crate::cache::index::InvertedIndexCacheRef;
 use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
 use crate::sst::index::inverted_index::applier::SstIndexApplier;

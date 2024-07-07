@@ -17,6 +17,7 @@
 mod cache_size;
 
 pub(crate) mod file_cache;
+pub(crate) mod index;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;
@@ -26,7 +27,6 @@ use std::sync::Arc;
 
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
-use index::inverted_index::format::reader::cache::{InvertedIndexCache, InvertedIndexCacheRef};
 use moka::sync::Cache;
 use parquet::column::page::Page;
 use parquet::file::metadata::ParquetMetaData;
@@ -34,6 +34,7 @@ use store_api::storage::{ConcreteDataType, RegionId};
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;

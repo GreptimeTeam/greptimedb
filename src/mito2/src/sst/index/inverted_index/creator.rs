@@ -297,7 +297,6 @@ mod tests {
     use datatypes::value::ValueRef;
     use datatypes::vectors::{UInt64Vector, UInt8Vector};
     use futures::future::BoxFuture;
-    use index::inverted_index::format::reader::cache::InvertedIndexCache;
     use object_store::services::Memory;
     use object_store::ObjectStore;
     use puffin::puffin_manager::PuffinManager;
@@ -305,6 +304,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::cache::index::InvertedIndexCache;
     use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
     use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;

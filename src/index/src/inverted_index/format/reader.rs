@@ -24,7 +24,6 @@ pub use crate::inverted_index::format::reader::blob::InvertedIndexBlobReader;
 use crate::inverted_index::FstMap;
 
 mod blob;
-pub mod cache;
 mod footer;
 
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
