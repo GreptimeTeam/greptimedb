@@ -256,7 +256,8 @@ impl InformationSchemaKeyColumnUsageBuilder {
                         // TODO(dimbtp): foreign key constraint not supported yet
                     }
                 } else {
-                    unreachable!();
+                    // The table might be dropped during iteration.
+                    continue;
                 }
             }
         }
