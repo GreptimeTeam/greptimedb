@@ -40,9 +40,7 @@ use common_time::timezone::Timezone;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN};
-use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, COMMENT_KEY,
-};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use datatypes::types::{cast, TimestampType};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -54,14 +52,13 @@ use crate::ast::{
 };
 use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
-    ConvertValueSnafu, FulltextInvalidOptionSnafu, InvalidCastSnafu, InvalidSqlValueSnafu,
-    ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu,
-    TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
+    ConvertValueSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, ParseSqlValueSnafu, Result,
+    SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, TimestampOverflowSnafu,
+    UnsupportedDefaultValueSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
 pub use crate::statements::transform::{get_data_type_by_alias_name, transform_statements};
-use crate::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
 
 fn parse_string_to_value(
     column_name: &str,
@@ -394,35 +391,7 @@ pub fn column_to_schema(
             .insert(COMMENT_KEY.to_string(), c.to_string());
     }
 
-    if let Some(fulltext_opts) = &column.extensions.fulltext_options {
-        let mut options = FulltextOptions {
-            enable: true,
-            ..Default::default()
-        };
-        if let Some(analyzer) = fulltext_opts.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
-            match analyzer.to_ascii_lowercase().as_str() {
-                "english" => options.analyzer = FulltextAnalyzer::English,
-                "chinese" => options.analyzer = FulltextAnalyzer::Chinese,
-                _ => {
-                    return FulltextInvalidOptionSnafu {
-                        msg: format!("{analyzer}, expected: 'English' | 'Chinese'"),
-                    }
-                    .fail();
-                }
-            }
-        }
-        if let Some(case_sensitive) = fulltext_opts.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
-            match case_sensitive.to_ascii_lowercase().as_str() {
-                "true" => options.case_sensitive = true,
-                "false" => options.case_sensitive = false,
-                _ => {
-                    return FulltextInvalidOptionSnafu {
-                        msg: format!("{case_sensitive}, expected: 'true' | 'false'"),
-                    }
-                    .fail();
-                }
-            }
-        }
+    if let Some(options) = column.extensions.build_fulltext_options()? {
         column_schema = column_schema
             .with_fulltext_options(options)
             .context(SetFulltextOptionSnafu)?;
@@ -600,6 +569,7 @@ mod tests {
     use api::v1::ColumnDataType;
     use common_time::timestamp::TimeUnit;
     use common_time::timezone::set_default_timezone;
+    use datatypes::schema::FulltextAnalyzer;
     use datatypes::types::BooleanType;
     use datatypes::value::OrderedFloat;
 
@@ -607,6 +577,7 @@ mod tests {
     use crate::ast::TimezoneInfo;
     use crate::statements::create::ColumnExtensions;
     use crate::statements::ColumnOption;
+    use crate::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
         assert_eq!(

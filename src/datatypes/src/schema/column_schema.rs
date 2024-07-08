@@ -325,8 +325,10 @@ pub struct FulltextOptions {
     /// Whether the fulltext index is enabled.
     pub enable: bool,
     /// The fulltext analyzer to use.
+    #[serde(default)]
     pub analyzer: FulltextAnalyzer,
     /// Whether the fulltext index is case-sensitive.
+    #[serde(default)]
     pub case_sensitive: bool,
 }
 

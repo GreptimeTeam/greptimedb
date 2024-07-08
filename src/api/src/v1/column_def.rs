@@ -26,6 +26,7 @@ use crate::v1::{ColumnDef, ColumnOptions, SemanticType};
 /// Key used to store fulltext options in gRPC column options.
 const FULLTEXT_GRPC_KEY: &str = "fulltext";
 
+/// Tries to construct a ColumnSchema` from the given  `ColumnDef`.
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let data_type = ColumnDataTypeWrapper::try_new(
         column_def.data_type,
@@ -63,6 +64,7 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         })
 }
 
+/// Constructs a `ColumnOptions` from a `ColumnSchema`.
 pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<ColumnOptions> {
     let mut options = ColumnOptions::default();
     if let Some(fulltext) = column_schema.metadata().get(FULLTEXT_KEY) {
@@ -74,12 +76,14 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
     (!options.options.is_empty()).then_some(options)
 }
 
+/// Checks if the `ColumnOptions` contain fulltext options.
 pub fn contains_fulltext(options: &Option<ColumnOptions>) -> bool {
     options
         .as_ref()
         .map_or(false, |o| o.options.contains_key(FULLTEXT_GRPC_KEY))
 }
 
+/// Constructs a `ColumnOptions` with `FulltextOptions`.
 pub fn options_with_fulltext(fulltext: &FulltextOptions) -> Result<Option<ColumnOptions>> {
     let mut options = ColumnOptions::default();
 
@@ -87,4 +91,105 @@ pub fn options_with_fulltext(fulltext: &FulltextOptions) -> Result<Option<Column
     options.options.insert(FULLTEXT_GRPC_KEY.to_string(), v);
 
     Ok((!options.options.is_empty()).then_some(options))
+}
+
+#[cfg(test)]
+mod tests {
+
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::FulltextAnalyzer;
+
+    use super::*;
+    use crate::v1::ColumnDataType;
+
+    #[test]
+    fn test_try_as_column_schema() {
+        let column_def = ColumnDef {
+            name: "test".to_string(),
+            data_type: ColumnDataType::String as i32,
+            is_nullable: true,
+            default_constraint: ColumnDefaultConstraint::Value("test_default".into())
+                .try_into()
+                .unwrap(),
+            semantic_type: SemanticType::Field as i32,
+            comment: "test_comment".to_string(),
+            datatype_extension: None,
+            options: Some(ColumnOptions {
+                options: HashMap::from([(
+                    FULLTEXT_GRPC_KEY.to_string(),
+                    "{\"enable\":true}".to_string(),
+                )]),
+            }),
+        };
+
+        let schema = try_as_column_schema(&column_def).unwrap();
+        assert_eq!(schema.name, "test");
+        assert_eq!(schema.data_type, ConcreteDataType::string_datatype());
+        assert!(!schema.is_time_index());
+        assert!(schema.is_nullable());
+        assert_eq!(
+            schema.default_constraint().unwrap(),
+            &ColumnDefaultConstraint::Value("test_default".into())
+        );
+        assert_eq!(schema.metadata().get(COMMENT_KEY).unwrap(), "test_comment");
+        assert_eq!(
+            schema.fulltext_options().unwrap().unwrap(),
+            FulltextOptions {
+                enable: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_options_from_column_schema() {
+        let schema = ColumnSchema::new("test", ConcreteDataType::string_datatype(), true);
+        let options = options_from_column_schema(&schema);
+        assert!(options.is_none());
+
+        let schema = ColumnSchema::new("test", ConcreteDataType::string_datatype(), true)
+            .with_fulltext_options(FulltextOptions {
+                enable: true,
+                analyzer: FulltextAnalyzer::English,
+                case_sensitive: false,
+            })
+            .unwrap();
+        let options = options_from_column_schema(&schema).unwrap();
+        assert_eq!(
+            options.options.get(FULLTEXT_GRPC_KEY).unwrap(),
+            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false}"
+        );
+    }
+
+    #[test]
+    fn test_options_with_fulltext() {
+        let fulltext = FulltextOptions {
+            enable: true,
+            analyzer: FulltextAnalyzer::English,
+            case_sensitive: false,
+        };
+        let options = options_with_fulltext(&fulltext).unwrap().unwrap();
+        assert_eq!(
+            options.options.get(FULLTEXT_GRPC_KEY).unwrap(),
+            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false}"
+        );
+    }
+
+    #[test]
+    fn test_contains_fulltext() {
+        let options = ColumnOptions {
+            options: HashMap::from([(
+                FULLTEXT_GRPC_KEY.to_string(),
+                "{\"enable\":true}".to_string(),
+            )]),
+        };
+        assert!(contains_fulltext(&Some(options)));
+
+        let options = ColumnOptions {
+            options: HashMap::new(),
+        };
+        assert!(!contains_fulltext(&Some(options)));
+
+        assert!(!contains_fulltext(&None));
+    }
 }

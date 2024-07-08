@@ -116,7 +116,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Full-text index only supports string type, column: {column_name}, unexpected type: {column_type:?}"
+        "Fulltext index only supports string type, column: {column_name}, unexpected type: {column_type:?}"
     ))]
     InvalidFulltextColumnType {
         column_name: String,
