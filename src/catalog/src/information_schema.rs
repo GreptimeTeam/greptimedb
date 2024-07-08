@@ -14,8 +14,8 @@
 
 mod cluster_info;
 pub mod columns;
+mod information_memory_table;
 pub mod key_column_usage;
-mod memory_table;
 mod partitions;
 mod predicate;
 mod region_peers;
@@ -50,14 +50,15 @@ pub use table_names::*;
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
 use crate::information_schema::cluster_info::InformationSchemaClusterInfo;
+use crate::information_schema::information_memory_table::get_schema_columns;
 use crate::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
-use crate::information_schema::memory_table::{get_schema_columns, MemoryTable};
 use crate::information_schema::partitions::InformationSchemaPartitions;
 use crate::information_schema::region_peers::InformationSchemaRegionPeers;
 use crate::information_schema::runtime_metrics::InformationSchemaMetrics;
 use crate::information_schema::schemata::InformationSchemaSchemata;
 use crate::information_schema::table_constraints::InformationSchemaTableConstraints;
 use crate::information_schema::tables::InformationSchemaTables;
+use crate::memory_table::MemoryTable;
 use crate::CatalogManager;
 
 lazy_static! {

@@ -15,17 +15,23 @@
 use std::sync::Arc;
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
-use datatypes::prelude::{ConcreteDataType, VectorRef};
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::vectors::{Int64Vector, StringVector};
+use common_recordbatch::SendableRecordBatchStream;
+use datatypes::schema::{Schema, SchemaRef};
+use datatypes::vectors::{Int64Vector, StringVector, VectorRef};
+use store_api::storage::{ScanRequest, TableId};
 
-use crate::information_schema::table_names::*;
+use super::table_names::*;
+use super::InformationTable;
+// pub use tables::get_schema_columns;
+use crate::error::Result;
+use crate::memory_table::tables::{bigint_column, datetime_column, string_column, string_columns};
+use crate::memory_table::MemoryTable;
 
 const NO_VALUE: &str = "NO";
 
 /// Find the schema and columns by the table_name, only valid for memory tables.
 /// Safety: the user MUST ensure the table schema exists, panic otherwise.
-pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
+pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
     let (column_schemas, columns): (_, Vec<VectorRef>) = match table_name {
         COLUMN_PRIVILEGES => (
             string_columns(&[
@@ -415,49 +421,38 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
     (Arc::new(Schema::new(column_schemas)), columns)
 }
 
-fn string_columns(names: &[&'static str]) -> Vec<ColumnSchema> {
-    names.iter().map(|name| string_column(name)).collect()
-}
+impl InformationTable for MemoryTable {
+    fn table_id(&self) -> TableId {
+        self.table_id
+    }
 
-fn string_column(name: &str) -> ColumnSchema {
-    ColumnSchema::new(
-        str::to_lowercase(name),
-        ConcreteDataType::string_datatype(),
-        false,
-    )
-}
+    fn table_name(&self) -> &'static str {
+        self.table_name
+    }
 
-fn bigint_column(name: &str) -> ColumnSchema {
-    ColumnSchema::new(
-        str::to_lowercase(name),
-        ConcreteDataType::int64_datatype(),
-        false,
-    )
-}
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
 
-fn datetime_column(name: &str) -> ColumnSchema {
-    ColumnSchema::new(
-        str::to_lowercase(name),
-        ConcreteDataType::datetime_datatype(),
-        false,
-    )
+    fn to_stream(&self, _request: ScanRequest) -> Result<SendableRecordBatchStream> {
+        self.to_stream()
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+
     use super::*;
-
     #[test]
-    fn test_string_columns() {
-        let columns = ["a", "b", "c"];
-        let column_schemas = string_columns(&columns);
+    fn test_information_memory_table_schema() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("a", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("b", ConcreteDataType::string_datatype(), false),
+        ]));
 
-        assert_eq!(3, column_schemas.len());
-        for (i, name) in columns.iter().enumerate() {
-            let cs = column_schemas.get(i).unwrap();
-
-            assert_eq!(*name, cs.name);
-            assert_eq!(ConcreteDataType::string_datatype(), cs.data_type);
-        }
+        let table = MemoryTable::new(42, "test", schema.clone(), vec![]);
+        assert_eq!(schema, InformationTable::schema(&table));
     }
 }

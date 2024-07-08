@@ -31,6 +31,7 @@ pub mod error;
 pub mod information_schema;
 pub mod kvbackend;
 pub mod memory;
+mod memory_table;
 mod metrics;
 pub mod pg_catalog;
 pub mod table_source;
