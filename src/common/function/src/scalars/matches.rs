@@ -1063,7 +1063,6 @@ mod test {
                 let parser = ParserContext { stack: vec![] };
                 let ast = parser.parse_pattern(query)?;
                 let _ast = ast.transform_ast()?;
-                ()
             };
 
             assert!(result.is_err(), "{query}");
