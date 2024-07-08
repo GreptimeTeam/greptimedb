@@ -48,6 +48,7 @@ pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<Crea
                     semantic_type: semantic_type as i32,
                     comment: String::new(),
                     datatype_extension: c.datatype_extension.clone(),
+                    options: c.options.clone(),
                 }),
                 column_id: i as u32,
             }

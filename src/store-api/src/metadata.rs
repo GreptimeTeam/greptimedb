@@ -21,14 +21,14 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use api::helper::ColumnDataTypeWrapper;
+use api::v1::column_def::try_as_column_schema;
 use api::v1::region::RegionColumnDef;
-use api::v1::{ColumnDef, SemanticType};
+use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -61,26 +61,6 @@ impl fmt::Debug for ColumnMetadata {
 }
 
 impl ColumnMetadata {
-    fn inner_try_from_column_def(column_def: ColumnDef) -> Result<ColumnSchema> {
-        let default_constrain = if column_def.default_constraint.is_empty() {
-            None
-        } else {
-            Some(
-                ColumnDefaultConstraint::try_from(column_def.default_constraint.as_slice())
-                    .context(ConvertDatatypesSnafu)?,
-            )
-        };
-        let data_type = ColumnDataTypeWrapper::new(
-            column_def.data_type(),
-            column_def.datatype_extension.clone(),
-        )
-        .into();
-        ColumnSchema::new(&column_def.name, data_type, column_def.is_nullable)
-            .with_time_index(column_def.semantic_type() == SemanticType::Timestamp)
-            .with_default_constraint(default_constrain)
-            .context(ConvertDatatypesSnafu)
-    }
-
     /// Construct `Self` from protobuf struct [RegionColumnDef]
     pub fn try_from_column_def(column_def: RegionColumnDef) -> Result<Self> {
         let column_id = column_def.column_id;
@@ -90,7 +70,7 @@ impl ColumnMetadata {
                 err: "column_def is absent",
             })?;
         let semantic_type = column_def.semantic_type();
-        let column_schema = Self::inner_try_from_column_def(column_def)?;
+        let column_schema = try_as_column_schema(&column_def).context(ConvertColumnSchemaSnafu)?;
 
         Ok(Self {
             column_schema,
@@ -714,13 +694,6 @@ pub enum MetadataError {
         error: serde_json::Error,
     },
 
-    #[snafu(display("Failed to convert struct from datatypes"))]
-    ConvertDatatypes {
-        #[snafu(implicit)]
-        location: Location,
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Invalid raw region request, err: {}", err))]
     InvalidRawRegionRequest {
         err: String,
@@ -755,6 +728,13 @@ pub enum MetadataError {
     ChangeColumnNotFound {
         column_name: String,
         region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert column schema"))]
+    ConvertColumnSchema {
+        source: api::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
