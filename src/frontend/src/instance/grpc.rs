@@ -253,6 +253,18 @@ impl Instance {
     }
 
     #[tracing::instrument(skip_all)]
+    pub async fn handle_influx_row_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.inserter
+            .handle_last_non_null_inserts(requests, ctx, self.statement_executor.as_ref())
+            .await
+            .context(TableOperationSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
     pub async fn handle_metric_row_inserts(
         &self,
         requests: RowInsertRequests,
