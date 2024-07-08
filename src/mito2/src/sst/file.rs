@@ -63,6 +63,17 @@ impl FileId {
     pub fn as_puffin(&self) -> String {
         format!("{}{}", self, ".puffin")
     }
+
+    /// Converts [FileId] as byte slice.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl From<FileId> for Uuid {
+    fn from(value: FileId) -> Self {
+        value.0
+    }
 }
 
 impl fmt::Display for FileId {

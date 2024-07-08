@@ -82,7 +82,7 @@ async fn main() {
         .prefix("sqlness")
         .tempdir()
         .unwrap();
-    let data_home = temp_dir.path().to_path_buf();
+    let data_home = temp_dir.into_path();
 
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir(args.case_dir))
@@ -107,12 +107,13 @@ async fn main() {
 
     let runner = Runner::new(
         config,
-        Env::new(data_home, args.server_addr, wal, args.bins_dir),
+        Env::new(data_home.clone(), args.server_addr, wal, args.bins_dir),
     );
     runner.run().await.unwrap();
 
-    // skip clean up and exit
-    if args.preserve_state {
-        println!("Preserving state in {:?}", temp_dir.into_path());
+    // clean up and exit
+    if !args.preserve_state {
+        println!("Removing state in {:?}", data_home);
+        tokio::fs::remove_dir_all(data_home).await.unwrap();
     }
 }
