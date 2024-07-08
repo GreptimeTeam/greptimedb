@@ -84,7 +84,6 @@ impl IntermediateManager {
 #[derive(Debug, Clone)]
 pub struct IntermediateLocation {
     files_dir: String,
-    sst_dir: String,
 }
 
 impl IntermediateLocation {
@@ -97,13 +96,12 @@ impl IntermediateLocation {
         let uuid = Uuid::new_v4();
         Self {
             files_dir: format!("{INTERMEDIATE_DIR}/{region_id}/{sst_file_id}/{uuid}/"),
-            sst_dir: format!("{INTERMEDIATE_DIR}/{region_id}/{sst_file_id}/"),
         }
     }
 
     /// Returns the directory to clean up when the sorting is done
     pub fn dir_to_cleanup(&self) -> &str {
-        &self.sst_dir
+        &self.files_dir
     }
 
     /// Returns the path of the directory for intermediate files associated with a column:
@@ -121,6 +119,8 @@ impl IntermediateLocation {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use common_test_util::temp_dir;
     use regex::Regex;
 
@@ -187,19 +187,19 @@ mod tests {
         let manager = IntermediateManager::init_fs(&aux_path).await.unwrap();
         let region_id = RegionId::new(0, 0);
         let sst_file_id = FileId::random();
-        let column_id = 0;
+        let column_id = 1;
         let fulltext_path = manager.fulltext_path(&region_id, &sst_file_id, column_id);
 
-        let p = fulltext_path.to_string_lossy().to_string();
-        let (normalized_aux_path, normalized_path) = if cfg!(windows) {
-            (aux_path.replace('\\', "/"), p.replace('\\', "/"))
-        } else {
-            (aux_path, p)
-        };
-
-        let r = Regex::new(&format!(
-                "{normalized_aux_path}/{INTERMEDIATE_DIR}/0/{sst_file_id}/fulltext-0-\\w{{8}}-\\w{{4}}-\\w{{4}}-\\w{{4}}-\\w{{12}}",
-            )).unwrap();
-        assert!(r.is_match(&normalized_path));
+        let mut pi = fulltext_path.iter();
+        for a in temp_dir.path().iter() {
+            assert_eq!(a, pi.next().unwrap());
+        }
+        assert_eq!(pi.next().unwrap(), INTERMEDIATE_DIR);
+        assert_eq!(pi.next().unwrap(), "0"); // region id
+        assert_eq!(pi.next().unwrap(), OsStr::new(&sst_file_id.to_string())); // sst file id
+        assert!(Regex::new(r"fulltext-1-\w{8}-\w{4}-\w{4}-\w{4}-\w{12}")
+            .unwrap()
+            .is_match(&pi.next().unwrap().to_string_lossy())); // fulltext path
+        assert!(pi.next().is_none());
     }
 }
