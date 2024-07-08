@@ -93,5 +93,36 @@ monitor1,host=host2 memory=1027 1663840496400340001";
 | 2022-09-22T09:54:56.400340001 | host2 |      | 1027.0 |
 +-------------------------------+-------+------+--------+"
         );
+
+        // Put the cpu column for host2.
+        let lines = r"
+monitor1,host=host2 cpu=32 1663840496400340001";
+        let request = InfluxdbRequest {
+            precision: None,
+            lines: lines.to_string(),
+        };
+        instance.exec(request, QueryContext::arc()).await.unwrap();
+
+        let mut output = instance
+            .do_query(
+                "SELECT ts, host, cpu, memory FROM monitor1 ORDER BY ts",
+                QueryContext::arc(),
+            )
+            .await;
+        let output = output.remove(0).unwrap();
+        let OutputData::Stream(stream) = output.data else {
+            unreachable!()
+        };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            recordbatches.pretty_print().unwrap(),
+            "\
++-------------------------------+-------+------+--------+
+| ts                            | host  | cpu  | memory |
++-------------------------------+-------+------+--------+
+| 2022-09-22T09:54:56.100023100 | host1 | 66.6 | 1024.0 |
+| 2022-09-22T09:54:56.400340001 | host2 | 32.0 | 1027.0 |
++-------------------------------+-------+------+--------+"
+        );
     }
 }

@@ -126,6 +126,8 @@ impl StatementExecutor {
 
             Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx).await,
 
+            Statement::ShowTableStatus(stmt) => self.show_table_status(stmt, query_ctx).await,
+
             Statement::ShowCollation(kind) => self.show_collation(kind, query_ctx).await,
 
             Statement::ShowCharset(kind) => self.show_charset(kind, query_ctx).await,

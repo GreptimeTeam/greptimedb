@@ -22,7 +22,7 @@ use snafu::ResultExt;
 use sql::ast::Ident;
 use sql::statements::create::Partitions;
 use sql::statements::show::{
-    ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
+    ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTableStatus, ShowTables, ShowVariables,
 };
 use sqlparser::ast::ObjectName;
 use table::metadata::TableType;
@@ -51,6 +51,17 @@ impl StatementExecutor {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         query::sql::show_tables(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub(super) async fn show_table_status(
+        &self,
+        stmt: ShowTableStatus,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_table_status(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
             .await
             .context(ExecuteStatementSnafu)
     }
