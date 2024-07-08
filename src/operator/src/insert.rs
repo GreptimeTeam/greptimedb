@@ -76,7 +76,7 @@ enum AutoCreateTableType {
     Physical,
     /// A log table which is append-only.
     Log,
-    /// A table that merge rows by `last_non_null` strategy.
+    /// A table that merges rows by `last_non_null` strategy.
     LastNonNull,
 }
 
@@ -681,7 +681,10 @@ impl Inserter {
 
         match res {
             Ok(table) => {
-                info!("Successfully created table {}", table_ref);
+                info!(
+                    "Successfully created table {} with options: {:?}",
+                    table_ref, options
+                );
                 Ok(table)
             }
             Err(err) => {
