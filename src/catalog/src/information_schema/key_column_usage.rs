@@ -212,12 +212,12 @@ impl InformationSchemaKeyColumnUsageBuilder {
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
         let predicates = Predicates::from_scan_request(&request);
 
-        let mut primary_constraints = vec![];
-
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
 
             while let Some(table) = stream.try_next().await? {
+                let mut primary_constraints = vec![];
+
                 let table_info = table.table_info();
                 let table_name = &table_info.name;
                 let keys = &table_info.meta.primary_key_indices;
@@ -246,22 +246,22 @@ impl InformationSchemaKeyColumnUsageBuilder {
                     }
                     // TODO(dimbtp): foreign key constraint not supported yet
                 }
-            }
-        }
 
-        for (i, (catalog_name, schema_name, table_name, column_name)) in
-            primary_constraints.into_iter().enumerate()
-        {
-            self.add_key_column_usage(
-                &predicates,
-                &schema_name,
-                PRI_CONSTRAINT_NAME,
-                &catalog_name,
-                &schema_name,
-                &table_name,
-                &column_name,
-                i as u32 + 1,
-            );
+                for (i, (catalog_name, schema_name, table_name, column_name)) in
+                    primary_constraints.into_iter().enumerate()
+                {
+                    self.add_key_column_usage(
+                        &predicates,
+                        &schema_name,
+                        PRI_CONSTRAINT_NAME,
+                        &catalog_name,
+                        &schema_name,
+                        &table_name,
+                        &column_name,
+                        i as u32 + 1,
+                    );
+                }
+            }
         }
 
         self.finish()
