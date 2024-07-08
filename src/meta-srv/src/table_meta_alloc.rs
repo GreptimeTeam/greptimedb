@@ -22,7 +22,7 @@ use snafu::{ensure, ResultExt};
 use store_api::storage::MAX_REGION_SEQ;
 
 use crate::error::{self, Result, TooManyPartitionsSnafu};
-use crate::metasrv::{SelectorContext, SelectorRef};
+use crate::metasrv::{SelectTarget, SelectorContext, SelectorRef};
 use crate::selector::SelectorOptions;
 
 pub struct MetasrvPeerAllocator {
@@ -64,9 +64,10 @@ impl MetasrvPeerAllocator {
 
         ensure!(
             peers.len() >= regions,
-            error::NoEnoughAvailableDatanodeSnafu {
+            error::NoEnoughAvailableNodeSnafu {
                 required: regions,
                 available: peers.len(),
+                select_target: SelectTarget::Datanode
             }
         );
 

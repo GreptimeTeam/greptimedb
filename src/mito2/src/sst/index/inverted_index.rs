@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod error;
-pub mod pipeline_operator;
-pub mod table;
+pub(crate) mod applier;
+mod codec;
+pub(crate) mod creator;
+
+const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";

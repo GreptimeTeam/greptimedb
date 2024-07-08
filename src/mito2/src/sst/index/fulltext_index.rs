@@ -12,17 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! All keys used for distributed locking in the Metasrv.
-//! Place them in this unified module for better maintenance.
+pub(crate) mod creator;
 
-use common_meta::RegionIdent;
-
-use crate::lock::Key;
-
-pub(crate) fn table_metadata_lock_key(region: &RegionIdent) -> Key {
-    format!(
-        "table_metadata_lock_({}-{})",
-        region.cluster_id, region.table_id,
-    )
-    .into_bytes()
-}
+const INDEX_BLOB_TYPE: &str = "greptime-fulltext-index-v1";

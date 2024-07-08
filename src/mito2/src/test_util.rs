@@ -45,7 +45,6 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
-use object_store::util::join_dir;
 use object_store::ObjectStore;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
@@ -69,6 +68,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::worker::WorkerGroup;
 
@@ -602,17 +602,25 @@ impl TestEnv {
         local_store: ObjectStore,
         capacity: ReadableSize,
     ) -> WriteCacheRef {
-        let data_home = self.data_home().display().to_string();
-
-        let intm_mgr = IntermediateManager::init_fs(join_dir(&data_home, "intm"))
+        let index_aux_path = self.data_home.path().join("index_aux");
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
+            .await
+            .unwrap();
+        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
             .await
             .unwrap();
 
         let object_store_manager = self.get_object_store_manager().unwrap();
-        let write_cache =
-            WriteCache::new(local_store, object_store_manager, capacity, None, intm_mgr)
-                .await
-                .unwrap();
+        let write_cache = WriteCache::new(
+            local_store,
+            object_store_manager,
+            capacity,
+            None,
+            puffin_mgr,
+            intm_mgr,
+        )
+        .await
+        .unwrap();
 
         Arc::new(write_cache)
     }

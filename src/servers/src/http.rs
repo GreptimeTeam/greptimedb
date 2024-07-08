@@ -36,6 +36,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
 use datatypes::schema::SchemaRef;
+use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -91,6 +92,7 @@ pub mod csv_result;
 #[cfg(feature = "dashboard")]
 mod dashboard;
 pub mod error_result;
+pub mod greptime_manage_resp;
 pub mod greptime_result_v1;
 pub mod influxdb_result_v1;
 pub mod table_result;
@@ -589,11 +591,15 @@ impl HttpServerBuilder {
         }
     }
 
-    pub fn with_log_ingest_handler(self, handler: LogHandlerRef) -> Self {
+    pub fn with_log_ingest_handler(
+        self,
+        handler: LogHandlerRef,
+        validator: Option<LogValidatorRef>,
+    ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/events"),
-                HttpServer::route_log(handler),
+                HttpServer::route_log(handler, validator),
             ),
             ..self
         }
@@ -691,7 +697,9 @@ impl HttpServer {
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
-                    .layer(TraceLayer::new_for_http())
+                    // disable on failure tracing. because printing out isn't very helpful,
+                    // and we have impl IntoResponse for Error. It will print out more detailed error messages
+                    .layer(TraceLayer::new_for_http().on_failure(()))
                     .option_layer(timeout_layer)
                     .option_layer(body_limit_layer)
                     // auth layer
@@ -721,19 +729,29 @@ impl HttpServer {
             .with_state(metrics_handler)
     }
 
-    fn route_log<S>(log_handler: LogHandlerRef) -> Router<S> {
+    fn route_log<S>(
+        log_handler: LogHandlerRef,
+        log_validator: Option<LogValidatorRef>,
+    ) -> Router<S> {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
             .route(
                 "/pipelines/:pipeline_name",
                 routing::post(event::add_pipeline),
             )
+            .route(
+                "/pipelines/:pipeline_name",
+                routing::delete(event::delete_pipeline),
+            )
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(RequestDecompressionLayer::new()),
             )
-            .with_state(log_handler)
+            .with_state(LogState {
+                log_handler,
+                log_validator,
+            })
     }
 
     fn route_sql<S>(api_state: ApiState) -> ApiRouter<S> {

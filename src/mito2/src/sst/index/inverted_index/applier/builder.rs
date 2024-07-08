@@ -34,10 +34,11 @@ use store_api::metadata::RegionMetadata;
 use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
+use crate::cache::index::InvertedIndexCacheRef;
 use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
-use crate::sst::index::applier::SstIndexApplier;
-use crate::sst::index::codec::IndexValueCodec;
+use crate::sst::index::inverted_index::applier::SstIndexApplier;
+use crate::sst::index::inverted_index::codec::IndexValueCodec;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
 /// Constructs an [`SstIndexApplier`] which applies predicates to SST files during scan.
@@ -62,6 +63,9 @@ pub(crate) struct SstIndexApplierBuilder<'a> {
 
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
+
+    /// Cache for inverted index.
+    index_cache: Option<InvertedIndexCacheRef>,
 }
 
 impl<'a> SstIndexApplierBuilder<'a> {
@@ -70,6 +74,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         region_dir: String,
         object_store: ObjectStore,
         file_cache: Option<FileCacheRef>,
+        index_cache: Option<InvertedIndexCacheRef>,
         metadata: &'a RegionMetadata,
         ignore_column_ids: HashSet<ColumnId>,
         puffin_manager_factory: PuffinManagerFactory,
@@ -81,6 +86,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
             metadata,
             ignore_column_ids,
             output: HashMap::default(),
+            index_cache,
             puffin_manager_factory,
         }
     }
@@ -102,11 +108,13 @@ impl<'a> SstIndexApplierBuilder<'a> {
             .map(|(column_id, predicates)| (column_id.to_string(), predicates))
             .collect();
         let applier = PredicatesIndexApplier::try_from(predicates);
+
         Ok(Some(SstIndexApplier::new(
             self.region_dir,
             self.metadata.region_id,
             self.object_store,
             self.file_cache,
+            self.index_cache,
             Box::new(applier.context(BuildIndexApplierSnafu)?),
             self.puffin_manager_factory,
         )))
@@ -319,6 +327,7 @@ mod tests {
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
+            None,
             None,
             &metadata,
             HashSet::default(),

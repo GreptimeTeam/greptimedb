@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::result::Result as StdResult;
+use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use axum::body::HttpBody;
@@ -23,22 +25,20 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, TypedHeader};
 use common_telemetry::{error, warn};
-use common_time::{Timestamp, Timezone};
-use datatypes::timestamp::TimestampNanosecond;
-use http::{HeaderMap, HeaderValue};
 use mime_guess::mime;
 use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
-use pipeline::table::PipelineVersion;
-use pipeline::Value as PipelineValue;
+use pipeline::util::to_pipeline_version;
+use pipeline::{PipelineVersion, Value as PipelineValue};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Deserializer, Value};
+use serde_json::{Deserializer, Value};
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
+use crate::http::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
 use crate::query_handler::LogHandlerRef;
@@ -51,6 +51,7 @@ pub struct LogIngesterQueryParams {
     pub ignore_errors: Option<bool>,
 
     pub version: Option<String>,
+    pub source: Option<String>,
 }
 
 pub struct PipelineContent(String);
@@ -100,11 +101,13 @@ where
 
 #[axum_macros::debug_handler]
 pub async fn add_pipeline(
-    State(handler): State<LogHandlerRef>,
+    State(state): State<LogState>,
     Path(pipeline_name): Path<String>,
     Extension(query_ctx): Extension<QueryContextRef>,
     PipelineContent(payload): PipelineContent,
-) -> Result<impl IntoResponse> {
+) -> Result<GreptimedbManageResponse> {
+    let start = Instant::now();
+    let handler = state.log_handler;
     if pipeline_name.is_empty() {
         return Err(InvalidParameterSnafu {
             reason: "pipeline_name is required in path",
@@ -126,26 +129,56 @@ pub async fn add_pipeline(
 
     result
         .map(|pipeline| {
-            let json_header =
-                HeaderValue::from_str(mime_guess::mime::APPLICATION_JSON.as_ref()).unwrap();
-            let mut headers = HeaderMap::new();
-            headers.append(CONTENT_TYPE, json_header);
-            // Safety check: unwrap is safe here because we have checked the format of the timestamp
-            let version = pipeline
-                .0
-                .as_formatted_string(
-                    "%Y-%m-%d %H:%M:%S%.fZ",
-                    // Safety check: unwrap is safe here because we have checked the format of the timezone
-                    Some(Timezone::from_tz_string("UTC").unwrap()).as_ref(),
-                )
-                .unwrap();
-            (
-                headers,
-                json!({"version": version, "name": pipeline_name}).to_string(),
+            GreptimedbManageResponse::from_pipeline(
+                pipeline_name,
+                pipeline.0.to_timezone_aware_string(None),
+                start.elapsed().as_millis() as u64,
             )
         })
         .map_err(|e| {
             error!(e; "failed to insert pipeline");
+            e
+        })
+}
+
+#[axum_macros::debug_handler]
+pub async fn delete_pipeline(
+    State(state): State<LogState>,
+    Extension(query_ctx): Extension<QueryContextRef>,
+    Query(query_params): Query<LogIngesterQueryParams>,
+    Path(pipeline_name): Path<String>,
+) -> Result<GreptimedbManageResponse> {
+    let start = Instant::now();
+    let handler = state.log_handler;
+    ensure!(
+        !pipeline_name.is_empty(),
+        InvalidParameterSnafu {
+            reason: "pipeline_name is required",
+        }
+    );
+
+    let version_str = query_params.version.context(InvalidParameterSnafu {
+        reason: "version is required",
+    })?;
+
+    let version = to_pipeline_version(Some(version_str.clone())).context(PipelineSnafu)?;
+
+    handler
+        .delete_pipeline(&pipeline_name, version, query_ctx)
+        .await
+        .map(|v| {
+            if v.is_some() {
+                GreptimedbManageResponse::from_pipeline(
+                    pipeline_name,
+                    version_str,
+                    start.elapsed().as_millis() as u64,
+                )
+            } else {
+                GreptimedbManageResponse::from_pipelines(vec![], start.elapsed().as_millis() as u64)
+            }
+        })
+        .map_err(|e| {
+            error!(e; "failed to delete pipeline");
             e
         })
 }
@@ -192,12 +225,20 @@ fn transform_ndjson_array_factory(
 
 #[axum_macros::debug_handler]
 pub async fn log_ingester(
-    State(handler): State<LogHandlerRef>,
+    State(log_state): State<LogState>,
     Query(query_params): Query<LogIngesterQueryParams>,
     Extension(query_ctx): Extension<QueryContextRef>,
     TypedHeader(content_type): TypedHeader<ContentType>,
     payload: String,
 ) -> Result<HttpResponse> {
+    if let Some(log_validator) = log_state.log_validator {
+        if let Some(response) = log_validator.validate(query_params.source.clone(), &payload) {
+            return response;
+        }
+    }
+
+    let handler = log_state.log_handler;
+
     let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
         reason: "pipeline_name is required",
     })?;
@@ -205,18 +246,7 @@ pub async fn log_ingester(
         reason: "table is required",
     })?;
 
-    let version = match query_params.version {
-        Some(version) => {
-            let ts = Timestamp::from_str_utc(&version).map_err(|e| {
-                InvalidParameterSnafu {
-                    reason: format!("invalid pipeline version: {} with error: {}", &version, e),
-                }
-                .build()
-            })?;
-            Some(TimestampNanosecond(ts))
-        }
-        None => None,
-    };
+    let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
 
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
@@ -275,4 +305,19 @@ async fn ingest_logs_inner(
         .await
         .with_execution_time(start.elapsed().as_millis() as u64);
     Ok(response)
+}
+
+pub trait LogValidator {
+    /// validate payload by source before processing
+    /// Return a `Some` result to indicate validation failure.
+    fn validate(&self, source: Option<String>, payload: &str) -> Option<Result<HttpResponse>>;
+}
+
+pub type LogValidatorRef = Arc<dyn LogValidator + Send + Sync>;
+
+/// axum state struct to hold log handler and validator
+#[derive(Clone)]
+pub struct LogState {
+    pub log_handler: LogHandlerRef,
+    pub log_validator: Option<LogValidatorRef>,
 }

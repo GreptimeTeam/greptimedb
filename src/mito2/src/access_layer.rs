@@ -22,6 +22,7 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
+use crate::config::{FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
@@ -141,19 +142,21 @@ impl AccessLayer {
                 .await?
         } else {
             // Write cache is disabled.
+            let store = self.object_store.clone();
             let indexer = IndexerBuilder {
-                create_inverted_index: request.create_inverted_index,
-                mem_threshold_index_create: request.mem_threshold_index_create,
-                write_buffer_size: request.index_write_buffer_size,
+                op_type: request.op_type,
                 file_id,
                 file_path: index_file_path,
                 metadata: &request.metadata,
                 row_group_size: write_opts.row_group_size,
-                object_store: self.object_store.clone(),
+                puffin_manager: self.puffin_manager_factory.build(store),
                 intermediate_manager: self.intermediate_manager.clone(),
                 index_options: request.index_options,
+                inverted_index_config: request.inverted_index_config,
+                fulltext_index_config: request.fulltext_index_config,
             }
-            .build();
+            .build()
+            .await;
             let mut writer = ParquetWriter::new_with_object_store(
                 self.object_store.clone(),
                 file_path,
@@ -182,22 +185,27 @@ impl AccessLayer {
     }
 }
 
+/// `OperationType` represents the origin of the `SstWriteRequest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum OperationType {
+    Flush,
+    Compact,
+}
+
 /// Contents to build a SST.
 pub(crate) struct SstWriteRequest {
+    pub(crate) op_type: OperationType,
     pub(crate) file_id: FileId,
     pub(crate) metadata: RegionMetadataRef,
     pub(crate) source: Source,
     pub(crate) cache_manager: CacheManagerRef,
     #[allow(dead_code)]
     pub(crate) storage: Option<String>,
-    /// Whether to create inverted index.
-    pub(crate) create_inverted_index: bool,
-    /// The threshold of memory size to create inverted index.
-    pub(crate) mem_threshold_index_create: Option<usize>,
-    /// The size of write buffer for index.
-    pub(crate) index_write_buffer_size: Option<usize>,
-    /// The options of the index for the region.
+
+    /// Configs for index
     pub(crate) index_options: IndexOptions,
+    pub(crate) inverted_index_config: InvertedIndexConfig,
+    pub(crate) fulltext_index_config: FulltextIndexConfig,
 }
 
 /// Creates a fs object store with atomic write dir.

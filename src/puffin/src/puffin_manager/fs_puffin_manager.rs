@@ -17,30 +17,25 @@ mod reader;
 mod writer;
 
 use async_trait::async_trait;
-use futures::{AsyncRead, AsyncSeek, AsyncWrite};
 pub use reader::FsPuffinReader;
 pub use writer::FsPuffinWriter;
 
+use super::file_accessor::PuffinFileAccessor;
 use crate::error::Result;
-use crate::puffin_manager::file_accessor::PuffinFileAccessorRef;
-use crate::puffin_manager::stager::StagerRef;
-use crate::puffin_manager::{BlobGuard, DirGuard, PuffinManager};
+use crate::puffin_manager::stager::Stager;
+use crate::puffin_manager::PuffinManager;
 
 /// `FsPuffinManager` is a `PuffinManager` that provides readers and writers for puffin data in filesystem.
-pub struct FsPuffinManager<B, D, AR, AW> {
+pub struct FsPuffinManager<S, F> {
     /// The stager.
-    stager: StagerRef<B, D>,
-
+    stager: S,
     /// The puffin file accessor.
-    puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
+    puffin_file_accessor: F,
 }
 
-impl<B, D, AR, AW> FsPuffinManager<B, D, AR, AW> {
+impl<S, F> FsPuffinManager<S, F> {
     /// Creates a new `FsPuffinManager` with the specified `stager` and `puffin_file_accessor`.
-    pub fn new(
-        stager: StagerRef<B, D>,
-        puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
-    ) -> Self {
+    pub fn new(stager: S, puffin_file_accessor: F) -> Self {
         Self {
             stager,
             puffin_file_accessor,
@@ -49,15 +44,13 @@ impl<B, D, AR, AW> FsPuffinManager<B, D, AR, AW> {
 }
 
 #[async_trait]
-impl<B, D, AR, AW> PuffinManager for FsPuffinManager<B, D, AR, AW>
+impl<S, F> PuffinManager for FsPuffinManager<S, F>
 where
-    B: BlobGuard,
-    D: DirGuard,
-    AR: AsyncRead + AsyncSeek + Send + Unpin + 'static,
-    AW: AsyncWrite + Send + Unpin + 'static,
+    S: Stager + Clone,
+    F: PuffinFileAccessor + Clone,
 {
-    type Reader = FsPuffinReader<B, D, AR, AW>;
-    type Writer = FsPuffinWriter<B, D, AW>;
+    type Reader = FsPuffinReader<S, F>;
+    type Writer = FsPuffinWriter<S, F::Writer>;
 
     async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader> {
         Ok(FsPuffinReader::new(

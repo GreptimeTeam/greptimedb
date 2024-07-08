@@ -12,201 +12,186 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datafusion_expr::Between;
-use index::inverted_index::search::predicate::{Bound, Predicate, Range, RangePredicate};
+use std::collections::HashSet;
+
+use datafusion_expr::expr::InList;
+use index::inverted_index::search::predicate::{InListPredicate, Predicate};
 
 use crate::error::Result;
-use crate::sst::index::applier::builder::SstIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
 
 impl<'a> SstIndexApplierBuilder<'a> {
-    /// Collects a `BETWEEN` expression in the form of `column BETWEEN lit AND lit`.
-    pub(crate) fn collect_between(&mut self, between: &Between) -> Result<()> {
-        if between.negated {
+    /// Collects an in list expression in the form of `column IN (lit, lit, ...)`.
+    pub(crate) fn collect_inlist(&mut self, inlist: &InList) -> Result<()> {
+        if inlist.negated {
             return Ok(());
         }
-
-        let Some(column_name) = Self::column_name(&between.expr) else {
+        let Some(column_name) = Self::column_name(&inlist.expr) else {
             return Ok(());
         };
         let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
             return Ok(());
         };
-        let Some(low) = Self::nonnull_lit(&between.low) else {
-            return Ok(());
-        };
-        let Some(high) = Self::nonnull_lit(&between.high) else {
-            return Ok(());
-        };
 
-        let predicate = Predicate::Range(RangePredicate {
-            range: Range {
-                lower: Some(Bound {
-                    inclusive: true,
-                    value: Self::encode_lit(low, data_type.clone())?,
-                }),
-                upper: Some(Bound {
-                    inclusive: true,
-                    value: Self::encode_lit(high, data_type)?,
-                }),
-            },
-        });
+        let mut predicate = InListPredicate {
+            list: HashSet::with_capacity(inlist.list.len()),
+        };
+        for lit in &inlist.list {
+            let Some(lit) = Self::nonnull_lit(lit) else {
+                return Ok(());
+            };
 
-        self.add_predicate(column_id, predicate);
+            predicate
+                .list
+                .insert(Self::encode_lit(lit, data_type.clone())?);
+        }
+
+        self.add_predicate(column_id, Predicate::InList(predicate));
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::*;
     use crate::error::Error;
-    use crate::sst::index::applier::builder::tests::{
+    use crate::sst::index::inverted_index::applier::builder::tests::{
         encoded_string, field_column, int64_lit, nonexistent_column, string_lit, tag_column,
         test_object_store, test_region_metadata,
     };
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     #[test]
-    fn test_collect_between_basic() {
-        let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_between_basic_");
+    fn test_collect_in_list_basic() {
+        let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_in_list_basic_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
+            None,
             None,
             &metadata,
             HashSet::default(),
             facotry,
         );
 
-        let between = Between {
-            negated: false,
+        let in_list = InList {
             expr: Box::new(tag_column()),
-            low: Box::new(string_lit("abc")),
-            high: Box::new(string_lit("def")),
+            list: vec![string_lit("foo"), string_lit("bar")],
+            negated: false,
         };
 
-        builder.collect_between(&between).unwrap();
+        builder.collect_inlist(&in_list).unwrap();
 
         let predicates = builder.output.get(&1).unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],
-            Predicate::Range(RangePredicate {
-                range: Range {
-                    lower: Some(Bound {
-                        inclusive: true,
-                        value: encoded_string("abc"),
-                    }),
-                    upper: Some(Bound {
-                        inclusive: true,
-                        value: encoded_string("def"),
-                    }),
-                }
+            Predicate::InList(InListPredicate {
+                list: HashSet::from_iter([encoded_string("foo"), encoded_string("bar")])
             })
         );
     }
 
     #[test]
-    fn test_collect_between_negated() {
+    fn test_collect_in_list_negated() {
         let (_d, facotry) =
-            PuffinManagerFactory::new_for_test_block("test_collect_between_negated_");
+            PuffinManagerFactory::new_for_test_block("test_collect_in_list_negated_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
+            None,
             None,
             &metadata,
             HashSet::default(),
             facotry,
         );
 
-        let between = Between {
+        let in_list = InList {
+            expr: Box::new(tag_column()),
+            list: vec![string_lit("foo"), string_lit("bar")],
             negated: true,
-            expr: Box::new(tag_column()),
-            low: Box::new(string_lit("abc")),
-            high: Box::new(string_lit("def")),
         };
 
-        builder.collect_between(&between).unwrap();
+        builder.collect_inlist(&in_list).unwrap();
         assert!(builder.output.is_empty());
     }
 
     #[test]
-    fn test_collect_between_field_column() {
+    fn test_collect_in_list_field_column() {
         let (_d, facotry) =
-            PuffinManagerFactory::new_for_test_block("test_collect_between_field_column_");
+            PuffinManagerFactory::new_for_test_block("test_collect_in_list_field_column_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
+            None,
             None,
             &metadata,
             HashSet::default(),
             facotry,
         );
 
-        let between = Between {
-            negated: false,
+        let in_list = InList {
             expr: Box::new(field_column()),
-            low: Box::new(string_lit("abc")),
-            high: Box::new(string_lit("def")),
+            list: vec![string_lit("foo"), string_lit("bar")],
+            negated: false,
         };
 
-        builder.collect_between(&between).unwrap();
+        builder.collect_inlist(&in_list).unwrap();
         assert!(builder.output.is_empty());
     }
 
     #[test]
-    fn test_collect_between_type_mismatch() {
+    fn test_collect_in_list_type_mismatch() {
         let (_d, facotry) =
-            PuffinManagerFactory::new_for_test_block("test_collect_between_type_mismatch_");
+            PuffinManagerFactory::new_for_test_block("test_collect_in_list_type_mismatch_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
+            None,
             None,
             &metadata,
             HashSet::default(),
             facotry,
         );
 
-        let between = Between {
-            negated: false,
+        let in_list = InList {
             expr: Box::new(tag_column()),
-            low: Box::new(int64_lit(123)),
-            high: Box::new(int64_lit(456)),
+            list: vec![int64_lit(123), int64_lit(456)],
+            negated: false,
         };
 
-        let res = builder.collect_between(&between);
+        let res = builder.collect_inlist(&in_list);
         assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
         assert!(builder.output.is_empty());
     }
 
     #[test]
-    fn test_collect_between_nonexistent_column() {
+    fn test_collect_in_list_nonexistent_column() {
         let (_d, facotry) =
-            PuffinManagerFactory::new_for_test_block("test_collect_between_nonexistent_column_");
+            PuffinManagerFactory::new_for_test_block("test_collect_in_list_nonexistent_column_");
+
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
+            None,
             None,
             &metadata,
             HashSet::default(),
             facotry,
         );
 
-        let between = Between {
-            negated: false,
+        let in_list = InList {
             expr: Box::new(nonexistent_column()),
-            low: Box::new(string_lit("abc")),
-            high: Box::new(string_lit("def")),
+            list: vec![string_lit("foo"), string_lit("bar")],
+            negated: false,
         };
 
-        let res = builder.collect_between(&between);
+        let res = builder.collect_inlist(&in_list);
         assert!(matches!(res, Err(Error::ColumnNotFound { .. })));
         assert!(builder.output.is_empty());
     }

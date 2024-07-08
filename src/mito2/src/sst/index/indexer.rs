@@ -12,25 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_trait::async_trait;
-use common_meta::RegionIdent;
-use common_procedure::Status;
-use serde::{Deserialize, Serialize};
-
-use super::{RegionFailoverContext, State};
-use crate::error::Result;
-
-#[derive(Serialize, Deserialize, Debug)]
-pub(super) struct RegionFailoverEnd;
-
-#[async_trait]
-#[typetag::serde]
-impl State for RegionFailoverEnd {
-    async fn next(&mut self, _: &RegionFailoverContext, _: &RegionIdent) -> Result<Box<dyn State>> {
-        Ok(Box::new(RegionFailoverEnd))
-    }
-
-    fn status(&self) -> Status {
-        Status::done()
-    }
-}
+mod abort;
+mod finish;
+mod update;

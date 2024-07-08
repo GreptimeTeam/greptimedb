@@ -17,9 +17,8 @@ pub mod session_config;
 pub mod table_name;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -32,15 +31,31 @@ use crate::context::{Channel, ConnInfo, QueryContextRef};
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]
 pub struct Session {
-    catalog: ArcSwap<String>,
-    schema: ArcSwap<String>,
-    user_info: ArcSwap<UserInfoRef>,
+    catalog: RwLock<String>,
+    mutable_inner: Arc<RwLock<MutableInner>>,
     conn_info: ConnInfo,
-    timezone: ArcSwap<Timezone>,
     configuration_variables: Arc<ConfigurationVariables>,
 }
 
 pub type SessionRef = Arc<Session>;
+
+/// A container for mutable items in query context
+#[derive(Debug)]
+pub(crate) struct MutableInner {
+    schema: String,
+    user_info: UserInfoRef,
+    timezone: Timezone,
+}
+
+impl Default for MutableInner {
+    fn default() -> Self {
+        Self {
+            schema: DEFAULT_SCHEMA_NAME.into(),
+            user_info: auth::userinfo_by_name(None),
+            timezone: get_timezone(None).clone(),
+        }
+    }
+}
 
 impl Session {
     pub fn new(
@@ -49,80 +64,67 @@ impl Session {
         configuration_variables: ConfigurationVariables,
     ) -> Self {
         Session {
-            catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.into())),
-            schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.into())),
-            user_info: ArcSwap::new(Arc::new(auth::userinfo_by_name(None))),
+            catalog: RwLock::new(DEFAULT_CATALOG_NAME.into()),
             conn_info: ConnInfo::new(addr, channel),
-            timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
             configuration_variables: Arc::new(configuration_variables),
+            mutable_inner: Arc::new(RwLock::new(MutableInner::default())),
         }
     }
 
-    #[inline]
     pub fn new_query_context(&self) -> QueryContextRef {
         QueryContextBuilder::default()
-            .current_user(ArcSwap::new(Arc::new(Some(
-                self.user_info.load().as_ref().clone(),
-            ))))
-            .current_catalog(self.catalog.load().to_string())
-            .current_schema(self.schema.load().to_string())
+            // catalog is not allowed for update in query context so we use
+            // string here
+            .current_catalog(self.catalog.read().unwrap().clone())
+            .mutable_inner(self.mutable_inner.clone())
             .sql_dialect(self.conn_info.channel.dialect())
             .configuration_parameter(self.configuration_variables.clone())
-            .timezone(self.timezone())
             .build()
             .into()
     }
 
-    #[inline]
     pub fn conn_info(&self) -> &ConnInfo {
         &self.conn_info
     }
 
-    #[inline]
     pub fn mut_conn_info(&mut self) -> &mut ConnInfo {
         &mut self.conn_info
     }
 
-    #[inline]
-    pub fn timezone(&self) -> Arc<Timezone> {
-        self.timezone.load().clone()
+    pub fn timezone(&self) -> Timezone {
+        self.mutable_inner.read().unwrap().timezone.clone()
     }
 
-    #[inline]
     pub fn set_timezone(&self, tz: Timezone) {
-        let _ = self.timezone.swap(Arc::new(tz));
+        let mut inner = self.mutable_inner.write().unwrap();
+        inner.timezone = tz;
     }
 
-    #[inline]
     pub fn user_info(&self) -> UserInfoRef {
-        self.user_info.load().clone().as_ref().clone()
+        self.mutable_inner.read().unwrap().user_info.clone()
     }
 
-    #[inline]
     pub fn set_user_info(&self, user_info: UserInfoRef) {
-        self.user_info.store(Arc::new(user_info));
+        self.mutable_inner.write().unwrap().user_info = user_info;
     }
 
-    #[inline]
     pub fn set_catalog(&self, catalog: String) {
-        self.catalog.store(Arc::new(catalog));
+        *self.catalog.write().unwrap() = catalog;
     }
 
-    #[inline]
     pub fn catalog(&self) -> String {
-        self.catalog.load().as_ref().clone()
+        self.catalog.read().unwrap().clone()
     }
 
     pub fn schema(&self) -> String {
-        self.schema.load().as_ref().clone()
+        self.mutable_inner.read().unwrap().schema.clone()
     }
 
-    #[inline]
     pub fn set_schema(&self, schema: String) {
-        self.schema.store(Arc::new(schema));
+        self.mutable_inner.write().unwrap().schema = schema;
     }
 
     pub fn get_db_string(&self) -> String {
-        build_db_string(self.catalog.load().as_ref(), self.schema.load().as_ref())
+        build_db_string(&self.catalog(), &self.schema())
     }
 }

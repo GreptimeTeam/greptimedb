@@ -26,6 +26,7 @@ use table::metadata::TableId;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
 
+use crate::metasrv::SelectTarget;
 use crate::pubsub::Message;
 
 #[derive(Snafu)]
@@ -175,15 +176,17 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to request Datanode, required: {}, but only {} available",
+        "Failed to request {}, required: {}, but only {} available",
+        select_target,
         required,
         available
     ))]
-    NoEnoughAvailableDatanode {
+    NoEnoughAvailableNode {
         #[snafu(implicit)]
         location: Location,
         required: usize,
         available: usize,
+        select_target: SelectTarget,
     },
 
     #[snafu(display("Failed to request Datanode {}", peer))]
@@ -895,7 +898,7 @@ impl ErrorExt for Error {
             | Error::RetryLaterWithSource { .. }
             | Error::StartGrpc { .. }
             | Error::UpdateTableMetadata { .. }
-            | Error::NoEnoughAvailableDatanode { .. }
+            | Error::NoEnoughAvailableNode { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
             | Error::WeightArray { .. }

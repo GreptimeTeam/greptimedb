@@ -245,7 +245,7 @@ impl Context {
     /// Notifies the RegionSupervisor to register failure detectors of failed region.
     ///
     /// The original failure detector was removed once the procedure was triggered.
-    /// Now, we need to register the failure detector for the failed region.
+    /// Now, we need to register the failure detector for the failed region again.
     pub async fn register_failure_detectors(&self) {
         let cluster_id = self.persistent_ctx.cluster_id;
         let datanode_id = self.persistent_ctx.from_peer.id;
@@ -253,6 +253,20 @@ impl Context {
 
         self.region_failure_detector_controller
             .register_failure_detectors(vec![(cluster_id, datanode_id, region_id)])
+            .await;
+    }
+
+    /// Notifies the RegionSupervisor to deregister failure detectors.
+    ///
+    /// The original failure detectors was removed once the procedure was triggered.
+    /// However, the `from_peer` may still send the heartbeats contains the failed region.
+    pub async fn deregister_failure_detectors(&self) {
+        let cluster_id = self.persistent_ctx.cluster_id;
+        let datanode_id = self.persistent_ctx.from_peer.id;
+        let region_id = self.persistent_ctx.region_id;
+
+        self.region_failure_detector_controller
+            .deregister_failure_detectors(vec![(cluster_id, datanode_id, region_id)])
             .await;
     }
 

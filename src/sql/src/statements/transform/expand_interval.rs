@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::ops::ControlFlow;
+use std::time::Duration as StdDuration;
 
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -25,6 +26,9 @@ use crate::statements::transform::TransformRule;
 lazy_static! {
     /// Matches either one or more digits `(\d+)` or one or more ASCII characters `[a-zA-Z]` or plus/minus signs
     static ref INTERVAL_ABBREVIATION_PATTERN: Regex = Regex::new(r"([+-]?\d+|[a-zA-Z]+|\+|-)").unwrap();
+
+    /// Checks if the provided string starts as ISO_8601 format string (case/sign independent)
+    static ref IS_VALID_ISO_8601_PREFIX_PATTERN: Regex = Regex::new(r"^[-]?[Pp]").unwrap();
 
     static ref INTERVAL_ABBREVIATION_MAPPING: HashMap<&'static str, &'static str> = HashMap::from([
         ("y","years"),
@@ -58,7 +62,8 @@ lazy_static! {
 pub(crate) struct ExpandIntervalTransformRule;
 
 impl TransformRule for ExpandIntervalTransformRule {
-    /// Applies transform rule for `Interval` type by extending the shortened version (e.g. '1h', '2d')
+    /// Applies transform rule for `Interval` type by extending the shortened version (e.g. '1h', '2d') or
+    /// converting ISO 8601 format strings (e.g., "P1Y2M3D")
     /// In case when `Interval` has `BinaryOp` value (e.g. query like `SELECT INTERVAL '2h' - INTERVAL '1h'`)
     /// it's AST has `left` part of type `Value::SingleQuotedString` which needs to be handled specifically.
     /// To handle the `right` part which is `Interval` no extra steps are needed.
@@ -67,19 +72,19 @@ impl TransformRule for ExpandIntervalTransformRule {
             Expr::Interval(interval) => match &*interval.value {
                 Expr::Value(Value::SingleQuotedString(value))
                 | Expr::Value(Value::DoubleQuotedString(value)) => {
-                    if let Some(expanded_name) = expand_interval_name(value) {
+                    if let Some(normalized_name) = normalize_interval_name(value) {
                         *expr = update_existing_interval_with_value(
                             interval,
-                            single_quoted_string_expr(expanded_name),
+                            single_quoted_string_expr(normalized_name),
                         );
                     }
                 }
                 Expr::BinaryOp { left, op, right } => match &**left {
                     Expr::Value(Value::SingleQuotedString(value))
                     | Expr::Value(Value::DoubleQuotedString(value)) => {
-                        if let Some(expanded_name) = expand_interval_name(value) {
+                        if let Some(normalized_name) = normalize_interval_name(value) {
                             let new_expr_value = Box::new(Expr::BinaryOp {
-                                left: single_quoted_string_expr(expanded_name),
+                                left: single_quoted_string_expr(normalized_name),
                                 op: op.clone(),
                                 right: right.clone(),
                             });
@@ -100,7 +105,7 @@ impl TransformRule for ExpandIntervalTransformRule {
                         Expr::Value(Value::SingleQuotedString(value))
                         | Expr::Value(Value::DoubleQuotedString(value)) => {
                             let interval_name =
-                                expand_interval_name(value).unwrap_or_else(|| value.to_string());
+                                normalize_interval_name(value).unwrap_or_else(|| value.to_string());
                             *expr = create_interval(single_quoted_string_expr(interval_name));
                         }
                         _ => {}
@@ -137,26 +142,55 @@ fn update_existing_interval_with_value(interval: &Interval, value: Box<Expr>) ->
     })
 }
 
-/// Expands an interval abbreviation to its full name.
+/// Normalizes an interval expression string into the sql-compatible format.
+/// This function handles 2 types of input:
+/// 1. Abbreviated interval strings (e.g., "1y2mo3d")
 /// Returns an interval's full name (e.g., "years", "hours", "minutes") according to the `INTERVAL_ABBREVIATION_MAPPING`
 /// If the `interval_str` contains whitespaces, the interval name is considered to be in a full form.
-/// Hybrid format "1y 2 days 3h" is not supported.
-fn expand_interval_name(interval_str: &str) -> Option<String> {
-    return if !interval_str.contains(|c: char| c.is_whitespace()) {
-        Some(
-            INTERVAL_ABBREVIATION_PATTERN
-                .find_iter(interval_str)
-                .map(
-                    |mat| match INTERVAL_ABBREVIATION_MAPPING.get(mat.as_str()) {
-                        Some(&expanded_name) => expanded_name,
-                        None => mat.as_str(),
-                    },
-                )
-                .join(" "),
-        )
+/// 2. ISO 8601 format strings (e.g., "P1Y2M3D"), case/sign independent
+/// Returns a number of milliseconds corresponding to ISO 8601 (e.g., "36525000 milliseconds")
+/// Note: Hybrid format "1y 2 days 3h" is not supported.
+fn normalize_interval_name(interval_str: &str) -> Option<String> {
+    if interval_str.contains(char::is_whitespace) {
+        return None;
+    }
+
+    if IS_VALID_ISO_8601_PREFIX_PATTERN.is_match(interval_str) {
+        return parse_iso8601_interval(interval_str);
+    }
+
+    expand_interval_abbreviation(interval_str)
+}
+
+fn parse_iso8601_interval(signed_iso: &str) -> Option<String> {
+    let (is_negative, unsigned_iso) = if let Some(stripped) = signed_iso.strip_prefix('-') {
+        (true, stripped)
     } else {
-        None
+        (false, signed_iso)
     };
+
+    match iso8601::duration(&unsigned_iso.to_uppercase()) {
+        Ok(duration) => {
+            let millis = StdDuration::from(duration).as_millis();
+            let sign = if is_negative { "-" } else { "" };
+            Some(format!("{}{} milliseconds", sign, millis))
+        }
+        Err(_) => None,
+    }
+}
+
+fn expand_interval_abbreviation(interval_str: &str) -> Option<String> {
+    Some(
+        INTERVAL_ABBREVIATION_PATTERN
+            .find_iter(interval_str)
+            .map(|mat| {
+                let mat_str = mat.as_str();
+                *INTERVAL_ABBREVIATION_MAPPING
+                    .get(mat_str)
+                    .unwrap_or(&mat_str)
+            })
+            .join(" "),
+    )
 }
 
 #[cfg(test)]
@@ -166,7 +200,7 @@ mod tests {
     use sqlparser::ast::{BinaryOperator, DataType, Expr, Interval, Value};
 
     use crate::statements::transform::expand_interval::{
-        create_interval, expand_interval_name, single_quoted_string_expr,
+        create_interval, normalize_interval_name, single_quoted_string_expr,
         ExpandIntervalTransformRule,
     };
     use crate::statements::transform::TransformRule;
@@ -187,13 +221,13 @@ mod tests {
             ("400ns", "400 nanoseconds"),
         ];
         for (input, expected) in test_cases {
-            let result = expand_interval_name(input).unwrap();
+            let result = normalize_interval_name(input).unwrap();
             assert_eq!(result, expected);
         }
 
         let test_cases = vec!["1 year 2 months 3 days 4 hours", "-2 months"];
         for input in test_cases {
-            assert_eq!(expand_interval_name(input), None);
+            assert_eq!(normalize_interval_name(input), None);
         }
     }
 
@@ -223,13 +257,30 @@ mod tests {
             ),
         ];
         for (input, expected) in test_cases {
-            let result = expand_interval_name(input).unwrap();
+            let result = normalize_interval_name(input).unwrap();
             assert_eq!(result, expected);
         }
     }
 
     #[test]
-    fn test_visit_expr_when_interval_is_single_quoted_string_expr() {
+    fn test_iso8601_format() {
+        assert_eq!(
+            normalize_interval_name("P1Y2M3DT4H5M6S"),
+            Some("36993906000 milliseconds".to_string())
+        );
+        assert_eq!(
+            normalize_interval_name("p3y3m700dt133h17m36.789s"),
+            Some("163343856789 milliseconds".to_string())
+        );
+        assert_eq!(
+            normalize_interval_name("-P1Y2M3DT4H5M6S"),
+            Some("-36993906000 milliseconds".to_string())
+        );
+        assert_eq!(normalize_interval_name("P1_INVALID_ISO8601"), None);
+    }
+
+    #[test]
+    fn test_visit_expr_when_interval_is_single_quoted_string_abbr_expr() {
         let interval_transformation_rule = ExpandIntervalTransformRule {};
 
         let mut string_expr = create_interval(single_quoted_string_expr("5y".to_string()));
@@ -242,6 +293,30 @@ mod tests {
             Expr::Interval(Interval {
                 value: Box::new(Expr::Value(Value::SingleQuotedString(
                     "5 years".to_string()
+                ))),
+                leading_field: None,
+                leading_precision: None,
+                last_field: None,
+                fractional_seconds_precision: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_visit_expr_when_interval_is_single_quoted_string_iso8601_expr() {
+        let interval_transformation_rule = ExpandIntervalTransformRule {};
+
+        let mut string_expr =
+            create_interval(single_quoted_string_expr("P1Y2M3DT4H5M6S".to_string()));
+
+        let control_flow = interval_transformation_rule.visit_expr(&mut string_expr);
+
+        assert_eq!(control_flow, ControlFlow::Continue(()));
+        assert_eq!(
+            string_expr,
+            Expr::Interval(Interval {
+                value: Box::new(Expr::Value(Value::SingleQuotedString(
+                    "36993906000 milliseconds".to_string()
                 ))),
                 leading_field: None,
                 leading_precision: None,
