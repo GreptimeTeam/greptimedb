@@ -27,6 +27,7 @@ use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder, V
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{ConstantVector, StringVector, StringVectorBuilder, UInt32VectorBuilder};
+use futures_util::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
@@ -214,50 +215,36 @@ impl InformationSchemaKeyColumnUsageBuilder {
         let mut primary_constraints = vec![];
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            if !catalog_manager
-                .schema_exists(&catalog_name, &schema_name)
-                .await?
-            {
-                continue;
-            }
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
 
-            for table_name in catalog_manager
-                .table_names(&catalog_name, &schema_name)
-                .await?
-            {
-                if let Some(table) = catalog_manager
-                    .table(&catalog_name, &schema_name, &table_name)
-                    .await?
-                {
-                    let keys = &table.table_info().meta.primary_key_indices;
-                    let schema = table.schema();
+            while let Some(table) = stream.try_next().await? {
+                let table_info = table.table_info();
+                let table_name = &table_info.name;
+                let keys = &table_info.meta.primary_key_indices;
+                let schema = table.schema();
 
-                    for (idx, column) in schema.column_schemas().iter().enumerate() {
-                        if column.is_time_index() {
-                            self.add_key_column_usage(
-                                &predicates,
-                                &schema_name,
-                                TIME_INDEX_CONSTRAINT_NAME,
-                                &catalog_name,
-                                &schema_name,
-                                &table_name,
-                                &column.name,
-                                1, //always 1 for time index
-                            );
-                        }
-                        if keys.contains(&idx) {
-                            primary_constraints.push((
-                                catalog_name.clone(),
-                                schema_name.clone(),
-                                table_name.clone(),
-                                column.name.clone(),
-                            ));
-                        }
-                        // TODO(dimbtp): foreign key constraint not supported yet
+                for (idx, column) in schema.column_schemas().iter().enumerate() {
+                    if column.is_time_index() {
+                        self.add_key_column_usage(
+                            &predicates,
+                            &schema_name,
+                            TIME_INDEX_CONSTRAINT_NAME,
+                            &catalog_name,
+                            &schema_name,
+                            table_name,
+                            &column.name,
+                            1, //always 1 for time index
+                        );
                     }
-                } else {
-                    // The table might be dropped during iteration.
-                    continue;
+                    if keys.contains(&idx) {
+                        primary_constraints.push((
+                            catalog_name.clone(),
+                            schema_name.clone(),
+                            table_name.to_string(),
+                            column.name.clone(),
+                        ));
+                    }
+                    // TODO(dimbtp): foreign key constraint not supported yet
                 }
             }
         }
