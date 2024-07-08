@@ -425,7 +425,7 @@ impl ParserContext {
     pub fn parse_pattern(mut self, pattern: &str) -> Result<PatternAst> {
         let tokenizer = Tokenizer::default();
         let raw_tokens = tokenizer.tokenize(pattern)?;
-        let raw_tokens = Self::accomplish_optional_unary_op(raw_tokens);
+        let raw_tokens = Self::accomplish_optional_unary_op(raw_tokens)?;
         let mut tokens = Self::to_rpn(raw_tokens)?;
 
         while !tokens.is_empty() {
@@ -452,10 +452,14 @@ impl ParserContext {
 
     /// Add [`Token::Optional`] for all bare [`Token::Phase`] and [`Token::Or`]
     /// for all adjacent [`Token::Phase`]s.
-    fn accomplish_optional_unary_op(raw_tokens: Vec<Token>) -> Vec<Token> {
+    ///
+    /// This function also does some checks by the way. Like if two unary ops are
+    /// adjacent.
+    fn accomplish_optional_unary_op(raw_tokens: Vec<Token>) -> Result<Vec<Token>> {
         let mut is_prev_unary_op = false;
         // The first one doesn't need binary op
         let mut is_binary_op_before = true;
+        let mut is_unary_op_before = false;
         let mut new_tokens = Vec::with_capacity(raw_tokens.len());
         for token in raw_tokens {
             // fill `Token::Or`
@@ -490,10 +494,23 @@ impl ParserContext {
                 is_prev_unary_op = matches!(token, Token::Must | Token::Negative);
             }
 
+            // check if unary ops are adjacent by the way
+            if matches!(token, Token::Must | Token::Optional | Token::Negative) {
+                if is_unary_op_before {
+                    return InvalidFuncArgsSnafu {
+                        err_msg: "Invalid pattern, unary operators should not be adjacent",
+                    }
+                    .fail();
+                }
+                is_unary_op_before = true;
+            } else {
+                is_unary_op_before = false;
+            }
+
             new_tokens.push(token);
         }
 
-        new_tokens
+        Ok(new_tokens)
     }
 
     /// Convert infix token stream to RPN
@@ -524,24 +541,32 @@ impl ParserContext {
                     operator_stack.push(token);
                 }
                 Token::CloseParen => {
+                    let mut is_open_paren_found = false;
                     while let Some(op) = operator_stack.pop() {
                         if op == Token::OpenParen {
+                            is_open_paren_found = true;
                             break;
                         }
                         result.push(op);
+                    }
+                    if !is_open_paren_found {
+                        return InvalidFuncArgsSnafu {
+                            err_msg: "Unmatched close parentheses",
+                        }
+                        .fail();
                     }
                 }
             }
         }
 
-        while let Some(operand) = operator_stack.pop() {
-            if operand == Token::OpenParen {
+        while let Some(operator) = operator_stack.pop() {
+            if operator == Token::OpenParen {
                 return InvalidFuncArgsSnafu {
                     err_msg: "Unmatched parentheses",
                 }
                 .fail();
             }
-            result.push(operand);
+            result.push(operator);
         }
 
         Ok(result)
@@ -1026,6 +1051,28 @@ mod test {
     }
 
     #[test]
+    fn invalid_ast() {
+        let cases = [
+            (r#"a b (c"#, "Unmatched parentheses"),
+            (r#"a b) c"#, "Unmatched close parentheses"),
+            (r#"a +-b"#, "unary operators should not be adjacent"),
+        ];
+
+        for (query, expected) in cases {
+            let result: Result<()> = try {
+                let parser = ParserContext { stack: vec![] };
+                let ast = parser.parse_pattern(query)?;
+                let _ast = ast.transform_ast()?;
+                ()
+            };
+
+            assert!(result.is_err(), "{query}");
+            let actual_error = result.unwrap_err().to_string();
+            assert!(actual_error.contains(expected), "{query}, {actual_error}");
+        }
+    }
+
+    #[test]
     fn valid_matches_parser() {
         let cases = [
             (
@@ -1188,7 +1235,7 @@ mod test {
     }
 
     #[test]
-    fn evaluate_matches_without_parenthesis() {
+    fn evaluate_matches() {
         let input_data = vec![
             "The quick brown fox jumps over the lazy dog",
             "The             fox jumps over the lazy dog",

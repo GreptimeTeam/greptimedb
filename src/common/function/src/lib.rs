@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(let_chains)]
+#![feature(try_blocks)]
 
 mod macros;
 pub mod scalars;
