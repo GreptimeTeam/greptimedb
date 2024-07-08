@@ -252,6 +252,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid fulltext option: {}", msg))]
+    FulltextInvalidOption {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to set fulltext option"))]
+    SetFulltextOption {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -285,12 +299,15 @@ impl ErrorExt for Error {
             | ConvertToLogicalExpression { .. }
             | Simplification { .. }
             | InvalidInterval { .. }
-            | PermissionDenied { .. } => StatusCode::InvalidArguments,
+            | PermissionDenied { .. }
+            | FulltextInvalidOption { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             ConvertToDfStatement { .. } => StatusCode::Internal,
             ConvertSqlValue { .. } | ConvertValue { .. } => StatusCode::Unsupported,
+
+            SetFulltextOption { .. } => StatusCode::Unexpected,
         }
     }
 
