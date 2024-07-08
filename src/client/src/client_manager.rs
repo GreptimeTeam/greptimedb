@@ -70,13 +70,10 @@ impl NodeClients {
         }
     }
 
-    pub async fn get_client(&self, datanode: &Peer) -> Client {
+    pub async fn get_client(&self, peer: &Peer) -> Client {
         self.clients
-            .get_with_by_ref(datanode, async move {
-                Client::with_manager_and_urls(
-                    self.channel_manager.clone(),
-                    vec![datanode.addr.clone()],
-                )
+            .get_with_by_ref(peer, async move {
+                Client::with_manager_and_urls(self.channel_manager.clone(), vec![peer.addr.clone()])
             })
             .await
     }
