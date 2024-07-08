@@ -275,6 +275,7 @@ impl Compactor for DefaultCompactor {
             let append_mode = compaction_region.current_version.options.append_mode;
             let merge_mode = compaction_region.current_version.options.merge_mode();
             let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
+            let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
             futs.push(async move {
                 let reader = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
@@ -299,6 +300,7 @@ impl Compactor for DefaultCompactor {
                             storage,
                             index_options,
                             inverted_index_config,
+                            fulltext_index_config,
                         },
                         &write_opts,
                     )
@@ -313,6 +315,9 @@ impl Compactor for DefaultCompactor {
                             let mut indexes = SmallVec::new();
                             if sst_info.index_metadata.inverted_index.is_available() {
                                 indexes.push(IndexType::InvertedIndex);
+                            }
+                            if sst_info.index_metadata.fulltext_index.is_available() {
+                                indexes.push(IndexType::FulltextIndex);
                             }
                             indexes
                         },

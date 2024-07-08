@@ -121,6 +121,7 @@ fn parse_string_to_value(
                 .fail()
             }
         }
+        ConcreteDataType::Binary(_) => Ok(Value::Binary(s.as_bytes().into())),
         _ => {
             unreachable!()
         }
@@ -799,6 +800,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(Value::Binary(Bytes::from(b"Hello world!".as_slice())), v);
+
+        let sql_val = SqlValue::DoubleQuotedString("MorningMyFriends".to_string());
+        let v =
+            sql_value_to_value("a", &ConcreteDataType::binary_datatype(), &sql_val, None).unwrap();
+        assert_eq!(
+            Value::Binary(Bytes::from(b"MorningMyFriends".as_slice())),
+            v
+        );
 
         let sql_val = SqlValue::HexStringLiteral("9AF".to_string());
         let v = sql_value_to_value(

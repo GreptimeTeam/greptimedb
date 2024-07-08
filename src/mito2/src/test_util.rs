@@ -45,7 +45,6 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
-use object_store::util::join_dir;
 use object_store::ObjectStore;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
@@ -603,8 +602,6 @@ impl TestEnv {
         local_store: ObjectStore,
         capacity: ReadableSize,
     ) -> WriteCacheRef {
-        let data_home = self.data_home().display().to_string();
-
         let index_aux_path = self.data_home.path().join("index_aux");
         let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
             .await

@@ -697,7 +697,9 @@ impl HttpServer {
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
-                    .layer(TraceLayer::new_for_http())
+                    // disable on failure tracing. because printing out isn't very helpful,
+                    // and we have impl IntoResponse for Error. It will print out more detailed error messages
+                    .layer(TraceLayer::new_for_http().on_failure(()))
                     .option_layer(timeout_layer)
                     .option_layer(body_limit_layer)
                     // auth layer

@@ -25,7 +25,10 @@ use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
 use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
-pub use crate::schema::column_schema::{ColumnSchema, Metadata, COMMENT_KEY, TIME_INDEX_KEY};
+pub use crate::schema::column_schema::{
+    ColumnSchema, FulltextAnalyzer, FulltextOptions, Metadata, COMMENT_KEY, FULLTEXT_KEY,
+    TIME_INDEX_KEY,
+};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
 

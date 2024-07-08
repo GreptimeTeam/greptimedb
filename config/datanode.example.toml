@@ -413,26 +413,52 @@ staging_size = "2GB"
 [region_engine.mito.inverted_index]
 
 ## Whether to create the index on flush.
-## - `auto`: automatically
+## - `auto`: automatically (default)
 ## - `disable`: never
 create_on_flush = "auto"
 
 ## Whether to create the index on compaction.
-## - `auto`: automatically
+## - `auto`: automatically (default)
 ## - `disable`: never
 create_on_compaction = "auto"
 
 ## Whether to apply the index on query
-## - `auto`: automatically
+## - `auto`: automatically (default)
 ## - `disable`: never
 apply_on_query = "auto"
 
 ## Memory threshold for performing an external sort during index creation.
-## Setting to empty will disable external sorting, forcing all sorting operations to happen in memory.
-mem_threshold_on_create = "64M"
+## - `auto`: automatically determine the threshold based on the system memory size (default)
+## - `unlimited`: no memory limit
+## - `[size]` e.g. `64MB`: fixed memory threshold
+mem_threshold_on_create = "auto"
 
 ## Deprecated, use `region_engine.mito.index.aux_path` instead.
 intermediate_path = ""
+
+## The options for full-text index in Mito engine.
+[region_engine.mito.fulltext_index]
+
+## Whether to create the index on flush.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_flush = "auto"
+
+## Whether to create the index on compaction.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_compaction = "auto"
+
+## Whether to apply the index on query
+## - `auto`: automatically (default)
+## - `disable`: never
+apply_on_query = "auto"
+
+## Memory threshold for index creation.
+## - `auto`: automatically determine the threshold based on the system memory size (default)
+## - `unlimited`: no memory limit
+## - `[size]` e.g. `64MB`: fixed memory threshold
+mem_threshold_on_create = "auto"
 
 [region_engine.mito.memtable]
 ## Memtable type.

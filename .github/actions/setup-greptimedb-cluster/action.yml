@@ -35,7 +35,6 @@ runs:
     with: 
       timeout_minutes: 3
       max_attempts: 3
-      retry_on: error
       shell: bash
       command: |
         helm repo add greptime https://greptimeteam.github.io/helm-charts/ 

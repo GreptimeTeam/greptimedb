@@ -27,6 +27,7 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
+use crate::cache::index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
 use crate::error::{ApplyIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::FileId;
@@ -55,6 +56,9 @@ pub(crate) struct SstIndexApplier {
 
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
+
+    /// In-memory cache for inverted index.
+    inverted_index_cache: Option<InvertedIndexCacheRef>,
 }
 
 pub(crate) type SstIndexApplierRef = Arc<SstIndexApplier>;
@@ -66,6 +70,7 @@ impl SstIndexApplier {
         region_id: RegionId,
         store: ObjectStore,
         file_cache: Option<FileCacheRef>,
+        index_cache: Option<InvertedIndexCacheRef>,
         index_applier: Box<dyn IndexApplier>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
@@ -78,6 +83,7 @@ impl SstIndexApplier {
             file_cache,
             index_applier,
             puffin_manager_factory,
+            inverted_index_cache: index_cache,
         }
     }
 
@@ -99,13 +105,24 @@ impl SstIndexApplier {
                 self.remote_blob_reader(file_id).await?
             }
         };
-        let mut blob_reader = InvertedIndexBlobReader::new(blob);
-        let output = self
-            .index_applier
-            .apply(context, &mut blob_reader)
-            .await
-            .context(ApplyIndexSnafu)?;
-        Ok(output)
+
+        if let Some(index_cache) = &self.inverted_index_cache {
+            let mut index_reader = CachedInvertedIndexBlobReader::new(
+                file_id,
+                InvertedIndexBlobReader::new(blob),
+                index_cache.clone(),
+            );
+            self.index_applier
+                .apply(context, &mut index_reader)
+                .await
+                .context(ApplyIndexSnafu)
+        } else {
+            let mut index_reader = InvertedIndexBlobReader::new(blob);
+            self.index_applier
+                .apply(context, &mut index_reader)
+                .await
+                .context(ApplyIndexSnafu)
+        }
     }
 
     /// Creates a blob reader from the cached index file.
@@ -200,6 +217,7 @@ mod tests {
             RegionId::new(0, 0),
             object_store,
             None,
+            None,
             Box::new(mock_index_applier),
             puffin_manager_factory,
         );
@@ -240,6 +258,7 @@ mod tests {
             region_dir.clone(),
             RegionId::new(0, 0),
             object_store,
+            None,
             None,
             Box::new(mock_index_applier),
             puffin_manager_factory,
