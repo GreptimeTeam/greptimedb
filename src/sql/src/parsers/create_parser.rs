@@ -688,8 +688,8 @@ impl<'a> ParserContext<'a> {
                 ensure!(
                     validate_column_fulltext_option(key),
                     InvalidColumnOptionSnafu {
-                        name: key.to_string(),
-                        msg: "invalid FULLTEXT option",
+                        name: column_name.to_string(),
+                        msg: format!("invalid FULLTEXT option: {key}"),
                     }
                 );
             }

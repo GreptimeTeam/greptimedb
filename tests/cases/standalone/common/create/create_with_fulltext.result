@@ -97,5 +97,5 @@ CREATE TABLE log_with_invalid_option (
     msg TEXT FULLTEXT WITH (analyzer='English', invalid_option='true'),
 );
 
-Error: 1004(InvalidArguments), Invalid column option, column name: invalid_option, error: invalid FULLTEXT option
+Error: 1004(InvalidArguments), Invalid column option, column name: msg, error: invalid FULLTEXT option: invalid_option
 
