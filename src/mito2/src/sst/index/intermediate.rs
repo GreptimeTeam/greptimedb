@@ -190,18 +190,16 @@ mod tests {
         let column_id = 0;
         let fulltext_path = manager.fulltext_path(&region_id, &sst_file_id, column_id);
 
-        if cfg!(windows) {
-            let p = fulltext_path.to_string_lossy().to_string();
-            let r = Regex::new(&format!(
-                "{aux_path}\\\\{INTERMEDIATE_DIR}\\\\0\\\\{sst_file_id}\\\\fulltext-0-\\w{{8}}-\\w{{4}}-\\w{{4}}-\\w{{4}}-\\w{{12}}",
-            )).unwrap();
-            assert!(r.is_match(&p));
+        let p = fulltext_path.to_string_lossy().to_string();
+        let (normalized_aux_path, normalized_path) = if cfg!(windows) {
+            (aux_path.replace('\\', "/"), p.replace('\\', "/"))
         } else {
-            let p = fulltext_path.to_string_lossy().to_string();
-            let r = Regex::new(&format!(
-                "{aux_path}/{INTERMEDIATE_DIR}/0/{sst_file_id}/fulltext-0-\\w{{8}}-\\w{{4}}-\\w{{4}}-\\w{{4}}-\\w{{12}}",
+            (aux_path, p)
+        };
+
+        let r = Regex::new(&format!(
+                "{normalized_aux_path}/{INTERMEDIATE_DIR}/0/{sst_file_id}/fulltext-0-\\w{{8}}-\\w{{4}}-\\w{{4}}-\\w{{4}}-\\w{{12}}",
             )).unwrap();
-            assert!(r.is_match(&p));
-        }
+        assert!(r.is_match(&normalized_path));
     }
 }
