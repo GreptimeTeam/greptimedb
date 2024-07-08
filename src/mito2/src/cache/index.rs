@@ -22,9 +22,9 @@ use index::inverted_index::format::reader::InvertedIndexReader;
 use index::inverted_index::FstMap;
 use prost::Message;
 use snafu::ResultExt;
-use uuid::Uuid;
 
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
+use crate::sst::file::FileId;
 
 /// Metrics for index metadata.
 const INDEX_METADATA_TYPE: &str = "index_metadata";
@@ -33,13 +33,13 @@ const INDEX_CONTENT_TYPE: &str = "index_content";
 
 /// Inverted index blob reader with cache.
 pub struct CachedInvertedIndexBlobReader<R> {
-    file_id: Uuid,
+    file_id: FileId,
     inner: R,
     cache: InvertedIndexCacheRef,
 }
 
 impl<R> CachedInvertedIndexBlobReader<R> {
-    pub fn new(file_id: Uuid, inner: R, cache: InvertedIndexCacheRef) -> Self {
+    pub fn new(file_id: FileId, inner: R, cache: InvertedIndexCacheRef) -> Self {
         Self {
             file_id,
             inner,
@@ -69,16 +69,13 @@ where
             let mut all_data = Vec::with_capacity(1024 * 1024);
             self.inner.read_all(&mut all_data).await?;
             let result = all_data[range].to_vec();
-            let key = IndexKey {
-                file_id: self.file_id,
-            };
-            let value = Arc::new(all_data);
-            let size = index_content_weight(&key, &value);
-            self.cache.put_index(key, value);
+            self.cache.put_index(
+                IndexKey {
+                    file_id: self.file_id,
+                },
+                Arc::new(all_data),
+            );
             CACHE_MISS.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
-            CACHE_BYTES
-                .with_label_values(&[INDEX_CONTENT_TYPE])
-                .add(size.into());
             Ok(result)
         }
     }
@@ -134,7 +131,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IndexKey {
-    file_id: Uuid,
+    file_id: FileId,
 }
 
 pub type InvertedIndexCacheRef = Arc<InvertedIndexCache>;
@@ -178,11 +175,11 @@ impl InvertedIndexCache {
 }
 
 impl InvertedIndexCache {
-    pub fn get_index_metadata(&self, file_id: Uuid) -> Option<Arc<InvertedIndexMetas>> {
+    pub fn get_index_metadata(&self, file_id: FileId) -> Option<Arc<InvertedIndexMetas>> {
         self.index_metadata.get(&IndexKey { file_id })
     }
 
-    pub fn put_index_metadata(&self, file_id: Uuid, metadata: Arc<InvertedIndexMetas>) {
+    pub fn put_index_metadata(&self, file_id: FileId, metadata: Arc<InvertedIndexMetas>) {
         let key = IndexKey { file_id };
         CACHE_BYTES
             .with_label_values(&[INDEX_METADATA_TYPE])
