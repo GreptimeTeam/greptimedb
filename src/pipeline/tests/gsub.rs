@@ -54,7 +54,7 @@ transform:
         datatype: ColumnDataType::TimestampMillisecond.into(),
         semantic_type: SemanticType::Timestamp.into(),
         datatype_extension: None,
-        options: Default::default(),
+        options: None,
     }];
 
     assert_eq!(output.schema, expected_schema);

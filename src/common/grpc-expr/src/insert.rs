@@ -474,7 +474,7 @@ mod tests {
                     scale: 10,
                 })),
             }),
-            options: Default::default(),
+            options: None,
         };
 
         (

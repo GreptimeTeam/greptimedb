@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
+use api::v1::column_def::options_from_column_schema;
 use api::v1::region::InsertRequests as RegionInsertRequests;
 use api::v1::{ColumnSchema as GrpcColumnSchema, Row, Rows, Value as GrpcValue};
 use catalog::CatalogManager;
@@ -116,7 +117,7 @@ impl<'a> StatementToRegion<'a> {
                 datatype: datatype.into(),
                 semantic_type: semantic_type.into(),
                 datatype_extension,
-                options: column_schema.build_grpc_options(),
+                options: options_from_column_schema(column_schema),
             };
             schema.push(grpc_column_schema);
 

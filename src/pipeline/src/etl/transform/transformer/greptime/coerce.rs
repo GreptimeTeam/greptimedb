@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
-use datatypes::schema::{FulltextOptions, FULLTEXT_GRPC_KEY};
+use api::v1::column_def::options_with_fulltext;
+use api::v1::ColumnOptions;
+use datatypes::schema::FulltextOptions;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 
@@ -90,18 +90,16 @@ fn coerce_semantic_type(transform: &Transform) -> SemanticType {
     }
 }
 
-fn coerce_options(transform: &Transform) -> Result<HashMap<String, String>, String> {
-    let mut options = HashMap::new();
+fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>, String> {
     if let Some(Index::Fulltext) = transform.index {
-        let v = serde_json::to_string(&FulltextOptions {
+        options_with_fulltext(&FulltextOptions {
             enable: true,
             ..Default::default()
         })
-        .map_err(|e| format!("failed to serialize fulltext options: {e}"))?;
-
-        options.insert(FULLTEXT_GRPC_KEY.to_string(), v);
+        .map_err(|e| e.to_string())
+    } else {
+        Ok(None)
     }
-    Ok(options)
 }
 
 fn coerce_type(transform: &Transform) -> Result<ColumnDataType, String> {

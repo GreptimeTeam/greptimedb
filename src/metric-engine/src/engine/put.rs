@@ -158,7 +158,7 @@ impl MetricEngineInner {
             datatype: ColumnDataType::Uint32 as i32,
             semantic_type: SemanticType::Tag as _,
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         });
         // add tsid column
         rows.schema.push(ColumnSchema {
@@ -166,7 +166,7 @@ impl MetricEngineInner {
             datatype: ColumnDataType::Uint64 as i32,
             semantic_type: SemanticType::Tag as _,
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         });
 
         // fill internal columns

@@ -54,7 +54,7 @@ use crate::ast::{
 };
 use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
-    ConvertValueSnafu, FulltextInvalidValueSnafu, InvalidCastSnafu, InvalidSqlValueSnafu,
+    ConvertValueSnafu, FulltextInvalidOptionSnafu, InvalidCastSnafu, InvalidSqlValueSnafu,
     ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu,
     TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
 };
@@ -404,7 +404,7 @@ pub fn column_to_schema(
                 "english" => options.analyzer = FulltextAnalyzer::English,
                 "chinese" => options.analyzer = FulltextAnalyzer::Chinese,
                 _ => {
-                    return FulltextInvalidValueSnafu {
+                    return FulltextInvalidOptionSnafu {
                         msg: format!("{analyzer}, expected: 'English' | 'Chinese'"),
                     }
                     .fail();
@@ -416,7 +416,7 @@ pub fn column_to_schema(
                 "true" => options.case_sensitive = true,
                 "false" => options.case_sensitive = false,
                 _ => {
-                    return FulltextInvalidValueSnafu {
+                    return FulltextInvalidOptionSnafu {
                         msg: format!("{case_sensitive}, expected: 'true' | 'false'"),
                     }
                     .fail();
@@ -478,7 +478,7 @@ pub fn sql_column_def_to_grpc_column_def(
         semantic_type: semantic_type as _,
         comment: String::new(),
         datatype_extension: datatype_ext,
-        options: Default::default(),
+        options: None,
     })
 }
 

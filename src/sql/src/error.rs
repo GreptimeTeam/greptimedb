@@ -254,7 +254,7 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid fulltext option: {}", msg))]
-    FulltextInvalidValue {
+    FulltextInvalidOption {
         msg: String,
         #[snafu(implicit)]
         location: Location,
@@ -300,7 +300,7 @@ impl ErrorExt for Error {
             | Simplification { .. }
             | InvalidInterval { .. }
             | PermissionDenied { .. }
-            | FulltextInvalidValue { .. } => StatusCode::InvalidArguments,
+            | FulltextInvalidOption { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),

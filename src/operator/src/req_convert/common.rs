@@ -17,6 +17,7 @@ pub(crate) mod partitioner;
 use std::collections::HashMap;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::column_def::options_from_column_schema;
 use api::v1::value::ValueData;
 use api::v1::{Column, ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
 use common_base::BitVec;
@@ -210,7 +211,7 @@ pub fn column_schema(
                 datatype: datatype as i32,
                 semantic_type: semantic_type(table_info, column_name)?.into(),
                 datatype_extension,
-                options: column_schema.build_grpc_options(),
+                options: options_from_column_schema(column_schema),
             })
         })
         .collect::<Result<Vec<_>>>()

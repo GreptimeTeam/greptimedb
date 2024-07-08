@@ -563,14 +563,14 @@ impl Inserter {
                 datatype: ColumnDataType::TimestampMillisecond as _,
                 semantic_type: SemanticType::Timestamp as _,
                 datatype_extension: None,
-                options: Default::default(),
+                options: None,
             },
             ColumnSchema {
                 column_name: GREPTIME_VALUE.to_string(),
                 datatype: ColumnDataType::Float64 as _,
                 semantic_type: SemanticType::Field as _,
                 datatype_extension: None,
-                options: Default::default(),
+                options: None,
             },
         ];
         let create_table_expr = &mut build_create_table_expr(&table_reference, &default_schema)?;

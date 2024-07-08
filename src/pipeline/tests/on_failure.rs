@@ -45,14 +45,14 @@ transform:
             datatype: ColumnDataType::Uint8.into(),
             semantic_type: SemanticType::Field.into(),
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         },
         ColumnSchema {
             column_name: "greptime_timestamp".to_string(),
             datatype: ColumnDataType::TimestampNanosecond.into(),
             semantic_type: SemanticType::Timestamp.into(),
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         },
     ];
 
@@ -90,14 +90,14 @@ transform:
             datatype: ColumnDataType::Uint8.into(),
             semantic_type: SemanticType::Field.into(),
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         },
         ColumnSchema {
             column_name: "greptime_timestamp".to_string(),
             datatype: ColumnDataType::TimestampNanosecond.into(),
             semantic_type: SemanticType::Timestamp.into(),
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         },
     ];
 
@@ -130,14 +130,14 @@ transform:
             datatype: ColumnDataType::Uint8.into(),
             semantic_type: SemanticType::Field.into(),
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         },
         ColumnSchema {
             column_name: "greptime_timestamp".to_string(),
             datatype: ColumnDataType::TimestampNanosecond.into(),
             semantic_type: SemanticType::Timestamp.into(),
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         },
     ];
 
@@ -181,21 +181,21 @@ transform:
             datatype: ColumnDataType::Uint8.into(),
             semantic_type: SemanticType::Field.into(),
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         },
         ColumnSchema {
             column_name: "spec_version".to_string(),
             datatype: ColumnDataType::Uint16.into(),
             semantic_type: SemanticType::Field.into(),
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         },
         ColumnSchema {
             column_name: "greptime_timestamp".to_string(),
             datatype: ColumnDataType::TimestampNanosecond.into(),
             semantic_type: SemanticType::Timestamp.into(),
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         },
     ];
 

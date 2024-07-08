@@ -245,14 +245,14 @@ pub fn row_schema_with_tags(tags: &[&str]) -> Vec<PbColumnSchema> {
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as _,
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         },
         PbColumnSchema {
             column_name: "greptime_value".to_string(),
             datatype: ColumnDataType::Float64 as i32,
             semantic_type: SemanticType::Field as _,
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         },
     ];
     for tag in tags {
@@ -261,7 +261,7 @@ pub fn row_schema_with_tags(tags: &[&str]) -> Vec<PbColumnSchema> {
             datatype: ColumnDataType::String as i32,
             semantic_type: SemanticType::Tag as _,
             datatype_extension: None,
-            options: Default::default(),
+            options: None,
         });
     }
     schema

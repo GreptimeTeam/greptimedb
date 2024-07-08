@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
+use api::v1::column_def::contains_fulltext;
 use api::v1::{
     AddColumn, AddColumns, Column, ColumnDataType, ColumnDataTypeExtension, ColumnDef,
-    ColumnSchema, CreateTableExpr, SemanticType,
+    ColumnOptions, ColumnSchema, CreateTableExpr, SemanticType,
 };
-use datatypes::schema::{Schema, FULLTEXT_GRPC_KEY};
+use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 use table::table_reference::TableReference;
@@ -32,7 +33,7 @@ pub struct ColumnExpr<'a> {
     pub datatype: i32,
     pub semantic_type: i32,
     pub datatype_extension: &'a Option<ColumnDataTypeExtension>,
-    pub options: &'a HashMap<String, String>,
+    pub options: &'a Option<ColumnOptions>,
 }
 
 impl<'a> ColumnExpr<'a> {
@@ -127,7 +128,7 @@ pub fn build_create_table_expr(
             ColumnDataType::try_from(datatype).context(UnknownColumnDataTypeSnafu { datatype })?;
 
         ensure!(
-            !options.contains_key(FULLTEXT_GRPC_KEY) || column_type == ColumnDataType::String,
+            !contains_fulltext(options) || column_type == ColumnDataType::String,
             InvalidFulltextColumnTypeSnafu {
                 column_name,
                 column_type,

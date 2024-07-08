@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
+use api::v1::column_def::options_from_column_schema;
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, ColumnDataType,
     ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
@@ -422,7 +423,7 @@ pub fn column_schemas_to_defs(
                 semantic_type,
                 comment,
                 datatype_extension: datatype.1,
-                options: schema.build_grpc_options(),
+                options: options_from_column_schema(schema),
             })
         })
         .collect()

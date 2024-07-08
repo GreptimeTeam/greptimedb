@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, SemanticType};
 use common_error::ext::BoxedError;
 use datatypes::schema::ColumnSchema;
@@ -53,7 +54,7 @@ pub fn column_schemas_to_proto(
                 datatype: datatype.0 as i32,
                 semantic_type,
                 datatype_extension: datatype.1,
-                options: schema.build_grpc_options(),
+                options: options_from_column_schema(schema),
             }
         })
         .collect();
