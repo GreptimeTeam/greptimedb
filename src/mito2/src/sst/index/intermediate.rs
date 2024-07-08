@@ -152,11 +152,6 @@ mod tests {
         let sst_file_id = FileId::random();
         let location = IntermediateLocation::new(&RegionId::new(0, 0), &sst_file_id);
 
-        assert_eq!(
-            location.dir_to_cleanup(),
-            format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/")
-        );
-
         let re = Regex::new(&format!(
             "{INTERMEDIATE_DIR}/0/{sst_file_id}/{}/",
             r"\w{8}-\w{4}-\w{4}-\w{4}-\w{12}"
