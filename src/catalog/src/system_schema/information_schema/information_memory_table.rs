@@ -15,17 +15,13 @@
 use std::sync::Arc;
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
-use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::vectors::{Int64Vector, StringVector, VectorRef};
-use store_api::storage::{ScanRequest, TableId};
 
 use super::table_names::*;
-use super::InformationTable;
-// pub use tables::get_schema_columns;
-use crate::error::Result;
-use crate::memory_table::tables::{bigint_column, datetime_column, string_column, string_columns};
-use crate::memory_table::MemoryTable;
+use crate::system_schema::memory_table::tables::{
+    bigint_column, datetime_column, string_column, string_columns,
+};
 
 const NO_VALUE: &str = "NO";
 
@@ -419,40 +415,4 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
     };
 
     (Arc::new(Schema::new(column_schemas)), columns)
-}
-
-impl InformationTable for MemoryTable {
-    fn table_id(&self) -> TableId {
-        self.table_id
-    }
-
-    fn table_name(&self) -> &'static str {
-        self.table_name
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn to_stream(&self, _request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        self.to_stream()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
-
-    use super::*;
-    #[test]
-    fn test_information_memory_table_schema() {
-        let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new("a", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("b", ConcreteDataType::string_datatype(), false),
-        ]));
-
-        let table = MemoryTable::new(42, "test", schema.clone(), vec![]);
-        assert_eq!(schema, InformationTable::schema(&table));
-    }
 }

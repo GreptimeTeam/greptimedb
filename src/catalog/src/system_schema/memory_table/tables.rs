@@ -27,6 +27,30 @@ pub fn string_column(name: &str) -> ColumnSchema {
     )
 }
 
+pub fn u32_column(name: &str) -> ColumnSchema {
+    ColumnSchema::new(
+        str::to_lowercase(name),
+        ConcreteDataType::uint32_datatype(),
+        false,
+    )
+}
+
+pub fn bool_column(name: &str) -> ColumnSchema {
+    ColumnSchema::new(
+        str::to_lowercase(name),
+        ConcreteDataType::boolean_datatype(),
+        false,
+    )
+}
+
+pub fn i16_column(name: &str) -> ColumnSchema {
+    ColumnSchema::new(
+        str::to_lowercase(name),
+        ConcreteDataType::int16_datatype(),
+        false,
+    )
+}
+
 pub fn bigint_column(name: &str) -> ColumnSchema {
     ColumnSchema::new(
         str::to_lowercase(name),

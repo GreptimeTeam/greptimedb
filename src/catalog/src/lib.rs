@@ -28,14 +28,16 @@ use table::TableRef;
 use crate::error::Result;
 
 pub mod error;
-pub mod information_schema;
 pub mod kvbackend;
 pub mod memory;
-mod memory_table;
 mod metrics;
-pub mod pg_catalog;
-pub mod table_source;
+pub mod system_schema;
+pub mod information_schema {
+    // re-export to make it compatible with the legacy code
+    pub use crate::system_schema::information_schema::*;
+}
 
+pub mod table_source;
 #[async_trait::async_trait]
 pub trait CatalogManager: Send + Sync {
     fn as_any(&self) -> &dyn Any;

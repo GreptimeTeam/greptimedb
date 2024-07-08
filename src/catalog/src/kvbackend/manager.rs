@@ -47,7 +47,8 @@ use crate::error::{
 };
 use crate::information_schema::InformationSchemaProvider;
 use crate::kvbackend::TableCacheRef;
-use crate::pg_catalog::PGCatalogProvider;
+use crate::system_schema::pg_catalog::PGCatalogProvider;
+use crate::system_schema::SystemSchemaProvider;
 use crate::CatalogManager;
 
 /// Access all existing catalog, schema and tables.

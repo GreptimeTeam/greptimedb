@@ -15,3 +15,4 @@
 pub const PG_DATABASE: &str = "pg_databases";
 pub const PG_NAMESPACE: &str = "pg_namespace";
 pub const PG_CLASS: &str = "pg_class";
+pub const PG_TYPE: &str = "pg_type";

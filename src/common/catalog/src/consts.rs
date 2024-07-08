@@ -101,6 +101,7 @@ pub const INFORMATION_SCHEMA_CLUSTER_INFO_TABLE_ID: u32 = 31;
 pub const PG_CATALOG_TABLE_ID_MASK: u32 = 0x200;
 /// id for pg_catalog.pg_class
 pub const PG_CATALOG_PG_CLASS_TABLE_ID: u32 = PG_CATALOG_TABLE_ID_MASK | 1;
+pub const PG_CATALOG_PG_TYPE_TABLE_ID: u32 = PG_CATALOG_TABLE_ID_MASK | 2;
 /// ----- End of pg_catalog tables -----
 pub const MITO_ENGINE: &str = "mito";
 pub const MITO2_ENGINE: &str = "mito2";

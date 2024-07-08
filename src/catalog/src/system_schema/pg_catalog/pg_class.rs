@@ -20,7 +20,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use store_api::storage::{ConcreteDataType, ScanRequest};
 
 use super::table_names::PG_CLASS;
-use super::{PGCatalogTable, OID_COLUMN_NAME};
+use super::{oid_column, PGCatalogTable};
 use crate::error::Result;
 use crate::CatalogManager;
 
@@ -46,7 +46,7 @@ impl PGCatalogPgClass {
 
     pub(super) fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
-            ColumnSchema::new(OID_COLUMN_NAME, ConcreteDataType::uint32_datatype(), false),
+            oid_column(),
             ColumnSchema::new(CLASS_RELNAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
                 CLASS_RELNAMESPACE,

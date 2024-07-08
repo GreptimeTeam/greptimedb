@@ -12,32 +12,58 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod pg_catalog_memory_table;
 mod pg_class;
 mod table_names;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_recordbatch::SendableRecordBatchStream;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::{ColumnSchema, SchemaRef};
+use lazy_static::lazy_static;
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
 use table::TableRef;
 
-use self::table_names::PG_CLASS;
+use super::memory_table::tables::u32_column;
 use crate::error::Result;
 use crate::CatalogManager;
+
+lazy_static! {
+    static ref MEMORY_TABLES: &'static [&'static str] = &[table_names::PG_TYPE];
+}
 
 /// The column name for the OID column.
 /// The OID column is a unique identifier of type u32 for each object in the database.
 const OID_COLUMN_NAME: &str = "oid";
+
+fn oid_column() -> ColumnSchema {
+    u32_column(OID_COLUMN_NAME)
+}
 
 /// [`PGCatalogProvider`] is the provider for a schema named `pg_catalog`, it is not a catalog.
 pub struct PGCatalogProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
     tables: HashMap<String, TableRef>,
+}
+
+// TODO(j0hn50n133): Not sure whether to avoid duplication with `information_schema` or not.
+macro_rules! setup_memory_table {
+    ($name: expr) => {
+        paste! {
+            {
+                let (schema, columns) = get_schema_columns($name);
+                Some(Arc::new(MemoryTable::new(
+                    consts::[<PG_CATALOG_ $name  _TABLE_ID>],
+                    $name,
+                    schema,
+                    columns
+                )) as _)
+            }
+        }
+    };
 }
 
 impl PGCatalogProvider {
@@ -53,39 +79,42 @@ impl PGCatalogProvider {
 
     fn build_tables(&mut self) {
         // SECURITY NOTE:
-        // Follow the same security rules as [InformationSchemaProvider::build_tables].
-        if self.catalog_name == DEFAULT_CATALOG_NAME {
-            self.tables.insert(
-                table_names::PG_CLASS.to_string(),
-                self.build_table(PG_CLASS).unwrap(),
-            );
+        // Must follow the same security rules as [`InformationSchemaProvider::build_tables`].
+        let mut tables = HashMap::new();
+        for name in MEMORY_TABLES.iter() {
+            tables.insert(name.to_string(), self.build_table(name).expect(name));
         }
+        self.tables = tables;
     }
 
     fn build_table(&self, name: &str) -> Option<TableRef> {
-        // self.
-        todo!()
+        self.pg_catalog_table(name).map(|table| todo!())
     }
 
     pub fn table_names(&self) -> Vec<String> {
-        // TODO(j0hn50n133): replace hardcoded table names with collected table names
-        vec![
-            table_names::PG_DATABASE.to_string(),
-            table_names::PG_NAMESPACE.to_string(),
-            table_names::PG_CLASS.to_string(),
-        ]
+        let mut tables = self.tables.values().clone().collect::<Vec<_>>();
+        tables.sort_by(|t1, t2| {
+            t1.table_info()
+                .table_id()
+                .partial_cmp(&t2.table_info().table_id())
+                .unwrap()
+        });
+        tables
+            .into_iter()
+            .map(|t| t.table_info().name.clone())
+            .collect()
     }
 
-    pub fn pg_catalog_table(&self, name: &str) -> Option<PGCatalogTableRef> {
+    fn pg_catalog_table(&self, name: &str) -> Option<PGCatalogTableRef> {
         match name.to_ascii_lowercase().as_str() {
-            table_names::PG_CLASS => todo!(),
+            table_names::PG_TYPE => todo!(),
             _ => None,
         }
     }
 
     /// Returns the [TableRef] by table name.
     pub fn table(&self, name: &str) -> Option<TableRef> {
-        todo!()
+        self.tables.get(name).cloned()
     }
 }
 

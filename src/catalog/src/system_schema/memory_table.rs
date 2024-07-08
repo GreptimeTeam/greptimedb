@@ -26,8 +26,9 @@ use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatc
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
-use store_api::storage::TableId;
+use store_api::storage::{ScanRequest, TableId};
 
+use super::SystemTable;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 
 /// A memory table with specified schema and columns.
@@ -56,25 +57,6 @@ impl MemoryTable {
 
     pub fn builder(&self) -> MemoryTableBuilder {
         MemoryTableBuilder::new(self.schema.clone(), self.columns.clone())
-    }
-    pub fn to_stream(&self) -> Result<SendableRecordBatchStream> {
-        let schema = self.schema.arrow_schema().clone();
-        let mut builder = self.builder();
-        let stream = Box::pin(DfRecordBatchStreamAdapter::new(
-            schema,
-            futures::stream::once(async move {
-                builder
-                    .memory_records()
-                    .await
-                    .map(|x| x.into_df_record_batch())
-                    .map_err(Into::into)
-            }),
-        ));
-        Ok(Box::pin(
-            RecordBatchStreamAdapter::try_new(stream)
-                .map_err(BoxedError::new)
-                .context(InternalSnafu)?,
-        ))
     }
 }
 
@@ -120,6 +102,40 @@ impl DfPartitionStream for MemoryTable {
     }
 }
 
+impl SystemTable for MemoryTable {
+    fn table_id(&self) -> TableId {
+        self.table_id
+    }
+
+    fn table_name(&self) -> &'static str {
+        self.table_name
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn to_stream(&self, _request: ScanRequest) -> Result<SendableRecordBatchStream> {
+        let schema = self.schema.arrow_schema().clone();
+        let mut builder = self.builder();
+        let stream = Box::pin(DfRecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::once(async move {
+                builder
+                    .memory_records()
+                    .await
+                    .map(|x| x.into_df_record_batch())
+                    .map_err(Into::into)
+            }),
+        ));
+        Ok(Box::pin(
+            RecordBatchStreamAdapter::try_new(stream)
+                .map_err(BoxedError::new)
+                .context(InternalSnafu)?,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -130,6 +146,7 @@ mod tests {
     use datatypes::vectors::StringVector;
 
     use super::*;
+    use crate::system_schema::SystemTable;
 
     #[tokio::test]
     async fn test_memory_table() {
@@ -149,9 +166,10 @@ mod tests {
         );
 
         assert_eq!(42, table.table_id);
+        assert_eq!(schema, SystemTable::schema(&table));
         assert_eq!("test", table.table_name);
 
-        let stream = table.to_stream().unwrap();
+        let stream = table.to_stream(ScanRequest::default()).unwrap();
 
         let batches = RecordBatches::try_collect(stream).await.unwrap();
 
@@ -179,7 +197,7 @@ mod tests {
         assert_eq!(42, table.table_id);
         assert_eq!("test", table.table_name);
 
-        let stream = table.to_stream().unwrap();
+        let stream = table.to_stream(ScanRequest::default()).unwrap();
 
         let batches = RecordBatches::try_collect(stream).await.unwrap();
 

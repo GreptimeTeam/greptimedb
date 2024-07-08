@@ -29,6 +29,7 @@ use table::TableRef;
 
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::information_schema::InformationSchemaProvider;
+use crate::system_schema::SystemSchemaProvider;
 use crate::{CatalogManager, DeregisterTableRequest, RegisterSchemaRequest, RegisterTableRequest};
 
 type SchemaEntries = HashMap<String, HashMap<String, TableRef>>;

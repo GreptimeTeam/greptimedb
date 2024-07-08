@@ -44,8 +44,8 @@ use crate::error::{
     CreateRecordBatchSnafu, FindPartitionsSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::information_schema::{InformationTable, Predicates};
 use crate::kvbackend::KvBackendCatalogManager;
+use crate::system_schema::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
 const TABLE_CATALOG: &str = "table_catalog";
