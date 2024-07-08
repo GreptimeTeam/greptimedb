@@ -26,7 +26,7 @@ use crate::v1::{ColumnDef, ColumnOptions, SemanticType};
 /// Key used to store fulltext options in gRPC column options.
 const FULLTEXT_GRPC_KEY: &str = "fulltext";
 
-/// Tries to construct a ColumnSchema` from the given  `ColumnDef`.
+/// Tries to construct a `ColumnSchema` from the given  `ColumnDef`.
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let data_type = ColumnDataTypeWrapper::try_new(
         column_def.data_type,
@@ -64,7 +64,7 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         })
 }
 
-/// Constructs a `ColumnOptions` from a `ColumnSchema`.
+/// Constructs a `ColumnOptions` from the given `ColumnSchema`.
 pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<ColumnOptions> {
     let mut options = ColumnOptions::default();
     if let Some(fulltext) = column_schema.metadata().get(FULLTEXT_KEY) {
@@ -76,15 +76,15 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
     (!options.options.is_empty()).then_some(options)
 }
 
-/// Checks if the `ColumnOptions` contain fulltext options.
+/// Checks if the `ColumnOptions` contains fulltext options.
 pub fn contains_fulltext(options: &Option<ColumnOptions>) -> bool {
     options
         .as_ref()
         .map_or(false, |o| o.options.contains_key(FULLTEXT_GRPC_KEY))
 }
 
-/// Constructs a `ColumnOptions` with `FulltextOptions`.
-pub fn options_with_fulltext(fulltext: &FulltextOptions) -> Result<Option<ColumnOptions>> {
+/// Tries to construct a `ColumnOptions` from the given `FulltextOptions`.
+pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<ColumnOptions>> {
     let mut options = ColumnOptions::default();
 
     let v = serde_json::to_string(fulltext).context(error::SerializeJsonSnafu)?;
@@ -168,7 +168,7 @@ mod tests {
             analyzer: FulltextAnalyzer::English,
             case_sensitive: false,
         };
-        let options = options_with_fulltext(&fulltext).unwrap().unwrap();
+        let options = options_from_fulltext(&fulltext).unwrap().unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),
             "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false}"

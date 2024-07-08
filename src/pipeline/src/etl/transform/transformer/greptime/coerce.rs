@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::column_def::options_with_fulltext;
+use api::v1::column_def::options_from_fulltext;
 use api::v1::ColumnOptions;
 use datatypes::schema::FulltextOptions;
 use greptime_proto::v1::value::ValueData;
@@ -92,7 +92,7 @@ fn coerce_semantic_type(transform: &Transform) -> SemanticType {
 
 fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>, String> {
     if let Some(Index::Fulltext) = transform.index {
-        options_with_fulltext(&FulltextOptions {
+        options_from_fulltext(&FulltextOptions {
             enable: true,
             ..Default::default()
         })
