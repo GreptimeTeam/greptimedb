@@ -108,7 +108,7 @@ impl SstIndexApplier {
 
         if let Some(index_cache) = &self.inverted_index_cache {
             let mut index_reader = CachedInvertedIndexBlobReader::new(
-                file_id.into(),
+                file_id,
                 InvertedIndexBlobReader::new(blob),
                 index_cache.clone(),
             );
