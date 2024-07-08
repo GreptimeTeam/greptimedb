@@ -381,6 +381,11 @@ pub struct InvertedIndexConfig {
     #[deprecated = "use [IndexConfig::write_buffer_size] instead"]
     #[serde(skip_serializing)]
     pub write_buffer_size: ReadableSize,
+
+    /// Cache size for metadata of inverted index. Setting it to 0 to disable the cache.
+    pub metadata_cache_size: ReadableSize,
+    /// Cache size for inverted index content. Setting it to 0 to disable the cache.
+    pub content_cache_size: ReadableSize,
 }
 
 impl Default for InvertedIndexConfig {
@@ -392,9 +397,10 @@ impl Default for InvertedIndexConfig {
             apply_on_query: Mode::Auto,
             mem_threshold_on_create: MemoryThreshold::Auto,
             compress: true,
-
             write_buffer_size: ReadableSize::mb(8),
             intermediate_path: String::new(),
+            metadata_cache_size: ReadableSize::mb(32),
+            content_cache_size: ReadableSize::mb(32),
         }
     }
 }
