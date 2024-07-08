@@ -14,4 +14,44 @@ insert into fox values
 
 select fox from fox where matches(fox, '"fox jumps"') order by ts;
 
+select fox from fox where matches(fox, '"quick brown"') order by ts;
+
+select fox from fox where matches(fox, '"fox jumps"') order by ts;
+
+select fox from fox where matches(fox, 'fox OR lazy') order by ts;
+
+select fox from fox where matches(fox, 'fox AND lazy') order by ts;
+
+select fox from fox where matches(fox, '-over -lazy') order by ts;
+
+select fox from fox where matches(fox, '-over AND -lazy') order by ts;
+
+select fox from fox where matches(fox, 'fox AND jumps OR over') order by ts;
+
+select fox from fox where matches(fox, 'fox OR brown AND quick') order by ts;
+
+select fox from fox where matches(fox, '(fox OR brown) AND quick') order by ts;
+
+select fox from fox where matches(fox, 'brown AND quick OR fox') order by ts;
+
+select fox from fox where matches(fox, 'brown AND (quick OR fox)') order by ts;
+
+select fox from fox where matches(fox, 'brown AND quick AND fox  OR  jumps AND over AND lazy') order by ts;
+
+select fox from fox where matches(fox, 'quick brown fox +jumps') order by ts;
+
+select fox from fox where matches(fox, 'fox +jumps -over') order by ts;
+
+select fox from fox where matches(fox, 'fox AND +jumps AND -over') order by ts;
+
+select fox from fox where matches(fox, '(+fox +jumps) over') order by ts;
+
+select fox from fox where matches(fox, '+(fox jumps) AND over') order by ts;
+
+select fox from fox where matches(fox, 'over -(fox jumps)') order by ts;
+
+select fox from fox where matches(fox, 'over -(fox AND jumps)') order by ts;
+
+select fox from fox where matches(fox, 'over AND -(-(fox OR jumps))') order by ts;
+
 drop table fox;
