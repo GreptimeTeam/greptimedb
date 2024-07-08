@@ -173,7 +173,7 @@ impl TopicManager {
                     timestamp: chrono::Utc::now(),
                     headers: Default::default(),
                 }],
-                Compression::Lz4,
+                Compression::NoCompression,
             )
             .await
             .context(ProduceRecordSnafu { topic })?;
