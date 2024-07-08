@@ -64,7 +64,7 @@ pub const TABLE_COMMENT: &str = "table_comment";
 pub const MAX_INDEX_LENGTH: &str = "max_index_length";
 pub const TEMPORARY: &str = "temporary";
 const TABLE_ID: &str = "table_id";
-const ENGINE: &str = "engine";
+pub const ENGINE: &str = "engine";
 const INIT_CAPACITY: usize = 42;
 
 pub(super) struct InformationSchemaTables {

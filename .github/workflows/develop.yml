@@ -419,7 +419,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       matrix:
-        target: ["fuzz_failover_mito_regions"]
+        target: ["fuzz_migrate_mito_regions", "fuzz_failover_mito_regions", "fuzz_failover_metric_regions"]
         mode: 
           - name: "Remote WAL"
             minio: true

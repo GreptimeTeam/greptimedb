@@ -29,6 +29,7 @@ snafu.workspace = true
 tantivy = { version = "0.22", features = ["zstd-compression"] }
 tantivy-jieba = "0.11.0"
 tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true

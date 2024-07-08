@@ -28,14 +28,15 @@ use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use flow::{FlownodeBuilder, FlownodeInstance};
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
-use meta_client::MetaClientOptions;
+use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
+use tonic::transport::Endpoint;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result,
-    ShutdownFlownodeSnafu, StartFlownodeSnafu,
+    BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
+    MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu, TonicTransportSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -119,16 +120,26 @@ impl SubCommand {
 
 #[derive(Debug, Parser, Default)]
 struct StartCommand {
+    /// Flownode's id
     #[clap(long)]
     node_id: Option<u64>,
+    /// Bind address for the gRPC server.
     #[clap(long)]
     rpc_addr: Option<String>,
+    /// Hostname for the gRPC server.
     #[clap(long)]
     rpc_hostname: Option<String>,
+    /// Metasrv address list;
     #[clap(long, value_delimiter = ',', num_args = 1..)]
     metasrv_addrs: Option<Vec<String>>,
+    /// The gprc address of the frontend server used for writing results back to the database.
+    /// Need prefix i.e. "http://"
+    #[clap(long)]
+    frontend_addr: Option<String>,
+    /// The configuration file for flownode
     #[clap(short, long)]
     config_file: Option<String>,
+    /// The prefix of environment variables, default is `GREPTIMEDB_FLOWNODE`;
     #[clap(long, default_value = "GREPTIMEDB_FLOWNODE")]
     env_prefix: String,
 }
@@ -175,6 +186,10 @@ impl StartCommand {
             opts.grpc.hostname.clone_from(hostname);
         }
 
+        if let Some(fe_addr) = &self.frontend_addr {
+            opts.frontend_addr = Some(fe_addr.clone());
+        }
+
         if let Some(node_id) = self.node_id {
             opts.node_id = Some(node_id);
         }
@@ -213,11 +228,14 @@ impl StartCommand {
 
         let opts = opts.component;
 
-        let cluster_id = opts.cluster_id.context(MissingConfigSnafu {
-            msg: "'cluster_id'",
+        let frontend_addr = opts.frontend_addr.clone().context(MissingConfigSnafu {
+            msg: "'frontend_addr'",
         })?;
 
-        let node_id = opts
+        // TODO(discord9): make it not optionale after cluster id is required
+        let cluster_id = opts.cluster_id.unwrap_or(0);
+
+        let member_id = opts
             .node_id
             .context(MissingConfigSnafu { msg: "'node_id'" })?;
 
@@ -225,11 +243,13 @@ impl StartCommand {
             msg: "'meta_client_options'",
         })?;
 
-        let meta_client = Arc::new(
-            flow::heartbeat::new_metasrv_client(cluster_id, node_id, meta_config)
-                .await
-                .context(StartFlownodeSnafu)?,
-        );
+        let meta_client = meta_client::create_meta_client(
+            cluster_id,
+            MetaClientType::Flownode { member_id },
+            meta_config,
+        )
+        .await
+        .context(MetaClientInitSnafu)?;
 
         let cache_max_capacity = meta_config.metadata_cache_max_capacity;
         let cache_ttl = meta_config.metadata_cache_ttl;
@@ -295,6 +315,22 @@ impl StartCommand {
         .with_heartbeat_task(heartbeat_task);
 
         let flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
+
+        // set up the lazy connection to the frontend server
+        // TODO(discord9): consider move this to start() or pre_start()?
+        let endpoint =
+            Endpoint::from_shared(frontend_addr.clone()).context(TonicTransportSnafu {
+                msg: Some(format!("Fail to create from addr={}", frontend_addr)),
+            })?;
+        let chnl = endpoint.connect().await.context(TonicTransportSnafu {
+            msg: Some("Fail to connect to frontend".to_string()),
+        })?;
+        info!("Connected to frontend server: {:?}", frontend_addr);
+        let client = flow::FrontendClient::new(chnl);
+        flownode
+            .flow_worker_manager()
+            .set_frontend_invoker(Box::new(client))
+            .await;
 
         Ok(Instance::new(flownode, guard))
     }

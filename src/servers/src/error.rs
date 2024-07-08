@@ -25,7 +25,7 @@ use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_telemetry::{debug, error};
+use common_telemetry::{error, warn};
 use datatypes::prelude::ConcreteDataType;
 use headers::ContentType;
 use query::parser::PromQuery;
@@ -152,12 +152,6 @@ pub enum Error {
     #[snafu(display("Pipeline management api error"))]
     Pipeline {
         source: pipeline::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Unsupported delete pipeline."))]
-    UnsupportedDeletePipeline {
         #[snafu(implicit)]
         location: Location,
     },
@@ -635,7 +629,6 @@ impl ErrorExt for Error {
             | FileWatch { .. } => StatusCode::Internal,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
-            UnsupportedDeletePipeline { .. } => StatusCode::Unsupported,
 
             #[cfg(not(windows))]
             UpdateJemallocMetrics { .. } => StatusCode::Internal,
@@ -744,8 +737,17 @@ impl From<std::io::Error> for Error {
     }
 }
 
+fn log_error_if_necessary(error: &Error) {
+    if error.status_code().should_log_error() {
+        error!(error; "Failed to handle HTTP request ");
+    } else {
+        warn!(error; "Failed to handle HTTP request ");
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        use pipeline::error::Error as PipelineError;
         let error_msg = self.output_msg();
         let status = match self {
             Error::InfluxdbLineProtocol { .. }
@@ -759,16 +761,17 @@ impl IntoResponse for Error {
             | Error::InvalidPromRemoteRequest { .. }
             | Error::InvalidQuery { .. }
             | Error::TimePrecision { .. } => HttpStatusCode::BAD_REQUEST,
-            _ => {
-                if self.status_code().should_log_error() {
-                    error!(self; "Failed to handle HTTP request: ");
-                } else {
-                    debug!("Failed to handle HTTP request: {self:?}");
-                }
-
-                HttpStatusCode::INTERNAL_SERVER_ERROR
-            }
+            Error::Pipeline { ref source, .. } => match source {
+                PipelineError::CompilePipeline { .. }
+                | PipelineError::InvalidPipelineVersion { .. }
+                | PipelineError::PipelineNotFound { .. } => HttpStatusCode::BAD_REQUEST,
+                _ => HttpStatusCode::INTERNAL_SERVER_ERROR,
+            },
+            _ => HttpStatusCode::INTERNAL_SERVER_ERROR,
         };
+
+        log_error_if_necessary(&self);
+
         let body = Json(json!({
             "error": error_msg,
         }));

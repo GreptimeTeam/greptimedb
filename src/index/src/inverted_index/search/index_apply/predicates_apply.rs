@@ -148,6 +148,8 @@ impl TryFrom<Vec<(String, Vec<Predicate>)>> for PredicatesIndexApplier {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use common_base::bit_vec::prelude::*;
     use greptime_proto::v1::index::InvertedIndexMeta;
 
@@ -161,7 +163,7 @@ mod tests {
         s.to_owned()
     }
 
-    fn mock_metas(tags: impl IntoIterator<Item = (&'static str, u32)>) -> InvertedIndexMetas {
+    fn mock_metas(tags: impl IntoIterator<Item = (&'static str, u32)>) -> Arc<InvertedIndexMetas> {
         let mut metas = InvertedIndexMetas {
             total_row_count: 8,
             segment_row_count: 1,
@@ -175,7 +177,7 @@ mod tests {
             };
             metas.metas.insert(s(tag), meta);
         }
-        metas
+        Arc::new(metas)
     }
 
     fn key_fst_applier(value: &'static str) -> Box<dyn FstApplier> {
@@ -300,11 +302,11 @@ mod tests {
     async fn test_index_applier_with_empty_index() {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader.expect_metadata().returning(move || {
-            Ok(InvertedIndexMetas {
+            Ok(Arc::new(InvertedIndexMetas {
                 total_row_count: 0, // No rows
                 segment_row_count: 1,
                 ..Default::default()
-            })
+            }))
         });
 
         let mut mock_fst_applier = MockFstApplier::new();

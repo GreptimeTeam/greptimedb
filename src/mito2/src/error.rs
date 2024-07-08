@@ -597,20 +597,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Blob type not found, blob_type: {blob_type}"))]
-    PuffinBlobTypeNotFound {
-        blob_type: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to write puffin completely"))]
-    PuffinFinish {
-        source: puffin::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to add blob to puffin file"))]
     PuffinAddBlob {
         source: puffin::error::Error,
@@ -783,6 +769,58 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to initialize puffin stager"))]
+    PuffinInitStager {
+        source: puffin::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build puffin reader"))]
+    PuffinBuildReader {
+        source: puffin::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to retrieve fulltext options from column metadata"))]
+    FulltextOptions {
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+        column_name: String,
+    },
+
+    #[snafu(display("Failed to create fulltext index creator"))]
+    CreateFulltextCreator {
+        source: index::fulltext_index::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to cast vector of {from} to {to}"))]
+    CastVector {
+        #[snafu(implicit)]
+        location: Location,
+        from: ConcreteDataType,
+        to: ConcreteDataType,
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to push text to fulltext index"))]
+    FulltextPushText {
+        source: index::fulltext_index::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to finalize fulltext index creator"))]
+    FulltextFinish {
+        source: index::fulltext_index::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -821,7 +859,6 @@ impl ErrorExt for Error {
             | CreateDefault { .. }
             | InvalidParquet { .. }
             | OperateAbortedIndex { .. }
-            | PuffinBlobTypeNotFound { .. }
             | UnexpectedReplay { .. }
             | IndexEncodeNull { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
@@ -885,8 +922,9 @@ impl ErrorExt for Error {
             | IndexFinish { source, .. } => source.status_code(),
             PuffinReadMetadata { source, .. }
             | PuffinReadBlob { source, .. }
-            | PuffinFinish { source, .. }
-            | PuffinAddBlob { source, .. } => source.status_code(),
+            | PuffinAddBlob { source, .. }
+            | PuffinInitStager { source, .. }
+            | PuffinBuildReader { source, .. } => source.status_code(),
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
@@ -904,6 +942,11 @@ impl ErrorExt for Error {
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
             UnsupportedOperation { .. } => StatusCode::Unsupported,
             RemoteCompaction { .. } => StatusCode::Unexpected,
+
+            FulltextOptions { source, .. } => source.status_code(),
+            CreateFulltextCreator { source, .. } => source.status_code(),
+            CastVector { source, .. } => source.status_code(),
+            FulltextPushText { source, .. } | FulltextFinish { source, .. } => source.status_code(),
         }
     }
 

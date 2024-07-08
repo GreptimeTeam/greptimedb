@@ -27,7 +27,7 @@ struct DummyPermissionChecker;
 impl PermissionChecker for DummyPermissionChecker {
     fn check_permission(
         &self,
-        _user_info: Option<UserInfoRef>,
+        _user_info: UserInfoRef,
         req: PermissionReq,
     ) -> auth::error::Result<PermissionResp> {
         match req {
@@ -45,13 +45,13 @@ fn test_permission_checker() {
     let checker: PermissionCheckerRef = Arc::new(DummyPermissionChecker);
 
     let grpc_result = checker.check_permission(
-        None,
+        auth::userinfo_by_name(None),
         PermissionReq::GrpcRequest(&Request::Query(Default::default())),
     );
     assert_matches!(grpc_result, Ok(PermissionResp::Allow));
 
     let sql_result = checker.check_permission(
-        None,
+        auth::userinfo_by_name(None),
         PermissionReq::SqlStatement(&Statement::ShowDatabases(ShowDatabases::new(
             ShowKind::All,
             false,
@@ -59,6 +59,7 @@ fn test_permission_checker() {
     );
     assert_matches!(sql_result, Ok(PermissionResp::Reject));
 
-    let err_result = checker.check_permission(None, PermissionReq::Opentsdb);
+    let err_result =
+        checker.check_permission(auth::userinfo_by_name(None), PermissionReq::Opentsdb);
     assert_matches!(err_result, Err(InternalState { msg }) if msg == "testing");
 }

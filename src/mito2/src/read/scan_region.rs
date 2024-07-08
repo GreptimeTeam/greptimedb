@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -45,8 +45,8 @@ use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
 use crate::sst::file::{overlaps, FileHandle, FileMeta};
-use crate::sst::index::applier::builder::SstIndexApplierBuilder;
-use crate::sst::index::applier::SstIndexApplierRef;
+use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::SstIndexApplierRef;
 use crate::sst::parquet::file_range::FileRange;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
@@ -330,10 +330,17 @@ impl ScanRegion {
             Some(file_cache)
         }();
 
+        let index_cache = self
+            .cache_manager
+            .as_ref()
+            .and_then(|c| c.index_cache())
+            .cloned();
+
         SstIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
             file_cache,
+            index_cache,
             self.version.metadata.as_ref(),
             self.version
                 .options
@@ -343,6 +350,7 @@ impl ScanRegion {
                 .iter()
                 .copied()
                 .collect(),
+            self.access_layer.puffin_manager_factory().clone(),
         )
         .build(&self.request.filters)
         .inspect_err(|err| warn!(err; "Failed to build index applier"))
@@ -781,21 +789,17 @@ pub(crate) struct StreamContext {
     // Metrics:
     /// The start time of the query.
     pub(crate) query_start: Instant,
-    /// Time elapsed before creating the scanner.
-    pub(crate) prepare_scan_cost: Duration,
 }
 
 impl StreamContext {
     /// Creates a new [StreamContext].
     pub(crate) fn new(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
-        let prepare_scan_cost = query_start.elapsed();
 
         Self {
             input,
             parts: Mutex::new(ScanPartList::default()),
             query_start,
-            prepare_scan_cost,
         }
     }
 

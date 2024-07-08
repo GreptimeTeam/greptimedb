@@ -128,9 +128,9 @@ pub(crate) async fn auth(
     user_provider: Option<UserProviderRef>,
     header: Option<&RequestHeader>,
     query_ctx: &QueryContextRef,
-) -> Result<Option<UserInfoRef>> {
+) -> Result<UserInfoRef> {
     let Some(user_provider) = user_provider else {
-        return Ok(None);
+        return Ok(auth::userinfo_by_name(None));
     };
 
     let auth_scheme = header
@@ -156,7 +156,6 @@ pub(crate) async fn auth(
             name: "Token AuthScheme".to_string(),
         }),
     }
-    .map(Some)
     .map_err(|e| {
         METRIC_AUTH_FAILURE
             .with_label_values(&[e.status_code().as_ref()])
@@ -197,7 +196,7 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
     QueryContextBuilder::default()
         .current_catalog(catalog)
         .current_schema(schema)
-        .timezone(Arc::new(timezone))
+        .timezone(timezone)
         .build()
         .into()
 }

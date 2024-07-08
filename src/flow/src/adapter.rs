@@ -84,6 +84,7 @@ pub struct FlownodeOptions {
     pub cluster_id: Option<u64>,
     pub node_id: Option<u64>,
     pub grpc: GrpcOptions,
+    pub frontend_addr: Option<String>,
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
@@ -97,6 +98,7 @@ impl Default for FlownodeOptions {
             cluster_id: None,
             node_id: None,
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
+            frontend_addr: None,
             meta_client: None,
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
@@ -133,10 +135,7 @@ pub struct FlowWorkerManager {
 /// Building FlownodeManager
 impl FlowWorkerManager {
     /// set frontend invoker
-    pub async fn set_frontend_invoker(
-        self: &Arc<Self>,
-        frontend: Box<dyn FrontendInvoker + Send + Sync>,
-    ) {
+    pub async fn set_frontend_invoker(&self, frontend: Box<dyn FrontendInvoker + Send + Sync>) {
         *self.frontend_invoker.write().await = Some(frontend);
     }
 

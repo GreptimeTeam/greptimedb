@@ -68,6 +68,10 @@ pub struct BoundedStager {
 
 impl BoundedStager {
     pub async fn new(base_dir: PathBuf, capacity: u64) -> Result<Self> {
+        tokio::fs::create_dir_all(&base_dir)
+            .await
+            .context(CreateSnafu)?;
+
         let recycle_bin = Cache::builder()
             .time_to_live(Duration::from_secs(60))
             .build();
@@ -421,7 +425,7 @@ pub struct FsBlobGuard {
     delete_queue: Sender<DeleteTask>,
 }
 
-impl BlobGuard for Arc<FsBlobGuard> {
+impl BlobGuard for FsBlobGuard {
     type Reader = Compat<fs::File>;
 
     fn reader(&self) -> BoxFuture<'static, Result<Self::Reader>> {
@@ -456,7 +460,7 @@ pub struct FsDirGuard {
     delete_queue: Sender<DeleteTask>,
 }
 
-impl DirGuard for Arc<FsDirGuard> {
+impl DirGuard for FsDirGuard {
     fn path(&self) -> &PathBuf {
         &self.path
     }

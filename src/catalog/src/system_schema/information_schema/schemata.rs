@@ -33,7 +33,7 @@ use store_api::storage::{ScanRequest, TableId};
 
 use super::SCHEMATA;
 use crate::error::{
-    CreateRecordBatchSnafu, InternalSnafu, Result, SchemaNotFoundSnafu, TableMetadataManagerSnafu,
+    CreateRecordBatchSnafu, InternalSnafu, Result, TableMetadataManagerSnafu,
     UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::system_schema::information_schema::{utils, InformationTable, Predicates};
@@ -172,17 +172,14 @@ impl InformationSchemaSchemataBuilder {
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
             let opts = if let Some(table_metadata_manager) = &table_metadata_manager {
-                let schema_opts = table_metadata_manager
+                table_metadata_manager
                     .schema_manager()
                     .get(SchemaNameKey::new(&catalog_name, &schema_name))
                     .await
                     .context(TableMetadataManagerSnafu)?
-                    .context(SchemaNotFoundSnafu {
-                        catalog: &catalog_name,
-                        schema: &schema_name,
-                    })?;
-
-                Some(format!("{schema_opts}"))
+                    // information_schema is not available from this
+                    // table_metadata_manager and we return None
+                    .map(|schema_opts| format!("{schema_opts}"))
             } else {
                 None
             };

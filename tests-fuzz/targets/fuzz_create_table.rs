@@ -32,8 +32,7 @@ use tests_fuzz::ir::CreateTableExpr;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{
-    get_from_env_or_default_value, init_greptime_connections_via_env, Connections,
-    GT_FUZZ_INPUT_MAX_COLUMNS,
+    get_gt_fuzz_input_max_columns, init_greptime_connections_via_env, Connections,
 };
 use tests_fuzz::validator;
 
@@ -57,7 +56,7 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let max_columns = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_COLUMNS, 30);
+        let max_columns = get_gt_fuzz_input_max_columns();
         let columns = rng.gen_range(2..max_columns);
         Ok(FuzzInput { columns, seed })
     }

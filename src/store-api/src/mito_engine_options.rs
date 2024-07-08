@@ -17,6 +17,11 @@
 
 use common_wal::options::WAL_OPTIONS_KEY;
 
+/// Option key for append mode.
+pub const APPEND_MODE_KEY: &str = "append_mode";
+/// Option key for merge mode.
+pub const MERGE_MODE_KEY: &str = "merge_mode";
+
 /// Returns true if the `key` is a valid option key for the mito engine.
 pub fn is_mito_engine_option_key(key: &str) -> bool {
     [
@@ -34,7 +39,8 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         "memtable.partition_tree.index_max_keys_per_shard",
         "memtable.partition_tree.data_freeze_threshold",
         "memtable.partition_tree.fork_dictionary_bytes",
-        "append_mode",
+        APPEND_MODE_KEY,
+        MERGE_MODE_KEY,
     ]
     .contains(&key)
 }

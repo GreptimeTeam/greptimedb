@@ -17,6 +17,7 @@
 mod cache_size;
 
 pub(crate) mod file_cache;
+pub(crate) mod index;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;
@@ -33,6 +34,7 @@ use store_api::storage::{ConcreteDataType, RegionId};
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
@@ -59,6 +61,8 @@ pub struct CacheManager {
     page_cache: Option<PageCache>,
     /// A Cache for writing files to object stores.
     write_cache: Option<WriteCacheRef>,
+    /// Cache for inverted index.
+    index_cache: Option<InvertedIndexCacheRef>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
@@ -167,6 +171,10 @@ impl CacheManager {
     pub(crate) fn write_cache(&self) -> Option<&WriteCacheRef> {
         self.write_cache.as_ref()
     }
+
+    pub(crate) fn index_cache(&self) -> Option<&InvertedIndexCacheRef> {
+        self.index_cache.as_ref()
+    }
 }
 
 /// Builder to construct a [CacheManager].
@@ -175,6 +183,8 @@ pub struct CacheManagerBuilder {
     sst_meta_cache_size: u64,
     vector_cache_size: u64,
     page_cache_size: u64,
+    index_metadata_size: u64,
+    index_content_size: u64,
     write_cache: Option<WriteCacheRef>,
 }
 
@@ -200,6 +210,18 @@ impl CacheManagerBuilder {
     /// Sets write cache.
     pub fn write_cache(mut self, cache: Option<WriteCacheRef>) -> Self {
         self.write_cache = cache;
+        self
+    }
+
+    /// Sets cache size for index metadata.
+    pub fn index_metadata_size(mut self, bytes: u64) -> Self {
+        self.index_metadata_size = bytes;
+        self
+    }
+
+    /// Sets cache size for index content.
+    pub fn index_content_size(mut self, bytes: u64) -> Self {
+        self.index_content_size = bytes;
         self
     }
 
@@ -240,11 +262,14 @@ impl CacheManagerBuilder {
                 .build()
         });
 
+        let inverted_index_cache =
+            InvertedIndexCache::new(self.index_metadata_size, self.index_content_size);
         CacheManager {
             sst_meta_cache,
             vector_cache,
             page_cache,
             write_cache: self.write_cache,
+            index_cache: Some(Arc::new(inverted_index_cache)),
         }
     }
 }
