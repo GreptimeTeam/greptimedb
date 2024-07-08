@@ -84,10 +84,6 @@ pub struct MitoConfig {
     pub vector_cache_size: ReadableSize,
     /// Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
     pub page_cache_size: ReadableSize,
-    /// Cache size for metadata of inverted index. Setting it to 0 to disable the cache.
-    pub inverted_index_metadata_cache_size: ReadableSize,
-    /// Cache size for inverted index content. Setting it to 0 to disable the cache.
-    pub inverted_index_cache_size: ReadableSize,
     /// Whether to enable the experimental write cache.
     pub enable_experimental_write_cache: bool,
     /// File system path for write cache, defaults to `{data_home}/write_cache`.
@@ -137,8 +133,6 @@ impl Default for MitoConfig {
             sst_meta_cache_size: ReadableSize::mb(128),
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
-            inverted_index_metadata_cache_size: ReadableSize::mb(32),
-            inverted_index_cache_size: ReadableSize::mb(32),
             enable_experimental_write_cache: false,
             experimental_write_cache_path: String::new(),
             experimental_write_cache_size: ReadableSize::mb(512),
@@ -387,6 +381,11 @@ pub struct InvertedIndexConfig {
     #[deprecated = "use [IndexConfig::write_buffer_size] instead"]
     #[serde(skip_serializing)]
     pub write_buffer_size: ReadableSize,
+
+    /// Cache size for metadata of inverted index. Setting it to 0 to disable the cache.
+    pub metadata_cache_size: ReadableSize,
+    /// Cache size for inverted index content. Setting it to 0 to disable the cache.
+    pub content_cache_size: ReadableSize,
 }
 
 impl Default for InvertedIndexConfig {
@@ -398,9 +397,10 @@ impl Default for InvertedIndexConfig {
             apply_on_query: Mode::Auto,
             mem_threshold_on_create: MemoryThreshold::Auto,
             compress: true,
-
             write_buffer_size: ReadableSize::mb(8),
             intermediate_path: String::new(),
+            metadata_cache_size: ReadableSize::mb(32),
+            content_cache_size: ReadableSize::mb(32),
         }
     }
 }

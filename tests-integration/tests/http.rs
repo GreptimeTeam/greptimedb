@@ -820,8 +820,6 @@ manifest_checkpoint_distance = 10
 compress_manifest = false
 max_background_jobs = 4
 auto_flush_interval = "30m"
-inverted_index_metadata_cache_size = "32MiB"
-inverted_index_cache_size = "32MiB"
 enable_experimental_write_cache = false
 experimental_write_cache_path = ""
 experimental_write_cache_size = "512MiB"
@@ -841,6 +839,8 @@ create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
 compress = true
+metadata_cache_size = "32MiB"
+content_cache_size = "32MiB"
 
 [region_engine.mito.fulltext_index]
 create_on_flush = "auto"
