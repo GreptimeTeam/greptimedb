@@ -299,7 +299,11 @@ pub fn sql_value_to_value(
             | Value::Duration(_)
             | Value::Interval(_) => match unary_op {
                 UnaryOperator::Plus => {}
-                UnaryOperator::Minus => value = value.try_negative().unwrap(),
+                UnaryOperator::Minus => {
+                    value = value
+                        .try_negative()
+                        .with_context(|| InvalidUnaryOpSnafu { unary_op, value })?;
+                }
                 _ => return InvalidUnaryOpSnafu { unary_op, value }.fail(),
             },
 
@@ -1287,5 +1291,29 @@ mod tests {
             None
         )
         .is_err());
+        assert!(sql_value_to_value(
+            "test",
+            &ConcreteDataType::string_datatype(),
+            &SqlValue::Placeholder("default".into()),
+            None,
+            Some(UnaryOperator::Minus),
+        )
+        .is_err());
+        assert!(sql_value_to_value(
+            "test",
+            &ConcreteDataType::uint16_datatype(),
+            &SqlValue::Number("3".into(), false),
+            None,
+            Some(UnaryOperator::Minus),
+        )
+        .is_err());
+        assert!(sql_value_to_value(
+            "test",
+            &ConcreteDataType::uint16_datatype(),
+            &SqlValue::Number("3".into(), false),
+            None,
+            None
+        )
+        .is_ok());
     }
 }

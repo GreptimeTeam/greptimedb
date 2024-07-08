@@ -301,7 +301,6 @@ impl ErrorExt for Error {
             | ConvertToLogicalExpression { .. }
             | Simplification { .. }
             | InvalidInterval { .. }
-            | PermissionDenied { .. }
             | InvalidUnaryOp { .. }
             | UnsupportedUnaryOp { .. } => StatusCode::InvalidArguments,
 
@@ -309,6 +308,8 @@ impl ErrorExt for Error {
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             ConvertToDfStatement { .. } => StatusCode::Internal,
             ConvertSqlValue { .. } | ConvertValue { .. } => StatusCode::Unsupported,
+
+            PermissionDenied { .. } => StatusCode::PermissionDenied,
         }
     }
 
