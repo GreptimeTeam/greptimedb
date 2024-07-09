@@ -208,7 +208,7 @@ impl GreptimeDbStandaloneBuilder {
             opts.frontend_options(),
             kv_backend.clone(),
             cache_registry,
-            catalog_manager,
+            catalog_manager.clone(),
             node_manager,
             ddl_task_executor,
         )
@@ -217,10 +217,19 @@ impl GreptimeDbStandaloneBuilder {
         .await
         .unwrap();
 
-        let flow_manager = flownode.flow_worker_manager();
-        flow_manager
-            .set_frontend_invoker(Box::new(instance.clone()))
+        let invoker = RemoteFrondendInvoker::build_from(
+            catalog_manager.clone(),
+            kv_backend.clone(),
+            layered_cache_registry.clone(),
+            ddl_task_executor.clone(),
+        )
+        .await
+        .context(StartFlownodeSnafu)?;
+        let flow_worker_manager = flownode.flow_worker_manager();
+        flow_worker_manager
+            .set_frontend_invoker(Box::new(invoker))
             .await;
+
         let _node_handle = flow_manager.run_background();
 
         procedure_manager.start().await.unwrap();
