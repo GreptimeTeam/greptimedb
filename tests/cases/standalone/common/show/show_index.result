@@ -11,9 +11,30 @@ CREATE TABLE IF NOT EXISTS system_metrics (
 
 Affected Rows: 0
 
+CREATE TABLE IF NOT EXISTS test (
+    a STRING,
+    b STRING,
+    c DOUBLE,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(a, b),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
 SHOW INDEX;
 
 Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement: SHOW INDEX;, expected: '{FROM | IN} table', found: ;
+
+SHOW INDEX FROM test;
+
++-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                 | Comment | Index_comment | Visible | Expression |
++-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
+| test  | 1          | PRIMARY    | 1            | a           | A         |             |          |        | YES  | greptime-inverted-index-v1 |         |               | YES     |            |
+| test  | 1          | PRIMARY    | 2            | b           | A         |             |          |        | YES  | greptime-inverted-index-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX | 1            | ts          | A         |             |          |        | NO   | greptime-inverted-index-v1 |         |               | YES     |            |
++-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
 
 SHOW INDEX FROM system_metrics;
 
@@ -48,6 +69,10 @@ SHOW INDEX FROM system_metrics WHERE Key_name = 'TIME INDEX';
 +----------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
 
 DROP TABLE system_metrics;
+
+Affected Rows: 0
+
+DROP TABLE test;
 
 Affected Rows: 0
 
