@@ -121,6 +121,11 @@ impl Decimal128 {
         let value = (hi | lo) as i128;
         Self::new(value, precision, scale)
     }
+
+    pub fn negative(mut self) -> Self {
+        self.value = -self.value;
+        self
+    }
 }
 
 /// The default value of Decimal128 is 0, and its precision is 1 and scale is 0.

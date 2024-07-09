@@ -192,6 +192,10 @@ impl DateTime {
     pub fn to_date(&self) -> Option<Date> {
         self.to_chrono_datetime().map(|d| Date::from(d.date()))
     }
+
+    pub fn negative(&self) -> Self {
+        Self(-self.0)
+    }
 }
 
 #[cfg(test)]

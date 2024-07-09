@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
+#![feature(if_let_guard)]
 
 pub mod delete;
 pub mod error;

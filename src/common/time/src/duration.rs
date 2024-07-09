@@ -92,6 +92,11 @@ impl Duration {
     pub fn to_std_duration(self) -> std::time::Duration {
         self.into()
     }
+
+    pub fn negative(mut self) -> Self {
+        self.value = -self.value;
+        self
+    }
 }
 
 /// Convert i64 to Duration Type.

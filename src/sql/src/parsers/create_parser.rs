@@ -940,6 +940,10 @@ fn ensure_one_expr(expr: &Expr, columns: &[&Column]) -> Result<()> {
             Ok(())
         }
         Expr::Value(_) => Ok(()),
+        Expr::UnaryOp { expr, .. } => {
+            ensure_one_expr(expr, columns)?;
+            Ok(())
+        }
         _ => error::InvalidSqlSnafu {
             msg: format!("Partition rule expr {:?} is not a binary expr!", expr),
         }
