@@ -517,6 +517,10 @@ impl FlowWorkerManager {
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
+        // flow is now shutdown, drop frontend_invoker early so a ref cycle(in standalone mode) can be prevent:
+        // FlowWorkerManager.frontend_invoker -> FrontendInvoker.inserter
+        // -> Inserter.node_manager -> NodeManager.flownode -> Flownode.flow_worker_manager.frontend_invoker
+        self.frontend_invoker.write().await.take();
     }
 
     /// Run all available subgraph in the flow node
