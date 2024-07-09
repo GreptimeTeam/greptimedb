@@ -53,9 +53,8 @@ use crate::ast::{
 use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
     ConvertValueSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu,
-    ParseSqlValueSnafu, ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu,
-    SetFulltextOptionSnafu, TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
-    UnsupportedUnaryOpSnafu,
+    ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu,
+    TimestampOverflowSnafu, UnsupportedDefaultValueSnafu, UnsupportedUnaryOpSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
