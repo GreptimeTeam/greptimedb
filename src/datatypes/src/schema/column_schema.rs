@@ -32,7 +32,7 @@ pub const TIME_INDEX_KEY: &str = "greptime:time_index";
 pub const COMMENT_KEY: &str = "greptime:storage:comment";
 /// Key used to store default constraint in arrow field's metadata.
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
-/// Key used to store fulltext options in column metadata.
+/// Key used to store fulltext options in arrow field's metadata.
 pub const FULLTEXT_KEY: &str = "greptime:fulltext";
 
 /// Schema of a column, used as an immutable struct.
@@ -254,6 +254,14 @@ impl ColumnSchema {
             }
         }
     }
+
+    pub fn with_fulltext_options(mut self, options: FulltextOptions) -> Result<Self> {
+        self.metadata.insert(
+            FULLTEXT_KEY.to_string(),
+            serde_json::to_string(&options).context(error::SerializeSnafu)?,
+        );
+        Ok(self)
+    }
 }
 
 impl TryFrom<&Field> for ColumnSchema {
@@ -312,12 +320,15 @@ impl TryFrom<&ColumnSchema> for Field {
 
 /// Fulltext options for a column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
 pub struct FulltextOptions {
     /// Whether the fulltext index is enabled.
     pub enable: bool,
     /// The fulltext analyzer to use.
+    #[serde(default)]
     pub analyzer: FulltextAnalyzer,
     /// Whether the fulltext index is case-sensitive.
+    #[serde(default)]
     pub case_sensitive: bool,
 }
 
@@ -327,6 +338,15 @@ pub enum FulltextAnalyzer {
     #[default]
     English,
     Chinese,
+}
+
+impl fmt::Display for FulltextAnalyzer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FulltextAnalyzer::English => write!(f, "English"),
+            FulltextAnalyzer::Chinese => write!(f, "Chinese"),
+        }
+    }
 }
 
 #[cfg(test)]

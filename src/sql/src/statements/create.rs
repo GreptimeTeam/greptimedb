@@ -15,13 +15,16 @@
 use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
+use datatypes::schema::{FulltextAnalyzer, FulltextOptions};
 use itertools::Itertools;
-use sqlparser::ast::{Expr, Query};
+use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, TableConstraint, Value as SqlValue};
+use crate::error::{FulltextInvalidOptionSnafu, Result};
 use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
+use crate::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
@@ -83,12 +86,104 @@ pub struct CreateTable {
     pub table_id: u32,
     /// Table name
     pub name: ObjectName,
-    pub columns: Vec<ColumnDef>,
+    pub columns: Vec<Column>,
     pub engine: String,
     pub constraints: Vec<TableConstraint>,
     /// Table options in `WITH`. All keys are lowercase.
     pub options: OptionMap,
     pub partitions: Option<Partitions>,
+}
+
+/// Column definition in `CREATE TABLE` statement.
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+pub struct Column {
+    /// `ColumnDef` from `sqlparser::ast`
+    pub column_def: ColumnDef,
+    /// Column extensions for greptimedb dialect.
+    pub extensions: ColumnExtensions,
+}
+
+/// Column extensions for greptimedb dialect.
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Default)]
+pub struct ColumnExtensions {
+    /// Fulltext options.
+    pub fulltext_options: Option<OptionMap>,
+}
+
+impl Column {
+    pub fn name(&self) -> &Ident {
+        &self.column_def.name
+    }
+
+    pub fn data_type(&self) -> &DataType {
+        &self.column_def.data_type
+    }
+
+    pub fn mut_data_type(&mut self) -> &mut DataType {
+        &mut self.column_def.data_type
+    }
+
+    pub fn options(&self) -> &[ColumnOptionDef] {
+        &self.column_def.options
+    }
+
+    pub fn mut_options(&mut self) -> &mut Vec<ColumnOptionDef> {
+        &mut self.column_def.options
+    }
+}
+
+impl Display for Column {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.column_def)?;
+        if let Some(fulltext_options) = &self.extensions.fulltext_options {
+            if !fulltext_options.is_empty() {
+                let options = fulltext_options.kv_pairs();
+                write!(f, " FULLTEXT WITH({})", format_list_comma!(options))?;
+            } else {
+                write!(f, " FULLTEXT")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ColumnExtensions {
+    pub fn build_fulltext_options(&self) -> Result<Option<FulltextOptions>> {
+        let Some(options) = self.fulltext_options.as_ref() else {
+            return Ok(None);
+        };
+
+        let mut fulltext = FulltextOptions {
+            enable: true,
+            ..Default::default()
+        };
+        if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
+            match analyzer.to_ascii_lowercase().as_str() {
+                "english" => fulltext.analyzer = FulltextAnalyzer::English,
+                "chinese" => fulltext.analyzer = FulltextAnalyzer::Chinese,
+                _ => {
+                    return FulltextInvalidOptionSnafu {
+                        msg: format!("{analyzer}, expected: 'English' | 'Chinese'"),
+                    }
+                    .fail();
+                }
+            }
+        }
+        if let Some(case_sensitive) = options.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
+            match case_sensitive.to_ascii_lowercase().as_str() {
+                "true" => fulltext.case_sensitive = true,
+                "false" => fulltext.case_sensitive = false,
+                _ => {
+                    return FulltextInvalidOptionSnafu {
+                        msg: format!("{case_sensitive}, expected: 'true' | 'false'"),
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        Ok(Some(fulltext))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
@@ -201,7 +296,7 @@ impl Display for CreateDatabase {
 pub struct CreateExternalTable {
     /// Table name
     pub name: ObjectName,
-    pub columns: Vec<ColumnDef>,
+    pub columns: Vec<Column>,
     pub constraints: Vec<TableConstraint>,
     /// Table options in `WITH`. All keys are lowercase.
     pub options: OptionMap,

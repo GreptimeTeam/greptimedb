@@ -22,6 +22,7 @@ use api::helper::{
     is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_proto_value,
     ColumnDataTypeWrapper,
 };
+use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
 use common_telemetry::info;
 use datatypes::prelude::DataType;
@@ -270,6 +271,7 @@ impl WriteRequest {
             datatype: datatype as i32,
             semantic_type: column.semantic_type as i32,
             datatype_extension: datatype_ext,
+            options: options_from_column_schema(&column.column_schema),
         });
 
         Ok(())
