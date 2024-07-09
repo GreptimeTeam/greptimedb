@@ -2122,6 +2122,7 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "object-store",
+ "rand",
  "serde",
  "serde_json",
  "smallvec",
