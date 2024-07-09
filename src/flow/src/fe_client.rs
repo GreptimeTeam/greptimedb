@@ -14,31 +14,110 @@
 
 //! Frontend Client for flownode, used for writing result back to database
 
+use std::fmt::Debug;
+use std::time::Duration;
+
 use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::{
     GreptimeRequest, GreptimeResponse, RequestHeader, RowDeleteRequests, RowInsertRequests,
 };
+use client::frontend::FrontendRequester;
+use client::Client;
 use common_error::ext::BoxedError;
 use common_frontend::handler::FrontendInvoker;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::cluster::{ClusterInfo, Role};
+use common_meta::peer::Peer;
 use common_query::Output;
 use common_telemetry::tracing_context::{TracingContext, W3cTrace};
+use futures::FutureExt;
+use itertools::Itertools;
+use meta_client::MetaClientRef;
+use moka::future::{Cache, CacheBuilder};
 use session::context::{QueryContext, QueryContextRef};
-use snafu::IntoError;
+use snafu::{ensure, IntoError, ResultExt};
 use tokio::sync::Mutex;
 
+use crate::error::{GetFrontendRequesterSnafu, ListFrontendNodesSnafu};
 use crate::{Error, Result};
 
-/// Frontend client for writing result back to database
+#[derive(Clone)]
+struct FrontendPeers {
+    meta_client: MetaClientRef,
+}
+
+impl FrontendPeers {
+    pub fn new(meta_client: MetaClientRef) -> Self {
+        Self { meta_client }
+    }
+
+    pub async fn get_peers(&self) -> Result<Vec<Peer>> {
+        let mut node_infos = self
+            .meta_client
+            .list_nodes(Some(Role::Frontend))
+            .await
+            .context(ListFrontendNodesSnafu)?;
+        node_infos.sort_by(|a, b| b.last_activity_ts.cmp(&a.last_activity_ts));
+        if let Some(last_activity_ts) = node_infos.first().map(|node| node.last_activity_ts) {
+            // Filter out nodes that have been inactive for a long time, as they are likely dead.
+            node_infos.retain(|node| {
+                node.last_activity_ts
+                    >= last_activity_ts - Duration::from_secs(5 * 60).as_millis() as i64
+            })
+        }
+
+        ensure!(
+            !node_infos.is_empty(),
+            GetFrontendRequesterSnafu {
+                reason: "empty frontend nodes"
+            }
+        );
+
+        Ok(node_infos
+            .into_iter()
+            .map(|node_info| node_info.peer)
+            .collect())
+    }
+}
+
 pub struct FrontendClient {
-    client: GreptimeDatabaseClient<tonic::transport::Channel>,
+    channel_manager: ChannelManager,
+    frontend_peers: FrontendPeers,
+    requesters: Cache<String, FrontendRequester>,
 }
 
 impl FrontendClient {
-    pub fn new(channel: tonic::transport::Channel) -> Self {
+    pub fn new(config: ChannelConfig, meta_client: MetaClientRef) -> Self {
         Self {
-            client: GreptimeDatabaseClient::new(channel),
+            channel_manager: ChannelManager::with_config(config),
+            frontend_peers: FrontendPeers::new(meta_client),
+            requesters: CacheBuilder::new(1)
+                .time_to_live(Duration::from_secs(5 * 60))
+                .time_to_idle(Duration::from_secs(5 * 60))
+                .build(),
         }
+    }
+
+    pub async fn get_requester(&self) -> Result<FrontendRequester> {
+        let init = async move {
+            let addrs = self
+                .frontend_peers
+                .get_peers()
+                .await?
+                .into_iter()
+                .map(|peer| peer.addr)
+                .collect::<Vec<_>>();
+            let client = Client::with_manager_and_urls(self.channel_manager.clone(), addrs);
+            Ok(FrontendRequester::new(client))
+        };
+
+        self.requesters
+            .try_get_with_by_ref::<_, Error, _>("single_requester", init)
+            .await
+            .map_err(|e| Error::GetFrontendRequester {
+                reason: e.to_string(),
+            })
     }
 }
 
@@ -59,20 +138,12 @@ fn to_rpc_request(request: Request, ctx: &QueryContext) -> GreptimeRequest {
     }
 }
 
-fn from_rpc_error(e: tonic::Status) -> common_frontend::error::Error {
-    common_frontend::error::ExternalSnafu {}
-        .into_error(BoxedError::new(client::error::Error::from(e)))
+fn from_rpc_error(e: client::error::Error) -> common_frontend::error::Error {
+    common_frontend::error::ExternalSnafu {}.into_error(BoxedError::new(e))
 }
 
-fn resp_to_output(resp: GreptimeResponse) -> Output {
-    let affect_rows = resp
-        .response
-        .map(|r| match r {
-            api::v1::greptime_response::Response::AffectedRows(r) => r.value,
-        })
-        .unwrap_or(0);
-
-    Output::new_with_affected_rows(affect_rows as usize)
+fn from_requester_error(e: Error) -> common_frontend::error::Error {
+    common_frontend::error::ExternalSnafu {}.into_error(BoxedError::new(e))
 }
 
 #[async_trait::async_trait]
@@ -82,14 +153,11 @@ impl FrontendInvoker for FrontendClient {
         requests: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> common_frontend::error::Result<Output> {
+        let requester = self.get_requester().await.map_err(from_requester_error)?;
         let req = to_rpc_request(Request::RowInserts(requests), &ctx);
-        let resp = self
-            .client
-            .clone()
-            .handle(req)
-            .await
-            .map_err(from_rpc_error)?;
-        Ok(resp_to_output(resp.into_inner()))
+        let affect_rows = requester.handle(req).await.map_err(from_rpc_error)?;
+
+        Ok(Output::new_with_affected_rows(affect_rows as usize))
     }
 
     async fn row_deletes(
@@ -97,13 +165,10 @@ impl FrontendInvoker for FrontendClient {
         requests: RowDeleteRequests,
         ctx: QueryContextRef,
     ) -> common_frontend::error::Result<Output> {
+        let requester = self.get_requester().await.map_err(from_requester_error)?;
         let req = to_rpc_request(Request::RowDeletes(requests), &ctx);
-        let resp = self
-            .client
-            .clone()
-            .handle(req)
-            .await
-            .map_err(from_rpc_error)?;
-        Ok(resp_to_output(resp.into_inner()))
+        let affect_rows = requester.handle(req).await.map_err(from_rpc_error)?;
+
+        Ok(Output::new_with_affected_rows(affect_rows as usize))
     }
 }

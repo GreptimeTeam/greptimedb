@@ -45,6 +45,7 @@ hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow.git", branch = "m
 itertools.workspace = true
 meta-client.workspace = true
 minstant = "0.1.7"
+moka = { workspace = true, features = ["future"] }
 nom = "7.1.3"
 num-traits = "0.2"
 prost.workspace = true

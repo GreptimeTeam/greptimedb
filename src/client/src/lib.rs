@@ -20,6 +20,7 @@ pub mod client_manager;
 mod database;
 pub mod error;
 pub mod flow;
+pub mod frontend;
 pub mod load_balance;
 mod metrics;
 pub mod region;

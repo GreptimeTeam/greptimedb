@@ -190,6 +190,16 @@ pub enum Error {
         #[snafu(source)]
         error: std::net::AddrParseError,
     },
+
+    #[snafu(display("Failed to list frontend nodes"))]
+    ListFrontendNodes {
+        #[snafu(implicit)]
+        location: Location,
+        source: meta_client::error::Error,
+    },
+
+    #[snafu(display("Failed to get frontend requester: {reason}"))]
+    GetFrontendRequester { reason: String },
 }
 
 /// Result type for flow module
@@ -198,9 +208,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::Eval { .. } | &Self::JoinTask { .. } | &Self::Datafusion { .. } => {
-                StatusCode::Internal
-            }
+            Self::Eval { .. }
+            | &Self::JoinTask { .. }
+            | &Self::Datafusion { .. }
+            | &Self::GetFrontendRequester { .. } => StatusCode::Internal,
             &Self::TableAlreadyExist { .. } | Self::FlowAlreadyExist { .. } => {
                 StatusCode::TableAlreadyExists
             }
@@ -222,6 +233,7 @@ impl ErrorExt for Error {
             }
             Self::MetaClientInit { source, .. } => source.status_code(),
             Self::ParseAddr { .. } => StatusCode::InvalidArguments,
+            Self::ListFrontendNodes { source, .. } => source.status_code(),
         }
     }
 
