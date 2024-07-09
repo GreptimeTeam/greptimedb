@@ -27,6 +27,7 @@ use datafusion::parquet::file::metadata::ParquetMetaData;
 use datafusion::parquet::format::FileMetaData;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use futures::future::BoxFuture;
 use futures::StreamExt;
@@ -231,10 +232,12 @@ fn column_wise_config(
         props = props.set_column_dictionary_enabled(path, false);
     }
 
-    // Use delta binary packed encoding for all numeric columns.
+    // Use delta binary packed encoding for int32/int64 columns.
     for column in schema.column_schemas() {
         let data_type = &column.data_type;
-        if data_type.is_numeric() {
+        if data_type == &ConcreteDataType::int64_datatype()
+            || data_type == &ConcreteDataType::int32_datatype()
+        {
             let path = ColumnPath::new(vec![column.name.clone()]);
             props = props.set_column_encoding(path, Encoding::DELTA_BINARY_PACKED);
         }
