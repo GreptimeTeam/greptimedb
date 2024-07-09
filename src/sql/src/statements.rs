@@ -802,8 +802,14 @@ mod tests {
         assert_eq!(Value::Binary(Bytes::from(b"Hello world!".as_slice())), v);
 
         let sql_val = SqlValue::DoubleQuotedString("MorningMyFriends".to_string());
-        let v =
-            sql_value_to_value("a", &ConcreteDataType::binary_datatype(), &sql_val, None).unwrap();
+        let v = sql_value_to_value(
+            "a",
+            &ConcreteDataType::binary_datatype(),
+            &sql_val,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             Value::Binary(Bytes::from(b"MorningMyFriends".as_slice())),
             v
