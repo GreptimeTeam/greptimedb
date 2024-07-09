@@ -119,7 +119,7 @@ pub struct FlowWorkerManager {
     /// which is `!Send` so a handle is used
     pub worker_handles: Vec<Mutex<WorkerHandle>>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
-    query_engine: Arc<dyn QueryEngine>,
+    pub query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
     table_info_source: TableSource,
     frontend_invoker: RwLock<Option<Box<FrontendInvoker>>>,

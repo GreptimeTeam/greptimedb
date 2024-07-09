@@ -538,8 +538,10 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
+        let flow_worker_manager = flownode.flow_worker_manager();
         // flow server need to be able to use frontend to write insert requests back
         let invoker = FrontendInvoker::build_from(
+            flow_worker_manager.clone(),
             catalog_manager.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
@@ -547,7 +549,6 @@ impl StartCommand {
         )
         .await
         .context(StartFlownodeSnafu)?;
-        let flow_worker_manager = flownode.flow_worker_manager();
         flow_worker_manager
             .set_frontend_invoker(Box::new(invoker))
             .await;

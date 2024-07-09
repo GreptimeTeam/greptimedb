@@ -219,7 +219,9 @@ impl GreptimeDbStandaloneBuilder {
         .await
         .unwrap();
 
+        let flow_worker_manager = flownode.flow_worker_manager();
         let invoker = flow::FrontendInvoker::build_from(
+            flow_worker_manager.clone(),
             catalog_manager.clone(),
             kv_backend.clone(),
             cache_registry.clone(),
@@ -229,7 +231,6 @@ impl GreptimeDbStandaloneBuilder {
         .context(StartFlownodeSnafu)
         .unwrap();
 
-        let flow_worker_manager = flownode.flow_worker_manager();
         flow_worker_manager
             .set_frontend_invoker(Box::new(invoker))
             .await;

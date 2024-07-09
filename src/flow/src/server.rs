@@ -18,6 +18,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use api::v1::{RowDeleteRequests, RowInsertRequests};
+use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
@@ -345,6 +346,7 @@ impl FrontendInvoker {
     }
 
     pub async fn build_from(
+        flow_worker_manager: FlowWorkerManagerRef,
         catalog_manager: CatalogManagerRef,
         kv_backend: KvBackendRef,
         layered_cache_registry: LayeredCacheRegistryRef,
@@ -352,7 +354,7 @@ impl FrontendInvoker {
     ) -> Result<FrontendInvoker, Error> {
         let table_route_cache: TableRouteCacheRef =
             layered_cache_registry.get().context(CacheRequiredSnafu {
-                name: "table_route_cache",
+                name: TABLE_ROUTE_CACHE_NAME,
             })?;
 
         let partition_manager = Arc::new(PartitionRuleManager::new(
@@ -360,6 +362,8 @@ impl FrontendInvoker {
             table_route_cache.clone(),
         ));
 
+        // frontend to datanode need not timeout.
+        // Some queries are expected to take long time.
         let channel_config = ChannelConfig {
             timeout: None,
             ..Default::default()
@@ -368,7 +372,7 @@ impl FrontendInvoker {
 
         let table_flownode_cache: TableFlownodeSetCacheRef =
             layered_cache_registry.get().context(CacheRequiredSnafu {
-                name: "table_flownode_set_cache",
+                name: TABLE_FLOWNODE_SET_CACHE_NAME,
             })?;
 
         let inserter = Arc::new(Inserter::new(
@@ -384,17 +388,7 @@ impl FrontendInvoker {
             client.clone(),
         ));
 
-        // TODO(discord9): does this query engine need those?
-        let query_engine_factory = QueryEngineFactory::new_with_plugins(
-            // query engine in flownode is only used for translate plan with resolved table source.
-            catalog_manager.clone(),
-            None,
-            None,
-            None,
-            false,
-            Default::default(),
-        );
-        let query_engine = query_engine_factory.query_engine();
+        let query_engine = flow_worker_manager.query_engine.clone();
 
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),

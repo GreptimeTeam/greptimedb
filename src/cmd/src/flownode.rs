@@ -305,6 +305,7 @@ impl StartCommand {
         let flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
         let invoker = FrontendInvoker::build_from(
+            flownode.flow_worker_manager().clone(),
             catalog_manager.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
