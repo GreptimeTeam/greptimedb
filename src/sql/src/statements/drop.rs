@@ -148,12 +148,16 @@ pub struct DropView {
 
 impl Display for DropView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("DROP VIEW")?;
-        if self.drop_if_exists {
-            f.write_str(" IF EXISTS")?;
-        }
-        let view_name = &self.view_name;
-        write!(f, r#" {view_name}"#)
+        write!(
+            f,
+            "DROP VIEW{} {}",
+            if self.drop_if_exists {
+                " IF EXISTS"
+            } else {
+                ""
+            },
+            self.view_name
+        )
     }
 }
 

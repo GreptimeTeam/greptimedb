@@ -21,7 +21,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::AsRefStr;
-use table::metadata::{TableId, TableType};
+use table::metadata::{RawTableInfo, TableId, TableType};
 use table::table_reference::TableReference;
 
 use super::utils::handle_retry_error;
@@ -103,7 +103,6 @@ impl DropViewProcedure {
 
     async fn check_view_metadata(&mut self) -> Result<()> {
         let view_id = self.data.view_id();
-
         let table_info_value = self
             .context
             .table_metadata_manager
@@ -114,17 +113,24 @@ impl DropViewProcedure {
                 table: self.data.table_ref().to_string(),
             })?;
 
-        // Ensure the exists one is view, we can't drop other table types
+        self.ensure_is_view(&table_info_value.table_info)?;
+        self.ensure_view_info_exists(view_id).await?;
+
+        Ok(())
+    }
+
+    fn ensure_is_view(&self, table_info: &RawTableInfo) -> Result<()> {
         ensure!(
-            table_info_value.table_info.table_type == TableType::View,
+            table_info.table_type == TableType::View,
             error::InvalidViewInfoSnafu {
                 err_msg: format!("{} is not a view", self.data.table_ref()),
             }
         );
+        Ok(())
+    }
 
-        // Ensure [ViewInfoValue] exists
-        let _ = self
-            .context
+    async fn ensure_view_info_exists(&self, view_id: TableId) -> Result<()> {
+        self.context
             .table_metadata_manager
             .view_info_manager()
             .get(view_id)
@@ -132,7 +138,6 @@ impl DropViewProcedure {
             .with_context(|| error::ViewNotFoundSnafu {
                 view_name: self.data.table_ref().to_string(),
             })?;
-
         Ok(())
     }
 
