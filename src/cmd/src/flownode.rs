@@ -26,17 +26,16 @@ use common_meta::key::TableMetadataManager;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
-use flow::{FlownodeBuilder, FlownodeInstance};
+use flow::{build_frontend_invoker, FlownodeBuilder, FlownodeInstance};
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
-use tonic::transport::Endpoint;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
     BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
-    MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu, TonicTransportSnafu,
+    MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -228,10 +227,6 @@ impl StartCommand {
 
         let opts = opts.component;
 
-        let frontend_addr = opts.frontend_addr.clone().context(MissingConfigSnafu {
-            msg: "'frontend_addr'",
-        })?;
-
         // TODO(discord9): make it not optionale after cluster id is required
         let cluster_id = opts.cluster_id.unwrap_or(0);
 
@@ -286,7 +281,8 @@ impl StartCommand {
             layered_cache_registry.clone(),
         );
 
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(cached_meta_backend));
+        let table_metadata_manager =
+            Arc::new(TableMetadataManager::new(cached_meta_backend.clone()));
         table_metadata_manager
             .init()
             .await
@@ -310,26 +306,23 @@ impl StartCommand {
             opts,
             Plugins::new(),
             table_metadata_manager,
-            catalog_manager,
+            catalog_manager.clone(),
         )
         .with_heartbeat_task(heartbeat_task);
 
         let flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
-        // set up the lazy connection to the frontend server
-        // TODO(discord9): consider move this to start() or pre_start()?
-        let endpoint =
-            Endpoint::from_shared(frontend_addr.clone()).context(TonicTransportSnafu {
-                msg: Some(format!("Fail to create from addr={}", frontend_addr)),
-            })?;
-        let chnl = endpoint.connect().await.context(TonicTransportSnafu {
-            msg: Some("Fail to connect to frontend".to_string()),
-        })?;
-        info!("Connected to frontend server: {:?}", frontend_addr);
-        let client = flow::FrontendClient::new(chnl);
+        let invoker = build_frontend_invoker(
+            catalog_manager.clone(),
+            cached_meta_backend.clone(),
+            layered_cache_registry.clone(),
+            meta_client.clone(),
+        )
+        .await
+        .context(StartFlownodeSnafu)?;
         flownode
             .flow_worker_manager()
-            .set_frontend_invoker(Box::new(client))
+            .set_frontend_invoker(Box::new(invoker))
             .await;
 
         Ok(Instance::new(flownode, guard))

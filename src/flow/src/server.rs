@@ -17,24 +17,38 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use api::v1::{RowDeleteRequests, RowInsertRequests};
 use catalog::CatalogManagerRef;
+use client::client_manager::NodeClients;
 use common_base::Plugins;
-use common_meta::ddl::table_meta;
+use common_error::ext::BoxedError;
+use common_frontend::handler::FrontendInvoker;
+use common_grpc::channel_manager::ChannelConfig;
+use common_meta::cache::{
+    LayeredCacheRegistry, LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef,
+};
+use common_meta::ddl::{table_meta, ProcedureExecutorRef};
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::Flownode;
+use common_query::Output;
 use common_telemetry::tracing::info;
 use futures::FutureExt;
 use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
 use itertools::Itertools;
 use meta_client::client::MetaClient;
-use query::QueryEngineFactory;
+use operator::delete::Deleter;
+use operator::insert::Inserter;
+use operator::statement::StatementExecutor;
+use partition::manager::PartitionRuleManager;
+use query::{QueryEngine, QueryEngineFactory};
 use serde::de::Unexpected;
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::server::Server;
-use snafu::{ensure, ResultExt};
+use session::context::QueryContextRef;
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
 use tonic::codec::CompressionEncoding;
@@ -42,12 +56,14 @@ use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
 use crate::adapter::FlowWorkerManagerRef;
-use crate::error::{ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu};
+use crate::error::{
+    CacheRequiredSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
+};
 use crate::heartbeat::HeartbeatTask;
 use crate::transform::register_function_to_query_engine;
 use crate::{Error, FlowWorkerManager, FlownodeOptions};
-pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 
+pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
 #[derive(Clone)]
 pub struct FlowService {
@@ -250,7 +266,20 @@ impl FlownodeBuilder {
     }
 
     pub async fn build(self) -> Result<FlownodeInstance, Error> {
-        let manager = Arc::new(self.build_manager().await?);
+        // TODO(discord9): does this query engine need those?
+        let query_engine_factory = QueryEngineFactory::new_with_plugins(
+            // query engine in flownode is only used for translate plan with resolved table source.
+            self.catalog_manager.clone(),
+            None,
+            None,
+            None,
+            false,
+            Default::default(),
+        );
+        let manager = Arc::new(
+            self.build_manager(query_engine_factory.query_engine())
+                .await?,
+        );
         let server = FlownodeServer::new(FlowService::new(manager.clone()));
 
         let heartbeat_task = self.heartbeat_task;
@@ -266,20 +295,11 @@ impl FlownodeBuilder {
 
     /// build [`FlowWorkerManager`], note this doesn't take ownership of `self`,
     /// nor does it actually start running the worker.
-    async fn build_manager(&self) -> Result<FlowWorkerManager, Error> {
-        let catalog_manager = self.catalog_manager.clone();
+    async fn build_manager(
+        &self,
+        query_engine: Arc<dyn QueryEngine>,
+    ) -> Result<FlowWorkerManager, Error> {
         let table_meta = self.table_meta.clone();
-
-        let query_engine_factory = QueryEngineFactory::new_with_plugins(
-            // query engine in flownode is only used for translate plan with resolved table source.
-            catalog_manager,
-            None,
-            None,
-            None,
-            false,
-            self.plugins.clone(),
-        );
-        let query_engine = query_engine_factory.query_engine();
 
         register_function_to_query_engine(&query_engine);
 
@@ -302,4 +322,117 @@ impl FlownodeBuilder {
         info!("Flow Node Manager started");
         Ok(man)
     }
+}
+
+pub struct RemoteFrondendInvoker {
+    inserter: Arc<Inserter>,
+    deleter: Arc<Deleter>,
+    statement_executor: Arc<StatementExecutor>,
+}
+
+impl RemoteFrondendInvoker {
+    pub fn new(
+        inserter: Arc<Inserter>,
+        deleter: Arc<Deleter>,
+        statement_executor: Arc<StatementExecutor>,
+    ) -> Self {
+        Self {
+            inserter,
+            deleter,
+            statement_executor,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl FrontendInvoker for RemoteFrondendInvoker {
+    async fn row_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> common_frontend::error::Result<Output> {
+        self.inserter
+            .handle_row_inserts(requests, ctx, &self.statement_executor)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_frontend::error::ExternalSnafu)
+    }
+
+    async fn row_deletes(
+        &self,
+        requests: RowDeleteRequests,
+        ctx: QueryContextRef,
+    ) -> common_frontend::error::Result<Output> {
+        self.deleter
+            .handle_row_deletes(requests, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_frontend::error::ExternalSnafu)
+    }
+}
+
+pub async fn build_frontend_invoker(
+    catalog_manager: CatalogManagerRef,
+    kv_backend: KvBackendRef,
+    layered_cache_registry: LayeredCacheRegistryRef,
+    procedure_executor: ProcedureExecutorRef,
+) -> Result<RemoteFrondendInvoker, Error> {
+    let table_route_cache: TableRouteCacheRef =
+        layered_cache_registry.get().context(CacheRequiredSnafu {
+            name: "table_route_cache",
+        })?;
+
+    let partition_manager = Arc::new(PartitionRuleManager::new(
+        kv_backend.clone(),
+        table_route_cache.clone(),
+    ));
+
+    let channel_config = ChannelConfig {
+        timeout: None,
+        ..Default::default()
+    };
+    let client = Arc::new(NodeClients::new(channel_config));
+
+    let table_flownode_cache: TableFlownodeSetCacheRef =
+        layered_cache_registry.get().context(CacheRequiredSnafu {
+            name: "table_flownode_set_cache",
+        })?;
+
+    let inserter = Arc::new(Inserter::new(
+        catalog_manager.clone(),
+        partition_manager.clone(),
+        client.clone(),
+        table_flownode_cache,
+    ));
+
+    let deleter = Arc::new(Deleter::new(
+        catalog_manager.clone(),
+        partition_manager.clone(),
+        client.clone(),
+    ));
+
+    // TODO(discord9): does this query engine need those?
+    let query_engine_factory = QueryEngineFactory::new_with_plugins(
+        // query engine in flownode is only used for translate plan with resolved table source.
+        catalog_manager.clone(),
+        None,
+        None,
+        None,
+        false,
+        Default::default(),
+    );
+    let query_engine = query_engine_factory.query_engine();
+
+    let statement_executor = Arc::new(StatementExecutor::new(
+        catalog_manager.clone(),
+        query_engine.clone(),
+        procedure_executor.clone(),
+        kv_backend.clone(),
+        layered_cache_registry.clone(),
+        inserter.clone(),
+        table_route_cache,
+    ));
+
+    let invoker = RemoteFrondendInvoker::new(inserter, deleter, statement_executor);
+    Ok(invoker)
 }

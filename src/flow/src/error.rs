@@ -190,6 +190,13 @@ pub enum Error {
         #[snafu(source)]
         error: std::net::AddrParseError,
     },
+
+    #[snafu(display("Failed to get cache from cache registry: {}", name))]
+    CacheRequired {
+        #[snafu(implicit)]
+        location: Location,
+        name: String,
+    },
 }
 
 /// Result type for flow module
@@ -216,7 +223,7 @@ impl ErrorExt for Error {
                 StatusCode::Unsupported
             }
             Self::External { source, .. } => source.status_code(),
-            Self::Internal { .. } => StatusCode::Internal,
+            Self::Internal { .. } | Self::CacheRequired { .. } => StatusCode::Internal,
             Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
                 source.status_code()
             }

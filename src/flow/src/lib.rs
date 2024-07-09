@@ -38,4 +38,7 @@ mod utils;
 pub use adapter::{FlowWorkerManager, FlowWorkerManagerRef, FlownodeOptions};
 pub use error::{Error, Result};
 pub use fe_client::FrontendClient;
-pub use server::{FlownodeBuilder, FlownodeInstance, FlownodeServer};
+pub use server::{
+    build_frontend_invoker, FlownodeBuilder, FlownodeInstance, FlownodeServer,
+    RemoteFrondendInvoker,
+};

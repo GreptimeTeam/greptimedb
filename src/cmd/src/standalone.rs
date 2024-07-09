@@ -44,7 +44,7 @@ use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
-use flow::FlownodeBuilder;
+use flow::{build_frontend_invoker, FlownodeBuilder};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
@@ -66,8 +66,9 @@ use tracing_appender::non_blocking::WorkerGuard;
 use crate::error::{
     BuildCacheRegistrySnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu,
     InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, OtherSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
-    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
+    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFlownodeSnafu,
+    StartFrontendSnafu, StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu,
+    StopProcedureManagerSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -447,6 +448,12 @@ impl StartCommand {
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
 
+        let datanode = DatanodeBuilder::new(dn_opts, fe_plugins.clone())
+            .with_kv_backend(kv_backend.clone())
+            .build()
+            .await
+            .context(StartDatanodeSnafu)?;
+
         let flow_builder = FlownodeBuilder::new(
             Default::default(),
             fe_plugins.clone(),
@@ -460,12 +467,6 @@ impl StartCommand {
                 .map_err(BoxedError::new)
                 .context(OtherSnafu)?,
         );
-
-        let datanode = DatanodeBuilder::new(dn_opts, fe_plugins.clone())
-            .with_kv_backend(kv_backend.clone())
-            .build()
-            .await
-            .context(StartDatanodeSnafu)?;
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
@@ -510,11 +511,11 @@ impl StartCommand {
 
         let mut frontend = FrontendBuilder::new(
             fe_opts.clone(),
-            kv_backend,
-            layered_cache_registry,
-            catalog_manager,
+            kv_backend.clone(),
+            layered_cache_registry.clone(),
+            catalog_manager.clone(),
             node_manager,
-            ddl_task_executor,
+            ddl_task_executor.clone(),
         )
         .with_plugin(fe_plugins.clone())
         .try_build()
@@ -522,9 +523,17 @@ impl StartCommand {
         .context(StartFrontendSnafu)?;
 
         // flow server need to be able to use frontend to write insert requests back
+        let invoker = build_frontend_invoker(
+            catalog_manager.clone(),
+            kv_backend.clone(),
+            layered_cache_registry.clone(),
+            ddl_task_executor.clone(),
+        )
+        .await
+        .context(StartFlownodeSnafu)?;
         let flow_worker_manager = flownode.flow_worker_manager();
         flow_worker_manager
-            .set_frontend_invoker(Box::new(frontend.clone()))
+            .set_frontend_invoker(Box::new(invoker))
             .await;
         // TODO(discord9): unify with adding `start` and `shutdown` method to flownode too.
         let _handle = flow_worker_manager.run_background();

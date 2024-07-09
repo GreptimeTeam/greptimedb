@@ -1703,6 +1703,7 @@ dependencies = [
 name = "cmd"
 version = "0.8.2"
 dependencies = [
+ "api",
  "async-trait",
  "auth",
  "base64 0.21.7",
@@ -1715,6 +1716,7 @@ dependencies = [
  "common-catalog",
  "common-config",
  "common-error",
+ "common-frontend",
  "common-grpc",
  "common-macro",
  "common-meta",
@@ -3796,6 +3798,8 @@ dependencies = [
  "minstant",
  "nom",
  "num-traits",
+ "operator",
+ "partition",
  "pretty_assertions",
  "prost 0.12.6",
  "query",
