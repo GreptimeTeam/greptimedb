@@ -231,9 +231,7 @@ impl GreptimeDbStandaloneBuilder {
         .context(StartFlownodeSnafu)
         .unwrap();
 
-        flow_worker_manager
-            .set_frontend_invoker(Box::new(invoker))
-            .await;
+        flow_worker_manager.set_frontend_invoker(invoker).await;
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();

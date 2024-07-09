@@ -315,7 +315,7 @@ impl StartCommand {
         .context(StartFlownodeSnafu)?;
         flownode
             .flow_worker_manager()
-            .set_frontend_invoker(Box::new(invoker))
+            .set_frontend_invoker(invoker)
             .await;
 
         Ok(Instance::new(flownode, guard))

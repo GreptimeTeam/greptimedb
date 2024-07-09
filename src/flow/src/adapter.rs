@@ -122,7 +122,7 @@ pub struct FlowWorkerManager {
     pub query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
     table_info_source: TableSource,
-    frontend_invoker: RwLock<Option<Box<FrontendInvoker>>>,
+    frontend_invoker: RwLock<Option<FrontendInvoker>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
@@ -134,7 +134,7 @@ pub struct FlowWorkerManager {
 /// Building FlownodeManager
 impl FlowWorkerManager {
     /// set frontend invoker
-    pub async fn set_frontend_invoker(&self, frontend: Box<FrontendInvoker>) {
+    pub async fn set_frontend_invoker(&self, frontend: FrontendInvoker) {
         *self.frontend_invoker.write().await = Some(frontend);
     }
 

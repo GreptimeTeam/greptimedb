@@ -549,9 +549,7 @@ impl StartCommand {
         )
         .await
         .context(StartFlownodeSnafu)?;
-        flow_worker_manager
-            .set_frontend_invoker(Box::new(invoker))
-            .await;
+        flow_worker_manager.set_frontend_invoker(invoker).await;
 
         let (tx, _rx) = broadcast::channel(1);
 
