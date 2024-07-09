@@ -52,10 +52,11 @@ pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Ident;
 use sql::parser::ParserContext;
-use sql::statements::create::{CreateFlow, Partitions};
+use sql::statements::create::{CreateFlow, CreateView, Partitions};
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTableStatus, ShowTables, ShowVariables,
 };
+use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
@@ -143,6 +144,13 @@ static SHOW_CREATE_FLOW_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
         ColumnSchema::new("Flow", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("Create Flow", ConcreteDataType::string_datatype(), false),
+    ]))
+});
+
+static SHOW_CREATE_VIEW_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("View", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Create View", ConcreteDataType::string_datatype(), false),
     ]))
 });
 
@@ -678,6 +686,40 @@ pub fn show_create_table(
         Arc::new(StringVector::from(vec![sql])) as _,
     ];
     let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
+        .context(error::CreateRecordBatchSnafu)?;
+
+    Ok(Output::new_with_record_batches(records))
+}
+
+pub fn show_create_view(
+    view_name: ObjectName,
+    definition: &str,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let mut parser_ctx =
+        ParserContext::new(query_ctx.sql_dialect(), definition).context(error::SqlSnafu)?;
+
+    let Statement::CreateView(create_view) =
+        parser_ctx.parse_statement().context(error::SqlSnafu)?
+    else {
+        // MUST be `CreateView` statement.
+        unreachable!();
+    };
+
+    let stmt = CreateView {
+        name: view_name.clone(),
+        columns: create_view.columns,
+        query: create_view.query,
+        or_replace: create_view.or_replace,
+        if_not_exists: create_view.if_not_exists,
+    };
+
+    let sql = format!("{}", stmt);
+    let columns = vec![
+        Arc::new(StringVector::from(vec![view_name.to_string()])) as _,
+        Arc::new(StringVector::from(vec![sql])) as _,
+    ];
+    let records = RecordBatches::try_from_columns(SHOW_CREATE_VIEW_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
 
     Ok(Output::new_with_record_batches(records))

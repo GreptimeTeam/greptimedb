@@ -120,6 +120,13 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to get schema from logical plan"))]
+    GetSchema {
+        #[snafu(implicit)]
+        location: Location,
+        source: query::error::Error,
+    },
+
     #[snafu(display("Column datatype error"))]
     ColumnDataType {
         #[snafu(implicit)]
@@ -137,6 +144,15 @@ pub enum Error {
 
     #[snafu(display("Invalid statement to create view"))]
     InvalidViewStmt {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Expect {expected} columns for view {view_name}, but found {actual}"))]
+    ViewColumnsMismatch {
+        view_name: String,
+        expected: usize,
+        actual: usize,
         #[snafu(implicit)]
         location: Location,
     },
@@ -203,6 +219,28 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: catalog::error::Error,
+    },
+
+    #[snafu(display("Failed to find view info for: {}", view_name))]
+    FindViewInfo {
+        view_name: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("View info not found: {}", view_name))]
+    ViewInfoNotFound {
+        view_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("View not found: {}", view_name))]
+    ViewNotFound {
+        view_name: String,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to find table partition rule for table {}", table_name))]
@@ -740,6 +778,7 @@ impl ErrorExt for Error {
             | Error::InvalidTableName { .. }
             | Error::InvalidViewName { .. }
             | Error::InvalidExpr { .. }
+            | Error::ViewColumnsMismatch { .. }
             | Error::InvalidViewStmt { .. }
             | Error::ConvertIdentifier { .. }
             | Error::InvalidPartition { .. } => StatusCode::InvalidArguments,
@@ -770,7 +809,9 @@ impl ErrorExt for Error {
             | Error::CreateTableInfo { source, .. }
             | Error::IntoVectors { source, .. } => source.status_code(),
 
-            Error::RequestInserts { source, .. } => source.status_code(),
+            Error::RequestInserts { source, .. } | Error::FindViewInfo { source, .. } => {
+                source.status_code()
+            }
             Error::RequestRegion { source, .. } => source.status_code(),
             Error::RequestDeletes { source, .. } => source.status_code(),
             Error::SubstraitCodec { source, .. } => source.status_code(),
@@ -787,7 +828,10 @@ impl ErrorExt for Error {
 
             Error::EncodeJson { .. } => StatusCode::Unexpected,
 
-            Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::ViewNotFound { .. }
+            | Error::ViewInfoNotFound { .. }
+            | Error::TableNotFound { .. } => StatusCode::TableNotFound,
+
             Error::FlowNotFound { .. } => StatusCode::FlowNotFound,
 
             Error::JoinTask { .. } => StatusCode::Internal,
@@ -804,6 +848,7 @@ impl ErrorExt for Error {
             | Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
 
             Error::ExecuteStatement { source, .. }
+            | Error::GetSchema { source, .. }
             | Error::ExtractTableNames { source, .. }
             | Error::PlanStatement { source, .. }
             | Error::ParseQuery { source, .. }

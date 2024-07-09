@@ -24,7 +24,7 @@ use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr, KeyOrIndexDi
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
-use sqlparser::parser::Parser;
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
 use table::requests::validate_table_option;
 
@@ -125,6 +125,8 @@ impl<'a> ParserContext<'a> {
         let if_not_exists = self.parse_if_not_exist()?;
         let view_name = self.intern_parse_table_name()?;
 
+        let columns = self.parse_view_columns()?;
+
         self.parser
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
@@ -133,10 +135,34 @@ impl<'a> ParserContext<'a> {
 
         Ok(Statement::CreateView(CreateView {
             name: view_name,
+            columns,
             or_replace,
             query: Box::new(query),
             if_not_exists,
         }))
+    }
+
+    fn parse_view_columns(&mut self) -> Result<Vec<Ident>> {
+        let mut columns = vec![];
+        if !self.parser.consume_token(&Token::LParen) || self.parser.consume_token(&Token::RParen) {
+            return Ok(columns);
+        }
+
+        loop {
+            let name = self.parse_column_name().context(SyntaxSnafu)?;
+
+            columns.push(name);
+
+            let comma = self.parser.consume_token(&Token::Comma);
+            if self.parser.consume_token(&Token::RParen) {
+                // allow a trailing comma, even though it's not in standard
+                break;
+            } else if !comma {
+                return self.expected("',' or ')' after column name", self.parser.peek_token());
+            }
+        }
+
+        Ok(columns)
     }
 
     fn parse_create_external_table(&mut self) -> Result<Statement> {
@@ -547,10 +573,26 @@ impl<'a> ParserContext<'a> {
         Ok(())
     }
 
+    /// Parse the column name and check if it's valid.
+    fn parse_column_name(&mut self) -> std::result::Result<Ident, ParserError> {
+        let name = self.parser.parse_identifier(false)?;
+        if name.quote_style.is_none() &&
+        // "ALL_KEYWORDS" are sorted.
+            ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()
+        {
+            return Err(ParserError::ParserError(format!(
+                "Cannot use keyword '{}' as column name. Hint: add quotes to the name.",
+                &name.value
+            )));
+        }
+
+        Ok(name)
+    }
+
     pub fn parse_column_def(&mut self) -> Result<Column> {
+        let name = self.parse_column_name().context(SyntaxSnafu)?;
         let parser = &mut self.parser;
 
-        let name = parser.parse_identifier(false).context(SyntaxSnafu)?;
         ensure!(
             !(name.quote_style.is_none() &&
             // "ALL_KEYWORDS" are sorted.
@@ -2008,5 +2050,86 @@ CREATE TABLE log (
             .unwrap_err()
             .to_string()
             .contains("invalid FULLTEXT option"));
+    }
+
+    #[test]
+    fn test_parse_create_view_with_columns() {
+        let sql = "CREATE VIEW test () AS SELECT * FROM NUMBERS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        match &result[0] {
+            Statement::CreateView(c) => {
+                assert_eq!(c.to_string(), "CREATE VIEW test AS SELECT * FROM NUMBERS");
+                assert!(!c.or_replace);
+                assert!(!c.if_not_exists);
+                assert_eq!("test", c.name.to_string());
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            "CREATE VIEW test AS SELECT * FROM NUMBERS",
+            result[0].to_string()
+        );
+
+        let sql = "CREATE VIEW test (n1) AS SELECT * FROM NUMBERS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        match &result[0] {
+            Statement::CreateView(c) => {
+                assert_eq!(c.to_string(), sql);
+                assert!(!c.or_replace);
+                assert!(!c.if_not_exists);
+                assert_eq!("test", c.name.to_string());
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(sql, result[0].to_string());
+
+        let sql = "CREATE VIEW test (n1, n2) AS SELECT * FROM NUMBERS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        match &result[0] {
+            Statement::CreateView(c) => {
+                assert_eq!(c.to_string(), sql);
+                assert!(!c.or_replace);
+                assert!(!c.if_not_exists);
+                assert_eq!("test", c.name.to_string());
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(sql, result[0].to_string());
+
+        // Some invalid syntax cases
+        let sql = "CREATE VIEW test (n1 AS select * from demo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+
+        let sql = "CREATE VIEW test (n1, AS select * from demo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+
+        let sql = "CREATE VIEW test n1,n2) AS select * from demo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+
+        let sql = "CREATE VIEW test (1) AS select * from demo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+
+        // keyword
+        let sql = "CREATE VIEW test (n1, select) AS select * from demo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
     }
 }

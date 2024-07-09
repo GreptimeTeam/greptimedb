@@ -400,8 +400,38 @@ impl StatementExecutor {
                 return InvalidViewStmtSnafu {}.fail();
             }
         };
+        // Save the definition for `show create view`.
+        let definition = create_view.to_string();
 
-        // Extract the table names from the origin plan
+        // Save the columns in plan, it may changed when the schemas of tables in plan
+        // are altered.
+        let plan_columns: Vec<_> = logical_plan
+            .schema()
+            .context(error::GetSchemaSnafu)?
+            .column_schemas()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+
+        let columns: Vec<_> = create_view
+            .columns
+            .iter()
+            .map(|ident| ident.to_string())
+            .collect();
+
+        // Validate columns
+        if !columns.is_empty() {
+            ensure!(
+                columns.len() == plan_columns.len(),
+                error::ViewColumnsMismatchSnafu {
+                    view_name: create_view.name.to_string(),
+                    expected: plan_columns.len(),
+                    actual: columns.len(),
+                }
+            );
+        }
+
+        // Extract the table names from the original plan
         // and rewrite them as fully qualified names.
         let (table_names, plan) =
             extract_and_rewrite_full_table_names(logical_plan.unwrap_df_plan(), ctx.clone())
@@ -423,6 +453,9 @@ impl StatementExecutor {
             create_view,
             encoded_plan.to_vec(),
             table_names,
+            columns,
+            plan_columns,
+            definition,
             ctx.clone(),
         )?;
 
@@ -539,6 +572,12 @@ impl StatementExecutor {
             })?;
         info!("Successfully created view '{view_name}' with view id {view_id}");
 
+        view_info.ident.table_id = view_id;
+
+        let view_info = Arc::new(view_info.try_into().context(CreateTableInfoSnafu)?);
+
+        let table = DistTable::table(view_info);
+
         // Invalidates local cache ASAP.
         self.cache_invalidator
             .invalidate(
@@ -550,12 +589,6 @@ impl StatementExecutor {
             )
             .await
             .context(error::InvalidateTableCacheSnafu)?;
-
-        view_info.ident.table_id = view_id;
-
-        let view_info = Arc::new(view_info.try_into().context(CreateTableInfoSnafu)?);
-
-        let table = DistTable::table(view_info);
 
         Ok(table)
     }
