@@ -62,6 +62,11 @@ impl DropViewProcedure {
         Ok(Self { context, data })
     }
 
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> DropViewState {
+        self.data.state
+    }
+
     /// Checks whether view exists.
     /// - Early returns if view not exists and `drop_if_exists` is `true`.
     /// - Throws an error if view not exists and `drop_if_exists` is `false`.
@@ -92,6 +97,7 @@ impl DropViewProcedure {
 
         self.check_view_metadata().await?;
         self.data.state = DropViewState::DeleteMetadata;
+
         Ok(Status::executing(true))
     }
 
@@ -220,8 +226,8 @@ impl DropViewData {
 }
 
 /// The state of drop view
-#[derive(Debug, Serialize, Deserialize, AsRefStr, PartialEq)]
-enum DropViewState {
+#[derive(Debug, Serialize, Deserialize, AsRefStr, PartialEq, Clone, Copy)]
+pub(crate) enum DropViewState {
     /// Prepares to drop the view
     Prepare,
     /// Deletes metadata

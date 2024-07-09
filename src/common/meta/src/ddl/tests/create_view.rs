@@ -32,7 +32,7 @@ use crate::error::Error;
 use crate::rpc::ddl::CreateViewTask;
 use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
-fn test_table_names() -> HashSet<table::table_name::TableName> {
+pub(crate) fn test_table_names() -> HashSet<table::table_name::TableName> {
     let mut set = HashSet::new();
     set.insert(table::table_name::TableName {
         catalog_name: "greptime".to_string(),
