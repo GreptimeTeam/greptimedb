@@ -24,7 +24,7 @@ use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr, KeyOrIndexDi
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
-use sqlparser::parser::Parser;
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
 use table::requests::validate_table_option;
 
@@ -590,7 +590,7 @@ impl<'a> ParserContext<'a> {
     }
 
     pub fn parse_column_def(&mut self) -> Result<Column> {
-        let name = self.parse_column_name()?;
+        let name = self.parse_column_name().context(SyntaxSnafu)?;
         let parser = &mut self.parser;
 
         ensure!(
@@ -2052,6 +2052,7 @@ CREATE TABLE log (
             .contains("invalid FULLTEXT option"));
     }
 
+    #[test]
     fn test_parse_create_view_with_columns() {
         let sql = "CREATE VIEW test () AS SELECT * FROM NUMBERS";
         let result =

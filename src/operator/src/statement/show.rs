@@ -23,8 +23,8 @@ use snafu::{OptionExt, ResultExt};
 use sql::ast::Ident;
 use sql::statements::create::Partitions;
 use sql::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowIndex, ShowKind, ShowTables,
-    ShowVariables,ShowTableStatus
+    ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowIndex, ShowKind,
+    ShowTableStatus, ShowTables, ShowVariables,
 };
 use table::metadata::TableType;
 use table::table_name::TableName;
