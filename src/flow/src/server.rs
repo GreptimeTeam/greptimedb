@@ -22,7 +22,6 @@ use catalog::CatalogManagerRef;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
-use common_frontend::handler::FrontendInvoker;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{
     LayeredCacheRegistry, LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef,
@@ -50,7 +49,7 @@ use servers::server::Server;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot, Mutex};
 use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
@@ -121,7 +120,7 @@ impl flow_server::Flow for FlowService {
 }
 
 pub struct FlownodeServer {
-    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    shutdown_tx: Mutex<Option<broadcast::Sender<()>>>,
     flow_service: FlowService,
 }
 
@@ -158,7 +157,8 @@ impl servers::server::Server for FlownodeServer {
         Ok(())
     }
     async fn start(&self, addr: SocketAddr) -> Result<SocketAddr, servers::error::Error> {
-        let (tx, rx) = oneshot::channel::<()>();
+        let (tx, rx) = broadcast::channel::<()>(1);
+        let mut rx_server = tx.subscribe();
         let (incoming, addr) = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
             ensure!(
@@ -179,15 +179,16 @@ impl servers::server::Server for FlownodeServer {
         };
 
         let builder = tonic::transport::Server::builder().add_service(self.create_flow_service());
+
         let _handle = common_runtime::spawn_bg(async move {
             let _result = builder
-                .serve_with_incoming_shutdown(incoming, rx.map(drop))
+                .serve_with_incoming_shutdown(incoming, rx_server.recv().map(drop))
                 .await
                 .context(StartGrpcSnafu);
         });
 
         let manager_ref = self.flow_service.manager.clone();
-        let _handle = manager_ref.clone().run_background();
+        let _handle = manager_ref.clone().run_background(Some(rx));
 
         Ok(addr)
     }
@@ -410,9 +411,8 @@ impl RemoteFrondendInvoker {
     }
 }
 
-#[async_trait::async_trait]
-impl FrontendInvoker for RemoteFrondendInvoker {
-    async fn row_inserts(
+impl RemoteFrondendInvoker {
+    pub async fn row_inserts(
         &self,
         requests: RowInsertRequests,
         ctx: QueryContextRef,
@@ -424,7 +424,7 @@ impl FrontendInvoker for RemoteFrondendInvoker {
             .context(common_frontend::error::ExternalSnafu)
     }
 
-    async fn row_deletes(
+    pub async fn row_deletes(
         &self,
         requests: RowDeleteRequests,
         ctx: QueryContextRef,

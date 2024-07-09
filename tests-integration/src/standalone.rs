@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::KvBackendCatalogManager;
+use cmd::error::StartFlownodeSnafu;
 use cmd::standalone::StandaloneOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
@@ -40,6 +41,7 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::Mode;
+use snafu::ResultExt;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
 
@@ -207,30 +209,30 @@ impl GreptimeDbStandaloneBuilder {
         let instance = FrontendBuilder::new(
             opts.frontend_options(),
             kv_backend.clone(),
-            cache_registry,
+            cache_registry.clone(),
             catalog_manager.clone(),
             node_manager,
-            ddl_task_executor,
+            ddl_task_executor.clone(),
         )
         .with_plugin(plugins)
         .try_build()
         .await
         .unwrap();
 
-        let invoker = RemoteFrondendInvoker::build_from(
+        let invoker = flow::RemoteFrondendInvoker::build_from(
             catalog_manager.clone(),
             kv_backend.clone(),
-            layered_cache_registry.clone(),
+            cache_registry.clone(),
             ddl_task_executor.clone(),
         )
         .await
-        .context(StartFlownodeSnafu)?;
+        .context(StartFlownodeSnafu)
+        .unwrap();
+
         let flow_worker_manager = flownode.flow_worker_manager();
         flow_worker_manager
             .set_frontend_invoker(Box::new(invoker))
             .await;
-
-        let _node_handle = flow_manager.run_background();
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();

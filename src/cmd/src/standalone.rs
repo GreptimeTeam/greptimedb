@@ -44,7 +44,7 @@ use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
-use flow::{FlownodeBuilder, RemoteFrondendInvoker};
+use flow::{FlowWorkerManager, FlownodeBuilder, RemoteFrondendInvoker};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
@@ -61,14 +61,15 @@ use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
+use tokio::sync::broadcast;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
     BuildCacheRegistrySnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu,
     InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, OtherSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFlownodeSnafu,
-    StartFrontendSnafu, StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu,
-    StopProcedureManagerSnafu,
+    ShutdownDatanodeSnafu, ShutdownFlownodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,
+    StartFlownodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
+    StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -215,6 +216,9 @@ impl StandaloneOptions {
 pub struct Instance {
     datanode: Datanode,
     frontend: FeInstance,
+    // TODO(discord9): wrapped it in flownode instance instead
+    flow_worker_manager: Arc<FlowWorkerManager>,
+    flow_shutdown: broadcast::Sender<()>,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
 
@@ -246,6 +250,9 @@ impl App for Instance {
             .context(StartFrontendSnafu)?;
 
         self.frontend.start().await.context(StartFrontendSnafu)?;
+        self.flow_worker_manager
+            .clone()
+            .run_background(Some(self.flow_shutdown.subscribe()));
         Ok(())
     }
 
@@ -264,6 +271,15 @@ impl App for Instance {
             .shutdown()
             .await
             .context(ShutdownDatanodeSnafu)?;
+        self.flow_shutdown
+            .send(())
+            .map_err(|_e| {
+                flow::error::InternalSnafu {
+                    reason: "Failed to send shutdown signal to flow worker manager, all receiver end already closed".to_string(),
+                }
+                .build()
+            })
+            .context(ShutdownFlownodeSnafu)?;
         info!("Datanode instance stopped.");
 
         Ok(())
@@ -535,8 +551,8 @@ impl StartCommand {
         flow_worker_manager
             .set_frontend_invoker(Box::new(invoker))
             .await;
-        // TODO(discord9): unify with adding `start` and `shutdown` method to flownode too.
-        let _handle = flow_worker_manager.run_background();
+
+        let (tx, _rx) = broadcast::channel(1);
 
         let servers = Services::new(fe_opts, Arc::new(frontend.clone()), fe_plugins)
             .build()
@@ -549,6 +565,8 @@ impl StartCommand {
         Ok(Instance {
             datanode,
             frontend,
+            flow_worker_manager,
+            flow_shutdown: tx,
             procedure_manager,
             wal_options_allocator,
             _guard: guard,
