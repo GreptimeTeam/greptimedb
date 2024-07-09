@@ -27,12 +27,14 @@ use datafusion::parquet::file::metadata::ParquetMetaData;
 use datafusion::parquet::format::FileMetaData;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datatypes::schema::SchemaRef;
 use futures::future::BoxFuture;
 use futures::StreamExt;
 use object_store::{FuturesAsyncReader, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
-use parquet::basic::{Compression, ZstdLevel};
-use parquet::file::properties::WriterProperties;
+use parquet::basic::{Compression, Encoding, ZstdLevel};
+use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
+use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
@@ -184,14 +186,16 @@ impl ArrowWriterCloser for ArrowWriter<SharedBuffer> {
 /// Returns number of rows written.
 pub async fn stream_to_parquet(
     mut stream: SendableRecordBatchStream,
+    schema: datatypes::schema::SchemaRef,
     store: ObjectStore,
     path: &str,
     concurrency: usize,
 ) -> Result<usize> {
-    let write_props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        .build();
-    let schema = stream.schema();
+    let write_props = column_wise_config(
+        WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::default())),
+        schema,
+    )
+    .build();
     let inner_writer = store
         .writer_with(path)
         .concurrent(concurrency)
@@ -200,7 +204,7 @@ pub async fn stream_to_parquet(
         .map(|w| w.into_futures_async_write().compat_write())
         .context(WriteObjectSnafu { path })?;
 
-    let mut writer = AsyncArrowWriter::try_new(inner_writer, schema, Some(write_props))
+    let mut writer = AsyncArrowWriter::try_new(inner_writer, stream.schema(), Some(write_props))
         .context(WriteParquetSnafu { path })?;
     let mut rows_written = 0;
 
@@ -214,6 +218,29 @@ pub async fn stream_to_parquet(
     }
     writer.close().await.context(WriteParquetSnafu { path })?;
     Ok(rows_written)
+}
+
+/// Customizes per-column properties.
+fn column_wise_config(
+    mut props: WriterPropertiesBuilder,
+    schema: SchemaRef,
+) -> WriterPropertiesBuilder {
+    // Disable dictionary for timestamp column.
+    if let Some(ts_col) = schema.timestamp_column() {
+        let path = ColumnPath::new(vec![ts_col.name.clone()]);
+        props = props.set_column_dictionary_enabled(path, false);
+    }
+
+    // Use delta binary packed encoding for all numeric columns.
+    for column in schema.column_schemas() {
+        let data_type = &column.data_type;
+        if data_type.is_numeric() {
+            let path = ColumnPath::new(vec![column.name.clone()]);
+            props = props.set_column_encoding(path, Encoding::DELTA_BINARY_PACKED);
+        }
+    }
+
+    props
 }
 
 #[cfg(test)]
