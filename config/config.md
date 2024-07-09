@@ -454,7 +454,6 @@
 | --- | -----| ------- | ----------- |
 | `mode` | String | `distributed` | The running mode of the flownode. It can be `standalone` or `distributed`. |
 | `node_id` | Integer | `None` | The flownode identifier and should be unique in the cluster. |
-| `frontend_addr` | String | `http://127.0.0.1:4001` | Frontend grpc address. Used by flownode to write result back to frontend. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:6800` | The address to bind the gRPC server. |
 | `grpc.hostname` | String | `127.0.0.1` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |

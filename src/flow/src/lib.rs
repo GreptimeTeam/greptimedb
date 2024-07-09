@@ -25,9 +25,8 @@
 // allow unused for now because it should be use later
 mod adapter;
 mod compute;
-mod error;
+pub mod error;
 mod expr;
-mod fe_client;
 pub mod heartbeat;
 mod plan;
 mod repr;
@@ -37,5 +36,4 @@ mod utils;
 
 pub use adapter::{FlowWorkerManager, FlowWorkerManagerRef, FlownodeOptions};
 pub use error::{Error, Result};
-pub use fe_client::FrontendClient;
-pub use server::{FlownodeBuilder, FlownodeInstance, FlownodeServer};
+pub use server::{FlownodeBuilder, FlownodeInstance, FlownodeServer, FrontendInvoker};
