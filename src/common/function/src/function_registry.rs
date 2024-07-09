@@ -22,6 +22,7 @@ use crate::function::FunctionRef;
 use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
+use crate::scalars::matches::MatchesFunction;
 use crate::scalars::math::MathFunction;
 use crate::scalars::numpy::NumpyFunction;
 use crate::scalars::timestamp::TimestampFunction;
@@ -85,6 +86,9 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
 
     // Aggregate functions
     AggregateFunctions::register(&function_registry);
+
+    // Full text search function
+    MatchesFunction::register(&function_registry);
 
     // System and administration functions
     SystemFunction::register(&function_registry);
