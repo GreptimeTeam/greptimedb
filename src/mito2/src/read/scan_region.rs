@@ -521,7 +521,7 @@ impl ScanInput {
         self
     }
 
-    /// Sets the series selector.
+    /// Sets the time series row selector.
     #[must_use]
     pub(crate) fn with_series_row_selector(
         mut self,
