@@ -342,6 +342,72 @@ impl RemoteFrondendInvoker {
             statement_executor,
         }
     }
+
+    pub async fn build_from(
+        catalog_manager: CatalogManagerRef,
+        kv_backend: KvBackendRef,
+        layered_cache_registry: LayeredCacheRegistryRef,
+        procedure_executor: ProcedureExecutorRef,
+    ) -> Result<RemoteFrondendInvoker, Error> {
+        let table_route_cache: TableRouteCacheRef =
+            layered_cache_registry.get().context(CacheRequiredSnafu {
+                name: "table_route_cache",
+            })?;
+
+        let partition_manager = Arc::new(PartitionRuleManager::new(
+            kv_backend.clone(),
+            table_route_cache.clone(),
+        ));
+
+        let channel_config = ChannelConfig {
+            timeout: None,
+            ..Default::default()
+        };
+        let client = Arc::new(NodeClients::new(channel_config));
+
+        let table_flownode_cache: TableFlownodeSetCacheRef =
+            layered_cache_registry.get().context(CacheRequiredSnafu {
+                name: "table_flownode_set_cache",
+            })?;
+
+        let inserter = Arc::new(Inserter::new(
+            catalog_manager.clone(),
+            partition_manager.clone(),
+            client.clone(),
+            table_flownode_cache,
+        ));
+
+        let deleter = Arc::new(Deleter::new(
+            catalog_manager.clone(),
+            partition_manager.clone(),
+            client.clone(),
+        ));
+
+        // TODO(discord9): does this query engine need those?
+        let query_engine_factory = QueryEngineFactory::new_with_plugins(
+            // query engine in flownode is only used for translate plan with resolved table source.
+            catalog_manager.clone(),
+            None,
+            None,
+            None,
+            false,
+            Default::default(),
+        );
+        let query_engine = query_engine_factory.query_engine();
+
+        let statement_executor = Arc::new(StatementExecutor::new(
+            catalog_manager.clone(),
+            query_engine.clone(),
+            procedure_executor.clone(),
+            kv_backend.clone(),
+            layered_cache_registry.clone(),
+            inserter.clone(),
+            table_route_cache,
+        ));
+
+        let invoker = RemoteFrondendInvoker::new(inserter, deleter, statement_executor);
+        Ok(invoker)
+    }
 }
 
 #[async_trait::async_trait]
@@ -369,70 +435,4 @@ impl FrontendInvoker for RemoteFrondendInvoker {
             .map_err(BoxedError::new)
             .context(common_frontend::error::ExternalSnafu)
     }
-}
-
-pub async fn build_frontend_invoker(
-    catalog_manager: CatalogManagerRef,
-    kv_backend: KvBackendRef,
-    layered_cache_registry: LayeredCacheRegistryRef,
-    procedure_executor: ProcedureExecutorRef,
-) -> Result<RemoteFrondendInvoker, Error> {
-    let table_route_cache: TableRouteCacheRef =
-        layered_cache_registry.get().context(CacheRequiredSnafu {
-            name: "table_route_cache",
-        })?;
-
-    let partition_manager = Arc::new(PartitionRuleManager::new(
-        kv_backend.clone(),
-        table_route_cache.clone(),
-    ));
-
-    let channel_config = ChannelConfig {
-        timeout: None,
-        ..Default::default()
-    };
-    let client = Arc::new(NodeClients::new(channel_config));
-
-    let table_flownode_cache: TableFlownodeSetCacheRef =
-        layered_cache_registry.get().context(CacheRequiredSnafu {
-            name: "table_flownode_set_cache",
-        })?;
-
-    let inserter = Arc::new(Inserter::new(
-        catalog_manager.clone(),
-        partition_manager.clone(),
-        client.clone(),
-        table_flownode_cache,
-    ));
-
-    let deleter = Arc::new(Deleter::new(
-        catalog_manager.clone(),
-        partition_manager.clone(),
-        client.clone(),
-    ));
-
-    // TODO(discord9): does this query engine need those?
-    let query_engine_factory = QueryEngineFactory::new_with_plugins(
-        // query engine in flownode is only used for translate plan with resolved table source.
-        catalog_manager.clone(),
-        None,
-        None,
-        None,
-        false,
-        Default::default(),
-    );
-    let query_engine = query_engine_factory.query_engine();
-
-    let statement_executor = Arc::new(StatementExecutor::new(
-        catalog_manager.clone(),
-        query_engine.clone(),
-        procedure_executor.clone(),
-        kv_backend.clone(),
-        layered_cache_registry.clone(),
-        inserter.clone(),
-        table_route_cache,
-    ));
-
-    let invoker = RemoteFrondendInvoker::new(inserter, deleter, statement_executor);
-    Ok(invoker)
 }

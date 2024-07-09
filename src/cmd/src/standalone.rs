@@ -44,7 +44,7 @@ use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
-use flow::{build_frontend_invoker, FlownodeBuilder};
+use flow::{FlownodeBuilder, RemoteFrondendInvoker};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
@@ -523,7 +523,7 @@ impl StartCommand {
         .context(StartFrontendSnafu)?;
 
         // flow server need to be able to use frontend to write insert requests back
-        let invoker = build_frontend_invoker(
+        let invoker = RemoteFrondendInvoker::build_from(
             catalog_manager.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),

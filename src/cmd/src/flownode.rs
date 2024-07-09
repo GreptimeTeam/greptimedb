@@ -26,7 +26,7 @@ use common_meta::key::TableMetadataManager;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
-use flow::{build_frontend_invoker, FlownodeBuilder, FlownodeInstance};
+use flow::{FlownodeBuilder, FlownodeInstance, RemoteFrondendInvoker};
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
@@ -131,10 +131,6 @@ struct StartCommand {
     /// Metasrv address list;
     #[clap(long, value_delimiter = ',', num_args = 1..)]
     metasrv_addrs: Option<Vec<String>>,
-    /// The gprc address of the frontend server used for writing results back to the database.
-    /// Need prefix i.e. "http://"
-    #[clap(long)]
-    frontend_addr: Option<String>,
     /// The configuration file for flownode
     #[clap(short, long)]
     config_file: Option<String>,
@@ -183,10 +179,6 @@ impl StartCommand {
 
         if let Some(hostname) = &self.rpc_hostname {
             opts.grpc.hostname.clone_from(hostname);
-        }
-
-        if let Some(fe_addr) = &self.frontend_addr {
-            opts.frontend_addr = Some(fe_addr.clone());
         }
 
         if let Some(node_id) = self.node_id {
@@ -312,7 +304,7 @@ impl StartCommand {
 
         let flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
-        let invoker = build_frontend_invoker(
+        let invoker = RemoteFrondendInvoker::build_from(
             catalog_manager.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
