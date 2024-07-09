@@ -65,7 +65,7 @@ pub(crate) mod node_context;
 mod table_source;
 
 use crate::error::Error;
-use crate::RemoteFrondendInvoker;
+use crate::FrontendInvoker;
 
 // TODO(discord9): replace this with `GREPTIME_TIMESTAMP` before v0.9
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
@@ -122,7 +122,7 @@ pub struct FlowWorkerManager {
     query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
     table_info_source: TableSource,
-    frontend_invoker: RwLock<Option<Box<RemoteFrondendInvoker>>>,
+    frontend_invoker: RwLock<Option<Box<FrontendInvoker>>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
@@ -134,7 +134,7 @@ pub struct FlowWorkerManager {
 /// Building FlownodeManager
 impl FlowWorkerManager {
     /// set frontend invoker
-    pub async fn set_frontend_invoker(&self, frontend: Box<RemoteFrondendInvoker>) {
+    pub async fn set_frontend_invoker(&self, frontend: Box<FrontendInvoker>) {
         *self.frontend_invoker.write().await = Some(frontend);
     }
 

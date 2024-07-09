@@ -219,7 +219,7 @@ impl GreptimeDbStandaloneBuilder {
         .await
         .unwrap();
 
-        let invoker = flow::RemoteFrondendInvoker::build_from(
+        let invoker = flow::FrontendInvoker::build_from(
             catalog_manager.clone(),
             kv_backend.clone(),
             cache_registry.clone(),

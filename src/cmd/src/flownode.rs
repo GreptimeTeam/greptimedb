@@ -26,7 +26,7 @@ use common_meta::key::TableMetadataManager;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
-use flow::{FlownodeBuilder, FlownodeInstance, RemoteFrondendInvoker};
+use flow::{FlownodeBuilder, FlownodeInstance, FrontendInvoker};
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
@@ -304,7 +304,7 @@ impl StartCommand {
 
         let flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
-        let invoker = RemoteFrondendInvoker::build_from(
+        let invoker = FrontendInvoker::build_from(
             catalog_manager.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),

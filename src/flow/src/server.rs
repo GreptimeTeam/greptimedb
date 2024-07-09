@@ -325,13 +325,13 @@ impl FlownodeBuilder {
     }
 }
 
-pub struct RemoteFrondendInvoker {
+pub struct FrontendInvoker {
     inserter: Arc<Inserter>,
     deleter: Arc<Deleter>,
     statement_executor: Arc<StatementExecutor>,
 }
 
-impl RemoteFrondendInvoker {
+impl FrontendInvoker {
     pub fn new(
         inserter: Arc<Inserter>,
         deleter: Arc<Deleter>,
@@ -349,7 +349,7 @@ impl RemoteFrondendInvoker {
         kv_backend: KvBackendRef,
         layered_cache_registry: LayeredCacheRegistryRef,
         procedure_executor: ProcedureExecutorRef,
-    ) -> Result<RemoteFrondendInvoker, Error> {
+    ) -> Result<FrontendInvoker, Error> {
         let table_route_cache: TableRouteCacheRef =
             layered_cache_registry.get().context(CacheRequiredSnafu {
                 name: "table_route_cache",
@@ -406,12 +406,12 @@ impl RemoteFrondendInvoker {
             table_route_cache,
         ));
 
-        let invoker = RemoteFrondendInvoker::new(inserter, deleter, statement_executor);
+        let invoker = FrontendInvoker::new(inserter, deleter, statement_executor);
         Ok(invoker)
     }
 }
 
-impl RemoteFrondendInvoker {
+impl FrontendInvoker {
     pub async fn row_inserts(
         &self,
         requests: RowInsertRequests,
