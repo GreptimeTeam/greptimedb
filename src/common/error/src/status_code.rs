@@ -159,7 +159,6 @@ impl StatusCode {
             | StatusCode::Unexpected
             | StatusCode::Internal
             | StatusCode::Cancelled
-            | StatusCode::PlanQuery
             | StatusCode::EngineExecuteQuery
             | StatusCode::StorageUnavailable
             | StatusCode::RuntimeResourcesExhausted => true,
@@ -171,6 +170,7 @@ impl StatusCode {
             | StatusCode::TableNotFound
             | StatusCode::RegionAlreadyExists
             | StatusCode::RegionNotFound
+            | StatusCode::PlanQuery
             | StatusCode::FlowAlreadyExists
             | StatusCode::FlowNotFound
             | StatusCode::RegionNotReady
