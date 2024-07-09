@@ -64,22 +64,22 @@ pub enum DdlTask {
 }
 
 impl DdlTask {
-    /// Creates a [DdlTask] to create a flow.
+    /// Creates a [`DdlTask`] to create a flow.
     pub fn new_create_flow(expr: CreateFlowTask) -> Self {
         DdlTask::CreateFlow(expr)
     }
 
-    /// Creates a [DdlTask] to drop a flow.
+    /// Creates a [`DdlTask`] to drop a flow.
     pub fn new_drop_flow(expr: DropFlowTask) -> Self {
         DdlTask::DropFlow(expr)
     }
 
-    /// Creates a [DdlTask] to drop a view.
+    /// Creates a [`DdlTask`] to drop a view.
     pub fn new_drop_view(expr: DropViewTask) -> Self {
         DdlTask::DropView(expr)
     }
 
-    /// Creates a [DdlTask] to create a table.
+    /// Creates a [`DdlTask`] to create a table.
     pub fn new_create_table(
         expr: CreateTableExpr,
         partitions: Vec<Partition>,
@@ -88,7 +88,7 @@ impl DdlTask {
         DdlTask::CreateTable(CreateTableTask::new(expr, partitions, table_info))
     }
 
-    /// Creates a [DdlTask] to create a logical table.
+    /// Creates a [`DdlTask`] to create a logical table.
     pub fn new_create_logical_tables(table_data: Vec<(CreateTableExpr, RawTableInfo)>) -> Self {
         DdlTask::CreateLogicalTables(
             table_data
@@ -98,7 +98,7 @@ impl DdlTask {
         )
     }
 
-    /// Creates a [DdlTask] to alter a logical table.
+    /// Creates a [`DdlTask`] to alter a logical table.
     pub fn new_alter_logical_tables(table_data: Vec<AlterExpr>) -> Self {
         DdlTask::AlterLogicalTables(
             table_data
@@ -108,7 +108,7 @@ impl DdlTask {
         )
     }
 
-    /// Creates a [DdlTask] to drop a table.
+    /// Creates a [`DdlTask`] to drop a table.
     pub fn new_drop_table(
         catalog: String,
         schema: String,
@@ -125,7 +125,7 @@ impl DdlTask {
         })
     }
 
-    /// Creates a [DdlTask] to create a database.
+    /// Creates a [`DdlTask`] to create a database.
     pub fn new_create_database(
         catalog: String,
         schema: String,
@@ -140,7 +140,7 @@ impl DdlTask {
         })
     }
 
-    /// Creates a [DdlTask] to drop a database.
+    /// Creates a [`DdlTask`] to drop a database.
     pub fn new_drop_database(catalog: String, schema: String, drop_if_exists: bool) -> Self {
         DdlTask::DropDatabase(DropDatabaseTask {
             catalog,
@@ -149,12 +149,12 @@ impl DdlTask {
         })
     }
 
-    /// Creates a [DdlTask] to alter a table.
+    /// Creates a [`DdlTask`] to alter a table.
     pub fn new_alter_table(alter_table: AlterExpr) -> Self {
         DdlTask::AlterTable(AlterTableTask { alter_table })
     }
 
-    /// Creates a [DdlTask] to truncate a table.
+    /// Creates a [`DdlTask`] to truncate a table.
     pub fn new_truncate_table(
         catalog: String,
         schema: String,
@@ -169,7 +169,7 @@ impl DdlTask {
         })
     }
 
-    /// Creates a [DdlTask] to create a view.
+    /// Creates a [`DdlTask`] to create a view.
     pub fn new_create_view(create_view: CreateViewExpr, view_info: RawTableInfo) -> Self {
         DdlTask::CreateView(CreateViewTask {
             create_view,
@@ -327,7 +327,7 @@ pub struct CreateViewTask {
 }
 
 impl CreateViewTask {
-    /// Returns the `[TableReference]` of view.
+    /// Returns the [`TableReference`] of view.
     pub fn table_ref(&self) -> TableReference {
         TableReference {
             catalog: &self.create_view.catalog_name,
@@ -440,7 +440,7 @@ pub struct DropViewTask {
 }
 
 impl DropViewTask {
-    /// Returns the `[TableReference]` of view.
+    /// Returns the [`TableReference`] of view.
     pub fn table_ref(&self) -> TableReference {
         TableReference {
             catalog: &self.catalog,
