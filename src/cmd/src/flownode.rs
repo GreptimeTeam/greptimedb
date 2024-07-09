@@ -17,8 +17,10 @@ use std::sync::Arc;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
+use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_config::Configurable;
+use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
@@ -304,12 +306,21 @@ impl StartCommand {
 
         let flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
+        // flownode's frontend to datanode need not timeout.
+        // Some queries are expected to take long time.
+        let channel_config = ChannelConfig {
+            timeout: None,
+            ..Default::default()
+        };
+        let client = Arc::new(NodeClients::new(channel_config));
+
         let invoker = FrontendInvoker::build_from(
             flownode.flow_worker_manager().clone(),
             catalog_manager.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             meta_client.clone(),
+            client,
         )
         .await
         .context(StartFlownodeSnafu)?;

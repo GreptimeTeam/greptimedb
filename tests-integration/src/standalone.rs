@@ -211,7 +211,7 @@ impl GreptimeDbStandaloneBuilder {
             kv_backend.clone(),
             cache_registry.clone(),
             catalog_manager.clone(),
-            node_manager,
+            node_manager.clone(),
             ddl_task_executor.clone(),
         )
         .with_plugin(plugins)
@@ -226,6 +226,7 @@ impl GreptimeDbStandaloneBuilder {
             kv_backend.clone(),
             cache_registry.clone(),
             ddl_task_executor.clone(),
+            node_manager.clone(),
         )
         .await
         .context(StartFlownodeSnafu)

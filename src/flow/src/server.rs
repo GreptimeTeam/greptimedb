@@ -31,7 +31,7 @@ use common_meta::ddl::{table_meta, ProcedureExecutorRef};
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::node_manager::Flownode;
+use common_meta::node_manager::{self, Flownode, NodeManagerRef};
 use common_query::Output;
 use common_telemetry::tracing::info;
 use futures::FutureExt;
@@ -351,6 +351,7 @@ impl FrontendInvoker {
         kv_backend: KvBackendRef,
         layered_cache_registry: LayeredCacheRegistryRef,
         procedure_executor: ProcedureExecutorRef,
+        node_manager: NodeManagerRef,
     ) -> Result<FrontendInvoker, Error> {
         let table_route_cache: TableRouteCacheRef =
             layered_cache_registry.get().context(CacheRequiredSnafu {
@@ -362,14 +363,6 @@ impl FrontendInvoker {
             table_route_cache.clone(),
         ));
 
-        // frontend to datanode need not timeout.
-        // Some queries are expected to take long time.
-        let channel_config = ChannelConfig {
-            timeout: None,
-            ..Default::default()
-        };
-        let client = Arc::new(NodeClients::new(channel_config));
-
         let table_flownode_cache: TableFlownodeSetCacheRef =
             layered_cache_registry.get().context(CacheRequiredSnafu {
                 name: TABLE_FLOWNODE_SET_CACHE_NAME,
@@ -378,14 +371,14 @@ impl FrontendInvoker {
         let inserter = Arc::new(Inserter::new(
             catalog_manager.clone(),
             partition_manager.clone(),
-            client.clone(),
+            node_manager.clone(),
             table_flownode_cache,
         ));
 
         let deleter = Arc::new(Deleter::new(
             catalog_manager.clone(),
             partition_manager.clone(),
-            client.clone(),
+            node_manager.clone(),
         ));
 
         let query_engine = flow_worker_manager.query_engine.clone();

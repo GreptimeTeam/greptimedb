@@ -530,7 +530,7 @@ impl StartCommand {
             kv_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager.clone(),
-            node_manager,
+            node_manager.clone(),
             ddl_task_executor.clone(),
         )
         .with_plugin(fe_plugins.clone())
@@ -546,6 +546,7 @@ impl StartCommand {
             kv_backend.clone(),
             layered_cache_registry.clone(),
             ddl_task_executor.clone(),
+            node_manager,
         )
         .await
         .context(StartFlownodeSnafu)?;
