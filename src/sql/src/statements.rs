@@ -383,6 +383,13 @@ fn parse_column_default_constraint(
                     .fail();
                 }
             }
+            ColumnOption::Default(others) => {
+                return UnsupportedDefaultValueSnafu {
+                    column_name,
+                    expr: others.clone(),
+                }
+                .fail();
+            }
             _ => unreachable!(),
         };
 
