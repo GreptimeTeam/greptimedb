@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use api::greptime_proto::v1;
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::column_def::options_from_column_schema;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
@@ -45,7 +46,6 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
-use object_store::util::join_dir;
 use object_store::ObjectStore;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
@@ -603,8 +603,6 @@ impl TestEnv {
         local_store: ObjectStore,
         capacity: ReadableSize,
     ) -> WriteCacheRef {
-        let data_home = self.data_home().display().to_string();
-
         let index_aux_path = self.data_home.path().join("index_aux");
         let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
             .await
@@ -936,6 +934,7 @@ pub(crate) fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api
         datatype: datatype as i32,
         semantic_type: metadata.semantic_type as i32,
         datatype_extension,
+        options: options_from_column_schema(&metadata.column_schema),
     }
 }
 

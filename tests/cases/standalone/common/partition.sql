@@ -85,3 +85,26 @@ PARTITION ON COLUMNS (a) (
   a > 10 AND a < 20,
   a >= 20
 );
+
+-- Issue https://github.com/GreptimeTeam/greptimedb/issues/4247
+-- Partition rule with unary operator
+CREATE TABLE `molestiAe` (
+  `sImiLiQUE` FLOAT NOT NULL,
+  `amEt` TIMESTAMP(6) TIME INDEX,
+  `EXpLICaBo` DOUBLE,
+  PRIMARY KEY (`sImiLiQUE`)
+) PARTITION ON COLUMNS (`sImiLiQUE`) (
+  `sImiLiQUE` < -1,
+  `sImiLiQUE` >= -1 AND `sImiLiQUE` < -0,
+  `sImiLiQUE` >= 0
+);
+
+INSERT INTO `molestiAe` VALUES
+  (-2, 0, 0),
+  (-0.9, 0, 0),
+  (1, 0, 0);
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM `molestiAe`;
+
+DROP TABLE `molestiAe`;

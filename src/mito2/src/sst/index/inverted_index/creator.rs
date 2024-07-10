@@ -304,6 +304,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::cache::index::InvertedIndexCache;
     use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
     use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -313,8 +314,8 @@ mod tests {
         ObjectStore::new(Memory::default()).unwrap().finish()
     }
 
-    fn mock_intm_mgr() -> IntermediateManager {
-        IntermediateManager::new(mock_object_store())
+    async fn new_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {
+        IntermediateManager::init_fs(path).await.unwrap()
     }
 
     fn mock_region_metadata() -> RegionMetadataRef {
@@ -387,7 +388,7 @@ mod tests {
         let file_path = location::index_file_path(&region_dir, sst_file_id);
         let object_store = mock_object_store();
         let region_metadata = mock_region_metadata();
-        let intm_mgr = mock_intm_mgr();
+        let intm_mgr = new_intm_mgr(d.path().to_string_lossy()).await;
         let memory_threshold = None;
         let segment_row_count = 2;
 
@@ -414,10 +415,12 @@ mod tests {
 
         move |expr| {
             let _d = &d;
+            let cache = Arc::new(InvertedIndexCache::new(10, 10));
             let applier = SstIndexApplierBuilder::new(
                 region_dir.clone(),
                 object_store.clone(),
                 None,
+                Some(cache),
                 &region_metadata,
                 Default::default(),
                 factory.clone(),

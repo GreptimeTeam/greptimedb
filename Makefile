@@ -205,9 +205,13 @@ run-it-in-container: start-etcd ## Run integration tests in dev-builder.
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:latest \
 	make test sqlness-test BUILD_JOBS=${BUILD_JOBS}
 
-.PHONY: run-cluster-with-etcd
-run-cluster-with-etcd: ## Run greptime cluster with etcd in docker-compose.
+.PHONY: start-cluster
+start-cluster: ## Start the greptimedb cluster with etcd by using docker compose.
 	 docker compose -f ./docker/docker-compose/cluster-with-etcd.yaml up
+
+.PHONY: stop-cluster
+stop-cluster: ## Stop the greptimedb cluster that created by docker compose.
+	docker compose -f ./docker/docker-compose/cluster-with-etcd.yaml stop
 
 ##@ Docs
 config-docs: ## Generate configuration documentation from toml files.

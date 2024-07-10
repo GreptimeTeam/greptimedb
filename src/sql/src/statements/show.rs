@@ -29,11 +29,20 @@ pub enum ShowKind {
 impl Display for ShowKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ShowKind::All => write!(f, "ALL"),
+            // The `All` is the default kind placeholder, not a valid statement.
+            ShowKind::All => write!(f, ""),
             ShowKind::Like(ident) => write!(f, "LIKE {ident}"),
             ShowKind::Where(expr) => write!(f, "WHERE {expr}"),
         }
     }
+}
+
+macro_rules! format_kind {
+    ($self: expr, $f: expr) => {
+        if $self.kind != ShowKind::All {
+            write!($f, " {}", &$self.kind)?;
+        }
+    };
 }
 
 /// SQL structure for `SHOW DATABASES`.
@@ -58,11 +67,12 @@ impl Display for ShowColumns {
         if self.full {
             write!(f, "FULL ")?;
         }
-        write!(f, "COLUMNS IN {} ", &self.table)?;
+        write!(f, "COLUMNS IN {}", &self.table)?;
         if let Some(database) = &self.database {
-            write!(f, "IN {database} ")?;
+            write!(f, " IN {database}")?;
         }
-        write!(f, "{}", &self.kind)
+        format_kind!(self, f);
+        Ok(())
     }
 }
 
@@ -76,11 +86,13 @@ pub struct ShowIndex {
 
 impl Display for ShowIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SHOW INDEX IN {} ", &self.table)?;
+        write!(f, "SHOW INDEX IN {}", &self.table)?;
         if let Some(database) = &self.database {
-            write!(f, "IN {database} ")?;
+            write!(f, " IN {database}")?;
         }
-        write!(f, "{}", &self.kind)
+        format_kind!(self, f);
+
+        Ok(())
     }
 }
 
@@ -93,13 +105,15 @@ impl ShowDatabases {
 
 impl Display for ShowDatabases {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = &self.kind;
-
         if self.full {
-            write!(f, r#"SHOW FULL DATABASES {kind}"#)
+            write!(f, "SHOW FULL DATABASES")?;
         } else {
-            write!(f, r#"SHOW DATABASES {kind}"#)
+            write!(f, "SHOW DATABASES")?;
         }
+
+        format_kind!(self, f);
+
+        Ok(())
     }
 }
 
@@ -117,11 +131,33 @@ impl Display for ShowTables {
         if self.full {
             write!(f, "FULL ")?;
         }
-        write!(f, "TABLES ")?;
+        write!(f, "TABLES")?;
         if let Some(database) = &self.database {
-            write!(f, "IN {database} ")?;
+            write!(f, " IN {database}")?;
         }
-        write!(f, "{}", &self.kind)
+        format_kind!(self, f);
+
+        Ok(())
+    }
+}
+
+/// SQL structure for `SHOW TABLE STATUS`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ShowTableStatus {
+    pub kind: ShowKind,
+    pub database: Option<String>,
+}
+
+impl Display for ShowTableStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SHOW TABLE STATUS")?;
+        if let Some(database) = &self.database {
+            write!(f, " IN {database}")?;
+        }
+
+        format_kind!(self, f);
+
+        Ok(())
     }
 }
 
@@ -148,6 +184,19 @@ impl Display for ShowCreateFlow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let flow_name = &self.flow_name;
         write!(f, "SHOW CREATE FLOW {flow_name}")
+    }
+}
+
+/// SQL structure for `SHOW CREATE VIEW`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ShowCreateView {
+    pub view_name: ObjectName,
+}
+
+impl Display for ShowCreateView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let view_name = &self.view_name;
+        write!(f, "SHOW CREATE VIEW {view_name}")
     }
 }
 
@@ -187,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_kind_display() {
-        assert_eq!("ALL", format!("{}", ShowKind::All));
+        assert_eq!("", format!("{}", ShowKind::All));
         assert_eq!(
             "LIKE test",
             format!(
@@ -348,7 +397,7 @@ SHOW CREATE TABLE monitor"#,
                 let new_sql = format!("\n{}", show);
                 assert_eq!(
                     r#"
-SHOW INDEX IN t1 IN d1 ALL"#,
+SHOW INDEX IN t1 IN d1"#,
                     &new_sql
                 );
             }
@@ -371,7 +420,7 @@ SHOW INDEX IN t1 IN d1 ALL"#,
                 let new_sql = format!("\n{}", show);
                 assert_eq!(
                     r#"
-SHOW FULL COLUMNS IN t1 IN d1 ALL"#,
+SHOW FULL COLUMNS IN t1 IN d1"#,
                     &new_sql
                 );
             }
@@ -394,7 +443,7 @@ SHOW FULL COLUMNS IN t1 IN d1 ALL"#,
                 let new_sql = format!("\n{}", show);
                 assert_eq!(
                     r#"
-SHOW FULL TABLES IN d1 ALL"#,
+SHOW FULL TABLES IN d1"#,
                     &new_sql
                 );
             }
@@ -414,7 +463,7 @@ SHOW FULL TABLES IN d1 ALL"#,
                 let new_sql = format!("\n{}", show);
                 assert_eq!(
                     r#"
-SHOW FULL TABLES ALL"#,
+SHOW FULL TABLES"#,
                     &new_sql
                 );
             }
@@ -437,7 +486,7 @@ SHOW FULL TABLES ALL"#,
                 let new_sql = format!("\n{}", show);
                 assert_eq!(
                     r#"
-SHOW DATABASES ALL"#,
+SHOW DATABASES"#,
                     &new_sql
                 );
             }

@@ -105,6 +105,7 @@ impl MetaClientBuilder {
         Self::new(cluster_id, member_id, Role::Flownode)
             .enable_store()
             .enable_heartbeat()
+            .enable_procedure()
     }
 
     pub fn enable_heartbeat(self) -> Self {

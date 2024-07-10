@@ -783,6 +783,44 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to retrieve fulltext options from column metadata"))]
+    FulltextOptions {
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+        column_name: String,
+    },
+
+    #[snafu(display("Failed to create fulltext index creator"))]
+    CreateFulltextCreator {
+        source: index::fulltext_index::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to cast vector of {from} to {to}"))]
+    CastVector {
+        #[snafu(implicit)]
+        location: Location,
+        from: ConcreteDataType,
+        to: ConcreteDataType,
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to push text to fulltext index"))]
+    FulltextPushText {
+        source: index::fulltext_index::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to finalize fulltext index creator"))]
+    FulltextFinish {
+        source: index::fulltext_index::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -904,6 +942,11 @@ impl ErrorExt for Error {
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
             UnsupportedOperation { .. } => StatusCode::Unsupported,
             RemoteCompaction { .. } => StatusCode::Unexpected,
+
+            FulltextOptions { source, .. } => source.status_code(),
+            CreateFulltextCreator { source, .. } => source.status_code(),
+            CastVector { source, .. } => source.status_code(),
+            FulltextPushText { source, .. } | FulltextFinish { source, .. } => source.status_code(),
         }
     }
 

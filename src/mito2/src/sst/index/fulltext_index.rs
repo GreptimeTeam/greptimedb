@@ -12,27 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{RowDeleteRequests, RowInsertRequests};
-use async_trait::async_trait;
-use common_query::Output;
-use session::context::QueryContextRef;
+pub(crate) mod creator;
 
-use crate::error::Result;
-
-/// [FrontendInvoker] provides the ability to:
-/// - Insert rows
-/// - Delete rows
-#[async_trait]
-pub trait FrontendInvoker {
-    async fn row_inserts(
-        &self,
-        requests: RowInsertRequests,
-        ctx: QueryContextRef,
-    ) -> Result<Output>;
-
-    async fn row_deletes(
-        &self,
-        requests: RowDeleteRequests,
-        ctx: QueryContextRef,
-    ) -> Result<Output>;
-}
+const INDEX_BLOB_TYPE: &str = "greptime-fulltext-index-v1";

@@ -281,6 +281,15 @@ impl Interval {
     pub fn to_i32(&self) -> i32 {
         self.months
     }
+
+    pub fn negative(&self) -> Self {
+        Self {
+            months: -self.months,
+            days: -self.days,
+            nsecs: -self.nsecs,
+            unit: self.unit,
+        }
+    }
 }
 
 impl From<i128> for Interval {

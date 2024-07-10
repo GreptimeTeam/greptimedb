@@ -15,7 +15,6 @@
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use rskafka::client::partition::Compression;
 use serde::{Deserialize, Serialize};
 
 use crate::config::kafka::common::{backoff_prefix, BackoffConfig};
@@ -40,9 +39,6 @@ pub struct StandaloneKafkaConfig {
     /// The timeout of topic creation.
     #[serde(with = "humantime_serde")]
     pub create_topic_timeout: Duration,
-    /// The compression algorithm used to compress kafka records.
-    #[serde(skip)]
-    pub compression: Compression,
     /// TODO(weny): Remove the alias once we release v0.9.
     /// The max size of a single producer batch.
     #[serde(alias = "max_batch_size")]
@@ -67,7 +63,6 @@ impl Default for StandaloneKafkaConfig {
             num_partitions: 1,
             replication_factor,
             create_topic_timeout: Duration::from_secs(30),
-            compression: Compression::Lz4,
             // Warning: Kafka has a default limit of 1MB per message in a topic.
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),

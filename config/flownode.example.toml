@@ -5,9 +5,6 @@ mode = "distributed"
 ## +toml2docs:none-default
 node_id = 14
 
-## Frontend grpc address. Used by flownode to write result back to frontend.
-frontend_addr = "http://127.0.0.1:4001"
-
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.

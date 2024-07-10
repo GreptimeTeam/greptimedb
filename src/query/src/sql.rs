@@ -52,10 +52,11 @@ pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Ident;
 use sql::parser::ParserContext;
-use sql::statements::create::{CreateFlow, Partitions};
+use sql::statements::create::{CreateFlow, CreateView, Partitions};
 use sql::statements::show::{
-    ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
+    ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTableStatus, ShowTables, ShowVariables,
 };
+use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
@@ -143,6 +144,13 @@ static SHOW_CREATE_FLOW_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
         ColumnSchema::new("Flow", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("Create Flow", ConcreteDataType::string_datatype(), false),
+    ]))
+});
+
+static SHOW_CREATE_VIEW_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("View", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Create View", ConcreteDataType::string_datatype(), false),
     ]))
 });
 
@@ -445,6 +453,7 @@ pub async fn show_index(
     .await
 }
 
+/// Execute [`ShowTables`] statement and return the [`Output`] if success.
 pub async fn show_tables(
     stmt: ShowTables,
     query_engine: &QueryEngineRef,
@@ -467,6 +476,63 @@ pub async fn show_tables(
     } else {
         vec![(tables::TABLE_NAME, TABLES_COLUMN)]
     };
+    let filters = vec![
+        col(tables::TABLE_SCHEMA).eq(lit(schema_name.clone())),
+        col(tables::TABLE_CATALOG).eq(lit(query_ctx.current_catalog())),
+    ];
+    let like_field = Some(tables::TABLE_NAME);
+    let sort = vec![col(tables::TABLE_NAME).sort(true, true)];
+
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        TABLES,
+        vec![],
+        projects,
+        filters,
+        like_field,
+        sort,
+        stmt.kind,
+    )
+    .await
+}
+
+/// Execute [`ShowTableStatus`] statement and return the [`Output`] if success.
+pub async fn show_table_status(
+    stmt: ShowTableStatus,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let schema_name = if let Some(database) = stmt.database {
+        database
+    } else {
+        query_ctx.current_schema()
+    };
+
+    // Refer to https://dev.mysql.com/doc/refman/8.4/en/show-table-status.html
+    let projects = vec![
+        (tables::TABLE_NAME, "Name"),
+        (tables::ENGINE, "Engine"),
+        (tables::VERSION, "Version"),
+        (tables::ROW_FORMAT, "Row_format"),
+        (tables::TABLE_ROWS, "Rows"),
+        (tables::AVG_ROW_LENGTH, "Avg_row_length"),
+        (tables::DATA_LENGTH, "Data_length"),
+        (tables::MAX_DATA_LENGTH, "Max_data_length"),
+        (tables::INDEX_LENGTH, "Index_length"),
+        (tables::DATA_FREE, "Data_free"),
+        (tables::AUTO_INCREMENT, "Auto_increment"),
+        (tables::CREATE_TIME, "Create_time"),
+        (tables::UPDATE_TIME, "Update_time"),
+        (tables::CHECK_TIME, "Check_time"),
+        (tables::TABLE_COLLATION, "Collation"),
+        (tables::CHECKSUM, "Checksum"),
+        (tables::CREATE_OPTIONS, "Create_options"),
+        (tables::TABLE_COMMENT, "Comment"),
+    ];
+
     let filters = vec![
         col(tables::TABLE_SCHEMA).eq(lit(schema_name.clone())),
         col(tables::TABLE_CATALOG).eq(lit(query_ctx.current_catalog())),
@@ -620,6 +686,40 @@ pub fn show_create_table(
         Arc::new(StringVector::from(vec![sql])) as _,
     ];
     let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
+        .context(error::CreateRecordBatchSnafu)?;
+
+    Ok(Output::new_with_record_batches(records))
+}
+
+pub fn show_create_view(
+    view_name: ObjectName,
+    definition: &str,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let mut parser_ctx =
+        ParserContext::new(query_ctx.sql_dialect(), definition).context(error::SqlSnafu)?;
+
+    let Statement::CreateView(create_view) =
+        parser_ctx.parse_statement().context(error::SqlSnafu)?
+    else {
+        // MUST be `CreateView` statement.
+        unreachable!();
+    };
+
+    let stmt = CreateView {
+        name: view_name.clone(),
+        columns: create_view.columns,
+        query: create_view.query,
+        or_replace: create_view.or_replace,
+        if_not_exists: create_view.if_not_exists,
+    };
+
+    let sql = format!("{}", stmt);
+    let columns = vec![
+        Arc::new(StringVector::from(vec![view_name.to_string()])) as _,
+        Arc::new(StringVector::from(vec![sql])) as _,
+    ];
+    let records = RecordBatches::try_from_columns(SHOW_CREATE_VIEW_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
 
     Ok(Output::new_with_record_batches(records))

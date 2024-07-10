@@ -474,6 +474,7 @@ mod tests {
                     scale: 10,
                 })),
             }),
+            options: None,
         };
 
         (

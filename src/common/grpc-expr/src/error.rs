@@ -14,6 +14,7 @@
 
 use std::any::Any;
 
+use api::v1::ColumnDataType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -104,6 +105,25 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unknown proto column datatype: {}", datatype))]
+    UnknownColumnDataType {
+        datatype: i32,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: prost::DecodeError,
+    },
+
+    #[snafu(display(
+        "Fulltext index only supports string type, column: {column_name}, unexpected type: {column_type:?}"
+    ))]
+    InvalidFulltextColumnType {
+        column_name: String,
+        column_type: ColumnDataType,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -122,6 +142,10 @@ impl ErrorExt for Error {
             Error::MissingField { .. } => StatusCode::InvalidArguments,
             Error::InvalidColumnDef { source, .. } => source.status_code(),
             Error::UnexpectedValuesLength { .. } | Error::UnknownLocationType { .. } => {
+                StatusCode::InvalidArguments
+            }
+
+            Error::UnknownColumnDataType { .. } | Error::InvalidFulltextColumnType { .. } => {
                 StatusCode::InvalidArguments
             }
         }

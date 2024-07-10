@@ -175,6 +175,7 @@ impl UpdateMetadata {
         };
 
         ctx.remove_table_route_value();
+        ctx.deregister_failure_detectors().await;
         // Consumes the guard.
         ctx.volatile_ctx.opening_region_guard.take();
 

@@ -332,6 +332,7 @@ impl RegionFlushTask {
                 storage: version.options.storage.clone(),
                 index_options: self.index_options.clone(),
                 inverted_index_config: self.engine_config.inverted_index.clone(),
+                fulltext_index_config: self.engine_config.fulltext_index.clone(),
             };
             let Some(sst_info) = self
                 .access_layer
@@ -353,6 +354,9 @@ impl RegionFlushTask {
                     let mut indexes = SmallVec::new();
                     if sst_info.index_metadata.inverted_index.is_available() {
                         indexes.push(IndexType::InvertedIndex);
+                    }
+                    if sst_info.index_metadata.fulltext_index.is_available() {
+                        indexes.push(IndexType::FulltextIndex);
                     }
                     indexes
                 },

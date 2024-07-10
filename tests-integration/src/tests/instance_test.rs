@@ -16,7 +16,7 @@ use std::assert_matches::assert_matches;
 use std::env;
 use std::sync::Arc;
 
-use client::OutputData;
+use client::{OutputData, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_recordbatch::util;
@@ -1876,6 +1876,43 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 | another_catalog | information_schema | columns       | LOCAL TEMPORARY | 4        |        |
 | another_catalog | information_schema | tables        | LOCAL TEMPORARY | 3        |        |
 +-----------------+--------------------+---------------+-----------------+----------+--------+";
+    check_output_stream(output, expected).await;
+}
+
+#[apply(both_instances_cases)]
+async fn test_show_databases(instance: Arc<dyn MockInstance>) {
+    common_telemetry::init_default_ut_logging();
+    let instance = instance.frontend();
+
+    let sql = "show databases";
+
+    let query_ctx = Arc::new(QueryContext::with(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+    ));
+    let output = execute_sql_with(&instance, sql, query_ctx.clone())
+        .await
+        .data;
+    let expected = "\
++--------------------+
+| Database           |
++--------------------+
+| greptime_private   |
+| information_schema |
+| public             |
++--------------------+";
+    check_output_stream(output, expected).await;
+
+    let query_ctx = Arc::new(QueryContext::with("random_catalog", DEFAULT_SCHEMA_NAME));
+    let output = execute_sql_with(&instance, sql, query_ctx.clone())
+        .await
+        .data;
+    let expected = "\
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
++--------------------+";
     check_output_stream(output, expected).await;
 }
 
