@@ -1,12 +1,13 @@
 x-custom:
-  initial_cluster_token: &initial_cluster_token "--initial-cluster-token=etcd-cluster"
-  common_settings: &common_settings
+  etcd_initial_cluster_token: &etcd_initial_cluster_token "--initial-cluster-token=etcd-cluster"
+  etcd_common_settings: &etcd_common_settings
     image: quay.io/coreos/etcd:v3.5.10
     entrypoint: /usr/local/bin/etcd
+  greptimedb_image: &greptimedb_image docker.io/greptimedb/greptimedb:latest
 
 services:
   etcd0:
-    <<: *common_settings
+    <<: *etcd_common_settings
     container_name: etcd0
     ports:
       - 2379:2379
@@ -22,7 +23,7 @@ services:
       - --election-timeout=1250
       - --initial-cluster=etcd0=http://etcd0:2380
       - --initial-cluster-state=new
-      - *initial_cluster_token
+      - *etcd_initial_cluster_token
     volumes:
       - /tmp/greptimedb-cluster-docker-compose/etcd0:/var/lib/etcd
     healthcheck:
@@ -34,7 +35,7 @@ services:
       - greptimedb
 
   metasrv:
-    image: docker.io/greptime/greptimedb:latest
+    image: *greptimedb_image
     container_name: metasrv
     ports:
       - 3002:3002
@@ -56,10 +57,11 @@ services:
       - greptimedb
 
   datanode0:
-    image: docker.io/greptime/greptimedb:latest
+    image: *greptimedb_image
     container_name: datanode0
     ports:
       - 3001:3001
+      - 5000:5000
     command:
       - datanode
       - start
@@ -67,8 +69,14 @@ services:
       - --rpc-addr=0.0.0.0:3001
       - --rpc-hostname=datanode0:3001
       - --metasrv-addrs=metasrv:3002
+      - --http-addr=0.0.0.0:5000
     volumes:
       - /tmp/greptimedb-cluster-docker-compose/datanode0:/tmp/greptimedb
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://datanode0:5000/health" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     depends_on:
       metasrv:
         condition: service_healthy
@@ -76,7 +84,7 @@ services:
       - greptimedb
 
   frontend0:
-    image: docker.io/greptime/greptimedb:latest
+    image: *greptimedb_image
     container_name: frontend0
     ports:
       - 4000:4000
@@ -91,8 +99,31 @@ services:
       - --rpc-addr=0.0.0.0:4001
       - --mysql-addr=0.0.0.0:4002
       - --postgres-addr=0.0.0.0:4003
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://frontend0:4000/health" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     depends_on:
-      metasrv:
+      datanode0:
+        condition: service_healthy
+    networks:
+      - greptimedb
+
+  flownode0:
+    image: *greptimedb_image
+    container_name: flownode0
+    ports:
+      - 4004:4004
+    command:
+      - flownode
+      - start
+      - --node-id=0
+      - --metasrv-addrs=metasrv:3002
+      - --rpc-addr=0.0.0.0:4004
+      - --rpc-hostname=flownode0:4004
+    depends_on:
+      frontend0:
         condition: service_healthy
     networks:
       - greptimedb

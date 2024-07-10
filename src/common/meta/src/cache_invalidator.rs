@@ -23,6 +23,7 @@ use crate::key::schema_name::SchemaNameKey;
 use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteKey;
+use crate::key::view_info::ViewInfoKey;
 use crate::key::MetaKey;
 
 /// KvBackend cache invalidator
@@ -75,6 +76,9 @@ where
                     self.invalidate_key(&key.to_bytes()).await;
 
                     let key = TableRouteKey::new(*table_id);
+                    self.invalidate_key(&key.to_bytes()).await;
+
+                    let key = ViewInfoKey::new(*table_id);
                     self.invalidate_key(&key.to_bytes()).await;
                 }
                 CacheIdent::TableName(table_name) => {

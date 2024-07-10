@@ -145,6 +145,11 @@ impl Time {
             None
         }
     }
+
+    pub fn negative(mut self) -> Self {
+        self.value = -self.value;
+        self
+    }
 }
 
 impl From<i64> for Time {
