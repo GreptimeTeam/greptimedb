@@ -100,7 +100,6 @@ impl From<StandaloneWalConfig> for DatanodeWalConfig {
             StandaloneWalConfig::RaftEngine(config) => Self::RaftEngine(config),
             StandaloneWalConfig::Kafka(config) => Self::Kafka(DatanodeKafkaConfig {
                 broker_endpoints: config.broker_endpoints,
-                compression: config.compression,
                 max_batch_bytes: config.max_batch_bytes,
                 consumer_wait_timeout: config.consumer_wait_timeout,
                 backoff: config.backoff,
@@ -114,7 +113,6 @@ mod tests {
     use std::time::Duration;
 
     use common_base::readable_size::ReadableSize;
-    use rskafka::client::partition::Compression;
 
     use super::*;
     use crate::config::kafka::common::BackoffConfig;
@@ -207,7 +205,6 @@ mod tests {
         let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
         let expected = DatanodeKafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
-            compression: Compression::Lz4,
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig {
@@ -229,7 +226,6 @@ mod tests {
             num_partitions: 1,
             replication_factor: 1,
             create_topic_timeout: Duration::from_secs(30),
-            compression: Compression::Lz4,
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig {
