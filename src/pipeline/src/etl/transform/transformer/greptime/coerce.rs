@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::column_def::options_from_fulltext;
+use api::v1::ColumnOptions;
+use datatypes::schema::FulltextOptions;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 
@@ -71,6 +74,7 @@ pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>,
             datatype,
             semantic_type,
             datatype_extension: None,
+            options: coerce_options(transform)?,
         };
         columns.push(column);
     }
@@ -82,8 +86,19 @@ fn coerce_semantic_type(transform: &Transform) -> SemanticType {
     match transform.index {
         Some(Index::Tag) => SemanticType::Tag,
         Some(Index::Timestamp) => SemanticType::Timestamp,
-        Some(Index::Fulltext) => unimplemented!("Fulltext"),
-        None => SemanticType::Field,
+        Some(Index::Fulltext) | None => SemanticType::Field,
+    }
+}
+
+fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>, String> {
+    if let Some(Index::Fulltext) = transform.index {
+        options_from_fulltext(&FulltextOptions {
+            enable: true,
+            ..Default::default()
+        })
+        .map_err(|e| e.to_string())
+    } else {
+        Ok(None)
     }
 }
 

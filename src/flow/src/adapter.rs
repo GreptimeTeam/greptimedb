@@ -23,7 +23,6 @@ use std::time::{Instant, SystemTime};
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use common_config::Configurable;
 use common_error::ext::BoxedError;
-use common_frontend::handler::FrontendInvoker;
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -42,7 +41,8 @@ use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ConcreteDataType, RegionId};
 use table::metadata::TableId;
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::broadcast::error::TryRecvError;
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::TableSource;
@@ -65,6 +65,7 @@ pub(crate) mod node_context;
 mod table_source;
 
 use crate::error::Error;
+use crate::FrontendInvoker;
 
 // TODO(discord9): replace this with `GREPTIME_TIMESTAMP` before v0.9
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
@@ -84,7 +85,6 @@ pub struct FlownodeOptions {
     pub cluster_id: Option<u64>,
     pub node_id: Option<u64>,
     pub grpc: GrpcOptions,
-    pub frontend_addr: Option<String>,
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
@@ -98,7 +98,6 @@ impl Default for FlownodeOptions {
             cluster_id: None,
             node_id: None,
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
-            frontend_addr: None,
             meta_client: None,
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
@@ -120,10 +119,10 @@ pub struct FlowWorkerManager {
     /// which is `!Send` so a handle is used
     pub worker_handles: Vec<Mutex<WorkerHandle>>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
-    query_engine: Arc<dyn QueryEngine>,
+    pub query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
     table_info_source: TableSource,
-    frontend_invoker: RwLock<Option<Box<dyn FrontendInvoker + Send + Sync>>>,
+    frontend_invoker: RwLock<Option<FrontendInvoker>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
@@ -135,7 +134,7 @@ pub struct FlowWorkerManager {
 /// Building FlownodeManager
 impl FlowWorkerManager {
     /// set frontend invoker
-    pub async fn set_frontend_invoker(&self, frontend: Box<dyn FrontendInvoker + Send + Sync>) {
+    pub async fn set_frontend_invoker(&self, frontend: FrontendInvoker) {
         *self.frontend_invoker.write().await = Some(frontend);
     }
 
@@ -460,11 +459,14 @@ impl FlowWorkerManager {
 /// Flow Runtime related methods
 impl FlowWorkerManager {
     /// run in common_runtime background runtime
-    pub fn run_background(self: Arc<Self>) -> JoinHandle<()> {
+    pub fn run_background(
+        self: Arc<Self>,
+        shutdown: Option<broadcast::Receiver<()>>,
+    ) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
         // TODO(discord9): add heartbeat tasks here
         common_runtime::spawn_bg(async move {
-            self.run().await;
+            self.run(shutdown).await;
         })
     }
 
@@ -485,7 +487,7 @@ impl FlowWorkerManager {
     /// Trigger dataflow running, and then send writeback request to the source sender
     ///
     /// note that this method didn't handle input mirror request, as this should be handled by grpc server
-    pub async fn run(&self) {
+    pub async fn run(&self, mut shutdown: Option<broadcast::Receiver<()>>) {
         debug!("Starting to run");
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
@@ -497,8 +499,28 @@ impl FlowWorkerManager {
                 common_telemetry::error!(err;"Send writeback request errors");
             };
             self.log_all_errors().await;
+            match &shutdown.as_mut().map(|s| s.try_recv()) {
+                Some(Ok(())) => {
+                    info!("Shutdown flow's main loop");
+                    break;
+                }
+                Some(Err(TryRecvError::Empty)) => (),
+                Some(Err(TryRecvError::Closed)) => {
+                    common_telemetry::error!("Shutdown channel is closed");
+                    break;
+                }
+                Some(Err(TryRecvError::Lagged(num))) => {
+                    common_telemetry::error!("Shutdown channel is lagged by {}, meaning multiple shutdown cmd have been issued", num);
+                    break;
+                }
+                None => (),
+            }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
+        // flow is now shutdown, drop frontend_invoker early so a ref cycle(in standalone mode) can be prevent:
+        // FlowWorkerManager.frontend_invoker -> FrontendInvoker.inserter
+        // -> Inserter.node_manager -> NodeManager.flownode -> Flownode.flow_worker_manager.frontend_invoker
+        self.frontend_invoker.write().await.take();
     }
 
     /// Run all available subgraph in the flow node

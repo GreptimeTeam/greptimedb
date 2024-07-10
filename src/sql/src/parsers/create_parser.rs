@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use common_catalog::consts::default_engine;
 use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
+use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr, KeyOrIndexDisplay};
@@ -31,16 +32,18 @@ use super::utils;
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidIntervalSnafu,
-    InvalidTableOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result, SyntaxSnafu,
-    UnexpectedSnafu, UnsupportedSnafu,
+    InvalidSqlSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
+    SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{ParserContext, FLOW};
 use crate::statements::create::{
-    CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView,
-    Partitions, TIME_INDEX,
+    Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
+    CreateTableLike, CreateView, Partitions, TIME_INDEX,
 };
 use crate::statements::statement::Statement;
-use crate::statements::{get_data_type_by_alias_name, OptionMap};
+use crate::statements::{
+    get_data_type_by_alias_name, sql_data_type_to_concrete_data_type, OptionMap,
+};
 use crate::util::parse_option_string;
 
 pub const ENGINE: &str = "ENGINE";
@@ -53,6 +56,17 @@ const DB_OPT_KEY_TTL: &str = "ttl";
 
 fn validate_database_option(key: &str) -> bool {
     [DB_OPT_KEY_TTL].contains(&key)
+}
+
+pub const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
+pub const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
+
+fn validate_column_fulltext_option(key: &str) -> bool {
+    [
+        COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
+        COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+    ]
+    .contains(&key)
 }
 
 /// Parses create [table] statement
@@ -111,6 +125,8 @@ impl<'a> ParserContext<'a> {
         let if_not_exists = self.parse_if_not_exist()?;
         let view_name = self.intern_parse_table_name()?;
 
+        let columns = self.parse_view_columns()?;
+
         self.parser
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
@@ -119,10 +135,34 @@ impl<'a> ParserContext<'a> {
 
         Ok(Statement::CreateView(CreateView {
             name: view_name,
+            columns,
             or_replace,
             query: Box::new(query),
             if_not_exists,
         }))
+    }
+
+    fn parse_view_columns(&mut self) -> Result<Vec<Ident>> {
+        let mut columns = vec![];
+        if !self.parser.consume_token(&Token::LParen) || self.parser.consume_token(&Token::RParen) {
+            return Ok(columns);
+        }
+
+        loop {
+            let name = self.parse_column_name().context(SyntaxSnafu)?;
+
+            columns.push(name);
+
+            let comma = self.parser.consume_token(&Token::Comma);
+            if self.parser.consume_token(&Token::RParen) {
+                // allow a trailing comma, even though it's not in standard
+                break;
+            } else if !comma {
+                return self.expected("',' or ')' after column name", self.parser.peek_token());
+            }
+        }
+
+        Ok(columns)
     }
 
     fn parse_create_external_table(&mut self) -> Result<Statement> {
@@ -409,7 +449,7 @@ impl<'a> ParserContext<'a> {
         Ok(values)
     }
 
-    fn parse_columns(&mut self) -> Result<(Vec<ColumnDef>, Vec<TableConstraint>)> {
+    fn parse_columns(&mut self) -> Result<(Vec<Column>, Vec<TableConstraint>)> {
         let mut columns = vec![];
         let mut constraints = vec![];
         if !self.parser.consume_token(&Token::LParen) || self.parser.consume_token(&Token::RParen) {
@@ -444,13 +484,13 @@ impl<'a> ParserContext<'a> {
 
     fn parse_column(
         &mut self,
-        columns: &mut Vec<ColumnDef>,
+        columns: &mut Vec<Column>,
         constraints: &mut Vec<TableConstraint>,
     ) -> Result<()> {
-        let mut column = self.parse_column_def().context(SyntaxSnafu)?;
+        let mut column = self.parse_column_def()?;
 
         let mut time_index_opt_idx = None;
-        for (index, opt) in column.options.iter().enumerate() {
+        for (index, opt) in column.options().iter().enumerate() {
             if let ColumnOption::DialectSpecific(tokens) = &opt.option {
                 if matches!(
                     &tokens[..],
@@ -468,7 +508,7 @@ impl<'a> ParserContext<'a> {
                     ensure!(
                         time_index_opt_idx.is_none(),
                         InvalidColumnOptionSnafu {
-                            name: column.name.to_string(),
+                            name: column.name().to_string(),
                             msg: "duplicated time index",
                         }
                     );
@@ -480,7 +520,7 @@ impl<'a> ParserContext<'a> {
                             quote_style: None,
                         }),
                         columns: vec![Ident {
-                            value: column.name.value.clone(),
+                            value: column.name().value.clone(),
                             quote_style: None,
                         }],
                         characteristics: None,
@@ -496,22 +536,22 @@ impl<'a> ParserContext<'a> {
 
         if let Some(index) = time_index_opt_idx {
             ensure!(
-                !column.options.contains(&ColumnOptionDef {
+                !column.options().contains(&ColumnOptionDef {
                     option: ColumnOption::Null,
                     name: None,
                 }),
                 InvalidColumnOptionSnafu {
-                    name: column.name.to_string(),
+                    name: column.name().to_string(),
                     msg: "time index column can't be null",
                 }
             );
 
             // The timestamp type may be an alias type, we have to retrieve the actual type.
-            let data_type = get_real_timestamp_type(&column.data_type);
+            let data_type = get_unalias_type(column.data_type());
             ensure!(
                 matches!(data_type, DataType::Timestamp(_, _)),
                 InvalidColumnOptionSnafu {
-                    name: column.name.to_string(),
+                    name: column.name().to_string(),
                     msg: "time index column data type should be timestamp",
                 }
             );
@@ -521,11 +561,11 @@ impl<'a> ParserContext<'a> {
                 name: None,
             };
 
-            if !column.options.contains(&not_null_opt) {
-                column.options.push(not_null_opt);
+            if !column.options().contains(&not_null_opt) {
+                column.mut_options().push(not_null_opt);
             }
 
-            let _ = column.options.remove(index);
+            let _ = column.mut_options().remove(index);
         }
 
         columns.push(column);
@@ -533,10 +573,9 @@ impl<'a> ParserContext<'a> {
         Ok(())
     }
 
-    pub fn parse_column_def(&mut self) -> std::result::Result<ColumnDef, ParserError> {
-        let parser = &mut self.parser;
-
-        let name = parser.parse_identifier(false)?;
+    /// Parse the column name and check if it's valid.
+    fn parse_column_name(&mut self) -> std::result::Result<Ident, ParserError> {
+        let name = self.parser.parse_identifier(false)?;
         if name.quote_style.is_none() &&
         // "ALL_KEYWORDS" are sorted.
             ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()
@@ -547,44 +586,68 @@ impl<'a> ParserContext<'a> {
             )));
         }
 
-        let data_type = parser.parse_data_type()?;
+        Ok(name)
+    }
+
+    pub fn parse_column_def(&mut self) -> Result<Column> {
+        let name = self.parse_column_name().context(SyntaxSnafu)?;
+        let parser = &mut self.parser;
+
+        ensure!(
+            !(name.quote_style.is_none() &&
+            // "ALL_KEYWORDS" are sorted.
+            ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()),
+            InvalidSqlSnafu {
+                msg: format!(
+                    "Cannot use keyword '{}' as column name. Hint: add quotes to the name.",
+                    &name.value
+                ),
+            }
+        );
+
+        let data_type = parser.parse_data_type().context(SyntaxSnafu)?;
         let collation = if parser.parse_keyword(Keyword::COLLATE) {
-            Some(parser.parse_object_name(false)?)
+            Some(parser.parse_object_name(false).context(SyntaxSnafu)?)
         } else {
             None
         };
         let mut options = vec![];
+        let mut extensions = ColumnExtensions::default();
         loop {
             if parser.parse_keyword(Keyword::CONSTRAINT) {
-                let name = Some(parser.parse_identifier(false)?);
+                let name = Some(parser.parse_identifier(false).context(SyntaxSnafu)?);
                 if let Some(option) = Self::parse_optional_column_option(parser)? {
                     options.push(ColumnOptionDef { name, option });
                 } else {
-                    return parser.expected(
-                        "constraint details after CONSTRAINT <name>",
-                        parser.peek_token(),
-                    );
+                    return parser
+                        .expected(
+                            "constraint details after CONSTRAINT <name>",
+                            parser.peek_token(),
+                        )
+                        .context(SyntaxSnafu);
                 }
             } else if let Some(option) = Self::parse_optional_column_option(parser)? {
                 options.push(ColumnOptionDef { name: None, option });
-            } else {
+            } else if !Self::parse_column_extensions(parser, &name, &data_type, &mut extensions)? {
                 break;
             };
         }
-        Ok(ColumnDef {
-            name: Self::canonicalize_identifier(name),
-            data_type,
-            collation,
-            options,
+
+        Ok(Column {
+            column_def: ColumnDef {
+                name: Self::canonicalize_identifier(name),
+                data_type,
+                collation,
+                options,
+            },
+            extensions,
         })
     }
 
-    fn parse_optional_column_option(
-        parser: &mut Parser<'a>,
-    ) -> std::result::Result<Option<ColumnOption>, ParserError> {
+    fn parse_optional_column_option(parser: &mut Parser<'a>) -> Result<Option<ColumnOption>> {
         if parser.parse_keywords(&[Keyword::CHARACTER, Keyword::SET]) {
             Ok(Some(ColumnOption::CharacterSet(
-                parser.parse_object_name(false)?,
+                parser.parse_object_name(false).context(SyntaxSnafu)?,
             )))
         } else if parser.parse_keywords(&[Keyword::NOT, Keyword::NULL]) {
             Ok(Some(ColumnOption::NotNull))
@@ -594,12 +657,14 @@ impl<'a> ParserContext<'a> {
                     token: Token::SingleQuotedString(value, ..),
                     ..
                 } => Ok(Some(ColumnOption::Comment(value))),
-                unexpected => parser.expected("string", unexpected),
+                unexpected => parser.expected("string", unexpected).context(SyntaxSnafu),
             }
         } else if parser.parse_keyword(Keyword::NULL) {
             Ok(Some(ColumnOption::Null))
         } else if parser.parse_keyword(Keyword::DEFAULT) {
-            Ok(Some(ColumnOption::Default(parser.parse_expr()?)))
+            Ok(Some(ColumnOption::Default(
+                parser.parse_expr().context(SyntaxSnafu)?,
+            )))
         } else if parser.parse_keywords(&[Keyword::PRIMARY, Keyword::KEY]) {
             Ok(Some(ColumnOption::Unique {
                 is_primary: true,
@@ -626,6 +691,55 @@ impl<'a> ParserContext<'a> {
             ])))
         } else {
             Ok(None)
+        }
+    }
+
+    fn parse_column_extensions(
+        parser: &mut Parser<'a>,
+        column_name: &Ident,
+        column_type: &DataType,
+        column_extensions: &mut ColumnExtensions,
+    ) -> Result<bool> {
+        if parser.parse_keyword(Keyword::FULLTEXT) {
+            ensure!(
+                column_extensions.fulltext_options.is_none(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "duplicated FULLTEXT option",
+                }
+            );
+
+            let column_type = get_unalias_type(column_type);
+            let data_type = sql_data_type_to_concrete_data_type(&column_type)?;
+            ensure!(
+                data_type == ConcreteDataType::string_datatype(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "FULLTEXT index only supports string type",
+                }
+            );
+
+            let options = parser
+                .parse_options(Keyword::WITH)
+                .context(error::SyntaxSnafu)?
+                .into_iter()
+                .map(parse_option_string)
+                .collect::<Result<HashMap<String, String>>>()?;
+
+            for key in options.keys() {
+                ensure!(
+                    validate_column_fulltext_option(key),
+                    InvalidColumnOptionSnafu {
+                        name: column_name.to_string(),
+                        msg: format!("invalid FULLTEXT option: {key}"),
+                    }
+                );
+            }
+
+            column_extensions.fulltext_options = Some(options.into());
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 
@@ -742,7 +856,7 @@ impl<'a> ParserContext<'a> {
     }
 }
 
-fn validate_time_index(columns: &[ColumnDef], constraints: &[TableConstraint]) -> Result<()> {
+fn validate_time_index(columns: &[Column], constraints: &[TableConstraint]) -> Result<()> {
     let time_index_constraints: Vec<_> = constraints
         .iter()
         .filter_map(|c| {
@@ -786,7 +900,7 @@ fn validate_time_index(columns: &[ColumnDef], constraints: &[TableConstraint]) -
     let time_index_column_ident = &time_index_constraints[0][0];
     let time_index_column = columns
         .iter()
-        .find(|c| c.name.value == *time_index_column_ident.value)
+        .find(|c| c.name().value == *time_index_column_ident.value)
         .with_context(|| InvalidTimeIndexSnafu {
             msg: format!(
                 "time index column {} not found in columns",
@@ -794,11 +908,11 @@ fn validate_time_index(columns: &[ColumnDef], constraints: &[TableConstraint]) -
             ),
         })?;
 
-    let time_index_data_type = get_real_timestamp_type(&time_index_column.data_type);
+    let time_index_data_type = get_unalias_type(time_index_column.data_type());
     ensure!(
         matches!(time_index_data_type, DataType::Timestamp(_, _)),
         InvalidColumnOptionSnafu {
-            name: time_index_column.name.to_string(),
+            name: time_index_column.name().to_string(),
             msg: "time index column data type should be timestamp",
         }
     );
@@ -806,7 +920,7 @@ fn validate_time_index(columns: &[ColumnDef], constraints: &[TableConstraint]) -
     Ok(())
 }
 
-fn get_real_timestamp_type(data_type: &DataType) -> DataType {
+fn get_unalias_type(data_type: &DataType) -> DataType {
     match data_type {
         DataType::Custom(name, tokens) if name.0.len() == 1 && tokens.is_empty() => {
             if let Some(real_type) = get_data_type_by_alias_name(name.0[0].value.as_str()) {
@@ -819,7 +933,7 @@ fn get_real_timestamp_type(data_type: &DataType) -> DataType {
     }
 }
 
-fn validate_partitions(columns: &[ColumnDef], partitions: &Partitions) -> Result<()> {
+fn validate_partitions(columns: &[Column], partitions: &Partitions) -> Result<()> {
     let partition_columns = ensure_partition_columns_defined(columns, partitions)?;
 
     ensure_exprs_are_binary(&partitions.exprs, &partition_columns)?;
@@ -828,7 +942,7 @@ fn validate_partitions(columns: &[ColumnDef], partitions: &Partitions) -> Result
 }
 
 /// Ensure all exprs are binary expr and all the columns are defined in the column list.
-fn ensure_exprs_are_binary(exprs: &[Expr], columns: &[&ColumnDef]) -> Result<()> {
+fn ensure_exprs_are_binary(exprs: &[Expr], columns: &[&Column]) -> Result<()> {
     for expr in exprs {
         // The first level must be binary expr
         if let Expr::BinaryOp { left, op: _, right } = expr {
@@ -847,7 +961,7 @@ fn ensure_exprs_are_binary(exprs: &[Expr], columns: &[&ColumnDef]) -> Result<()>
 /// Check if the expr is a binary expr, an ident or a literal value.
 /// If is ident, then check it is in the column list.
 /// This recursive function is intended to be used by [ensure_exprs_are_binary].
-fn ensure_one_expr(expr: &Expr, columns: &[&ColumnDef]) -> Result<()> {
+fn ensure_one_expr(expr: &Expr, columns: &[&Column]) -> Result<()> {
     match expr {
         Expr::BinaryOp { left, op: _, right } => {
             ensure_one_expr(left, columns)?;
@@ -857,7 +971,7 @@ fn ensure_one_expr(expr: &Expr, columns: &[&ColumnDef]) -> Result<()> {
         Expr::Identifier(ident) => {
             let column_name = &ident.value;
             ensure!(
-                columns.iter().any(|c| &c.name.value == column_name),
+                columns.iter().any(|c| &c.name().value == column_name),
                 error::InvalidSqlSnafu {
                     msg: format!(
                         "Column {:?} in rule expr is not referenced in PARTITION ON!",
@@ -868,6 +982,10 @@ fn ensure_one_expr(expr: &Expr, columns: &[&ColumnDef]) -> Result<()> {
             Ok(())
         }
         Expr::Value(_) => Ok(()),
+        Expr::UnaryOp { expr, .. } => {
+            ensure_one_expr(expr, columns)?;
+            Ok(())
+        }
         _ => error::InvalidSqlSnafu {
             msg: format!("Partition rule expr {:?} is not a binary expr!", expr),
         }
@@ -877,9 +995,9 @@ fn ensure_one_expr(expr: &Expr, columns: &[&ColumnDef]) -> Result<()> {
 
 /// Ensure that all columns used in "PARTITION ON COLUMNS" are defined in create table.
 fn ensure_partition_columns_defined<'a>(
-    columns: &'a [ColumnDef],
+    columns: &'a [Column],
     partitions: &'a Partitions,
-) -> Result<Vec<&'a ColumnDef>> {
+) -> Result<Vec<&'a Column>> {
     partitions
         .column_list
         .iter()
@@ -888,12 +1006,12 @@ fn ensure_partition_columns_defined<'a>(
             // a linear search to find the target every time is fine.
             columns
                 .iter()
-                .find(|c| &c.name == x)
+                .find(|c| c.name() == x)
                 .context(error::InvalidSqlSnafu {
                     msg: format!("Partition column {:?} not defined!", x.value),
                 })
         })
-        .collect::<Result<Vec<&ColumnDef>>>()
+        .collect::<Result<Vec<&Column>>>()
 }
 
 #[cfg(test)]
@@ -1036,10 +1154,10 @@ mod tests {
                 assert_eq!(c.options, options.into());
 
                 let columns = &c.columns;
-                assert_column_def(&columns[0], "host", "STRING");
-                assert_column_def(&columns[1], "ts", "TIMESTAMP");
-                assert_column_def(&columns[2], "cpu", "FLOAT");
-                assert_column_def(&columns[3], "memory", "FLOAT64");
+                assert_column_def(&columns[0].column_def, "host", "STRING");
+                assert_column_def(&columns[1].column_def, "ts", "TIMESTAMP");
+                assert_column_def(&columns[2].column_def, "cpu", "FLOAT");
+                assert_column_def(&columns[3].column_def, "memory", "FLOAT64");
 
                 let constraints = &c.constraints;
                 assert!(matches!(&constraints[0], TableConstraint::Unique {
@@ -1450,8 +1568,8 @@ ENGINE=mito";
         assert_eq!(result.len(), 1);
         if let Statement::CreateTable(c) = &result[0] {
             let ts = c.columns[2].clone();
-            assert_eq!(ts.name.to_string(), "ts");
-            assert_eq!(ts.options[0].option, NotNull);
+            assert_eq!(ts.name().to_string(), "ts");
+            assert_eq!(ts.options()[0].option, NotNull);
         } else {
             panic!("should be create table statement");
         }
@@ -1561,9 +1679,9 @@ ENGINE=mito";
                 _ => panic!("should be time index constraint"),
             }
             let ts = c.columns[2].clone();
-            assert_eq!(ts.name.to_string(), "ts");
-            assert!(matches!(ts.options[0].option, ColumnOption::Default(..)));
-            assert_eq!(ts.options[1].option, NotNull);
+            assert_eq!(ts.name().to_string(), "ts");
+            assert!(matches!(ts.options()[0].option, ColumnOption::Default(..)));
+            assert_eq!(ts.options()[1].option, NotNull);
         } else {
             unreachable!("should be create table statement");
         }
@@ -1657,10 +1775,10 @@ ENGINE=mito";
                 assert_eq!("mito", c.engine);
                 assert_eq!(4, c.columns.len());
                 let columns = &c.columns;
-                assert_column_def(&columns[0], "host", "STRING");
-                assert_column_def(&columns[1], "ts", "TIMESTAMP");
-                assert_column_def(&columns[2], "cpu", "FLOAT");
-                assert_column_def(&columns[3], "memory", "FLOAT64");
+                assert_column_def(&columns[0].column_def, "host", "STRING");
+                assert_column_def(&columns[1].column_def, "ts", "TIMESTAMP");
+                assert_column_def(&columns[2].column_def, "cpu", "FLOAT");
+                assert_column_def(&columns[3].column_def, "memory", "FLOAT64");
 
                 let constraints = &c.constraints;
                 assert!(matches!(&constraints[0], TableConstraint::Unique {
@@ -1803,5 +1921,215 @@ non TIMESTAMP(6) TIME INDEX,
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
         assert_matches!(result, Err(crate::error::Error::Syntax { .. }));
+    }
+
+    #[test]
+    fn test_parse_create_table_fulltext_options() {
+        let sql1 = r"
+CREATE TABLE log (
+    ts TIMESTAMP TIME INDEX,
+    msg TEXT FULLTEXT,
+)";
+        let result1 = ParserContext::create_with_dialect(
+            sql1,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+
+        if let Statement::CreateTable(c) = &result1[0] {
+            c.columns.iter().for_each(|col| {
+                if col.name().value == "msg" {
+                    assert!(col.extensions.fulltext_options.as_ref().unwrap().is_empty());
+                }
+            });
+        } else {
+            panic!("should be create_table statement");
+        }
+
+        let sql2 = r"
+CREATE TABLE log (
+    ts TIMESTAMP TIME INDEX,
+    msg STRING FULLTEXT WITH (analyzer='English', case_sensitive='false')
+)";
+        let result2 = ParserContext::create_with_dialect(
+            sql2,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+
+        if let Statement::CreateTable(c) = &result2[0] {
+            c.columns.iter().for_each(|col| {
+                if col.name().value == "msg" {
+                    let options = col.extensions.fulltext_options.as_ref().unwrap();
+                    assert_eq!(options.len(), 2);
+                    assert_eq!(options.get("analyzer").unwrap(), "English");
+                    assert_eq!(options.get("case_sensitive").unwrap(), "false");
+                }
+            });
+        } else {
+            panic!("should be create_table statement");
+        }
+
+        let sql3 = r"
+CREATE TABLE log (
+    ts TIMESTAMP TIME INDEX,
+    msg1 TINYTEXT FULLTEXT WITH (analyzer='English', case_sensitive='false'),
+    msg2 CHAR(20) FULLTEXT WITH (analyzer='Chinese', case_sensitive='true')
+)";
+        let result3 = ParserContext::create_with_dialect(
+            sql3,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+
+        if let Statement::CreateTable(c) = &result3[0] {
+            c.columns.iter().for_each(|col| {
+                if col.name().value == "msg1" {
+                    let options = col.extensions.fulltext_options.as_ref().unwrap();
+                    assert_eq!(options.len(), 2);
+                    assert_eq!(options.get("analyzer").unwrap(), "English");
+                    assert_eq!(options.get("case_sensitive").unwrap(), "false");
+                } else if col.name().value == "msg2" {
+                    let options = col.extensions.fulltext_options.as_ref().unwrap();
+                    assert_eq!(options.len(), 2);
+                    assert_eq!(options.get("analyzer").unwrap(), "Chinese");
+                    assert_eq!(options.get("case_sensitive").unwrap(), "true");
+                }
+            });
+        } else {
+            panic!("should be create_table statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_table_fulltext_options_invalid_type() {
+        let sql = r"
+CREATE TABLE log (
+    ts TIMESTAMP TIME INDEX,
+    msg INT FULLTEXT,
+)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("FULLTEXT index only supports string type"));
+    }
+
+    #[test]
+    fn test_parse_create_table_fulltext_options_duplicate() {
+        let sql = r"
+CREATE TABLE log (
+    ts TIMESTAMP TIME INDEX,
+    msg STRING FULLTEXT WITH (analyzer='English', analyzer='Chinese') FULLTEXT WITH (case_sensitive='false')
+)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("duplicated FULLTEXT option"));
+    }
+
+    #[test]
+    fn test_parse_create_table_fulltext_options_invalid_option() {
+        let sql = r"
+CREATE TABLE log (
+    ts TIMESTAMP TIME INDEX,
+    msg STRING FULLTEXT WITH (analyzer='English', invalid_option='Chinese')
+)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid FULLTEXT option"));
+    }
+
+    #[test]
+    fn test_parse_create_view_with_columns() {
+        let sql = "CREATE VIEW test () AS SELECT * FROM NUMBERS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        match &result[0] {
+            Statement::CreateView(c) => {
+                assert_eq!(c.to_string(), "CREATE VIEW test AS SELECT * FROM NUMBERS");
+                assert!(!c.or_replace);
+                assert!(!c.if_not_exists);
+                assert_eq!("test", c.name.to_string());
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            "CREATE VIEW test AS SELECT * FROM NUMBERS",
+            result[0].to_string()
+        );
+
+        let sql = "CREATE VIEW test (n1) AS SELECT * FROM NUMBERS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        match &result[0] {
+            Statement::CreateView(c) => {
+                assert_eq!(c.to_string(), sql);
+                assert!(!c.or_replace);
+                assert!(!c.if_not_exists);
+                assert_eq!("test", c.name.to_string());
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(sql, result[0].to_string());
+
+        let sql = "CREATE VIEW test (n1, n2) AS SELECT * FROM NUMBERS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        match &result[0] {
+            Statement::CreateView(c) => {
+                assert_eq!(c.to_string(), sql);
+                assert!(!c.or_replace);
+                assert!(!c.if_not_exists);
+                assert_eq!("test", c.name.to_string());
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(sql, result[0].to_string());
+
+        // Some invalid syntax cases
+        let sql = "CREATE VIEW test (n1 AS select * from demo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+
+        let sql = "CREATE VIEW test (n1, AS select * from demo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+
+        let sql = "CREATE VIEW test n1,n2) AS select * from demo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+
+        let sql = "CREATE VIEW test (1) AS select * from demo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+
+        // keyword
+        let sql = "CREATE VIEW test (n1, select) AS select * from demo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
     }
 }

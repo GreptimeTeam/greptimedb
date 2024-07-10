@@ -16,7 +16,7 @@ use std::ops::ControlFlow;
 
 use datatypes::data_type::DataType as GreptimeDataType;
 use sqlparser::ast::{
-    ColumnDef, DataType, Expr, Function, FunctionArg, FunctionArgExpr, Ident, ObjectName, Value,
+    DataType, Expr, Function, FunctionArg, FunctionArgExpr, Ident, ObjectName, Value,
 };
 
 use crate::error::Result;
@@ -45,12 +45,12 @@ impl TransformRule for TypeAliasTransformRule {
             Statement::CreateTable(CreateTable { columns, .. }) => {
                 columns
                     .iter_mut()
-                    .for_each(|ColumnDef { data_type, .. }| replace_type_alias(data_type));
+                    .for_each(|column| replace_type_alias(column.mut_data_type()));
             }
             Statement::CreateExternalTable(CreateExternalTable { columns, .. }) => {
                 columns
                     .iter_mut()
-                    .for_each(|ColumnDef { data_type, .. }| replace_type_alias(data_type));
+                    .for_each(|column| replace_type_alias(column.mut_data_type()));
             }
             Statement::Alter(alter_table) => {
                 if let AlterTableOperation::ChangeColumnType { target_type, .. } =

@@ -63,8 +63,8 @@ fn invalidator<'a>(
     ident: &'a CacheIdent,
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
-        if let CacheIdent::TableId(table_id) = ident {
-            cache.invalidate(table_id).await
+        if let CacheIdent::TableId(view_id) = ident {
+            cache.invalidate(view_id).await
         }
         Ok(())
     })
@@ -111,6 +111,7 @@ mod tests {
             });
             set
         };
+        let definition = "CREATE VIEW test AS SELECT * FROM numbers";
 
         task.view_info.ident.table_id = 1024;
         table_metadata_manager
@@ -118,6 +119,9 @@ mod tests {
                 task.view_info.clone(),
                 task.create_view.logical_plan.clone(),
                 table_names,
+                vec!["a".to_string()],
+                vec!["number".to_string()],
+                definition.to_string(),
             )
             .await
             .unwrap();
@@ -132,6 +136,9 @@ mod tests {
                 .map(|t| t.clone().into())
                 .collect::<HashSet<_>>()
         );
+        assert_eq!(view_info.definition, task.create_view.definition);
+        assert_eq!(view_info.columns, task.create_view.columns);
+        assert_eq!(view_info.plan_columns, task.create_view.plan_columns);
 
         assert!(cache.contains_key(&1024));
         cache

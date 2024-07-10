@@ -26,7 +26,7 @@ use common_time::Timestamp;
 use datafusion::physical_plan::DisplayFormatType;
 use smallvec::SmallVec;
 use store_api::region_engine::RegionScannerRef;
-use store_api::storage::ScanRequest;
+use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
@@ -297,7 +297,8 @@ impl ScanRegion {
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(filter_deleted)
-            .with_merge_mode(self.version.options.merge_mode());
+            .with_merge_mode(self.version.options.merge_mode())
+            .with_series_row_selector(self.request.series_row_selector.clone());
         Ok(input)
     }
 
@@ -410,6 +411,8 @@ pub(crate) struct ScanInput {
     pub(crate) filter_deleted: bool,
     /// Mode to merge duplicate rows.
     pub(crate) merge_mode: MergeMode,
+    /// Hint to select rows from time series.
+    pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
 }
 
 impl ScanInput {
@@ -431,6 +434,7 @@ impl ScanInput {
             append_mode: false,
             filter_deleted: true,
             merge_mode: MergeMode::default(),
+            series_row_selector: None,
         }
     }
 
@@ -514,6 +518,16 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_merge_mode(mut self, merge_mode: MergeMode) -> Self {
         self.merge_mode = merge_mode;
+        self
+    }
+
+    /// Sets the time series row selector.
+    #[must_use]
+    pub(crate) fn with_series_row_selector(
+        mut self,
+        series_row_selector: Option<TimeSeriesRowSelector>,
+    ) -> Self {
+        self.series_row_selector = series_row_selector;
         self
     }
 

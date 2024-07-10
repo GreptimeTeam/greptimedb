@@ -25,7 +25,6 @@ pub mod standalone;
 
 use std::sync::Arc;
 
-use api::v1::{RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
@@ -33,7 +32,6 @@ use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
-use common_frontend::handler::FrontendInvoker;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
@@ -191,33 +189,6 @@ impl Instance {
 
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
-    }
-}
-
-#[async_trait]
-impl FrontendInvoker for Instance {
-    async fn row_inserts(
-        &self,
-        requests: RowInsertRequests,
-        ctx: QueryContextRef,
-    ) -> common_frontend::error::Result<Output> {
-        self.inserter
-            .handle_row_inserts(requests, ctx, &self.statement_executor)
-            .await
-            .map_err(BoxedError::new)
-            .context(common_frontend::error::ExternalSnafu)
-    }
-
-    async fn row_deletes(
-        &self,
-        requests: RowDeleteRequests,
-        ctx: QueryContextRef,
-    ) -> common_frontend::error::Result<Output> {
-        self.deleter
-            .handle_row_deletes(requests, ctx)
-            .await
-            .map_err(BoxedError::new)
-            .context(common_frontend::error::ExternalSnafu)
     }
 }
 
@@ -483,6 +454,9 @@ pub fn check_permission(
         }
         Statement::ShowCreateFlow(stmt) => {
             validate_param(&stmt.flow_name, query_ctx)?;
+        }
+        Statement::ShowCreateView(stmt) => {
+            validate_param(&stmt.view_name, query_ctx)?;
         }
         Statement::CreateExternalTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;

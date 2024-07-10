@@ -159,6 +159,10 @@ impl Date {
             .checked_sub_days(Days::new(days as u64))
             .map(Into::into)
     }
+
+    pub fn negative(&self) -> Self {
+        Self(-self.0)
+    }
 }
 
 #[cfg(test)]

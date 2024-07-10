@@ -56,7 +56,7 @@ use sql::statements::create::{
 };
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
-use sqlparser::ast::{Expr, Ident, Value as ParserValue};
+use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::dist_table::DistTable;
@@ -400,8 +400,38 @@ impl StatementExecutor {
                 return InvalidViewStmtSnafu {}.fail();
             }
         };
+        // Save the definition for `show create view`.
+        let definition = create_view.to_string();
 
-        // Extract the table names from the origin plan
+        // Save the columns in plan, it may changed when the schemas of tables in plan
+        // are altered.
+        let plan_columns: Vec<_> = logical_plan
+            .schema()
+            .context(error::GetSchemaSnafu)?
+            .column_schemas()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+
+        let columns: Vec<_> = create_view
+            .columns
+            .iter()
+            .map(|ident| ident.to_string())
+            .collect();
+
+        // Validate columns
+        if !columns.is_empty() {
+            ensure!(
+                columns.len() == plan_columns.len(),
+                error::ViewColumnsMismatchSnafu {
+                    view_name: create_view.name.to_string(),
+                    expected: plan_columns.len(),
+                    actual: columns.len(),
+                }
+            );
+        }
+
+        // Extract the table names from the original plan
         // and rewrite them as fully qualified names.
         let (table_names, plan) =
             extract_and_rewrite_full_table_names(logical_plan.unwrap_df_plan(), ctx.clone())
@@ -423,6 +453,9 @@ impl StatementExecutor {
             create_view,
             encoded_plan.to_vec(),
             table_names,
+            columns,
+            plan_columns,
+            definition,
             ctx.clone(),
         )?;
 
@@ -539,6 +572,12 @@ impl StatementExecutor {
             })?;
         info!("Successfully created view '{view_name}' with view id {view_id}");
 
+        view_info.ident.table_id = view_id;
+
+        let view_info = Arc::new(view_info.try_into().context(CreateTableInfoSnafu)?);
+
+        let table = DistTable::table(view_info);
+
         // Invalidates local cache ASAP.
         self.cache_invalidator
             .invalidate(
@@ -550,12 +589,6 @@ impl StatementExecutor {
             )
             .await
             .context(error::InvalidateTableCacheSnafu)?;
-
-        view_info.ident.table_id = view_id;
-
-        let view_info = Arc::new(view_info.try_into().context(CreateTableInfoSnafu)?);
-
-        let table = DistTable::table(view_info);
 
         Ok(table)
     }
@@ -1329,14 +1362,30 @@ fn convert_one_expr(
 
     // convert leaf node.
     let (lhs, op, rhs) = match (left.as_ref(), right.as_ref()) {
+        // col, val
         (Expr::Identifier(ident), Expr::Value(value)) => {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(value, data_type, timezone)?;
+            let value = convert_value(value, data_type, timezone, None)?;
             (Operand::Column(column_name), op, Operand::Value(value))
         }
+        (Expr::Identifier(ident), Expr::UnaryOp { op: unary_op, expr })
+            if let Expr::Value(v) = &**expr =>
+        {
+            let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
+            let value = convert_value(v, data_type, timezone, Some(*unary_op))?;
+            (Operand::Column(column_name), op, Operand::Value(value))
+        }
+        // val, col
         (Expr::Value(value), Expr::Identifier(ident)) => {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(value, data_type, timezone)?;
+            let value = convert_value(value, data_type, timezone, None)?;
+            (Operand::Value(value), op, Operand::Column(column_name))
+        }
+        (Expr::UnaryOp { op: unary_op, expr }, Expr::Identifier(ident))
+            if let Expr::Value(v) = &**expr =>
+        {
+            let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
+            let value = convert_value(v, data_type, timezone, Some(*unary_op))?;
             (Operand::Value(value), op, Operand::Column(column_name))
         }
         (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {
@@ -1372,8 +1421,10 @@ fn convert_value(
     value: &ParserValue,
     data_type: ConcreteDataType,
     timezone: &Timezone,
+    unary_op: Option<UnaryOperator>,
 ) -> Result<Value> {
-    sql_value_to_value("<NONAME>", &data_type, value, Some(timezone)).context(ParseSqlValueSnafu)
+    sql_value_to_value("<NONAME>", &data_type, value, Some(timezone), unary_op)
+        .context(ParseSqlValueSnafu)
 }
 
 /// Merge table level table options with schema level table options.

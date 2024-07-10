@@ -17,10 +17,11 @@ datatypes.workspace = true
 greptime-proto.workspace = true
 paste = "1.0"
 prost.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
 
 [build-dependencies]
-tonic-build = "0.9"
+tonic-build = "0.11"
 
 [dev-dependencies]
 paste = "1.0"

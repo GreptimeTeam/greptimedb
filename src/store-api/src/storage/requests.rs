@@ -15,6 +15,13 @@
 use common_recordbatch::OrderOption;
 use datafusion_expr::expr::Expr;
 
+/// A hint on how to select rows from a time-series.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TimeSeriesRowSelector {
+    /// Only keep the last row of each time-series.
+    LastRow,
+}
+
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScanRequest {
     /// Indices of columns to read, `None` to read all columns. This indices is
@@ -29,4 +36,6 @@ pub struct ScanRequest {
     /// If set, it contains the amount of rows needed by the caller,
     /// The data source should return *at least* this number of rows if available.
     pub limit: Option<usize>,
+    /// Optional hint to select rows from time-series.
+    pub series_row_selector: Option<TimeSeriesRowSelector>,
 }
