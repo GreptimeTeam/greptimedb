@@ -12,22 +12,92 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::array::TryFromSliceError;
+
+use bytes::Bytes;
 use common_decimal::Decimal128;
 use common_time::{Date, Timestamp};
+use datafusion_common::ScalarValue;
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::value::Value;
+use num_traits::FromBytes;
+use snafu::ensure;
+use substrait::substrait_proto_df::proto::expression::literal::user_defined::Val;
+use substrait::substrait_proto_df::proto::expression::literal::UserDefined;
 use substrait::variation_const::{
     DATE_32_TYPE_VARIATION_REF, DATE_64_TYPE_VARIATION_REF, DEFAULT_TYPE_VARIATION_REF,
+    INTERVAL_DAY_TIME_TYPE_REF, INTERVAL_DAY_TIME_TYPE_URL, INTERVAL_MONTH_DAY_NANO_TYPE_REF,
+    INTERVAL_MONTH_DAY_NANO_TYPE_URL, INTERVAL_YEAR_MONTH_TYPE_REF, INTERVAL_YEAR_MONTH_TYPE_URL,
     TIMESTAMP_MICRO_TYPE_VARIATION_REF, TIMESTAMP_MILLI_TYPE_VARIATION_REF,
     TIMESTAMP_NANO_TYPE_VARIATION_REF, TIMESTAMP_SECOND_TYPE_VARIATION_REF,
     UNSIGNED_INTEGER_TYPE_VARIATION_REF,
 };
 use substrait_proto::proto::expression::literal::LiteralType;
 use substrait_proto::proto::expression::Literal;
-use substrait_proto::proto::r#type::Kind;
+use substrait_proto::proto::r#type::{self, parameter, Kind, Parameter};
+use substrait_proto::proto::Type;
 
-use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
+use crate::error::{Error, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu};
 use crate::transform::substrait_proto;
+
+/// TODO(discord9): this is copy from datafusion-substrait since the original function is not public, will be replace once is exported
+pub(crate) fn to_substrait_literal(value: &ScalarValue) -> Result<Literal, Error> {
+    if value.is_null() {
+        return not_impl_err!("Unsupported literal: {value:?}");
+    }
+    let (literal_type, type_variation_reference) = match value {
+        ScalarValue::Boolean(Some(b)) => (LiteralType::Boolean(*b), DEFAULT_TYPE_VARIATION_REF),
+        ScalarValue::Int8(Some(n)) => (LiteralType::I8(*n as i32), DEFAULT_TYPE_VARIATION_REF),
+        ScalarValue::UInt8(Some(n)) => (
+            LiteralType::I8(*n as i32),
+            UNSIGNED_INTEGER_TYPE_VARIATION_REF,
+        ),
+        ScalarValue::Int16(Some(n)) => (LiteralType::I16(*n as i32), DEFAULT_TYPE_VARIATION_REF),
+        ScalarValue::UInt16(Some(n)) => (
+            LiteralType::I16(*n as i32),
+            UNSIGNED_INTEGER_TYPE_VARIATION_REF,
+        ),
+        ScalarValue::Int32(Some(n)) => (LiteralType::I32(*n), DEFAULT_TYPE_VARIATION_REF),
+        ScalarValue::UInt32(Some(n)) => (
+            LiteralType::I32(*n as i32),
+            UNSIGNED_INTEGER_TYPE_VARIATION_REF,
+        ),
+        ScalarValue::Int64(Some(n)) => (LiteralType::I64(*n), DEFAULT_TYPE_VARIATION_REF),
+        ScalarValue::UInt64(Some(n)) => (
+            LiteralType::I64(*n as i64),
+            UNSIGNED_INTEGER_TYPE_VARIATION_REF,
+        ),
+        ScalarValue::Float32(Some(f)) => (LiteralType::Fp32(*f), DEFAULT_TYPE_VARIATION_REF),
+        ScalarValue::Float64(Some(f)) => (LiteralType::Fp64(*f), DEFAULT_TYPE_VARIATION_REF),
+        ScalarValue::TimestampSecond(Some(t), _) => (
+            LiteralType::Timestamp(*t),
+            TIMESTAMP_SECOND_TYPE_VARIATION_REF,
+        ),
+        ScalarValue::TimestampMillisecond(Some(t), _) => (
+            LiteralType::Timestamp(*t),
+            TIMESTAMP_MILLI_TYPE_VARIATION_REF,
+        ),
+        ScalarValue::TimestampMicrosecond(Some(t), _) => (
+            LiteralType::Timestamp(*t),
+            TIMESTAMP_MICRO_TYPE_VARIATION_REF,
+        ),
+        ScalarValue::TimestampNanosecond(Some(t), _) => (
+            LiteralType::Timestamp(*t),
+            TIMESTAMP_NANO_TYPE_VARIATION_REF,
+        ),
+        ScalarValue::Date32(Some(d)) => (LiteralType::Date(*d), DATE_32_TYPE_VARIATION_REF),
+        _ => (
+            not_impl_err!("Unsupported literal: {value:?}")?,
+            DEFAULT_TYPE_VARIATION_REF,
+        ),
+    };
+
+    Ok(Literal {
+        nullable: false,
+        type_variation_reference,
+        literal_type: Some(literal_type),
+    })
+}
 
 /// Convert a Substrait literal into a Value and its ConcreteDataType (So that we can know type even if the value is null)
 pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Error> {
@@ -105,7 +175,107 @@ pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Erro
             )
         }
         Some(LiteralType::Null(ntype)) => (Value::Null, from_substrait_type(ntype)?),
-        _ => not_impl_err!("unsupported literal_type")?,
+        Some(LiteralType::IntervalDayToSecond(interval)) => {
+            let (days, seconds, microseconds) =
+                (interval.days, interval.seconds, interval.microseconds);
+            let millis = microseconds / 1000 + seconds * 1000;
+            let value_interval = common_time::Interval::from_day_time(days, millis);
+            (
+                Value::Interval(value_interval),
+                CDT::interval_day_time_datatype(),
+            )
+        }
+        Some(LiteralType::IntervalYearToMonth(interval)) => (
+            Value::Interval(common_time::Interval::from_year_month(
+                interval.years * 12 + interval.months,
+            )),
+            CDT::interval_year_month_datatype(),
+        ),
+        Some(LiteralType::UserDefined(UserDefined {
+            val: Some(Val::Value(val)),
+            type_reference,
+            ..
+        })) => {
+            fn from_bytes<T: FromBytes>(i: &Bytes) -> Result<T, Error>
+            where
+                for<'a> &'a <T as num_traits::FromBytes>::Bytes:
+                    std::convert::TryFrom<&'a [u8], Error = TryFromSliceError>,
+            {
+                let (int_bytes, _rest) = i.split_at(std::mem::size_of::<T>());
+                let i = T::from_le_bytes(int_bytes.try_into().map_err(|e| {
+                    UnexpectedSnafu {
+                        reason: format!(
+                            "Expect slice to be {} bytes, found {} bytes, error={:?}",
+                            std::mem::size_of::<T>(),
+                            int_bytes.len(),
+                            e
+                        ),
+                    }
+                    .build()
+                })?);
+                Ok(i)
+            }
+            // see https://github.com/apache/datafusion/blob/146b679aa19c7749cc73d0c27440419d6498142b/datafusion/substrait/src/logical_plan/producer.rs#L1957
+            // for interval type's transform to substrait
+            match *type_reference {
+                INTERVAL_YEAR_MONTH_TYPE_REF => {
+                    ensure!(
+                        val.type_url == INTERVAL_YEAR_MONTH_TYPE_URL,
+                        UnexpectedSnafu {
+                            reason: format!(
+                                "Expect {}, found {} in type_url",
+                                INTERVAL_YEAR_MONTH_TYPE_URL, val.type_url
+                            )
+                        }
+                    );
+                    let i: i32 = from_bytes(&val.value)?;
+                    let value_interval = common_time::Interval::from_year_month(i);
+                    (
+                        Value::Interval(value_interval),
+                        CDT::interval_year_month_datatype(),
+                    )
+                }
+                INTERVAL_MONTH_DAY_NANO_TYPE_REF => {
+                    ensure!(
+                        val.type_url == INTERVAL_MONTH_DAY_NANO_TYPE_URL,
+                        UnexpectedSnafu {
+                            reason: format!(
+                                "Expect {}, found {} in type_url",
+                                INTERVAL_MONTH_DAY_NANO_TYPE_URL, val.type_url
+                            )
+                        }
+                    );
+                    let i: i128 = from_bytes(&val.value)?;
+                    let (months, days, nsecs) = ((i >> 96) as i32, (i >> 64) as i32, i as i64);
+                    let value_interval =
+                        common_time::Interval::from_month_day_nano(months, days, nsecs);
+                    (
+                        Value::Interval(value_interval),
+                        CDT::interval_month_day_nano_datatype(),
+                    )
+                }
+                INTERVAL_DAY_TIME_TYPE_REF => {
+                    ensure!(
+                        val.type_url == INTERVAL_DAY_TIME_TYPE_URL,
+                        UnexpectedSnafu {
+                            reason: format!(
+                                "Expect {}, found {} in type_url",
+                                INTERVAL_DAY_TIME_TYPE_URL, val.type_url
+                            )
+                        }
+                    );
+                    let i: i64 = from_bytes(&val.value)?;
+                    let (days, millis) = ((i >> 32) as i32, i as i32);
+                    let value_interval = common_time::Interval::from_day_time(days, millis);
+                    (
+                        Value::Interval(value_interval),
+                        CDT::interval_day_time_datatype(),
+                    )
+                }
+                _ => return not_impl_err!("unsupported literal_type: {:?}", &lit.literal_type)?,
+            }
+        }
+        _ => not_impl_err!("unsupported literal_type: {:?}", &lit.literal_type)?,
     };
     Ok(scalar_value)
 }

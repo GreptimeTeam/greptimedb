@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::ConcreteDataType as CDT;
@@ -27,20 +28,23 @@ use substrait_proto::proto::function_argument::ArgType;
 use substrait_proto::proto::Expression;
 
 use crate::error::{
-    DatafusionSnafu, DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu,
-    PlanSnafu,
+    DatafusionSnafu, DatatypesSnafu, Error, EvalSnafu, ExternalSnafu, InvalidQuerySnafu,
+    NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
 };
 use crate::expr::{
     BinaryFunc, DfScalarFunction, RawDfScalarFn, ScalarExpr, TypedExpr, UnaryFunc,
     UnmaterializableFunc, VariadicFunc,
 };
 use crate::repr::{ColumnType, RelationDesc, RelationType};
-use crate::transform::literal::{from_substrait_literal, from_substrait_type};
+use crate::transform::literal::{
+    from_substrait_literal, from_substrait_type, to_substrait_literal,
+};
 use crate::transform::{substrait_proto, FunctionExtensions};
-// TODO(discord9): found proper place for this
+
+// TODO(discord9): refactor plan to substrait convert of `arrow_cast` function thus remove this function
 /// ref to `arrow_schema::datatype` for type name
-fn typename_to_cdt(name: &str) -> CDT {
-    match name {
+fn typename_to_cdt(name: &str) -> Result<CDT, Error> {
+    let ret = match name {
         "Int8" => CDT::int8_datatype(),
         "Int16" => CDT::int16_datatype(),
         "Int32" => CDT::int32_datatype(),
@@ -53,10 +57,22 @@ fn typename_to_cdt(name: &str) -> CDT {
         "Float64" => CDT::float64_datatype(),
         "Boolean" => CDT::boolean_datatype(),
         "String" => CDT::string_datatype(),
-        "Date" => CDT::date_datatype(),
+        "Date" | "Date32" | "Date64" => CDT::date_datatype(),
         "Timestamp" => CDT::timestamp_second_datatype(),
-        _ => CDT::null_datatype(),
-    }
+        "Timestamp(Second, None)" => CDT::timestamp_second_datatype(),
+        "Timestamp(Millisecond, None)" => CDT::timestamp_millisecond_datatype(),
+        "Timestamp(Microsecond, None)" => CDT::timestamp_microsecond_datatype(),
+        "Timestamp(Nanosecond, None)" => CDT::timestamp_nanosecond_datatype(),
+        "Time32(Second)" | "Time64(Second)" => CDT::time_second_datatype(),
+        "Time32(Millisecond)" | "Time64(Millisecond)" => CDT::time_millisecond_datatype(),
+        "Time32(Microsecond)" | "Time64(Microsecond)" => CDT::time_microsecond_datatype(),
+        "Time32(Nanosecond)" | "Time64(Nanosecond)" => CDT::time_nanosecond_datatype(),
+        _ => NotImplementedSnafu {
+            reason: format!("Unrecognized typename: {}", name),
+        }
+        .fail()?,
+    };
+    Ok(ret)
 }
 
 /// Convert [`ScalarFunction`] to corresponding Datafusion's [`PhysicalExpr`]
@@ -138,17 +154,57 @@ fn is_proto_literal(arg: &substrait_proto::proto::FunctionArgument) -> bool {
     )
 }
 
+fn build_proto_lit(
+    lit: substrait_proto::proto::expression::Literal,
+) -> substrait_proto::proto::FunctionArgument {
+    use substrait_proto::proto;
+    proto::FunctionArgument {
+        arg_type: Some(ArgType::Value(Expression {
+            rex_type: Some(proto::expression::RexType::Literal(lit)),
+        })),
+    }
+}
+
 /// rewrite ScalarFunction's arguments to Columns 0..n so nested exprs are still handled by us instead of datafusion
 ///
 /// specially, if a argument is a literal, the replacement will not happen
-fn rewrite_scalar_function(f: &ScalarFunction) -> ScalarFunction {
+fn rewrite_scalar_function(
+    f: &ScalarFunction,
+    arg_exprs_typed: &[TypedExpr],
+) -> Result<ScalarFunction, Error> {
     let mut f_rewrite = f.clone();
     for (idx, raw_expr) in f_rewrite.arguments.iter_mut().enumerate() {
-        if !is_proto_literal(raw_expr) {
-            *raw_expr = proto_col(idx)
+        // only replace it with col(idx) if it is not literal
+        // will try best to determine if it is literal, i.e. for function like `cast(<literal>)` will try
+        // in both world to understand if it results in a literal
+        match (
+            is_proto_literal(raw_expr),
+            arg_exprs_typed[idx].expr.is_literal(),
+        ) {
+            (false, false) => *raw_expr = proto_col(idx),
+            (true, _) => (),
+            (false, true) => {
+                if let ScalarExpr::Literal(val, ty) = &arg_exprs_typed[idx].expr {
+                    let df_val = val
+                        .try_to_scalar_value(ty)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                    let lit_sub = to_substrait_literal(&df_val)?;
+                    // put const-folded literal back to df to simplify stuff
+                    *raw_expr = build_proto_lit(lit_sub);
+                } else {
+                    UnexpectedSnafu {
+                        reason: format!(
+                            "Expect value to be literal, but found {:?}",
+                            arg_exprs_typed[idx].expr
+                        ),
+                    }
+                    .fail()?
+                }
+            }
         }
     }
-    f_rewrite
+    Ok(f_rewrite)
 }
 
 impl TypedExpr {
@@ -157,10 +213,13 @@ impl TypedExpr {
         arg_exprs_typed: Vec<TypedExpr>,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
-        let (arg_exprs, arg_types): (Vec<_>, Vec<_>) =
-            arg_exprs_typed.into_iter().map(|e| (e.expr, e.typ)).unzip();
+        let (arg_exprs, arg_types): (Vec<_>, Vec<_>) = arg_exprs_typed
+            .clone()
+            .into_iter()
+            .map(|e| (e.expr, e.typ))
+            .unzip();
         debug!("Before rewrite: {:?}", f);
-        let f_rewrite = rewrite_scalar_function(f);
+        let f_rewrite = rewrite_scalar_function(f, &arg_exprs_typed)?;
         debug!("After rewrite: {:?}", f_rewrite);
         let input_schema = RelationType::new(arg_types).into_unnamed();
         let raw_fn =
@@ -240,12 +299,21 @@ impl TypedExpr {
                     .with_context(|| InvalidQuerySnafu {
                         reason: "array_cast's second argument must be a literal string",
                     })?;
-                let cast_to = typename_to_cdt(&cast_to);
-                let func = UnaryFunc::Cast(cast_to);
+                let cast_to = typename_to_cdt(&cast_to)?;
+                let func = UnaryFunc::Cast(cast_to.clone());
                 let arg = arg_exprs[0].clone();
-                let ret_type = ColumnType::new_nullable(func.signature().output.clone());
+                // constant folding here since some datafusion function require it for constant arg(i.e. `DATE_BIN`)
+                if arg.is_literal() {
+                    let res = func.eval(&[], &arg).context(EvalSnafu)?;
+                    Ok(TypedExpr::new(
+                        ScalarExpr::Literal(res, cast_to.clone()),
+                        ColumnType::new_nullable(cast_to),
+                    ))
+                } else {
+                    let ret_type = ColumnType::new_nullable(func.signature().output.clone());
 
-                Ok(TypedExpr::new(arg.call_unary(func), ret_type))
+                    Ok(TypedExpr::new(arg.call_unary(func), ret_type))
+                }
             }
             2 if BinaryFunc::is_valid_func_name(fn_name) => {
                 let (func, signature) =
@@ -602,28 +670,8 @@ mod test {
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)])
                 .into_unnamed(),
-            plan: Plan::Mfp {
-                input: Box::new(
-                    Plan::Get {
-                        id: crate::expr::Id::Global(GlobalId::User(0)),
-                    }
-                    .with_types(
-                        RelationType::new(vec![ColumnType::new(
-                            ConcreteDataType::uint32_datatype(),
-                            false,
-                        )])
-                        .into_named(vec![Some("number".to_string())]),
-                    ),
-                ),
-                mfp: MapFilterProject::new(1)
-                    .map(vec![ScalarExpr::Literal(
-                        Value::Int64(1),
-                        CDT::int64_datatype(),
-                    )
-                    .call_unary(UnaryFunc::Cast(CDT::int16_datatype()))])
-                    .unwrap()
-                    .project(vec![1])
-                    .unwrap(),
+            plan: Plan::Constant {
+                rows: vec![(repr::Row::new(vec![Value::from(1i16)]), i64::MIN, 1)],
             },
         };
         assert_eq!(flow_plan.unwrap(), expected);
