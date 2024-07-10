@@ -11,6 +11,7 @@ workspace = true
 async-trait.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
+common-version.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 tokio.workspace = true
@@ -20,6 +21,3 @@ uuid.workspace = true
 common-test-util.workspace = true
 hyper = { version = "0.14", features = ["full"] }
 tempfile.workspace = true
-
-[build-dependencies]
-common-version.workspace = true

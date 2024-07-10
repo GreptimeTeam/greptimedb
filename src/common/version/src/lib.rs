@@ -1,8 +1,8 @@
+#![allow(clippy::print_stdout)]
+
 use std::fmt::Display;
 
-use shadow_rs::shadow;
-
-shadow!(build);
+shadow_rs::shadow!(build);
 
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(

@@ -396,7 +396,7 @@ impl StartCommand {
             &opts.component.tracing,
             None,
         );
-        log_versions(version!(), short_version!());
+        log_versions(version(), short_version());
 
         info!("Standalone start command: {:#?}", self);
         info!("Standalone options: {opts:#?}");

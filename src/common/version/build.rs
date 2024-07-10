@@ -15,6 +15,7 @@
 use build_data::{format_timestamp, get_source_time};
 
 fn main() -> shadow_rs::SdResult<()> {
+    println!("cargo:rerun-if-changed=.git/refs/heads");
     println!(
         "cargo:rustc-env=SOURCE_TIMESTAMP={}",
         if let Ok(t) = get_source_time() {
