@@ -357,6 +357,9 @@ impl SystemCatalog {
                     ))
                 });
             information_schema_provider.table(table_name)
+        } else if schema == PG_CATALOG_NAME {
+            PGCatalogProvider::new(catalog.to_string(), self.catalog_manager.clone())
+                .table(table_name)
         } else if schema == DEFAULT_SCHEMA_NAME && table_name == NUMBERS_TABLE_NAME {
             Some(NumbersTable::table(NUMBERS_TABLE_ID))
         } else {

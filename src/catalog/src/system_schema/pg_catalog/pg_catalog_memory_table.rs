@@ -14,32 +14,54 @@
 
 use std::sync::Arc;
 
-use datatypes::schema::{Schema, SchemaRef};
-use datatypes::vectors::{BooleanVector, Int16Vector, StringVector, UInt32Vector, VectorRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::vectors::{Int16Vector, StringVector, UInt32Vector, VectorRef};
 
 use super::oid_column;
 use super::table_names::PG_TYPE;
-use crate::system_schema::memory_table::tables::{bool_column, i16_column, string_column};
+use crate::memory_table_cols;
+use crate::system_schema::memory_table::tables::{i16_column, string_column};
+fn pg_type_schema_columns() -> (Vec<ColumnSchema>, Vec<VectorRef>) {
+    memory_table_cols!(
+        [oid, typname, typlen],
+        [
+            (1, "String", -1),
+            (2, "Binary", -1),
+            (3, "Int8", 1),
+            (4, "Int16", 2),
+            (5, "Int32", 4),
+            (6, "Int64", 8),
+            (7, "UInt8", 1),
+            (8, "UInt16", 2),
+            (9, "UInt32", 4),
+            (10, "UInt64", 8),
+            (11, "Float32", 4),
+            (12, "Float64", 8),
+            (13, "Decimal", 16),
+            (14, "Date", 4),
+            (15, "DateTime", 8),
+            (16, "Timestamp", 8),
+            (17, "Time", 8),
+            (18, "Duration", 8),
+            (19, "Interval", 16),
+            (20, "List", -1),
+        ]
+    );
+    (
+        // not quiet identical with pg, we only follow the definition in pg
+        vec![oid_column(), string_column("typname"), i16_column("typlen")],
+        vec![
+            Arc::new(UInt32Vector::from_vec(oid)), // oid
+            Arc::new(StringVector::from(typname)),
+            Arc::new(Int16Vector::from_vec(typlen)), // typlen in bytes
+        ],
+    )
+}
 
 pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
     //TODO(j0hn50n133): u32_column("typnamespace"), we don't have such thing as namespace id or database id.
     let (column_schemas, columns): (_, Vec<VectorRef>) = match table_name {
-        PG_TYPE => (
-            vec![
-                oid_column(),
-                string_column("typname"),
-                i16_column("typlen"),
-                bool_column("typbyval"),
-                bool_column("typisdefined"),
-            ],
-            vec![
-                Arc::new(UInt32Vector::from_vec(vec![16])), // oid
-                Arc::new(StringVector::from(vec!["bool"])), // typlen
-                Arc::new(Int16Vector::from_vec(vec![1])),   // typname
-                Arc::new(BooleanVector::from(vec![true])),  // typbyval
-                Arc::new(BooleanVector::from(vec![true])),  // typisdefined
-            ],
-        ),
+        PG_TYPE => pg_type_schema_columns(),
         _ => unreachable!("Unknown table in pg_catalog: {}", table_name),
     };
     (Arc::new(Schema::new(column_schemas)), columns)

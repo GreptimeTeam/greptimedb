@@ -19,15 +19,17 @@ mod table_names;
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use common_recordbatch::SendableRecordBatchStream;
-use datatypes::schema::{ColumnSchema, SchemaRef};
+use common_catalog::consts::{self, PG_CATALOG_NAME};
+use datatypes::schema::ColumnSchema;
 use lazy_static::lazy_static;
-use store_api::storage::{ScanRequest, TableId};
-use table::metadata::TableType;
+use paste::paste;
+use pg_catalog_memory_table::get_schema_columns;
 use table::TableRef;
+pub use table_names::*;
 
 use super::memory_table::tables::u32_column;
-use crate::error::Result;
+use super::memory_table::MemoryTable;
+use super::{SystemSchemaProvider, SystemSchemaProviderInner, SystemTableRef};
 use crate::CatalogManager;
 
 lazy_static! {
@@ -47,6 +49,14 @@ pub struct PGCatalogProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
     tables: HashMap<String, TableRef>,
+}
+
+impl SystemSchemaProvider for PGCatalogProvider {
+    fn tables(&self) -> &HashMap<String, TableRef> {
+        assert!(!self.tables.is_empty());
+
+        &self.tables
+    }
 }
 
 // TODO(j0hn50n133): Not sure whether to avoid duplication with `information_schema` or not.
@@ -86,51 +96,21 @@ impl PGCatalogProvider {
         }
         self.tables = tables;
     }
+}
 
-    fn build_table(&self, name: &str) -> Option<TableRef> {
-        self.pg_catalog_table(name).map(|table| todo!())
+impl SystemSchemaProviderInner for PGCatalogProvider {
+    fn schema_name() -> &'static str {
+        PG_CATALOG_NAME
     }
 
-    pub fn table_names(&self) -> Vec<String> {
-        let mut tables = self.tables.values().clone().collect::<Vec<_>>();
-        tables.sort_by(|t1, t2| {
-            t1.table_info()
-                .table_id()
-                .partial_cmp(&t2.table_info().table_id())
-                .unwrap()
-        });
-        tables
-            .into_iter()
-            .map(|t| t.table_info().name.clone())
-            .collect()
-    }
-
-    fn pg_catalog_table(&self, name: &str) -> Option<PGCatalogTableRef> {
-        match name.to_ascii_lowercase().as_str() {
-            table_names::PG_TYPE => todo!(),
+    fn system_table(&self, name: &str) -> Option<SystemTableRef> {
+        match name {
+            table_names::PG_TYPE => setup_memory_table!(PG_TYPE),
             _ => None,
         }
     }
 
-    /// Returns the [TableRef] by table name.
-    pub fn table(&self, name: &str) -> Option<TableRef> {
-        self.tables.get(name).cloned()
+    fn catalog_name(&self) -> &str {
+        &self.catalog_name
     }
 }
-
-/// The trait for all tables in the `pg_catalog` schema.
-trait PGCatalogTable {
-    fn table_id(&self) -> TableId;
-
-    fn table_name(&self) -> &'static str;
-
-    fn schema(&self) -> SchemaRef;
-
-    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
-
-    fn table_type(&self) -> TableType {
-        TableType::Temporary
-    }
-}
-
-type PGCatalogTableRef = Arc<dyn PGCatalogTable + Send + Sync>;

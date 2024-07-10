@@ -14,14 +14,10 @@
 
 use std::sync::{Arc, Weak};
 
-use common_catalog::consts::PG_CATALOG_PG_CLASS_TABLE_ID;
-use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use store_api::storage::{ConcreteDataType, ScanRequest};
+use store_api::storage::ConcreteDataType;
 
-use super::table_names::PG_CLASS;
-use super::{oid_column, PGCatalogTable};
-use crate::error::Result;
+use super::oid_column;
 use crate::CatalogManager;
 
 const CLASS_RELKIND: &str = "relkind";
@@ -56,24 +52,5 @@ impl PGCatalogPgClass {
             ColumnSchema::new(CLASS_RELKIND, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(CLASS_RELOWNER, ConcreteDataType::uint32_datatype(), false),
         ]))
-    }
-}
-
-impl PGCatalogTable for PGCatalogPgClass {
-    fn table_id(&self) -> store_api::storage::TableId {
-        PG_CATALOG_PG_CLASS_TABLE_ID
-    }
-
-    fn table_name(&self) -> &'static str {
-        PG_CLASS
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let schema = self.schema.arrow_schema().clone();
-        todo!()
     }
 }

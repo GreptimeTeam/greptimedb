@@ -36,12 +36,12 @@ use lazy_static::lazy_static;
 use paste::paste;
 pub(crate) use predicate::Predicates;
 use store_api::storage::{ScanRequest, TableId};
-use table::metadata::{FilterPushDownType, TableType};
-use table::{Table, TableRef};
+use table::metadata::TableType;
+use table::TableRef;
 pub use table_names::*;
 
 use self::columns::InformationSchemaColumns;
-use super::{SystemSchemaProviderInner, SystemTable, SystemTableDataSource, SystemTableRef};
+use super::{SystemSchemaProviderInner, SystemTable, SystemTableRef};
 use crate::error::Result;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
@@ -113,6 +113,9 @@ impl SystemSchemaProvider for InformationSchemaProvider {
     }
 }
 impl SystemSchemaProviderInner for InformationSchemaProvider {
+    fn catalog_name(&self) -> &str {
+        &self.catalog_name
+    }
     fn schema_name() -> &'static str {
         INFORMATION_SCHEMA_NAME
     }
@@ -235,16 +238,6 @@ impl InformationSchemaProvider {
         }
 
         self.tables = tables;
-    }
-
-    fn build_table(&self, name: &str) -> Option<TableRef> {
-        self.system_table(name).map(|table| {
-            let table_info = Self::table_info(self.catalog_name.clone(), &table);
-            let filter_pushdown = FilterPushDownType::Inexact;
-            let data_source = Arc::new(SystemTableDataSource::new(table));
-            let table = Table::new(table_info, filter_pushdown, data_source);
-            Arc::new(table)
-        })
     }
 }
 

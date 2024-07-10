@@ -27,8 +27,10 @@ use snafu::ResultExt;
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
-use table::metadata::{TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
-use table::TableRef;
+use table::metadata::{
+    FilterPushDownType, TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
+};
+use table::{Table, TableRef};
 
 use crate::error::Result;
 
@@ -59,7 +61,17 @@ pub trait SystemSchemaProvider {
 }
 
 trait SystemSchemaProviderInner {
+    fn catalog_name(&self) -> &str;
     fn schema_name() -> &'static str;
+    fn build_table(&self, name: &str) -> Option<TableRef> {
+        self.system_table(name).map(|table| {
+            let table_info = Self::table_info(self.catalog_name().to_string(), &table);
+            let filter_pushdown = FilterPushDownType::Inexact;
+            let data_source = Arc::new(SystemTableDataSource::new(table));
+            let table = Table::new(table_info, filter_pushdown, data_source);
+            Arc::new(table)
+        })
+    }
     fn system_table(&self, name: &str) -> Option<SystemTableRef>;
 
     fn table_info(catalog_name: String, table: &SystemTableRef) -> TableInfoRef {
