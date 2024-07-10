@@ -5,10 +5,6 @@ use std::fmt::Display;
 shadow_rs::shadow!(build);
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(
-    feature = "codec",
-    derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)
-)]
 pub struct BuildInfo {
     pub branch: &'static str,
     pub commit: &'static str,
@@ -22,6 +18,56 @@ pub struct BuildInfo {
 }
 
 impl Display for BuildInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            [
+                format!("branch: {}", self.branch),
+                format!("commit: {}", self.commit),
+                format!("commit_short: {}", self.commit_short),
+                format!("clean: {}", self.clean),
+                format!("version: {}", self.version),
+            ]
+            .join("\n")
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    feature = "codec",
+    derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)
+)]
+pub struct OwnedBuildInfo {
+    pub branch: String,
+    pub commit: String,
+    pub commit_short: String,
+    pub clean: bool,
+    pub source_time: String,
+    pub build_time: String,
+    pub rustc: String,
+    pub target: String,
+    pub version: String,
+}
+
+impl From<BuildInfo> for OwnedBuildInfo {
+    fn from(info: BuildInfo) -> Self {
+        OwnedBuildInfo {
+            branch: info.branch.to_string(),
+            commit: info.commit.to_string(),
+            commit_short: info.commit_short.to_string(),
+            clean: info.clean,
+            source_time: info.source_time.to_string(),
+            build_time: info.build_time.to_string(),
+            rustc: info.rustc.to_string(),
+            target: info.target.to_string(),
+            version: info.version.to_string(),
+        }
+    }
+}
+
+impl Display for OwnedBuildInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

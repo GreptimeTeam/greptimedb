@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::env;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
