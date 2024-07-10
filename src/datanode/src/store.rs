@@ -60,7 +60,7 @@ pub(crate) async fn new_object_store(
         object_store
     };
 
-    let store = with_instrument_layers(object_store);
+    let store = with_instrument_layers(object_store, true);
     Ok(store)
 }
 
