@@ -19,8 +19,10 @@ use crate::error::Result;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
 
 /// Reader to keep the last row for each time series.
-/// It assumes that batches from the input reader is sorted and all deleted rows
-/// has been filtered.
+/// It assumes that batches from the input reader are
+/// - sorted
+/// - all deleted rows has been filtered.
+/// - not empty
 ///
 /// This reader is different from the [MergeMode](crate::region::options::MergeMode) as
 /// it focus on time series (the same key).
@@ -98,6 +100,16 @@ mod tests {
         check_reader_result(
             &mut reader,
             &[new_batch(b"k1", &[2], &[11], &[OpType::Put], &[22])],
+        )
+        .await;
+
+        // Only one row.
+        let input = [new_batch(b"k1", &[1], &[11], &[OpType::Put], &[21])];
+        let reader = VecBatchReader::new(&input);
+        let mut reader = LastRowReader::new(Box::new(reader));
+        check_reader_result(
+            &mut reader,
+            &[new_batch(b"k1", &[1], &[11], &[OpType::Put], &[21])],
         )
         .await;
     }
