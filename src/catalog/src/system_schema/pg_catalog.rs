@@ -13,7 +13,6 @@
 // limitations under the License.
 
 mod pg_catalog_memory_table;
-mod pg_class;
 mod table_names;
 
 use std::collections::HashMap;
@@ -47,7 +46,7 @@ fn oid_column() -> ColumnSchema {
 /// [`PGCatalogProvider`] is the provider for a schema named `pg_catalog`, it is not a catalog.
 pub struct PGCatalogProvider {
     catalog_name: String,
-    catalog_manager: Weak<dyn CatalogManager>,
+    _catalog_manager: Weak<dyn CatalogManager>,
     tables: HashMap<String, TableRef>,
 }
 
@@ -80,7 +79,7 @@ impl PGCatalogProvider {
     pub fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
         let mut provider = Self {
             catalog_name,
-            catalog_manager,
+            _catalog_manager: catalog_manager,
             tables: HashMap::new(),
         };
         provider.build_tables();
