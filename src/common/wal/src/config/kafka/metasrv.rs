@@ -14,9 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::kafka::common::{
-    backoff_prefix, kafka_topic_prefix, BackoffConfig, KafkaTopicConfig,
-};
+use crate::config::kafka::common::{backoff_prefix, BackoffConfig, KafkaTopicConfig};
 use crate::BROKER_ENDPOINT;
 
 /// Kafka wal configurations for metasrv.
@@ -29,7 +27,7 @@ pub struct MetasrvKafkaConfig {
     #[serde(flatten, with = "backoff_prefix")]
     pub backoff: BackoffConfig,
     /// The kafka config.
-    #[serde(flatten, with = "kafka_topic_prefix")]
+    #[serde(flatten)]
     pub kafka_topic: KafkaTopicConfig,
 }
 

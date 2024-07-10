@@ -139,12 +139,12 @@ mod tests {
             backoff_max = "10s"
             backoff_base = 2
             backoff_deadline = "5mins"
-            kafka_topic_num_topics = 32
-            kafka_topic_num_partitions = 1
-            kafka_topic_selector_type = "round_robin"
-            kafka_topic_replication_factor = 1
-            kafka_topic_create_topic_timeout = "30s"
-            kafka_topic_name_prefix = "greptimedb_wal_topic"
+            num_topics = 32
+            num_partitions = 1
+            selector_type = "round_robin"
+            replication_factor = 1
+            create_topic_timeout = "30s"
+            topic_name_prefix = "greptimedb_wal_topic"
         "#;
 
         // Deserialized to MetasrvWalConfig.
@@ -160,7 +160,7 @@ mod tests {
             kafka_topic: KafkaTopicConfig {
                 num_topics: 32,
                 selector_type: TopicSelectorType::RoundRobin,
-                name_prefix: "greptimedb_wal_topic".to_string(),
+                topic_name_prefix: "greptimedb_wal_topic".to_string(),
                 num_partitions: 1,
                 replication_factor: 1,
                 create_topic_timeout: Duration::from_secs(30),
@@ -183,7 +183,7 @@ mod tests {
             kafka_topic: KafkaTopicConfig {
                 num_topics: 32,
                 selector_type: TopicSelectorType::RoundRobin,
-                name_prefix: "greptimedb_wal_topic".to_string(),
+                topic_name_prefix: "greptimedb_wal_topic".to_string(),
                 num_partitions: 1,
                 replication_factor: 1,
                 create_topic_timeout: Duration::from_secs(30),

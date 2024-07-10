@@ -20,7 +20,6 @@ use serde_with::with_prefix;
 use crate::{TopicSelectorType, TOPIC_NAME_PREFIX};
 
 with_prefix!(pub backoff_prefix "backoff_");
-with_prefix!(pub kafka_topic_prefix "kafka_topic_");
 
 /// Backoff configurations for kafka clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,7 +65,7 @@ pub struct KafkaTopicConfig {
     #[serde(with = "humantime_serde")]
     pub create_topic_timeout: Duration,
     /// Topic name prefix.
-    pub name_prefix: String,
+    pub topic_name_prefix: String,
 }
 
 impl Default for KafkaTopicConfig {
@@ -77,7 +76,7 @@ impl Default for KafkaTopicConfig {
             selector_type: TopicSelectorType::RoundRobin,
             replication_factor: 1,
             create_topic_timeout: Duration::from_secs(30),
-            name_prefix: TOPIC_NAME_PREFIX.to_string(),
+            topic_name_prefix: TOPIC_NAME_PREFIX.to_string(),
         }
     }
 }

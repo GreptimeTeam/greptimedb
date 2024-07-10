@@ -57,7 +57,7 @@ impl TopicManager {
     pub fn new(config: MetasrvKafkaConfig, kv_backend: KvBackendRef) -> Self {
         // Topics should be created.
         let topics = (0..config.kafka_topic.num_topics)
-            .map(|topic_id| format!("{}_{topic_id}", config.kafka_topic.name_prefix))
+            .map(|topic_id| format!("{}_{topic_id}", config.kafka_topic.topic_name_prefix))
             .collect::<Vec<_>>();
 
         let selector = match config.kafka_topic.selector_type {
