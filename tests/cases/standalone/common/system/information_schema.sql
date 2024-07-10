@@ -37,7 +37,7 @@ order by table_name;
 
 select table_name
 from information_schema.tables
-where table_schema not in ('my_db', 'information_schema')
+where table_schema not in ('my_db', 'information_schema', 'pg_catalog')
 order by table_name;
 
 select table_catalog, table_schema, table_name, table_type, engine
@@ -45,6 +45,7 @@ from information_schema.tables
 where table_catalog = 'greptime'
   and table_schema != 'public'
   and table_schema != 'information_schema'
+  and table_schema != 'pg_catalog'
 order by table_schema, table_name;
 
 select table_catalog, table_schema, table_name, column_name, data_type, semantic_type
@@ -52,6 +53,7 @@ from information_schema.columns
 where table_catalog = 'greptime'
   and table_schema != 'public'
   and table_schema != 'information_schema'
+  and table_schema != 'pg_catalog'
 order by table_schema, table_name, column_name;
 
 -- test query filter for columns --
