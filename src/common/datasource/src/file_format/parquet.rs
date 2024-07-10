@@ -225,14 +225,8 @@ fn column_wise_config(
     mut props: WriterPropertiesBuilder,
     schema: SchemaRef,
 ) -> WriterPropertiesBuilder {
-    // Disable dictionary for timestamp column.
-    if let Some(ts_col) = schema.timestamp_column() {
-        let path = ColumnPath::new(vec![ts_col.name.clone()]);
-        props = props
-            .set_column_dictionary_enabled(path.clone(), false)
-            .set_column_encoding(path, Encoding::DELTA_BINARY_PACKED)
-    }
-
+    // Disable dictionary for timestamp column, since for increasing timestamp column,
+    // the dictionary pages will be larger than data pages.
     for col in schema.column_schemas() {
         if col.data_type.is_timestamp() {
             let path = ColumnPath::new(vec![col.name.clone()]);
