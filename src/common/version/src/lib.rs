@@ -1,22 +1,8 @@
-// Copyright 2023 Greptime Team
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-use std::borrow::Cow;
 use std::fmt::Display;
-use std::sync::OnceLock;
 
-const UNKNOWN: &str = "unknown";
+use shadow_rs::shadow;
+
+shadow!(build);
 
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(
@@ -24,16 +10,15 @@ const UNKNOWN: &str = "unknown";
     derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)
 )]
 pub struct BuildInfo {
-    pub branch: Cow<'static, str>,
-    pub commit: Cow<'static, str>,
-    pub commit_short: Cow<'static, str>,
-    pub dirty: Cow<'static, str>,
-    pub timestamp: Cow<'static, str>,
-
-    /// Rustc Version
-    pub rustc: Cow<'static, str>,
-    /// GreptimeDB Version
-    pub version: Cow<'static, str>,
+    pub branch: &'static str,
+    pub commit: &'static str,
+    pub commit_short: &'static str,
+    pub clean: bool,
+    pub source_time: &'static str,
+    pub build_time: &'static str,
+    pub rustc: &'static str,
+    pub target: &'static str,
+    pub version: &'static str,
 }
 
 impl Display for BuildInfo {
@@ -45,7 +30,7 @@ impl Display for BuildInfo {
                 format!("branch: {}", self.branch),
                 format!("commit: {}", self.commit),
                 format!("commit_short: {}", self.commit_short),
-                format!("dirty: {}", self.dirty),
+                format!("clean: {}", self.clean),
                 format!("version: {}", self.version),
             ]
             .join("\n")
@@ -53,78 +38,32 @@ impl Display for BuildInfo {
     }
 }
 
-static BUILD: OnceLock<BuildInfo> = OnceLock::new();
-
-pub fn build_info() -> &'static BuildInfo {
-    BUILD.get_or_init(|| {
-        let branch = build_data::get_git_branch()
-            .map(Cow::Owned)
-            .unwrap_or(Cow::Borrowed(UNKNOWN));
-        let commit = build_data::get_git_commit()
-            .map(Cow::Owned)
-            .unwrap_or(Cow::Borrowed(UNKNOWN));
-        let commit_short = build_data::get_git_commit_short()
-            .map(Cow::Owned)
-            .unwrap_or(Cow::Borrowed(UNKNOWN));
-        let dirty = build_data::get_git_dirty()
-            .map(|b| Cow::Owned(b.to_string()))
-            .unwrap_or(Cow::Borrowed(UNKNOWN));
-        let timestamp = build_data::get_source_time()
-            .map(|ts| Cow::Owned(build_data::format_timestamp(ts)))
-            .unwrap_or(Cow::Borrowed(UNKNOWN));
-        let rustc = build_data::get_rustc_version()
-            .map(Cow::Owned)
-            .unwrap_or(Cow::Borrowed(UNKNOWN));
-        let version = Cow::Borrowed(env!("CARGO_PKG_VERSION"));
-
-        BuildInfo {
-            branch,
-            commit,
-            commit_short,
-            dirty,
-            timestamp,
-            rustc,
-            version,
-        }
-    })
+pub const fn build_info() -> BuildInfo {
+    BuildInfo {
+        branch: build::BRANCH,
+        commit: build::COMMIT_HASH,
+        commit_short: build::SHORT_COMMIT,
+        clean: build::GIT_CLEAN,
+        source_time: env!("SOURCE_TIMESTAMP"),
+        build_time: env!("BUILD_TIMESTAMP"),
+        rustc: build::RUST_VERSION,
+        target: build::BUILD_TARGET,
+        version: build::PKG_VERSION,
+    }
 }
 
-#[allow(clippy::print_stdout)]
-pub fn setup_build_info() {
-    let build_info = build_info();
-    println!("cargo:rustc-env=GIT_COMMIT={}", build_info.commit);
-    println!(
-        "cargo:rustc-env=GIT_COMMIT_SHORT={}",
-        build_info.commit_short
-    );
-    println!("cargo:rustc-env=GIT_BRANCH={}", build_info.branch);
-    println!("cargo:rustc-env=GIT_DIRTY={}", build_info.dirty);
-    println!("cargo:rustc-env=GIT_DIRTY={}", build_info.dirty);
-    println!("cargo:rustc-env=RUSTC_VERSION={}", build_info.rustc);
-    println!("cargo:rustc-env=SOURCE_TIMESTAMP={}", build_info.timestamp);
+const BUILD_INFO: BuildInfo = build_info();
+
+pub const fn version() -> &'static str {
+    const_format::formatcp!(
+        "\nbranch: {}\ncommit: {}\nclean: {}\nversion: {}",
+        BUILD_INFO.branch,
+        BUILD_INFO.commit,
+        BUILD_INFO.clean,
+        BUILD_INFO.version,
+    )
 }
 
-/// Get the string for the output of cli "--version".
-#[macro_export]
-macro_rules! version {
-    () => {
-        concat!(
-            "\nbranch: ",
-            env!("GIT_BRANCH"),
-            "\ncommit: ",
-            env!("GIT_COMMIT"),
-            "\ndirty: ",
-            env!("GIT_DIRTY"),
-            "\nversion: ",
-            env!("CARGO_PKG_VERSION")
-        )
-    };
-}
-
-/// Short version for reporting metrics.
-#[macro_export]
-macro_rules! short_version {
-    () => {
-        concat!(env!("GIT_BRANCH"), "-", env!("GIT_COMMIT_SHORT"))
-    };
+pub const fn short_version() -> &'static str {
+    const_format::formatcp!("{}-{}", BUILD_INFO.branch, BUILD_INFO.commit_short,)
 }

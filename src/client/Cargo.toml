@@ -49,4 +49,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies.substrait_proto]
 package = "substrait"
-version = "0.17"
+version = "0.37"
