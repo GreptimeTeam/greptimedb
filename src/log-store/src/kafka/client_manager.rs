@@ -98,7 +98,7 @@ impl ClientManager {
             producer_channel_size: REQUEST_BATCH_SIZE * 2,
             producer_request_batch_size: REQUEST_BATCH_SIZE,
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
-            compression: config.compression,
+            compression: Compression::Lz4,
         })
     }
 
