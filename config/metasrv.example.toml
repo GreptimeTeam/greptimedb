@@ -84,7 +84,7 @@ num_topics = 64
 ## - `round_robin` (default)
 selector_type = "round_robin"
 
-## A Kafka topic is constructed by concatenating `name_prefix` and `topic_id`.
+## A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
 topic_name_prefix = "greptimedb_wal_topic"
 
 ## Expected number of replicas of each partition.

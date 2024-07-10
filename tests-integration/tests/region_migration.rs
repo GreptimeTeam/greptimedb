@@ -121,7 +121,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
             broker_endpoints: endpoints,
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
-                name_prefix: Uuid::new_v4().to_string(),
+                topic_name_prefix: Uuid::new_v4().to_string(),
                 ..Default::default()
             },
             ..Default::default()
@@ -253,7 +253,7 @@ pub async fn test_metric_table_region_migration_by_sql(
             broker_endpoints: endpoints,
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
-                name_prefix: Uuid::new_v4().to_string(),
+                topic_name_prefix: Uuid::new_v4().to_string(),
                 ..Default::default()
             },
             ..Default::default()
@@ -378,7 +378,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
             broker_endpoints: endpoints,
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
-                name_prefix: Uuid::new_v4().to_string(),
+                topic_name_prefix: Uuid::new_v4().to_string(),
                 ..Default::default()
             },
             ..Default::default()
@@ -502,7 +502,7 @@ pub async fn test_region_migration_multiple_regions(
             broker_endpoints: endpoints,
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
-                name_prefix: Uuid::new_v4().to_string(),
+                topic_name_prefix: Uuid::new_v4().to_string(),
                 ..Default::default()
             },
             ..Default::default()
@@ -641,7 +641,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
             broker_endpoints: endpoints,
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
-                name_prefix: Uuid::new_v4().to_string(),
+                topic_name_prefix: Uuid::new_v4().to_string(),
                 ..Default::default()
             },
             ..Default::default()
@@ -775,7 +775,7 @@ pub async fn test_region_migration_incorrect_from_peer(
             broker_endpoints: endpoints,
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
-                name_prefix: Uuid::new_v4().to_string(),
+                topic_name_prefix: Uuid::new_v4().to_string(),
                 ..Default::default()
             },
             ..Default::default()
@@ -852,7 +852,7 @@ pub async fn test_region_migration_incorrect_region_id(
             broker_endpoints: endpoints,
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
-                name_prefix: Uuid::new_v4().to_string(),
+                topic_name_prefix: Uuid::new_v4().to_string(),
                 ..Default::default()
             },
             ..Default::default()

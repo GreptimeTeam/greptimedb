@@ -233,7 +233,7 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             kafka_topic: KafkaTopicConfig {
-                name_prefix: test_name.to_string(),
+                topic_name_prefix: test_name.to_string(),
                 num_topics: 3,
                 ..Default::default()
             },
@@ -266,7 +266,7 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             kafka_topic: KafkaTopicConfig {
-                name_prefix: test_name.to_string(),
+                topic_name_prefix: test_name.to_string(),
                 num_topics: 3,
                 ..Default::default()
             },
