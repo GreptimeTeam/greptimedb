@@ -75,7 +75,6 @@ mod tests {
     use std::time::Duration;
 
     use common_base::readable_size::ReadableSize;
-    use rskafka::client::partition::Compression;
     use tests::kafka::common::KafkaTopicConfig;
 
     use super::*;
