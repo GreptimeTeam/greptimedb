@@ -281,7 +281,7 @@
 | `wal.broker_endpoints` | Array | -- | The broker endpoints of the Kafka cluster. |
 | `wal.num_topics` | Integer | `64` | Number of topics to be created upon start. |
 | `wal.selector_type` | String | `round_robin` | Topic selector type.<br/>Available selector types:<br/>- `round_robin` (default) |
-| `wal.topic_anme_prefix` | String | `greptimedb_wal_topic` | A Kafka topic is constructed by concatenating `name_prefix` and `topic_id`. |
+| `wal.topic_name_prefix` | String | `greptimedb_wal_topic` | A Kafka topic is constructed by concatenating `name_prefix` and `topic_id`. |
 | `wal.replication_factor` | Integer | `1` | Expected number of replicas of each partition. |
 | `wal.create_topic_timeout` | String | `30s` | Above which a topic creation operation will be cancelled. |
 | `wal.backoff_init` | String | `500ms` | The initial backoff for kafka clients. |
