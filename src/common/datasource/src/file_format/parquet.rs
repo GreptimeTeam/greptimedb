@@ -232,6 +232,15 @@ fn column_wise_config(
             .set_column_dictionary_enabled(path.clone(), false)
             .set_column_encoding(path, Encoding::DELTA_BINARY_PACKED)
     }
+
+    for col in schema.column_schemas() {
+        if col.data_type.is_timestamp() {
+            let path = ColumnPath::new(vec![col.name.clone()]);
+            props = props
+                .set_column_dictionary_enabled(path.clone(), false)
+                .set_column_encoding(path, Encoding::DELTA_BINARY_PACKED)
+        }
+    }
     props
 }
 
