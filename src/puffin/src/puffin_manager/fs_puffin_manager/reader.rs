@@ -19,16 +19,17 @@ use futures::io::BufReader;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite};
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::blob_metadata::CompressionCodec;
+use crate::blob_metadata::{BlobMetadata, CompressionCodec};
 use crate::error::{
     BlobIndexOutOfBoundSnafu, BlobNotFoundSnafu, DeserializeJsonSnafu, FileKeyNotMatchSnafu,
     ReadSnafu, Result, UnsupportedDecompressionSnafu, WriteSnafu,
 };
 use crate::file_format::reader::{AsyncReader, PuffinFileReader};
+use crate::partial_reader::PartialReader;
 use crate::puffin_manager::file_accessor::PuffinFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
 use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, Stager};
-use crate::puffin_manager::PuffinReader;
+use crate::puffin_manager::{BlobGuard, PuffinReader};
 
 /// `FsPuffinReader` is a `PuffinReader` that provides fs readers for puffin files.
 pub struct FsPuffinReader<S, F> {
@@ -58,22 +59,26 @@ where
     S: Stager,
     F: PuffinFileAccessor + Clone,
 {
-    type Blob = S::Blob;
+    type Blob = RandomReadBlob<F>;
     type Dir = S::Dir;
 
     async fn blob(&self, key: &str) -> Result<Self::Blob> {
-        self.stager
-            .get_blob(
-                self.puffin_file_name.as_str(),
-                key,
-                Box::new(move |writer| {
-                    let accessor = self.puffin_file_accessor.clone();
-                    let puffin_file_name = self.puffin_file_name.clone();
-                    let key = key.to_string();
-                    Self::init_blob_to_cache(puffin_file_name, key, writer, accessor)
-                }),
-            )
-            .await
+        let blob_metadata = self.blob_metadata(key).await?;
+
+        // If we choose to perform random reads directly on blobs
+        // within the puffin file, then they must not be compressed.
+        ensure!(
+            blob_metadata.compression_codec.is_none(),
+            UnsupportedDecompressionSnafu {
+                decompression: blob_metadata.compression_codec.unwrap().to_string()
+            }
+        );
+
+        Ok(RandomReadBlob {
+            file_name: self.puffin_file_name.clone(),
+            accessor: self.puffin_file_accessor.clone(),
+            blob_metadata: blob_metadata.clone(),
+        })
     }
 
     async fn dir(&self, key: &str) -> Result<Self::Dir> {
@@ -85,7 +90,7 @@ where
                     let accessor = self.puffin_file_accessor.clone();
                     let puffin_file_name = self.puffin_file_name.clone();
                     let key = key.to_string();
-                    Self::init_dir_to_cache(puffin_file_name, key, writer_provider, accessor)
+                    Self::init_dir_to_stager(puffin_file_name, key, writer_provider, accessor)
                 }),
             )
             .await
@@ -97,7 +102,27 @@ where
     S: Stager,
     F: PuffinFileAccessor,
 {
-    fn init_blob_to_cache(
+    // TODO(zhongzc): cache the metadata
+    async fn blob_metadata(&self, key: &str) -> Result<BlobMetadata> {
+        let reader = self
+            .puffin_file_accessor
+            .reader(&self.puffin_file_name)
+            .await?;
+        let mut file = PuffinFileReader::new(reader);
+
+        let metadata = file.metadata().await?;
+        let blob_metadata = metadata
+            .blobs
+            .into_iter()
+            .find(|m| m.blob_type == key)
+            .context(BlobNotFoundSnafu { blob: key })?;
+
+        Ok(blob_metadata)
+    }
+
+    // TODO(zhongzc): keep the function in case one day we need to stage the blob.
+    #[allow(dead_code)]
+    fn init_blob_to_stager(
         puffin_file_name: String,
         key: String,
         mut writer: BoxWriter,
@@ -122,7 +147,7 @@ where
         })
     }
 
-    fn init_dir_to_cache(
+    fn init_dir_to_stager(
         puffin_file_name: String,
         key: String,
         writer_provider: DirWriterProviderRef,
@@ -194,5 +219,37 @@ where
                 .await
                 .context(WriteSnafu),
         }
+    }
+}
+
+/// `RandomReadBlob` is a `BlobGuard` that directly reads the blob from the puffin file.
+pub struct RandomReadBlob<F> {
+    file_name: String,
+    accessor: F,
+    blob_metadata: BlobMetadata,
+}
+
+impl<F: PuffinFileAccessor + Clone> BlobGuard for RandomReadBlob<F> {
+    type Reader = PartialReader<F::Reader>;
+
+    fn reader(&self) -> BoxFuture<'static, Result<Self::Reader>> {
+        let accessor = self.accessor.clone();
+        let file_name = self.file_name.clone();
+        let blob_metadata = self.blob_metadata.clone();
+
+        Box::pin(async move {
+            // If we choose to perform random reads directly on blobs
+            // within the puffin file, then they must not be compressed.
+            ensure!(
+                blob_metadata.compression_codec.is_none(),
+                UnsupportedDecompressionSnafu {
+                    decompression: blob_metadata.compression_codec.unwrap().to_string()
+                }
+            );
+
+            let reader = accessor.reader(&file_name).await?;
+            let blob_reader = PuffinFileReader::new(reader).into_blob_reader(&blob_metadata);
+            Ok(blob_reader)
+        })
     }
 }
