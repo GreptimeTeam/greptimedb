@@ -218,6 +218,7 @@ async fn new_fs_store(root: &str) -> Result<ObjectStore> {
 }
 
 /// Creates a fs object store with atomic write dir.
+#[allow(unused)]
 pub(crate) async fn new_fs_object_store(root: &str) -> Result<ObjectStore> {
     Ok(with_instrument_layers(new_fs_store(root).await?, true))
 }
