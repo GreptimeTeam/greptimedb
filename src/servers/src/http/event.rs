@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,7 +31,7 @@ use pipeline::util::to_pipeline_version;
 use pipeline::{PipelineVersion, Value as PipelineValue};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Deserializer, Value};
+use serde_json::{Deserializer, Value};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -249,20 +250,7 @@ pub async fn log_ingester(
 
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
-    let value = match content_type {
-        ct if ct == ContentType::json() => transform_ndjson_array_factory(
-            Deserializer::from_str(&payload).into_iter(),
-            ignore_errors,
-        )?,
-        ct if ct == ContentType::text() || ct == ContentType::text_utf8() => Value::Array(
-            payload
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(|line| json!({ "line": line }))
-                .collect::<Vec<Value>>(),
-        ),
-        _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
-    };
+    let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
 
     ingest_logs_inner(
         handler,
@@ -275,18 +263,47 @@ pub async fn log_ingester(
     .await
 }
 
+fn extract_pipeline_value_by_content_type(
+    content_type: ContentType,
+    payload: String,
+    ignore_errors: bool,
+) -> Result<PipelineValue> {
+    Ok(match content_type {
+        ct if ct == ContentType::json() => {
+            let json_value = transform_ndjson_array_factory(
+                Deserializer::from_str(&payload).into_iter(),
+                ignore_errors,
+            )?;
+
+            PipelineValue::try_from(json_value)
+                .map_err(|reason| CastTypeSnafu { msg: reason }.build())
+                .context(PipelineSnafu)?
+        }
+        ct if ct == ContentType::text() || ct == ContentType::text_utf8() => {
+            let arr = payload
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    let mut map = HashMap::new();
+                    map.insert("line".to_string(), PipelineValue::String(line.to_string()));
+                    PipelineValue::Map(map.into())
+                })
+                .collect::<Vec<PipelineValue>>();
+            PipelineValue::Array(arr.into())
+        }
+        _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
+    })
+}
+
 async fn ingest_logs_inner(
     state: LogHandlerRef,
     pipeline_name: String,
     version: PipelineVersion,
     table_name: String,
-    payload: Value,
+    pipeline_data: PipelineValue,
     query_ctx: QueryContextRef,
 ) -> Result<HttpResponse> {
     let start = std::time::Instant::now();
-    let pipeline_data = PipelineValue::try_from(payload)
-        .map_err(|reason| CastTypeSnafu { msg: reason }.build())
-        .context(PipelineSnafu)?;
 
     let pipeline = state
         .get_pipeline(&pipeline_name, version, query_ctx.clone())
