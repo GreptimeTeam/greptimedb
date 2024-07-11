@@ -24,7 +24,6 @@ use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
-use puffin::blob_metadata::CompressionCodec;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -71,9 +70,6 @@ pub struct SstIndexCreator {
     /// The memory usage of the index creator.
     memory_usage: Arc<AtomicUsize>,
 
-    /// Whether to compress the index data.
-    compress: bool,
-
     /// Ids of indexed columns.
     column_ids: HashSet<ColumnId>,
 }
@@ -87,7 +83,6 @@ impl SstIndexCreator {
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
         segment_row_count: NonZeroUsize,
-        compress: bool,
         ignore_column_ids: &[ColumnId],
     ) -> Self {
         let temp_file_provider = Arc::new(TempFileProvider::new(
@@ -122,7 +117,6 @@ impl SstIndexCreator {
             stats: Statistics::default(),
             aborted: false,
             memory_usage,
-            compress,
             column_ids,
         }
     }
@@ -242,12 +236,9 @@ impl SstIndexCreator {
         let (tx, rx) = duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
         let mut index_writer = InvertedIndexBlobWriter::new(tx.compat_write());
 
-        let put_options = PutOptions {
-            compression: self.compress.then_some(CompressionCodec::Zstd),
-        };
         let (index_finish, puffin_add_blob) = futures::join!(
             self.index_creator.finish(&mut index_writer),
-            puffin_writer.put_blob(INDEX_BLOB_TYPE, rx.compat(), put_options)
+            puffin_writer.put_blob(INDEX_BLOB_TYPE, rx.compat(), PutOptions::default())
         );
 
         match (
@@ -398,7 +389,6 @@ mod tests {
             intm_mgr,
             memory_threshold,
             NonZeroUsize::new(segment_row_count).unwrap(),
-            false,
             &[],
         );
 
