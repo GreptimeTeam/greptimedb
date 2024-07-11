@@ -12,7 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod applier;
-pub(crate) mod creator;
+mod tantivy;
 
-const INDEX_BLOB_TYPE: &str = "greptime-fulltext-index-v1";
+use std::collections::BTreeSet;
+
+use async_trait::async_trait;
+
+use crate::fulltext_index::error::Result;
+pub use crate::fulltext_index::search::tantivy::TantivyFulltextIndexSearcher;
+
+pub type RowId = u32;
+
+/// `FulltextIndexSearcher` is a trait for searching fulltext index.
+#[async_trait]
+pub trait FulltextIndexSearcher {
+    async fn search(&self, query: &str) -> Result<BTreeSet<RowId>>;
+}

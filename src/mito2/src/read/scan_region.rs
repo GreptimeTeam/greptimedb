@@ -45,8 +45,10 @@ use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
 use crate::sst::file::{overlaps, FileHandle, FileMeta};
-use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
-use crate::sst::index::inverted_index::applier::SstIndexApplierRef;
+use crate::sst::index::fulltext_index::applier::builder::SstIndexApplierBuilder as FulltextIndexApplierBuilder;
+use crate::sst::index::fulltext_index::applier::SstIndexApplierRef as FulltextIndexApplier;
+use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder as InvertedIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::SstIndexApplierRef as InvertedIndexApplier;
 use crate::sst::parquet::file_range::FileRange;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
@@ -165,6 +167,8 @@ pub(crate) struct ScanRegion {
     parallelism: ScanParallism,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
+    /// Whether to ignore fulltext index.
+    ignore_fulltext_index: bool,
     /// Start time of the scan task.
     start_time: Option<Instant>,
 }
@@ -184,6 +188,7 @@ impl ScanRegion {
             cache_manager,
             parallelism: ScanParallism::default(),
             ignore_inverted_index: false,
+            ignore_fulltext_index: false,
             start_time: None,
         }
     }
@@ -195,9 +200,17 @@ impl ScanRegion {
         self
     }
 
+    /// Sets whether to ignore inverted index.
     #[must_use]
     pub(crate) fn with_ignore_inverted_index(mut self, ignore: bool) -> Self {
         self.ignore_inverted_index = ignore;
+        self
+    }
+
+    /// Sets whether to ignore fulltext index.
+    #[must_use]
+    pub(crate) fn with_ignore_fulltext_index(mut self, ignore: bool) -> Self {
+        self.ignore_fulltext_index = ignore;
         self
     }
 
@@ -278,7 +291,8 @@ impl ScanRegion {
             self.version.options.append_mode,
         );
 
-        let index_applier = self.build_index_applier();
+        let inverted_index_applier = self.build_invereted_index_applier();
+        let fulltext_index_applier = self.build_fulltext_index_applier();
         let predicate = Predicate::new(self.request.filters.clone());
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
@@ -292,7 +306,8 @@ impl ScanRegion {
             .with_memtables(memtables)
             .with_files(files)
             .with_cache(self.cache_manager)
-            .with_index_applier(index_applier)
+            .with_inverted_index_applier(inverted_index_applier)
+            .with_fulltext_index_applier(fulltext_index_applier)
             .with_parallelism(self.parallelism)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
@@ -318,8 +333,8 @@ impl ScanRegion {
         )
     }
 
-    /// Use the latest schema to build the index applier.
-    fn build_index_applier(&self) -> Option<SstIndexApplierRef> {
+    /// Use the latest schema to build the inveretd index applier.
+    fn build_invereted_index_applier(&self) -> Option<InvertedIndexApplier> {
         if self.ignore_inverted_index {
             return None;
         }
@@ -337,7 +352,7 @@ impl ScanRegion {
             .and_then(|c| c.index_cache())
             .cloned();
 
-        SstIndexApplierBuilder::new(
+        InvertedIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
             file_cache,
@@ -354,7 +369,26 @@ impl ScanRegion {
             self.access_layer.puffin_manager_factory().clone(),
         )
         .build(&self.request.filters)
-        .inspect_err(|err| warn!(err; "Failed to build index applier"))
+        .inspect_err(|err| warn!(err; "Failed to build invereted index applier"))
+        .ok()
+        .flatten()
+        .map(Arc::new)
+    }
+
+    /// Use the latest schema to build the fulltext index applier.
+    fn build_fulltext_index_applier(&self) -> Option<FulltextIndexApplier> {
+        if self.ignore_fulltext_index {
+            return None;
+        }
+
+        FulltextIndexApplierBuilder::new(
+            self.access_layer.region_dir().to_string(),
+            self.access_layer.object_store().clone(),
+            self.access_layer.puffin_manager_factory().clone(),
+            self.version.metadata.as_ref(),
+        )
+        .build(&self.request.filters)
+        .inspect_err(|err| warn!(err; "Failed to build fulltext index applier"))
         .ok()
         .flatten()
         .map(Arc::new)
@@ -401,8 +435,9 @@ pub(crate) struct ScanInput {
     ignore_file_not_found: bool,
     /// Parallelism to scan data.
     pub(crate) parallelism: ScanParallism,
-    /// Index applier.
-    index_applier: Option<SstIndexApplierRef>,
+    /// Index appliers.
+    inverted_index_applier: Option<InvertedIndexApplier>,
+    fulltext_index_applier: Option<FulltextIndexApplier>,
     /// Start time of the query.
     pub(crate) query_start: Option<Instant>,
     /// The region is using append mode.
@@ -429,7 +464,8 @@ impl ScanInput {
             cache_manager: None,
             ignore_file_not_found: false,
             parallelism: ScanParallism::default(),
-            index_applier: None,
+            inverted_index_applier: None,
+            fulltext_index_applier: None,
             query_start: None,
             append_mode: false,
             filter_deleted: true,
@@ -487,10 +523,23 @@ impl ScanInput {
         self
     }
 
-    /// Sets index applier.
+    /// Sets invereted index applier.
     #[must_use]
-    pub(crate) fn with_index_applier(mut self, index_applier: Option<SstIndexApplierRef>) -> Self {
-        self.index_applier = index_applier;
+    pub(crate) fn with_inverted_index_applier(
+        mut self,
+        applier: Option<InvertedIndexApplier>,
+    ) -> Self {
+        self.inverted_index_applier = applier;
+        self
+    }
+
+    /// Sets fulltext index applier.
+    #[must_use]
+    pub(crate) fn with_fulltext_index_applier(
+        mut self,
+        applier: Option<FulltextIndexApplier>,
+    ) -> Self {
+        self.fulltext_index_applier = applier;
         self
     }
 
@@ -566,7 +615,8 @@ impl ScanInput {
                 .time_range(self.time_range)
                 .projection(Some(self.mapper.column_ids().to_vec()))
                 .cache(self.cache_manager.clone())
-                .index_applier(self.index_applier.clone())
+                .inverted_index_applier(self.inverted_index_applier.clone())
+                .fulltext_index_applier(self.fulltext_index_applier.clone())
                 .expected_metadata(Some(self.mapper.metadata().clone()))
                 .build_reader_input()
                 .await;

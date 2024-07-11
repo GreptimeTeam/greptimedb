@@ -194,9 +194,10 @@ lazy_static! {
 
     // Index metrics.
     /// Timer of index application.
-    pub static ref INDEX_APPLY_ELAPSED: Histogram = register_histogram!(
+    pub static ref INDEX_APPLY_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_index_apply_elapsed",
         "index apply elapsed",
+        &[TYPE_LABEL],
     )
     .unwrap();
     /// Gauge of index apply memory usage.

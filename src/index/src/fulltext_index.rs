@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod create;
 pub mod error;
+pub mod search;
 
 /// Configuration for fulltext index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

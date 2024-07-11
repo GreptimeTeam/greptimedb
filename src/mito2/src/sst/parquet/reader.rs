@@ -52,12 +52,15 @@ use crate::metrics::{
 use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, SortField};
 use crate::sst::file::FileHandle;
-use crate::sst::index::inverted_index::applier::SstIndexApplierRef;
+use crate::sst::index::fulltext_index::applier::SstIndexApplierRef as FulltextIndexApplier;
+use crate::sst::index::inverted_index::applier::SstIndexApplierRef as InvertedIndexApplier;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
-use crate::sst::parquet::row_selection::row_selection_from_row_ranges;
+use crate::sst::parquet::row_selection::{
+    intersect_row_selections, row_selection_from_row_ranges, row_selection_from_sorted_row_ids,
+};
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
 
@@ -78,8 +81,9 @@ pub struct ParquetReaderBuilder {
     projection: Option<Vec<ColumnId>>,
     /// Manager that caches SST data.
     cache_manager: Option<CacheManagerRef>,
-    /// Index applier.
-    index_applier: Option<SstIndexApplierRef>,
+    /// Index appliers.
+    inverted_index_applier: Option<InvertedIndexApplier>,
+    fulltext_index_applier: Option<FulltextIndexApplier>,
     /// Expected metadata of the region while reading the SST.
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
@@ -101,7 +105,8 @@ impl ParquetReaderBuilder {
             time_range: None,
             projection: None,
             cache_manager: None,
-            index_applier: None,
+            inverted_index_applier: None,
+            fulltext_index_applier: None,
             expected_metadata: None,
         }
     }
@@ -136,10 +141,23 @@ impl ParquetReaderBuilder {
         self
     }
 
-    /// Attaches the index applier to the builder.
+    /// Attaches the inverted index applier to the builder.
     #[must_use]
-    pub(crate) fn index_applier(mut self, index_applier: Option<SstIndexApplierRef>) -> Self {
-        self.index_applier = index_applier;
+    pub(crate) fn inverted_index_applier(
+        mut self,
+        index_applier: Option<InvertedIndexApplier>,
+    ) -> Self {
+        self.inverted_index_applier = index_applier;
+        self
+    }
+
+    /// Attaches the fulltext index applier to the builder.
+    #[must_use]
+    pub(crate) fn fulltext_index_applier(
+        mut self,
+        index_applier: Option<FulltextIndexApplier>,
+    ) -> Self {
+        self.fulltext_index_applier = index_applier;
         self
     }
 
@@ -318,12 +336,118 @@ impl ParquetReaderBuilder {
         if num_row_groups == 0 {
             return BTreeMap::default();
         }
-        metrics.num_row_groups_before_filtering += num_row_groups;
 
-        self.prune_row_groups_by_inverted_index(parquet_meta, metrics)
-            .await
-            .or_else(|| self.prune_row_groups_by_minmax(read_format, parquet_meta, metrics))
-            .unwrap_or_else(|| (0..num_row_groups).map(|i| (i, None)).collect())
+        // Let's assume that the number of rows in the first row group
+        // can represent the `row_group_size` of the Parquet file.
+        let row_group_size = parquet_meta.row_group(0).num_rows() as usize;
+        if row_group_size == 0 {
+            return BTreeMap::default();
+        }
+
+        metrics.num_row_groups_before_filtering += num_row_groups;
+        metrics.num_rows_in_row_group_before_filtering += parquet_meta
+            .row_groups()
+            .iter()
+            .map(|r| r.num_rows())
+            .sum::<i64>() as usize;
+
+        let mut output = (0..num_row_groups).map(|i| (i, None)).collect();
+
+        self.prune_row_groups_by_fulltext_index(row_group_size, parquet_meta, &mut output, metrics)
+            .await;
+        if output.is_empty() {
+            return output;
+        }
+
+        let inverted_filtered = self
+            .prune_row_groups_by_inverted_index(row_group_size, parquet_meta, &mut output, metrics)
+            .await;
+        if output.is_empty() {
+            return output;
+        }
+
+        if !inverted_filtered {
+            self.prune_row_groups_by_minmax(read_format, parquet_meta, &mut output, metrics);
+        }
+
+        output
+    }
+
+    /// Prunes row groups by fulltext index. Returns `true` if the row groups are pruned.
+    async fn prune_row_groups_by_fulltext_index(
+        &self,
+        row_group_size: usize,
+        parquet_meta: &ParquetMetaData,
+        output: &mut BTreeMap<usize, Option<RowSelection>>,
+        metrics: &mut ReaderMetrics,
+    ) -> bool {
+        let Some(index_applier) = &self.fulltext_index_applier else {
+            return false;
+        };
+        if !self.file_handle.meta_ref().fulltext_index_available() {
+            return false;
+        }
+
+        let row_groups_before = output.len();
+        let mut rows_in_row_group_before = 0;
+        let mut rows_in_row_group_after = 0;
+
+        let apply_res = match index_applier.apply(self.file_handle.file_id()).await {
+            Ok(res) => res,
+            Err(err) => {
+                if cfg!(any(test, feature = "test")) {
+                    panic!(
+                        "Failed to apply full-text index, region_id: {}, file_id: {}, err: {}",
+                        self.file_handle.region_id(),
+                        self.file_handle.file_id(),
+                        err
+                    );
+                } else {
+                    warn!(
+                        err; "Failed to apply full-text index, region_id: {}, file_id: {}",
+                        self.file_handle.region_id(), self.file_handle.file_id()
+                    );
+                }
+
+                return false;
+            }
+        };
+
+        let row_group_to_row_ids = apply_res
+            .into_iter()
+            .group_by(|row_id| *row_id as usize / row_group_size);
+
+        let mut res = BTreeMap::new();
+        for (rg, row_ids) in row_group_to_row_ids.into_iter() {
+            let Some(selection) = output.remove(&rg) else {
+                continue;
+            };
+
+            let total_row_count = parquet_meta.row_group(rg).num_rows() as usize;
+            rows_in_row_group_before += selection
+                .as_ref()
+                .map_or(total_row_count, |s| s.row_count());
+
+            let row_ids_in_row_group = row_ids.map(|row_id| row_id % row_group_size as u32);
+            let new_selection =
+                row_selection_from_sorted_row_ids(row_ids_in_row_group, total_row_count);
+            let intersected_selection = intersect_row_selections(selection, Some(new_selection));
+
+            rows_in_row_group_after += intersected_selection
+                .as_ref()
+                .map_or(total_row_count, |s| s.row_count());
+
+            res.insert(rg, intersected_selection);
+        }
+
+        let row_groups_after = res.len();
+
+        metrics.num_row_groups_fulltext_index_filtered += row_groups_before - row_groups_after;
+        metrics.num_rows_in_row_group_fulltext_index_filtered +=
+            rows_in_row_group_before - rows_in_row_group_after;
+
+        *output = res;
+        true
     }
 
     /// Applies index to prune row groups.
@@ -333,51 +457,46 @@ impl ParquetReaderBuilder {
     /// the correctness of the index.
     async fn prune_row_groups_by_inverted_index(
         &self,
+        row_group_size: usize,
         parquet_meta: &ParquetMetaData,
+        output: &mut BTreeMap<usize, Option<RowSelection>>,
         metrics: &mut ReaderMetrics,
-    ) -> Option<BTreeMap<usize, Option<RowSelection>>> {
-        let Some(index_applier) = &self.index_applier else {
-            return None;
+    ) -> bool {
+        let Some(index_applier) = &self.inverted_index_applier else {
+            return false;
         };
 
         if !self.file_handle.meta_ref().inverted_index_available() {
-            return None;
+            return false;
         }
 
-        let output = match index_applier.apply(self.file_handle.file_id()).await {
+        let apply_output = match index_applier.apply(self.file_handle.file_id()).await {
             Ok(output) => output,
             Err(err) => {
                 if cfg!(any(test, feature = "test")) {
                     panic!(
-                        "Failed to apply index, region_id: {}, file_id: {}, err: {}",
+                        "Failed to apply inverted index, region_id: {}, file_id: {}, err: {}",
                         self.file_handle.region_id(),
                         self.file_handle.file_id(),
                         err
                     );
                 } else {
                     warn!(
-                        err; "Failed to apply index, region_id: {}, file_id: {}",
+                        err; "Failed to apply inverted index, region_id: {}, file_id: {}",
                         self.file_handle.region_id(), self.file_handle.file_id()
                     );
                 }
 
-                return None;
+                return false;
             }
         };
 
-        // Let's assume that the number of rows in the first row group
-        // can represent the `row_group_size` of the Parquet file.
-        //
-        // If the file contains only one row group, i.e. the number of rows
-        // less than the `row_group_size`, the calculation of `row_group_id`
-        // and `rg_begin_row_id` is still correct.
-        let row_group_size = parquet_meta.row_group(0).num_rows() as usize;
-        if row_group_size == 0 {
-            return None;
-        }
+        let row_groups_before = output.len();
+        let mut rows_in_row_group_before = 0;
+        let mut rows_in_row_group_after = 0;
 
-        let segment_row_count = output.segment_row_count;
-        let row_groups = output
+        let segment_row_count = apply_output.segment_row_count;
+        let grouped_in_row_groups = apply_output
             .matched_segment_ids
             .iter_ones()
             .map(|seg_id| {
@@ -389,26 +508,38 @@ impl ParquetReaderBuilder {
 
                 (row_group_id, rg_begin_row_id..rg_end_row_id)
             })
-            .group_by(|(row_group_id, _)| *row_group_id)
-            .into_iter()
-            .map(|(row_group_id, group)| {
-                let row_ranges = group.map(|(_, range)| range);
+            .group_by(|(row_group_id, _)| *row_group_id);
 
-                let total_row_count = parquet_meta.row_group(row_group_id).num_rows() as usize;
-                let (row_selection, skipped) =
-                    row_selection_from_row_ranges(row_ranges, total_row_count);
+        let mut res = BTreeMap::new();
+        for (row_group, group) in grouped_in_row_groups.into_iter() {
+            let Some(selection) = output.remove(&row_group) else {
+                continue;
+            };
 
-                metrics.num_rows_in_row_group_before_filtering += total_row_count;
-                metrics.num_rows_in_row_group_inverted_index_filtered += skipped;
+            let total_row_count = parquet_meta.row_group(row_group).num_rows() as usize;
+            rows_in_row_group_before += selection
+                .as_ref()
+                .map_or(total_row_count, |s| s.row_count());
 
-                (row_group_id, Some(row_selection))
-            })
-            .collect::<BTreeMap<_, _>>();
+            let row_ranges = group.map(|(_, range)| range);
 
-        let filtered = parquet_meta.num_row_groups() - row_groups.len();
-        metrics.num_row_groups_inverted_index_filtered += filtered;
+            let new_selection = row_selection_from_row_ranges(row_ranges, total_row_count);
+            let intersected_selection = intersect_row_selections(selection, Some(new_selection));
 
-        Some(row_groups)
+            rows_in_row_group_after += intersected_selection
+                .as_ref()
+                .map_or(total_row_count, |s| s.row_count());
+
+            res.insert(row_group, intersected_selection);
+        }
+
+        let row_groups_after = res.len();
+        metrics.num_row_groups_inverted_index_filtered += row_groups_before - row_groups_after;
+        metrics.num_rows_in_row_group_inverted_index_filtered +=
+            rows_in_row_group_before - rows_in_row_group_after;
+
+        *output = res;
+        true
     }
 
     /// Prunes row groups by min-max index.
@@ -416,13 +547,14 @@ impl ParquetReaderBuilder {
         &self,
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
+        output: &mut BTreeMap<usize, Option<RowSelection>>,
         metrics: &mut ReaderMetrics,
-    ) -> Option<BTreeMap<usize, Option<RowSelection>>> {
+    ) -> bool {
         let Some(predicate) = &self.predicate else {
-            return None;
+            return false;
         };
 
-        let num_row_groups = parquet_meta.num_row_groups();
+        let row_groups_before = output.len();
 
         let region_meta = read_format.metadata();
         let row_groups = parquet_meta.row_groups();
@@ -431,18 +563,25 @@ impl ParquetReaderBuilder {
         // Here we use the schema of the SST to build the physical expression. If the column
         // in the SST doesn't have the same column id as the column in the expected metadata,
         // we will get a None statistics for that column.
-        let row_groups = predicate
+        let res = predicate
             .prune_with_stats(&stats, region_meta.schema.arrow_schema())
             .iter()
-            .zip(0..num_row_groups)
-            .filter(|&(mask, _)| *mask)
-            .map(|(_, id)| (id, None))
+            .zip(0..parquet_meta.num_row_groups())
+            .filter_map(|(mask, row_group)| {
+                if !*mask {
+                    return None;
+                }
+
+                let selection = output.remove(&row_group)?;
+                Some((row_group, selection))
+            })
             .collect::<BTreeMap<_, _>>();
 
-        let filtered = num_row_groups - row_groups.len();
-        metrics.num_row_groups_min_max_filtered += filtered;
+        let row_groups_after = res.len();
+        metrics.num_row_groups_min_max_filtered += row_groups_before - row_groups_after;
 
-        Some(row_groups)
+        *output = res;
+        true
     }
 }
 
@@ -504,6 +643,8 @@ fn time_range_to_predicate(
 pub(crate) struct ReaderMetrics {
     /// Number of row groups before filtering.
     num_row_groups_before_filtering: usize,
+    /// Number of row groups filtered by fulltext index.
+    num_row_groups_fulltext_index_filtered: usize,
     /// Number of row groups filtered by inverted index.
     num_row_groups_inverted_index_filtered: usize,
     /// Number of row groups filtered by min-max index.
@@ -512,6 +653,8 @@ pub(crate) struct ReaderMetrics {
     num_rows_precise_filtered: usize,
     /// Number of rows in row group before filtering.
     num_rows_in_row_group_before_filtering: usize,
+    /// Number of rows in row group filtered by fulltext index.
+    num_rows_in_row_group_fulltext_index_filtered: usize,
     /// Number of rows in row group filtered by inverted index.
     num_rows_in_row_group_inverted_index_filtered: usize,
     /// Duration to build the parquet reader.
@@ -530,10 +673,13 @@ impl ReaderMetrics {
     /// Adds `other` metrics to this metrics.
     pub(crate) fn merge_from(&mut self, other: &ReaderMetrics) {
         self.num_row_groups_before_filtering += other.num_row_groups_before_filtering;
+        self.num_row_groups_fulltext_index_filtered += other.num_row_groups_fulltext_index_filtered;
         self.num_row_groups_inverted_index_filtered += other.num_row_groups_inverted_index_filtered;
         self.num_row_groups_min_max_filtered += other.num_row_groups_min_max_filtered;
         self.num_rows_precise_filtered += other.num_rows_precise_filtered;
         self.num_rows_in_row_group_before_filtering += other.num_rows_in_row_group_before_filtering;
+        self.num_rows_in_row_group_fulltext_index_filtered +=
+            other.num_rows_in_row_group_fulltext_index_filtered;
         self.num_rows_in_row_group_inverted_index_filtered +=
             other.num_rows_in_row_group_inverted_index_filtered;
         self.build_cost += other.build_cost;
@@ -783,6 +929,9 @@ impl Drop for ParquetReader {
             .with_label_values(&["before_filtering"])
             .inc_by(metrics.num_row_groups_before_filtering as u64);
         READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["fulltext_index_filtered"])
+            .inc_by(metrics.num_row_groups_fulltext_index_filtered as u64);
+        READ_ROW_GROUPS_TOTAL
             .with_label_values(&["inverted_index_filtered"])
             .inc_by(metrics.num_row_groups_inverted_index_filtered as u64);
         READ_ROW_GROUPS_TOTAL
@@ -794,6 +943,9 @@ impl Drop for ParquetReader {
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["before_filtering"])
             .inc_by(metrics.num_rows_in_row_group_before_filtering as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["fulltext_index_filtered"])
+            .inc_by(metrics.num_rows_in_row_group_fulltext_index_filtered as u64);
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["inverted_index_filtered"])
             .inc_by(metrics.num_rows_in_row_group_inverted_index_filtered as u64);

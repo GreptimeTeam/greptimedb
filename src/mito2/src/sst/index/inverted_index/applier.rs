@@ -28,11 +28,12 @@ use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
-use crate::error::{ApplyIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
+use crate::error::{ApplyInvertedIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::FileId;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
+use crate::sst::index::TYPE_INVERTED_INDEX;
 use crate::sst::location;
 
 /// The [`SstIndexApplier`] is responsible for applying predicates to the provided SST files
@@ -89,7 +90,9 @@ impl SstIndexApplier {
 
     /// Applies predicates to the provided SST file id and returns the relevant row group ids
     pub async fn apply(&self, file_id: FileId) -> Result<ApplyOutput> {
-        let _timer = INDEX_APPLY_ELAPSED.start_timer();
+        let _timer = INDEX_APPLY_ELAPSED
+            .with_label_values(&[TYPE_INVERTED_INDEX])
+            .start_timer();
 
         let context = SearchContext {
             // Encountering a non-existing column indicates that it doesn't match predicates.
@@ -115,13 +118,13 @@ impl SstIndexApplier {
             self.index_applier
                 .apply(context, &mut index_reader)
                 .await
-                .context(ApplyIndexSnafu)
+                .context(ApplyInvertedIndexSnafu)
         } else {
             let mut index_reader = InvertedIndexBlobReader::new(blob);
             self.index_applier
                 .apply(context, &mut index_reader)
                 .await
-                .context(ApplyIndexSnafu)
+                .context(ApplyInvertedIndexSnafu)
         }
     }
 

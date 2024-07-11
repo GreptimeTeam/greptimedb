@@ -38,6 +38,9 @@ use crate::sst::index::fulltext_index::creator::SstIndexCreator as FulltextIndex
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::SstIndexCreator as InvertedIndexer;
 
+pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
+pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
+
 /// Output of the index creation.
 #[derive(Debug, Clone, Default)]
 pub struct IndexOutput {
