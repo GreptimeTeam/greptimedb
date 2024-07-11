@@ -18,11 +18,12 @@ use std::time::Duration;
 
 use common_meta::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
 use common_telemetry::{error, info, warn};
-use etcd_client::{Client, GetOptions, PutOptions};
+use etcd_client::{Client, GetOptions, LeaderKey, LeaseKeepAliveStream, LeaseKeeper, PutOptions};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
+use tokio::time::timeout;
 
 use crate::election::{Election, LeaderChangeMessage, CANDIDATES_ROOT, ELECTION_KEY};
 use crate::error;
@@ -235,34 +236,32 @@ impl Election for EtcdElection {
                 tokio::time::interval(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS));
             loop {
                 let _ = keep_alive_interval.tick().await;
-                keeper.keep_alive().await.context(error::EtcdFailedSnafu)?;
 
-                if let Some(res) = receiver.message().await.context(error::EtcdFailedSnafu)? {
-                    if res.ttl() > 0 {
-                        // Only after a successful `keep_alive` is the leader considered official.
-                        if self
-                            .is_leader
-                            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                            .is_ok()
-                        {
-                            self.infancy.store(true, Ordering::Relaxed);
-
-                            if let Err(e) = self
-                                .leader_watcher
-                                .send(LeaderChangeMessage::Elected(Arc::new(leader.clone())))
-                            {
-                                error!(e; "Failed to send leader change message");
-                            }
-                        }
-                    } else {
+                // The keep alive operation MUST be done in `META_KEEP_ALIVE_INTERVAL_SECS`.
+                match timeout(
+                    Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS),
+                    self.keep_alive(&mut keeper, &mut receiver, leader),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        // Do nothing
+                    }
+                    Ok(Err(err)) => {
+                        error!(err; "Failed to keep alive");
+                        break;
+                    }
+                    Err(_) => {
+                        error!("Refresh lease timeout");
                         if self.is_leader.load(Ordering::Relaxed) {
                             if let Err(e) = self
                                 .leader_watcher
                                 .send(LeaderChangeMessage::StepDown(Arc::new(leader.clone())))
                             {
-                                error!("Failed to send leader change message, error: {e}");
+                                error!(e; "Failed to send leader change message");
                             }
                         }
+
                         break;
                     }
                 }
@@ -295,5 +294,50 @@ impl Election for EtcdElection {
 
     fn subscribe_leader_change(&self) -> Receiver<LeaderChangeMessage> {
         self.leader_watcher.subscribe()
+    }
+}
+
+impl EtcdElection {
+    async fn keep_alive(
+        &self,
+        keeper: &mut LeaseKeeper,
+        receiver: &mut LeaseKeepAliveStream,
+        leader: &LeaderKey,
+    ) -> Result<()> {
+        keeper.keep_alive().await.context(error::EtcdFailedSnafu)?;
+        if let Some(res) = receiver.message().await.context(error::EtcdFailedSnafu)? {
+            if res.ttl() > 0 {
+                // Only after a successful `keep_alive` is the leader considered official.
+                if self
+                    .is_leader
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    self.infancy.store(true, Ordering::Relaxed);
+
+                    if let Err(e) = self
+                        .leader_watcher
+                        .send(LeaderChangeMessage::Elected(Arc::new(leader.clone())))
+                    {
+                        error!(e; "Failed to send leader change message");
+                    }
+                }
+            } else {
+                if self.is_leader.load(Ordering::Relaxed) {
+                    if let Err(e) = self
+                        .leader_watcher
+                        .send(LeaderChangeMessage::StepDown(Arc::new(leader.clone())))
+                    {
+                        error!(e; "Failed to send leader change message");
+                    }
+                }
+                return error::UnexpectedSnafu {
+                    violated: "Failed to refresh the lease",
+                }
+                .fail();
+            }
+        }
+
+        Ok(())
     }
 }
