@@ -43,7 +43,7 @@ pub struct DropViewProcedure {
 }
 
 impl DropViewProcedure {
-    pub const TYPE_NAME: &'static str = "metasrv-procedure:DropView";
+    pub const TYPE_NAME: &'static str = "metasrv-procedure::DropView";
 
     pub fn new(cluster_id: ClusterId, task: DropViewTask, context: DdlContext) -> Self {
         Self {
