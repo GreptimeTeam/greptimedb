@@ -86,12 +86,12 @@ impl ExtensionPlanner for DistExtensionPlanner {
         let optimized_plan = input_plan;
         let Some(table_name) = Self::extract_full_table_name(input_plan)? else {
             // no relation found in input plan, going to execute them locally
-            return fallback(&optimized_plan).await;
+            return fallback(optimized_plan).await;
         };
 
         let Ok(regions) = self.get_regions(&table_name).await else {
             // no peers found, going to execute them locally
-            return fallback(&optimized_plan).await;
+            return fallback(optimized_plan).await;
         };
 
         // TODO(ruihang): generate different execution plans for different variant merge operation
