@@ -100,15 +100,14 @@ impl IntoResponse for ErrorResponse {
             | StatusCode::FlowNotFound
             | StatusCode::FlowAlreadyExists => HttpStatusCode::BAD_REQUEST,
 
-            StatusCode::PermissionDenied
-            | StatusCode::AuthHeaderNotFound
+            StatusCode::AuthHeaderNotFound
             | StatusCode::InvalidAuthHeader
             | StatusCode::UserNotFound
             | StatusCode::UnsupportedPasswordType
             | StatusCode::UserPasswordMismatch
             | StatusCode::RegionReadonly => HttpStatusCode::UNAUTHORIZED,
 
-            StatusCode::AccessDenied => HttpStatusCode::FORBIDDEN,
+            StatusCode::PermissionDenied | StatusCode::AccessDenied => HttpStatusCode::FORBIDDEN,
 
             StatusCode::RateLimited => HttpStatusCode::TOO_MANY_REQUESTS,
 
