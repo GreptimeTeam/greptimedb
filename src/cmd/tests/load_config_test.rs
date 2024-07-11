@@ -26,6 +26,7 @@ use common_telemetry::logging::LoggingOptions;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::{DatanodeWalConfig, StandaloneWalConfig};
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
+use file_engine::config::EngineConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::service_config::datanode::DatanodeClientOptions;
 use meta_client::MetaClientOptions;
@@ -71,18 +72,21 @@ fn test_load_datanode_example_config() {
                 data_home: "/tmp/greptimedb/".to_string(),
                 ..Default::default()
             },
-            region_engine: vec![RegionEngineConfig::Mito(MitoConfig {
-                num_workers: 8,
-                auto_flush_interval: Duration::from_secs(3600),
-                scan_parallelism: 0,
-                global_write_buffer_size: ReadableSize::gb(1),
-                global_write_buffer_reject_size: ReadableSize::gb(2),
-                sst_meta_cache_size: ReadableSize::mb(128),
-                vector_cache_size: ReadableSize::mb(512),
-                page_cache_size: ReadableSize::mb(512),
-                max_background_jobs: 4,
-                ..Default::default()
-            })],
+            region_engine: vec![
+                RegionEngineConfig::Mito(MitoConfig {
+                    num_workers: 8,
+                    auto_flush_interval: Duration::from_secs(3600),
+                    scan_parallelism: 0,
+                    global_write_buffer_size: ReadableSize::gb(1),
+                    global_write_buffer_reject_size: ReadableSize::gb(2),
+                    sst_meta_cache_size: ReadableSize::mb(128),
+                    vector_cache_size: ReadableSize::mb(512),
+                    page_cache_size: ReadableSize::mb(512),
+                    max_background_jobs: 4,
+                    ..Default::default()
+                }),
+                RegionEngineConfig::File(EngineConfig {}),
+            ],
             logging: LoggingOptions {
                 level: Some("info".to_string()),
                 otlp_endpoint: Some("".to_string()),
@@ -207,18 +211,21 @@ fn test_load_standalone_example_config() {
                 sync_period: Some(Duration::from_secs(10)),
                 ..Default::default()
             }),
-            region_engine: vec![RegionEngineConfig::Mito(MitoConfig {
-                num_workers: 8,
-                auto_flush_interval: Duration::from_secs(3600),
-                scan_parallelism: 0,
-                global_write_buffer_size: ReadableSize::gb(1),
-                global_write_buffer_reject_size: ReadableSize::gb(2),
-                sst_meta_cache_size: ReadableSize::mb(128),
-                vector_cache_size: ReadableSize::mb(512),
-                page_cache_size: ReadableSize::mb(512),
-                max_background_jobs: 4,
-                ..Default::default()
-            })],
+            region_engine: vec![
+                RegionEngineConfig::Mito(MitoConfig {
+                    num_workers: 8,
+                    auto_flush_interval: Duration::from_secs(3600),
+                    scan_parallelism: 0,
+                    global_write_buffer_size: ReadableSize::gb(1),
+                    global_write_buffer_reject_size: ReadableSize::gb(2),
+                    sst_meta_cache_size: ReadableSize::mb(128),
+                    vector_cache_size: ReadableSize::mb(512),
+                    page_cache_size: ReadableSize::mb(512),
+                    max_background_jobs: 4,
+                    ..Default::default()
+                }),
+                RegionEngineConfig::File(EngineConfig {}),
+            ],
             storage: StorageConfig {
                 data_home: "/tmp/greptimedb/".to_string(),
                 ..Default::default()
