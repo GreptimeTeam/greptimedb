@@ -373,9 +373,17 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
-                // todo: handle explain node
-
                 let state = ctx.state();
+
+                // special handle EXPLAIN plan
+                if !matches!(df_plan, DfLogicalPlan::Explain(_)) {
+                    return state
+                        .create_physical_plan(&df_plan)
+                        .await
+                        .context(error::DatafusionSnafu)
+                        .map_err(BoxedError::new)
+                        .context(QueryExecutionSnafu);
+                }
 
                 // analyze first
                 let analyzed_plan = state
