@@ -81,6 +81,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to create dataframe"))]
+    DataFrame {
+        source: query::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("General catalog error"))]
     Catalog {
         source: catalog::error::Error,
@@ -126,6 +133,7 @@ impl ErrorExt for Error {
             | InvalidPipelineVersion { .. } => StatusCode::InvalidArguments,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
+            DataFrame { source, .. } => source.status_code(),
             Catalog { source, .. } => source.status_code(),
             CreateTable { source, .. } => source.status_code(),
         }
