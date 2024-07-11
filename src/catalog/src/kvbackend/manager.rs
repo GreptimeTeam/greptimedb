@@ -89,6 +89,7 @@ impl KvBackendCatalogManager {
             system_catalog: SystemCatalog {
                 catalog_manager: me.clone(),
                 catalog_cache: Cache::new(CATALOG_CACHE_MAX_CAPACITY),
+                pg_catalog_cache: Cache::new(CATALOG_CACHE_MAX_CAPACITY),
                 information_schema_provider: Arc::new(InformationSchemaProvider::new(
                     DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
@@ -307,6 +308,9 @@ fn build_table(table_info_value: TableInfoValue) -> Result<TableRef> {
 struct SystemCatalog {
     catalog_manager: Weak<KvBackendCatalogManager>,
     catalog_cache: Cache<String, Arc<InformationSchemaProvider>>,
+    pg_catalog_cache: Cache<String, Arc<PGCatalogProvider>>,
+
+    // system_schema_provier for default catalog
     information_schema_provider: Arc<InformationSchemaProvider>,
     pg_catalog_provider: Arc<PGCatalogProvider>,
 }
@@ -358,8 +362,18 @@ impl SystemCatalog {
                 });
             information_schema_provider.table(table_name)
         } else if schema == PG_CATALOG_NAME {
-            PGCatalogProvider::new(catalog.to_string(), self.catalog_manager.clone())
-                .table(table_name)
+            if catalog == DEFAULT_CATALOG_NAME {
+                self.pg_catalog_provider.table(table_name)
+            } else {
+                let pg_catalog_provider =
+                    self.pg_catalog_cache.get_with_by_ref(catalog, move || {
+                        Arc::new(PGCatalogProvider::new(
+                            catalog.to_string(),
+                            self.catalog_manager.clone(),
+                        ))
+                    });
+                pg_catalog_provider.table(table_name)
+            }
         } else if schema == DEFAULT_SCHEMA_NAME && table_name == NUMBERS_TABLE_NAME {
             Some(NumbersTable::table(NUMBERS_TABLE_ID))
         } else {
