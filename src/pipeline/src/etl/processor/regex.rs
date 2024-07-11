@@ -232,7 +232,7 @@ mod tests {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
-        let temporary_map = Map { values };
+        let mut temporary_map = Map { values };
 
         {
             // single field (with prefix), multiple patterns
@@ -255,9 +255,9 @@ mod tests {
 
             let mut map = Map::default();
             map.insert("breadcrumbs", breadcrumbs.clone());
-            let processed_val = processor.exec_map(map).unwrap();
+            let processed_val = processor.exec_map(&mut map).unwrap();
 
-            assert_eq!(processed_val, Value::Map(temporary_map.clone()));
+            assert_eq!(processed_val, &mut temporary_map);
         }
 
         {
@@ -305,11 +305,11 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v))
             .collect();
 
-            let actual_val = processor.exec_map(temporary_map.clone()).unwrap();
             let mut expected_map = temporary_map.clone();
+            let actual_val = processor.exec_map(&mut temporary_map).unwrap();
             expected_map.extend(Map { values: new_values });
 
-            assert_eq!(Value::Map(expected_map), actual_val);
+            assert_eq!(&mut expected_map, actual_val);
         }
     }
 }

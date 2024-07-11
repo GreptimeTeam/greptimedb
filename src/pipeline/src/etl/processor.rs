@@ -26,7 +26,6 @@ pub mod urlencoding;
 use std::sync::Arc;
 
 use cmcd::CMCDProcessor;
-use common_telemetry::warn;
 use csv::CsvProcessor;
 use date::DateProcessor;
 use dissect::DissectProcessor;
@@ -38,7 +37,7 @@ use regex::RegexProcessor;
 use urlencoding::UrlEncodingProcessor;
 
 use crate::etl::field::{Field, Fields};
-use crate::etl::value::{Array, Map, Value};
+use crate::etl::value::{Map, Value};
 
 const FIELD_NAME: &str = "field";
 const FIELDS_NAME: &str = "fields";
@@ -67,7 +66,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
         Ok(Map::one(field.get_field(), val.clone()))
     }
 
-    fn exec_map(&self, mut map: Map) -> Result<Value, String> {
+    fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
         for ff @ Field { field, .. } in self.fields().iter() {
             match map.get(field) {
                 Some(v) => {
@@ -82,46 +81,8 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
                 }
             }
         }
-
-        Ok(Value::Map(map))
-    }
-
-    fn exec_array(&self, arr: Array) -> Result<Value, String> {
-        let mut values = vec![];
-        for val in arr.into_iter() {
-            match val {
-                Value::Map(map) => {
-                    values.push(self.exec_map(map)?);
-                }
-                Value::String(_) => {
-                    let fields = self.fields();
-                    if fields.len() != 1 {
-                        return Err(format!(
-                            "{} processor: expected fields length 1 when processing line input, but got {}",
-                            self.kind(),
-                            fields.len()
-                        ));
-                    }
-                    let field = fields.first().unwrap();
-
-                    values.push(self.exec_field(&val, field).map(Value::Map)?);
-                }
-                _ if self.ignore_processor_array_failure() => {
-                    warn!("expected a map, but got {val}")
-                }
-                _ => return Err(format!("expected a map, but got {}", val)),
-            }
-        }
-
-        Ok(Value::Array(Array { values }))
-    }
-
-    fn exec(&self, val: Value) -> Result<Value, String> {
-        match val {
-            Value::Map(map) => self.exec_map(map),
-            Value::Array(arr) => self.exec_array(arr),
-            _ => Err(format!("expected a map or array, but got {}", val)),
-        }
+        
+        Ok(map)
     }
 }
 

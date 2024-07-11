@@ -61,3 +61,9 @@ rayon = "1.0"
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 session = { workspace = true, features = ["testing"] }
+criterion = { version = "0.4" }
+
+[[bench]]
+name = "processor"
+harness = false
+path = "benches/processor.rs"
