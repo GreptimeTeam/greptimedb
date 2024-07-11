@@ -378,7 +378,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                 // special handle EXPLAIN plan
                 if matches!(df_plan, DfLogicalPlan::Explain(_)) {
                     return state
-                        .create_physical_plan(&df_plan)
+                        .create_physical_plan(df_plan)
                         .await
                         .context(error::DatafusionSnafu)
                         .map_err(BoxedError::new)
