@@ -88,7 +88,7 @@ impl DdlTask {
         DdlTask::CreateTable(CreateTableTask::new(expr, partitions, table_info))
     }
 
-    /// Creates a [`DdlTask`] to create a logical table.
+    /// Creates a [`DdlTask`] to create several logical tables.
     pub fn new_create_logical_tables(table_data: Vec<(CreateTableExpr, RawTableInfo)>) -> Self {
         DdlTask::CreateLogicalTables(
             table_data
