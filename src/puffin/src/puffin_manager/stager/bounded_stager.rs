@@ -22,7 +22,6 @@ use async_walkdir::{Filtering, WalkDir};
 use base64::prelude::BASE64_URL_SAFE;
 use base64::Engine;
 use common_telemetry::{info, warn};
-use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt};
 use moka::future::Cache;
 use sha2::{Digest, Sha256};
@@ -128,7 +127,7 @@ impl Stager for BoundedStager {
                 let file_name = format!("{}.{}", cache_key, uuid::Uuid::new_v4());
                 let path = self.base_dir.join(&file_name);
 
-                let size = Self::write_blob(&path, &init_fn).await?;
+                let size = Self::write_blob(&path, init_fn).await?;
 
                 let guard = Arc::new(FsBlobGuard {
                     path,
@@ -163,7 +162,7 @@ impl Stager for BoundedStager {
                 let dir_name = format!("{}.{}", cache_key, uuid::Uuid::new_v4());
                 let path = self.base_dir.join(&dir_name);
 
-                let size = Self::write_dir(&path, &init_fn).await?;
+                let size = Self::write_dir(&path, init_fn).await?;
 
                 let guard = Arc::new(FsDirGuard {
                     path,
@@ -225,7 +224,7 @@ impl BoundedStager {
 
     async fn write_blob(
         target_path: &PathBuf,
-        init_fn: &(dyn InitBlobFn + Send + Sync + '_),
+        init_fn: Box<dyn InitBlobFn + Send + Sync + '_>,
     ) -> Result<u64> {
         // To guarantee the atomicity of writing the file, we need to write
         // the file to a temporary file first...
@@ -247,7 +246,7 @@ impl BoundedStager {
 
     async fn write_dir(
         target_path: &PathBuf,
-        init_fn: &(dyn InitDirFn + Send + Sync + '_),
+        init_fn: Box<dyn InitDirFn + Send + Sync + '_>,
     ) -> Result<u64> {
         // To guarantee the atomicity of writing the directory, we need to write
         // the directory to a temporary directory first...
@@ -425,16 +424,13 @@ pub struct FsBlobGuard {
     delete_queue: Sender<DeleteTask>,
 }
 
+#[async_trait]
 impl BlobGuard for FsBlobGuard {
     type Reader = Compat<fs::File>;
 
-    fn reader(&self) -> BoxFuture<'static, Result<Self::Reader>> {
-        let path = self.path.clone();
-        async move {
-            let file = fs::File::open(&path).await.context(OpenSnafu)?;
-            Ok(file.compat())
-        }
-        .boxed()
+    async fn reader(&self) -> Result<Self::Reader> {
+        let file = fs::File::open(&self.path).await.context(OpenSnafu)?;
+        Ok(file.compat())
     }
 }
 

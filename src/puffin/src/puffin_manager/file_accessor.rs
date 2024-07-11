@@ -21,7 +21,7 @@ use crate::error::Result;
 #[async_trait]
 #[auto_impl::auto_impl(Arc)]
 pub trait PuffinFileAccessor: Send + Sync + 'static {
-    type Reader: AsyncRead + AsyncSeek + Unpin + Send;
+    type Reader: AsyncRead + AsyncSeek + Unpin + Send + Sync;
     type Writer: AsyncWrite + Unpin + Send;
 
     /// Opens a reader for the given puffin file.

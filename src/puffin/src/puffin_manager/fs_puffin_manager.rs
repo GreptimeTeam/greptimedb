@@ -46,7 +46,7 @@ impl<S, F> FsPuffinManager<S, F> {
 #[async_trait]
 impl<S, F> PuffinManager for FsPuffinManager<S, F>
 where
-    S: Stager + Clone,
+    S: Stager + Clone + 'static,
     F: PuffinFileAccessor + Clone,
 {
     type Reader = FsPuffinReader<S, F>;
