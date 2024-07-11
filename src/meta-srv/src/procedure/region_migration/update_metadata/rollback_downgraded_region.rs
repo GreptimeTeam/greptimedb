@@ -51,6 +51,7 @@ impl UpdateMetadata {
             });
         }
 
+        ctx.register_failure_detectors().await;
         ctx.remove_table_route_value();
 
         Ok(())
@@ -60,6 +61,7 @@ impl UpdateMetadata {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::sync::Arc;
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -71,6 +73,7 @@ mod tests {
     use crate::procedure::region_migration::test_util::{self, TestingEnv};
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
+    use crate::region::supervisor::RegionFailureDetectorControl;
 
     fn new_persistent_context() -> PersistentContext {
         test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
@@ -98,6 +101,8 @@ mod tests {
 
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        ctx.region_failure_detector_controller = Arc::new(RegionFailureDetectorControl::new(tx));
         let table_id = ctx.region_id().table_id();
 
         let table_info = new_test_table_info(1024, vec![1, 2, 3]).into();
@@ -161,8 +166,18 @@ mod tests {
         assert!(ctx.volatile_ctx.table_route.is_none());
         assert!(err.is_retryable());
         assert!(format!("{err:?}").contains("Failed to update the table route"));
-
+        assert_eq!(rx.len(), 0);
         state.rollback_downgraded_region(&mut ctx).await.unwrap();
+        let event = rx.try_recv().unwrap();
+        let detecting_regions = event.into_region_failure_detectors();
+        assert_eq!(
+            detecting_regions,
+            vec![(
+                ctx.persistent_ctx.cluster_id,
+                from_peer.id,
+                ctx.persistent_ctx.region_id
+            )]
+        );
 
         let table_route = table_metadata_manager
             .table_route_manager()

@@ -39,7 +39,12 @@ impl Display for ColumnOption {
             ColumnOption::Null => write!(f, "NULL"),
             ColumnOption::NotNull => write!(f, "NOT NULL"),
             ColumnOption::DefaultFn(s) => write!(f, "DEFAULT {}", s),
-            ColumnOption::DefaultValue(s) => write!(f, "DEFAULT {}", s),
+            ColumnOption::DefaultValue(s) => match s {
+                Value::String(value) => {
+                    write!(f, "DEFAULT \'{}\'", value.as_utf8())
+                }
+                _ => write!(f, "DEFAULT {}", s),
+            },
             ColumnOption::TimeIndex => write!(f, "TIME INDEX"),
             ColumnOption::PrimaryKey => write!(f, "PRIMARY KEY"),
         }

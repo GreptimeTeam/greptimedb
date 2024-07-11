@@ -14,24 +14,29 @@
 
 //! Send heartbeat from flownode to metasrv
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, Peer};
 use common_error::ext::BoxedError;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
-    HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
+    HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
-use common_telemetry::{debug, error, info};
-use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
+use common_telemetry::{debug, error, info, warn};
+use greptime_proto::v1::meta::NodeInfo;
+use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient, MetaClientBuilder};
+use meta_client::{MetaClientOptions, MetaClientType};
 use servers::addrs;
 use servers::heartbeat_options::HeartbeatOptions;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
-use crate::adapter::error::ExternalSnafu;
+use crate::error::{ExternalSnafu, MetaClientInitSnafu};
 use crate::{Error, FlownodeOptions};
 
 /// The flownode heartbeat task which sending `[HeartbeatRequest]` to Metasrv periodically in background.
@@ -43,6 +48,8 @@ pub struct HeartbeatTask {
     report_interval: Duration,
     retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
+    start_time_ms: u64,
+    running: Arc<AtomicBool>,
 }
 
 impl HeartbeatTask {
@@ -59,10 +66,20 @@ impl HeartbeatTask {
             report_interval: heartbeat_opts.interval,
             retry_interval: heartbeat_opts.retry_interval,
             resp_handler_executor,
+            start_time_ms: common_time::util::current_time_millis() as u64,
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub async fn start(&self) -> Result<(), Error> {
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!("Heartbeat task started multiple times");
+            return Ok(());
+        }
         info!("Start to establish the heartbeat connection to metasrv.");
         let (req_sender, resp_stream) = self
             .meta_client
@@ -83,24 +100,46 @@ impl HeartbeatTask {
         Ok(())
     }
 
-    fn create_heartbeat_request(
-        message: OutgoingMessage,
-        self_peer: &Option<Peer>,
-    ) -> Option<HeartbeatRequest> {
-        match outgoing_message_to_mailbox_message(message) {
-            Ok(message) => {
-                let req = HeartbeatRequest {
-                    mailbox_message: Some(message),
-                    peer: self_peer.clone(),
-                    ..Default::default()
-                };
-                Some(req)
-            }
-            Err(e) => {
-                error!(e; "Failed to encode mailbox messages");
-                None
-            }
+    pub fn shutdown(&self) {
+        info!("Close heartbeat task for flownode");
+        if self
+            .running
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!("Call close heartbeat task multiple times");
         }
+    }
+
+    fn create_heartbeat_request(
+        message: Option<OutgoingMessage>,
+        peer: Option<Peer>,
+        start_time_ms: u64,
+    ) -> Option<HeartbeatRequest> {
+        let mailbox_message = match message.map(outgoing_message_to_mailbox_message) {
+            Some(Ok(message)) => Some(message),
+            Some(Err(e)) => {
+                error!(e; "Failed to encode mailbox messages");
+                return None;
+            }
+            None => None,
+        };
+
+        Some(HeartbeatRequest {
+            mailbox_message,
+            peer,
+            info: Self::build_node_info(start_time_ms),
+            ..Default::default()
+        })
+    }
+
+    fn build_node_info(start_time_ms: u64) -> Option<NodeInfo> {
+        let build_info = common_version::build_info();
+        Some(NodeInfo {
+            version: build_info.version.to_string(),
+            git_commit: build_info.commit_short.to_string(),
+            start_time_ms,
+        })
     }
 
     fn start_heartbeat_report(
@@ -109,6 +148,7 @@ impl HeartbeatTask {
         mut outgoing_rx: mpsc::Receiver<OutgoingMessage>,
     ) {
         let report_interval = self.report_interval;
+        let start_time_ms = self.start_time_ms;
         let self_peer = Some(Peer {
             id: self.node_id,
             addr: self.peer_addr.clone(),
@@ -124,18 +164,14 @@ impl HeartbeatTask {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            Self::create_heartbeat_request(message, &self_peer)
+                            Self::create_heartbeat_request(Some(message), self_peer.clone(), start_time_ms)
                         } else {
                             // Receives None that means Sender was dropped, we need to break the current loop
                             break
                         }
                     }
                     _ = interval.tick() => {
-                        let req = HeartbeatRequest {
-                            peer: self_peer.clone(),
-                            ..Default::default()
-                        };
-                        Some(req)
+                        Self::create_heartbeat_request(None, self_peer.clone(), start_time_ms)
                     }
                 };
 

@@ -96,10 +96,11 @@ impl State for DropDatabaseExecutor {
     async fn next(
         &mut self,
         ddl_ctx: &DdlContext,
-        _ctx: &mut DropDatabaseContext,
+        ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)> {
         self.register_dropping_regions(ddl_ctx)?;
-        let executor = DropTableExecutor::new(self.table_name.clone(), self.table_id, true);
+        let executor =
+            DropTableExecutor::new(ctx.cluster_id, self.table_name.clone(), self.table_id, true);
         // Deletes metadata for table permanently.
         let table_route_value = TableRouteValue::new(
             self.table_id,
@@ -186,6 +187,7 @@ mod tests {
                 DropTableTarget::Physical,
             );
             let mut ctx = DropDatabaseContext {
+                cluster_id: 0,
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
@@ -198,6 +200,7 @@ mod tests {
         }
         // Execute again
         let mut ctx = DropDatabaseContext {
+            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -238,6 +241,7 @@ mod tests {
                 DropTableTarget::Logical,
             );
             let mut ctx = DropDatabaseContext {
+                cluster_id: 0,
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
@@ -250,6 +254,7 @@ mod tests {
         }
         // Execute again
         let mut ctx = DropDatabaseContext {
+            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -339,6 +344,7 @@ mod tests {
             DropTableTarget::Physical,
         );
         let mut ctx = DropDatabaseContext {
+            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -368,6 +374,7 @@ mod tests {
                 DropTableTarget::Physical,
             );
             let mut ctx = DropDatabaseContext {
+                cluster_id: 0,
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,

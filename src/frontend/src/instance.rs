@@ -25,16 +25,13 @@ pub mod standalone;
 
 use std::sync::Arc;
 
-use api::v1::{RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
-use common_config::{Configurable, KvBackendConfig};
+use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
-use common_frontend::handler::FrontendInvoker;
-use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
@@ -42,10 +39,8 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::{debug, error, info, tracing};
+use common_telemetry::{debug, error, tracing};
 use log_store::raft_engine::RaftEngineBackend;
-use meta_client::client::{MetaClient, MetaClientBuilder};
-use meta_client::MetaClientOptions;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
@@ -114,6 +109,7 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 
 #[derive(Clone)]
 pub struct Instance {
+    options: FrontendOptions,
     catalog_manager: CatalogManagerRef,
     script_executor: Arc<ScriptExecutor>,
     pipeline_operator: Arc<PipelineOperator>,
@@ -129,36 +125,6 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn create_meta_client(
-        meta_client_options: &MetaClientOptions,
-    ) -> Result<Arc<MetaClient>> {
-        info!(
-            "Creating Frontend instance in distributed mode with Meta server addr {:?}",
-            meta_client_options.metasrv_addrs
-        );
-
-        let channel_config = ChannelConfig::new()
-            .timeout(meta_client_options.timeout)
-            .connect_timeout(meta_client_options.connect_timeout)
-            .tcp_nodelay(meta_client_options.tcp_nodelay);
-        let ddl_channel_config = channel_config
-            .clone()
-            .timeout(meta_client_options.ddl_timeout);
-        let channel_manager = ChannelManager::with_config(channel_config);
-        let ddl_channel_manager = ChannelManager::with_config(ddl_channel_config);
-
-        let cluster_id = 0; // It is currently a reserved field and has not been enabled.
-        let mut meta_client = MetaClientBuilder::frontend_default_options(cluster_id)
-            .channel_manager(channel_manager)
-            .ddl_channel_manager(ddl_channel_manager)
-            .build();
-        meta_client
-            .start(&meta_client_options.metasrv_addrs)
-            .await
-            .context(error::StartMetaClientSnafu)?;
-        Ok(Arc::new(meta_client))
-    }
-
     pub async fn try_build_standalone_components(
         dir: String,
         kv_backend_config: KvBackendConfig,
@@ -189,14 +155,9 @@ impl Instance {
         Ok((kv_backend, procedure_manager))
     }
 
-    pub fn build_servers(
-        &mut self,
-        opts: impl Into<FrontendOptions> + Configurable,
-        servers: ServerHandlers,
-    ) -> Result<()> {
-        let opts: FrontendOptions = opts.into();
+    pub fn build_servers(&mut self, servers: ServerHandlers) -> Result<()> {
         self.export_metrics_task =
-            ExportMetricsTask::try_new(&opts.export_metrics, Some(&self.plugins))
+            ExportMetricsTask::try_new(&self.options.export_metrics, Some(&self.plugins))
                 .context(StartServerSnafu)?;
 
         self.servers = servers;
@@ -228,33 +189,6 @@ impl Instance {
 
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
-    }
-}
-
-#[async_trait]
-impl FrontendInvoker for Instance {
-    async fn row_inserts(
-        &self,
-        requests: RowInsertRequests,
-        ctx: QueryContextRef,
-    ) -> common_frontend::error::Result<Output> {
-        self.inserter
-            .handle_row_inserts(requests, ctx, &self.statement_executor)
-            .await
-            .map_err(BoxedError::new)
-            .context(common_frontend::error::ExternalSnafu)
-    }
-
-    async fn row_deletes(
-        &self,
-        requests: RowDeleteRequests,
-        ctx: QueryContextRef,
-    ) -> common_frontend::error::Result<Output> {
-        self.deleter
-            .handle_row_deletes(requests, ctx)
-            .await
-            .map_err(BoxedError::new)
-            .context(common_frontend::error::ExternalSnafu)
     }
 }
 
@@ -513,12 +447,16 @@ pub fn check_permission(
         Statement::CreateDatabase(_)
         | Statement::ShowDatabases(_)
         | Statement::DropDatabase(_)
-        | Statement::DropFlow(_) => {}
+        | Statement::DropFlow(_)
+        | Statement::Use(_) => {}
         Statement::ShowCreateTable(stmt) => {
             validate_param(&stmt.table_name, query_ctx)?;
         }
         Statement::ShowCreateFlow(stmt) => {
             validate_param(&stmt.flow_name, query_ctx)?;
+        }
+        Statement::ShowCreateView(stmt) => {
+            validate_param(&stmt.view_name, query_ctx)?;
         }
         Statement::CreateExternalTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
@@ -554,6 +492,9 @@ pub fn check_permission(
             }
         }
         Statement::ShowTables(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowTableStatus(stmt) => {
             validate_db_permission!(stmt, query_ctx);
         }
         Statement::ShowColumns(stmt) => {

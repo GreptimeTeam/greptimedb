@@ -29,9 +29,11 @@ use std::sync::Arc;
 
 use api::greptime_proto::v1;
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::column_def::options_from_column_schema;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
+use common_base::Plugins;
 use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
@@ -44,7 +46,6 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
-use object_store::util::join_dir;
 use object_store::ObjectStore;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
@@ -68,6 +69,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::worker::WorkerGroup;
 
@@ -256,16 +258,24 @@ impl TestEnv {
         let data_home = self.data_home().display().to_string();
 
         match log_store {
-            LogStoreImpl::RaftEngine(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
-            LogStoreImpl::Kafka(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
+            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
         }
     }
 
@@ -274,16 +284,24 @@ impl TestEnv {
         let object_store_manager = self.object_store_manager.as_ref().unwrap().clone();
         let data_home = self.data_home().display().to_string();
         match self.log_store.as_ref().unwrap().clone() {
-            LogStoreImpl::RaftEngine(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
-            LogStoreImpl::Kafka(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
+            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
         }
     }
 
@@ -434,6 +452,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -442,6 +461,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -456,6 +476,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -464,6 +485,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -484,16 +506,22 @@ impl TestEnv {
         config.sanitize(&data_home).unwrap();
 
         match log_store {
-            LogStoreImpl::RaftEngine(log_store) => {
-                WorkerGroup::start(Arc::new(config), log_store, Arc::new(object_store_manager))
-                    .await
-                    .unwrap()
-            }
-            LogStoreImpl::Kafka(log_store) => {
-                WorkerGroup::start(Arc::new(config), log_store, Arc::new(object_store_manager))
-                    .await
-                    .unwrap()
-            }
+            LogStoreImpl::RaftEngine(log_store) => WorkerGroup::start(
+                Arc::new(config),
+                log_store,
+                Arc::new(object_store_manager),
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => WorkerGroup::start(
+                Arc::new(config),
+                log_store,
+                Arc::new(object_store_manager),
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
         }
     }
 
@@ -575,17 +603,25 @@ impl TestEnv {
         local_store: ObjectStore,
         capacity: ReadableSize,
     ) -> WriteCacheRef {
-        let data_home = self.data_home().display().to_string();
-
-        let intm_mgr = IntermediateManager::init_fs(join_dir(&data_home, "intm"))
+        let index_aux_path = self.data_home.path().join("index_aux");
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
+            .await
+            .unwrap();
+        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
             .await
             .unwrap();
 
         let object_store_manager = self.get_object_store_manager().unwrap();
-        let write_cache =
-            WriteCache::new(local_store, object_store_manager, capacity, None, intm_mgr)
-                .await
-                .unwrap();
+        let write_cache = WriteCache::new(
+            local_store,
+            object_store_manager,
+            capacity,
+            None,
+            puffin_mgr,
+            intm_mgr,
+        )
+        .await
+        .unwrap();
 
         Arc::new(write_cache)
     }
@@ -898,6 +934,7 @@ pub(crate) fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api
         datatype: datatype as i32,
         semantic_type: metadata.semantic_type as i32,
         datatype_extension,
+        options: options_from_column_schema(&metadata.column_schema),
     }
 }
 

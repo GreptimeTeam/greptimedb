@@ -22,8 +22,10 @@ use object_store::layers::LruCacheLayer;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
 use object_store::{ObjectStore, ObjectStoreBuilder};
+use opendal::raw::oio::{List, Read};
+use opendal::raw::{Access, OpList, OpRead};
 use opendal::services::{Azblob, Gcs, Oss};
-use opendal::{EntryMode, Operator, OperatorBuilder};
+use opendal::{EntryMode, OperatorBuilder};
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
     // Create object handler.
@@ -227,7 +229,7 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
         .root(&data_dir.path().to_string_lossy())
         .atomic_write_dir(&tmp_dir.path().to_string_lossy());
 
-    let store = ObjectStore::new(builder).unwrap().finish();
+    let store = builder.build().unwrap();
 
     let cache_dir = create_temp_dir("test_file_backend_with_lru_cache");
     let cache_layer = {
@@ -235,12 +237,14 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
         let _ = builder
             .root(&cache_dir.path().to_string_lossy())
             .atomic_write_dir(&cache_dir.path().to_string_lossy());
-        let file_cache = Operator::new(builder).unwrap().finish();
+        let file_cache = Arc::new(builder.build().unwrap());
 
         LruCacheLayer::new(file_cache, 32).await.unwrap()
     };
 
-    let store = store.layer(cache_layer.clone());
+    let store = OperatorBuilder::new(store)
+        .layer(cache_layer.clone())
+        .finish();
 
     test_object_crud(&store).await?;
     test_object_list(&store).await?;
@@ -250,31 +254,36 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
     Ok(())
 }
 
-async fn assert_lru_cache(cache_layer: &LruCacheLayer, file_names: &[&str]) {
+async fn assert_lru_cache<C: Access>(cache_layer: &LruCacheLayer<C>, file_names: &[&str]) {
     for file_name in file_names {
         assert!(cache_layer.contains_file(file_name).await);
     }
 }
 
-async fn assert_cache_files(
-    store: &Operator,
+async fn assert_cache_files<C: Access>(
+    store: &C,
     file_names: &[&str],
     file_contents: &[&str],
 ) -> Result<()> {
-    let objects = store.list("/").await?;
+    let (_, mut lister) = store.list("/", OpList::default()).await?;
+    let mut objects = vec![];
+    while let Some(e) = lister.next().await? {
+        objects.push(e);
+    }
 
     // compare the cache file with the expected cache file; ignore orders
     for o in objects {
-        let position = file_names.iter().position(|&x| x == o.name());
-        assert!(position.is_some(), "file not found: {}", o.name());
+        let position = file_names.iter().position(|&x| x == o.path());
+        assert!(position.is_some(), "file not found: {}", o.path());
 
         let position = position.unwrap();
-        let bs = store.read(o.path()).await.unwrap();
+        let (_, mut r) = store.read(o.path(), OpRead::default()).await.unwrap();
+        let bs = r.read_all().await.unwrap();
         assert_eq!(
             file_contents[position],
             String::from_utf8(bs.to_vec())?,
             "file content not match: {}",
-            o.name()
+            o.path()
         );
     }
 
@@ -303,7 +312,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
         .root(&cache_dir.path().to_string_lossy())
         .atomic_write_dir(&atomic_temp_dir.path().to_string_lossy());
     let file_cache = Arc::new(builder.build().unwrap());
-    let cache_store = OperatorBuilder::new(file_cache.clone()).finish();
+    let cache_store = file_cache.clone();
 
     // create operator for cache dir to verify cache file
     let cache_layer = LruCacheLayer::new(cache_store.clone(), 38).await.unwrap();

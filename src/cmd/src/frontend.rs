@@ -34,14 +34,15 @@ use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::server::Services;
-use meta_client::MetaClientOptions;
+use meta_client::{MetaClientOptions, MetaClientType};
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    self, InitTimezoneSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result, StartFrontendSnafu,
+    self, InitTimezoneSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu, MissingConfigSnafu,
+    Result, StartFrontendSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -147,7 +148,7 @@ pub struct StartCommand {
     config_file: Option<String>,
     #[clap(short, long)]
     influxdb_enable: Option<bool>,
-    #[clap(long, aliases = ["metasrv-addr"], value_delimiter = ',', num_args = 1..)]
+    #[clap(long, value_delimiter = ',', num_args = 1..)]
     metasrv_addrs: Option<Vec<String>>,
     #[clap(long)]
     tls_mode: Option<TlsMode>,
@@ -279,10 +280,16 @@ impl StartCommand {
         let cache_ttl = meta_client_options.metadata_cache_ttl;
         let cache_tti = meta_client_options.metadata_cache_tti;
 
-        let meta_client = FeInstance::create_meta_client(meta_client_options)
-            .await
-            .context(StartFrontendSnafu)?;
+        let cluster_id = 0; // (TODO: jeremy): It is currently a reserved field and has not been enabled.
+        let meta_client = meta_client::create_meta_client(
+            cluster_id,
+            MetaClientType::Frontend,
+            meta_client_options,
+        )
+        .await
+        .context(MetaClientInitSnafu)?;
 
+        // TODO(discord9): add helper function to ease the creation of cache registry&such
         let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
             .cache_max_capacity(cache_max_capacity)
             .cache_ttl(cache_ttl)
@@ -336,6 +343,7 @@ impl StartCommand {
         let client = NodeClients::new(channel_config);
 
         let mut instance = FrontendBuilder::new(
+            opts.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager,
@@ -349,12 +357,12 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let servers = Services::new(opts.clone(), Arc::new(instance.clone()), plugins)
+        let servers = Services::new(opts, Arc::new(instance.clone()), plugins)
             .build()
             .await
             .context(StartFrontendSnafu)?;
         instance
-            .build_servers(opts, servers)
+            .build_servers(servers)
             .context(StartFrontendSnafu)?;
 
         Ok(Instance::new(instance, guard))

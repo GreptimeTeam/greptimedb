@@ -29,7 +29,7 @@ fn test_gsub() {
 
     let pipeline_yaml = r#"
 ---
-description: Pipeline for Akamai DataStream2 Log
+description: Pipeline for Demo Log
 
 processors:
   - gsub:
@@ -54,6 +54,7 @@ transform:
         datatype: ColumnDataType::TimestampMillisecond.into(),
         semantic_type: SemanticType::Timestamp.into(),
         datatype_extension: None,
+        options: None,
     }];
 
     assert_eq!(output.schema, expected_schema);

@@ -87,6 +87,20 @@ pub enum Error {
         source: datanode::error::Error,
     },
 
+    #[snafu(display("Failed to start flownode"))]
+    StartFlownode {
+        #[snafu(implicit)]
+        location: Location,
+        source: flow::Error,
+    },
+
+    #[snafu(display("Failed to shutdown flownode"))]
+    ShutdownFlownode {
+        #[snafu(implicit)]
+        location: Location,
+        source: flow::Error,
+    },
+
     #[snafu(display("Failed to start frontend"))]
     StartFrontend {
         #[snafu(implicit)]
@@ -325,6 +339,22 @@ pub enum Error {
         location: Location,
         source: cache::error::Error,
     },
+
+    #[snafu(display("Failed to initialize meta client"))]
+    MetaClientInit {
+        #[snafu(implicit)]
+        location: Location,
+        source: meta_client::error::Error,
+    },
+
+    #[snafu(display("Tonic transport error: {error:?} with msg: {msg:?}"))]
+    TonicTransport {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tonic::transport::Error,
+        msg: Option<String>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -380,6 +410,11 @@ impl ErrorExt for Error {
             Error::BuildRuntime { source, .. } => source.status_code(),
 
             Error::CacheRequired { .. } | Error::BuildCacheRegistry { .. } => StatusCode::Internal,
+            Self::StartFlownode { source, .. } | Self::ShutdownFlownode { source, .. } => {
+                source.status_code()
+            }
+            Error::MetaClientInit { source, .. } => source.status_code(),
+            Error::TonicTransport { .. } => StatusCode::Internal,
         }
     }
 

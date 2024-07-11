@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::KvBackendCatalogManager;
+use cmd::error::StartFlownodeSnafu;
 use cmd::standalone::StandaloneOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
@@ -23,12 +24,11 @@ use common_config::KvBackendConfig;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
-use common_meta::ddl::DdlContext;
+use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::peer::StandalonePeerLookupService;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::WalOptionsAllocator;
@@ -41,6 +41,7 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::Mode;
+use snafu::ResultExt;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
 
@@ -151,17 +152,16 @@ impl GreptimeDbStandaloneBuilder {
         );
 
         let flow_builder = FlownodeBuilder::new(
-            1, // for standalone mode this value is default to one
             Default::default(),
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
         );
-        let flownode = Arc::new(flow_builder.build().await);
+        let flownode = Arc::new(flow_builder.build().await.unwrap());
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
-            flow_server: flownode.clone(),
+            flow_server: flownode.flow_worker_manager(),
         });
 
         let table_id_sequence = Arc::new(
@@ -198,7 +198,7 @@ impl GreptimeDbStandaloneBuilder {
                     table_metadata_allocator,
                     flow_metadata_manager,
                     flow_metadata_allocator,
-                    peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
+                    region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
                 },
                 procedure_manager.clone(),
                 register_procedure_loaders,
@@ -207,21 +207,32 @@ impl GreptimeDbStandaloneBuilder {
         );
 
         let instance = FrontendBuilder::new(
+            opts.frontend_options(),
             kv_backend.clone(),
-            cache_registry,
-            catalog_manager,
-            node_manager,
-            ddl_task_executor,
+            cache_registry.clone(),
+            catalog_manager.clone(),
+            node_manager.clone(),
+            ddl_task_executor.clone(),
         )
         .with_plugin(plugins)
         .try_build()
         .await
         .unwrap();
 
-        flownode
-            .set_frontend_invoker(Box::new(instance.clone()))
-            .await;
-        let _node_handle = flownode.run_background();
+        let flow_worker_manager = flownode.flow_worker_manager();
+        let invoker = flow::FrontendInvoker::build_from(
+            flow_worker_manager.clone(),
+            catalog_manager.clone(),
+            kv_backend.clone(),
+            cache_registry.clone(),
+            ddl_task_executor.clone(),
+            node_manager.clone(),
+        )
+        .await
+        .context(StartFlownodeSnafu)
+        .unwrap();
+
+        flow_worker_manager.set_frontend_invoker(invoker).await;
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();

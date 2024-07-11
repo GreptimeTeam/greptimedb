@@ -42,7 +42,9 @@ use tests_fuzz::ir::{
 use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
-use tests_fuzz::utils::{init_greptime_connections_via_env, Connections};
+use tests_fuzz::utils::{
+    get_gt_fuzz_input_max_alter_actions, init_greptime_connections_via_env, Connections,
+};
 use tests_fuzz::validator;
 
 struct FuzzContext {
@@ -65,7 +67,8 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let actions = rng.gen_range(1..256);
+        let max_actions = get_gt_fuzz_input_max_alter_actions();
+        let actions = rng.gen_range(1..max_actions);
 
         Ok(FuzzInput { seed, actions })
     }

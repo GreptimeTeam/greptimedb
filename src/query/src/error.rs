@@ -307,6 +307,20 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display("Cannot change read-only table: {}", table))]
+    TableReadOnly {
+        table: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to get fulltext options"))]
+    GetFulltextOptions {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -356,6 +370,8 @@ impl ErrorExt for Error {
             TableMutation { source, .. } => source.status_code(),
             MissingTableMutationHandler { .. } => StatusCode::Unexpected,
             GetRegionMetadata { .. } => StatusCode::Internal,
+            TableReadOnly { .. } => StatusCode::Unsupported,
+            GetFulltextOptions { source, .. } => source.status_code(),
         }
     }
 

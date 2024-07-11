@@ -367,6 +367,56 @@ impl Value {
 
         Ok(scalar_value)
     }
+
+    /// Apply `-` unary op if possible
+    pub fn try_negative(&self) -> Option<Self> {
+        match self {
+            Value::Null => Some(Value::Null),
+            Value::UInt8(x) => {
+                if *x == 0 {
+                    Some(Value::UInt8(*x))
+                } else {
+                    None
+                }
+            }
+            Value::UInt16(x) => {
+                if *x == 0 {
+                    Some(Value::UInt16(*x))
+                } else {
+                    None
+                }
+            }
+            Value::UInt32(x) => {
+                if *x == 0 {
+                    Some(Value::UInt32(*x))
+                } else {
+                    None
+                }
+            }
+            Value::UInt64(x) => {
+                if *x == 0 {
+                    Some(Value::UInt64(*x))
+                } else {
+                    None
+                }
+            }
+            Value::Int8(x) => Some(Value::Int8(-*x)),
+            Value::Int16(x) => Some(Value::Int16(-*x)),
+            Value::Int32(x) => Some(Value::Int32(-*x)),
+            Value::Int64(x) => Some(Value::Int64(-*x)),
+            Value::Float32(x) => Some(Value::Float32(-*x)),
+            Value::Float64(x) => Some(Value::Float64(-*x)),
+            Value::Decimal128(x) => Some(Value::Decimal128(x.negative())),
+            Value::Date(x) => Some(Value::Date(x.negative())),
+            Value::DateTime(x) => Some(Value::DateTime(x.negative())),
+            Value::Timestamp(x) => Some(Value::Timestamp(x.negative())),
+            Value::Time(x) => Some(Value::Time(x.negative())),
+            Value::Duration(x) => Some(Value::Duration(x.negative())),
+            Value::Interval(x) => Some(Value::Interval(x.negative())),
+
+            Value::Binary(_) | Value::String(_) | Value::Boolean(_) | Value::List(_) => None,
+        }
+    }
 }
 
 pub trait TryAsPrimitive<T: LogicalPrimitiveType> {

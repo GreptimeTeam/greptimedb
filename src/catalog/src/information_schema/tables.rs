@@ -26,11 +26,13 @@ use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatc
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder};
+use datatypes::vectors::{
+    DateTimeVectorBuilder, StringVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder,
+};
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
-use table::metadata::TableType;
+use table::metadata::{TableInfo, TableType};
 
 use super::TABLES;
 use crate::error::{
@@ -43,8 +45,26 @@ pub const TABLE_CATALOG: &str = "table_catalog";
 pub const TABLE_SCHEMA: &str = "table_schema";
 pub const TABLE_NAME: &str = "table_name";
 pub const TABLE_TYPE: &str = "table_type";
+pub const VERSION: &str = "version";
+pub const ROW_FORMAT: &str = "row_format";
+pub const TABLE_ROWS: &str = "table_rows";
+pub const DATA_LENGTH: &str = "data_length";
+pub const INDEX_LENGTH: &str = "index_length";
+pub const MAX_DATA_LENGTH: &str = "max_data_length";
+pub const AVG_ROW_LENGTH: &str = "avg_row_length";
+pub const DATA_FREE: &str = "data_free";
+pub const AUTO_INCREMENT: &str = "auto_increment";
+pub const CREATE_TIME: &str = "create_time";
+pub const UPDATE_TIME: &str = "update_time";
+pub const CHECK_TIME: &str = "check_time";
+pub const TABLE_COLLATION: &str = "table_collation";
+pub const CHECKSUM: &str = "checksum";
+pub const CREATE_OPTIONS: &str = "create_options";
+pub const TABLE_COMMENT: &str = "table_comment";
+pub const MAX_INDEX_LENGTH: &str = "max_index_length";
+pub const TEMPORARY: &str = "temporary";
 const TABLE_ID: &str = "table_id";
-const ENGINE: &str = "engine";
+pub const ENGINE: &str = "engine";
 const INIT_CAPACITY: usize = 42;
 
 pub(super) struct InformationSchemaTables {
@@ -69,7 +89,25 @@ impl InformationSchemaTables {
             ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_ID, ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new(DATA_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(MAX_DATA_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(INDEX_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(MAX_INDEX_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(AVG_ROW_LENGTH, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(ENGINE, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(VERSION, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(ROW_FORMAT, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(TABLE_ROWS, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(DATA_FREE, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(AUTO_INCREMENT, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(CREATE_TIME, ConcreteDataType::datetime_datatype(), true),
+            ColumnSchema::new(UPDATE_TIME, ConcreteDataType::datetime_datatype(), true),
+            ColumnSchema::new(CHECK_TIME, ConcreteDataType::datetime_datatype(), true),
+            ColumnSchema::new(TABLE_COLLATION, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(CHECKSUM, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(CREATE_OPTIONS, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(TABLE_COMMENT, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(TEMPORARY, ConcreteDataType::string_datatype(), true),
         ]))
     }
 
@@ -131,7 +169,25 @@ struct InformationSchemaTablesBuilder {
     table_names: StringVectorBuilder,
     table_types: StringVectorBuilder,
     table_ids: UInt32VectorBuilder,
+    version: UInt64VectorBuilder,
+    row_format: StringVectorBuilder,
+    table_rows: UInt64VectorBuilder,
+    data_length: UInt64VectorBuilder,
+    max_data_length: UInt64VectorBuilder,
+    index_length: UInt64VectorBuilder,
+    avg_row_length: UInt64VectorBuilder,
+    max_index_length: UInt64VectorBuilder,
+    data_free: UInt64VectorBuilder,
+    auto_increment: UInt64VectorBuilder,
+    create_time: DateTimeVectorBuilder,
+    update_time: DateTimeVectorBuilder,
+    check_time: DateTimeVectorBuilder,
+    table_collation: StringVectorBuilder,
+    checksum: UInt64VectorBuilder,
+    create_options: StringVectorBuilder,
+    table_comment: StringVectorBuilder,
     engines: StringVectorBuilder,
+    temporary: StringVectorBuilder,
 }
 
 impl InformationSchemaTablesBuilder {
@@ -149,7 +205,25 @@ impl InformationSchemaTablesBuilder {
             table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             table_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             table_ids: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            data_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            max_data_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            index_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            avg_row_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             engines: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            version: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            row_format: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_rows: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            max_index_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            data_free: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            auto_increment: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            create_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            update_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            check_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_collation: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            checksum: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            create_options: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_comment: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            temporary: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -171,10 +245,8 @@ impl InformationSchemaTablesBuilder {
                     &predicates,
                     &catalog_name,
                     &schema_name,
-                    &table_info.name,
+                    table_info,
                     table.table_type(),
-                    Some(table_info.ident.table_id),
-                    Some(&table_info.meta.engine),
                 );
             }
         }
@@ -188,12 +260,14 @@ impl InformationSchemaTablesBuilder {
         predicates: &Predicates,
         catalog_name: &str,
         schema_name: &str,
-        table_name: &str,
+        table_info: Arc<TableInfo>,
         table_type: TableType,
-        table_id: Option<u32>,
-        engine: Option<&str>,
     ) {
-        let table_type = match table_type {
+        let table_name = table_info.name.as_ref();
+        let table_id = table_info.table_id();
+        let engine = table_info.meta.engine.as_ref();
+
+        let table_type_text = match table_type {
             TableType::Base => "BASE TABLE",
             TableType::View => "VIEW",
             TableType::Temporary => "LOCAL TEMPORARY",
@@ -203,7 +277,7 @@ impl InformationSchemaTablesBuilder {
             (TABLE_CATALOG, &Value::from(catalog_name)),
             (TABLE_SCHEMA, &Value::from(schema_name)),
             (TABLE_NAME, &Value::from(table_name)),
-            (TABLE_TYPE, &Value::from(table_type)),
+            (TABLE_TYPE, &Value::from(table_type_text)),
         ];
 
         if !predicates.eval(&row) {
@@ -213,9 +287,38 @@ impl InformationSchemaTablesBuilder {
         self.catalog_names.push(Some(catalog_name));
         self.schema_names.push(Some(schema_name));
         self.table_names.push(Some(table_name));
-        self.table_types.push(Some(table_type));
-        self.table_ids.push(table_id);
-        self.engines.push(engine);
+        self.table_types.push(Some(table_type_text));
+        self.table_ids.push(Some(table_id));
+        // TODO(sunng87): use real data for these fields
+        self.data_length.push(Some(0));
+        self.max_data_length.push(Some(0));
+        self.index_length.push(Some(0));
+        self.avg_row_length.push(Some(0));
+        self.max_index_length.push(Some(0));
+        self.checksum.push(Some(0));
+        self.table_rows.push(Some(0));
+        self.data_free.push(Some(0));
+        self.auto_increment.push(Some(0));
+        self.row_format.push(Some("Fixed"));
+        self.table_collation.push(None);
+        self.update_time.push(None);
+        self.check_time.push(None);
+
+        // use mariadb default table version number here
+        self.version.push(Some(11));
+        self.table_comment.push(table_info.desc.as_deref());
+        self.create_options
+            .push(Some(table_info.meta.options.to_string().as_ref()));
+        self.create_time
+            .push(Some(table_info.meta.created_on.timestamp_millis().into()));
+
+        self.temporary
+            .push(if matches!(table_type, TableType::Temporary) {
+                Some("Y")
+            } else {
+                Some("N")
+            });
+        self.engines.push(Some(engine));
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -225,7 +328,25 @@ impl InformationSchemaTablesBuilder {
             Arc::new(self.table_names.finish()),
             Arc::new(self.table_types.finish()),
             Arc::new(self.table_ids.finish()),
+            Arc::new(self.data_length.finish()),
+            Arc::new(self.max_data_length.finish()),
+            Arc::new(self.index_length.finish()),
+            Arc::new(self.max_index_length.finish()),
+            Arc::new(self.avg_row_length.finish()),
             Arc::new(self.engines.finish()),
+            Arc::new(self.version.finish()),
+            Arc::new(self.row_format.finish()),
+            Arc::new(self.table_rows.finish()),
+            Arc::new(self.data_free.finish()),
+            Arc::new(self.auto_increment.finish()),
+            Arc::new(self.create_time.finish()),
+            Arc::new(self.update_time.finish()),
+            Arc::new(self.check_time.finish()),
+            Arc::new(self.table_collation.finish()),
+            Arc::new(self.checksum.finish()),
+            Arc::new(self.create_options.finish()),
+            Arc::new(self.table_comment.finish()),
+            Arc::new(self.temporary.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }

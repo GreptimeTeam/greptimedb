@@ -15,46 +15,38 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
-use common_time::timezone::{get_timezone, parse_timezone};
+use common_time::timezone::parse_timezone;
 use common_time::Timezone;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
-use crate::SessionRef;
+use crate::MutableInner;
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
-#[derive(Debug, Builder)]
+#[derive(Debug, Builder, Clone)]
 #[builder(pattern = "owned")]
 #[builder(build_fn(skip))]
 pub struct QueryContext {
     current_catalog: String,
-    current_schema: String,
-    current_user: ArcSwap<Option<UserInfoRef>>,
-    #[builder(setter(custom))]
-    timezone: ArcSwap<Timezone>,
+    // we use Arc<RwLock>> for modifiable fields
+    #[builder(default)]
+    mutable_inner: Arc<RwLock<MutableInner>>,
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
     extensions: HashMap<String, String>,
     // The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
-}
-
-impl QueryContextBuilder {
-    pub fn timezone(mut self, tz: Arc<Timezone>) -> Self {
-        self.timezone = Some(ArcSwap::new(tz));
-        self
-    }
 }
 
 impl Display for QueryContext {
@@ -68,17 +60,29 @@ impl Display for QueryContext {
     }
 }
 
-impl Clone for QueryContext {
-    fn clone(&self) -> Self {
-        Self {
-            current_catalog: self.current_catalog.clone(),
-            current_schema: self.current_schema.clone(),
-            current_user: self.current_user.load().clone().into(),
-            timezone: self.timezone.load().clone().into(),
-            sql_dialect: self.sql_dialect.clone(),
-            extensions: self.extensions.clone(),
-            configuration_parameter: self.configuration_parameter.clone(),
+impl QueryContextBuilder {
+    pub fn current_schema(mut self, schema: String) -> Self {
+        if self.mutable_inner.is_none() {
+            self.mutable_inner = Some(Arc::new(RwLock::new(MutableInner::default())));
         }
+
+        // safe for unwrap because previous none check
+        self.mutable_inner.as_mut().unwrap().write().unwrap().schema = schema;
+        self
+    }
+
+    pub fn timezone(mut self, timezone: Timezone) -> Self {
+        if self.mutable_inner.is_none() {
+            self.mutable_inner = Some(Arc::new(RwLock::new(MutableInner::default())));
+        }
+
+        self.mutable_inner
+            .as_mut()
+            .unwrap()
+            .write()
+            .unwrap()
+            .timezone = timezone;
+        self
     }
 }
 
@@ -89,7 +93,7 @@ impl From<&RegionRequestHeader> for QueryContext {
             builder = builder
                 .current_catalog(ctx.current_catalog.clone())
                 .current_schema(ctx.current_schema.clone())
-                .timezone(Arc::new(parse_timezone(Some(&ctx.timezone))))
+                .timezone(parse_timezone(Some(&ctx.timezone)))
                 .extensions(ctx.extensions.clone());
         }
         builder.build()
@@ -101,7 +105,7 @@ impl From<api::v1::QueryContext> for QueryContext {
         QueryContextBuilder::default()
             .current_catalog(ctx.current_catalog)
             .current_schema(ctx.current_schema)
-            .timezone(Arc::new(parse_timezone(Some(&ctx.timezone))))
+            .timezone(parse_timezone(Some(&ctx.timezone)))
             .extensions(ctx.extensions)
             .build()
     }
@@ -111,16 +115,16 @@ impl From<QueryContext> for api::v1::QueryContext {
     fn from(
         QueryContext {
             current_catalog,
-            current_schema,
-            timezone,
+            mutable_inner,
             extensions,
             ..
         }: QueryContext,
     ) -> Self {
+        let mutable_inner = mutable_inner.read().unwrap();
         api::v1::QueryContext {
             current_catalog,
-            current_schema,
-            timezone: timezone.to_string(),
+            current_schema: mutable_inner.schema.clone(),
+            timezone: mutable_inner.timezone.to_string(),
             extensions,
         }
     }
@@ -152,12 +156,16 @@ impl QueryContext {
             });
         QueryContextBuilder::default()
             .current_catalog(catalog)
-            .current_schema(schema)
+            .current_schema(schema.to_string())
             .build()
     }
 
-    pub fn current_schema(&self) -> &str {
-        &self.current_schema
+    pub fn current_schema(&self) -> String {
+        self.mutable_inner.read().unwrap().schema.clone()
+    }
+
+    pub fn set_current_schema(&self, new_schema: &str) {
+        self.mutable_inner.write().unwrap().schema = new_schema.to_string();
     }
 
     pub fn current_catalog(&self) -> &str {
@@ -171,23 +179,23 @@ impl QueryContext {
     pub fn get_db_string(&self) -> String {
         let catalog = self.current_catalog();
         let schema = self.current_schema();
-        build_db_string(catalog, schema)
+        build_db_string(catalog, &schema)
     }
 
-    pub fn timezone(&self) -> Arc<Timezone> {
-        self.timezone.load().clone()
-    }
-
-    pub fn current_user(&self) -> Option<UserInfoRef> {
-        self.current_user.load().as_ref().clone()
-    }
-
-    pub fn set_current_user(&self, user: Option<UserInfoRef>) {
-        let _ = self.current_user.swap(Arc::new(user));
+    pub fn timezone(&self) -> Timezone {
+        self.mutable_inner.read().unwrap().timezone.clone()
     }
 
     pub fn set_timezone(&self, timezone: Timezone) {
-        let _ = self.timezone.swap(Arc::new(timezone));
+        self.mutable_inner.write().unwrap().timezone = timezone;
+    }
+
+    pub fn current_user(&self) -> UserInfoRef {
+        self.mutable_inner.read().unwrap().user_info.clone()
+    }
+
+    pub fn set_current_user(&self, user: UserInfoRef) {
+        self.mutable_inner.write().unwrap().user_info = user;
     }
 
     pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
@@ -200,15 +208,6 @@ impl QueryContext {
 
     pub fn extensions(&self) -> HashMap<String, String> {
         self.extensions.clone()
-    }
-
-    /// SQL like `set variable` may change timezone or other info in `QueryContext`.
-    /// We need persist these change in `Session`.
-    pub fn update_session(&self, session: &SessionRef) {
-        let tz = self.timezone();
-        if *session.timezone() != *tz {
-            session.set_timezone(tz.as_ref().clone())
-        }
     }
 
     /// Default to double quote and fallback to back quote
@@ -233,15 +232,7 @@ impl QueryContextBuilder {
             current_catalog: self
                 .current_catalog
                 .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
-            current_schema: self
-                .current_schema
-                .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
-            current_user: self
-                .current_user
-                .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
-            timezone: self
-                .timezone
-                .unwrap_or(ArcSwap::new(Arc::new(get_timezone(None).clone()))),
+            mutable_inner: self.mutable_inner.unwrap_or_default(),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
@@ -260,9 +251,8 @@ impl QueryContextBuilder {
     pub fn from_existing(context: &QueryContext) -> QueryContextBuilder {
         QueryContextBuilder {
             current_catalog: Some(context.current_catalog.clone()),
-            current_schema: Some(context.current_schema.clone()),
-            current_user: Some(context.current_user.load().clone().into()),
-            timezone: Some(context.timezone.load().clone().into()),
+            // note that this is a shallow copy
+            mutable_inner: Some(context.mutable_inner.clone()),
             sql_dialect: Some(context.sql_dialect.clone()),
             extensions: Some(context.extensions.clone()),
             configuration_parameter: Some(context.configuration_parameter.clone()),

@@ -101,8 +101,8 @@ async fn test_merge_mode_compaction() {
     let request = CreateRequestBuilder::new()
         .field_num(2)
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_files", "2")
-        .insert_option("compaction.twcs.max_inactive_window_files", "2")
+        .insert_option("compaction.twcs.max_active_window_runs", "1")
+        .insert_option("compaction.twcs.max_inactive_window_runs", "1")
         .insert_option("merge_mode", "last_non_null")
         .build();
     let region_dir = request.region_dir.clone();

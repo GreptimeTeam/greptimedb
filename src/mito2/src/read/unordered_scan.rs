@@ -141,11 +141,13 @@ impl RegionScanner for UnorderedScan {
 
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
         let mut metrics = ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
+            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
             ..Default::default()
         };
         let stream_ctx = self.stream_ctx.clone();
         let stream = try_stream! {
+            let first_poll = stream_ctx.query_start.elapsed();
+
             let mut parts = stream_ctx.parts.lock().await;
             maybe_init_parts(&mut parts, &stream_ctx.input, &mut metrics)
                 .await
@@ -196,8 +198,8 @@ impl RegionScanner for UnorderedScan {
             metrics.total_cost = query_start.elapsed();
             metrics.observe_metrics_on_finish();
             debug!(
-                "Unordered scan partition {} finished, region_id: {}, metrics: {:?}, reader_metrics: {:?}",
-                partition, mapper.metadata().region_id, metrics, reader_metrics
+                "Unordered scan partition {} finished, region_id: {}, metrics: {:?}, reader_metrics: {:?}, first_poll: {:?}",
+                partition, mapper.metadata().region_id, metrics, reader_metrics, first_poll,
             );
         };
         let stream = Box::pin(RecordBatchStreamWrapper::new(
@@ -220,7 +222,6 @@ impl fmt::Debug for UnorderedScan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnorderedScan")
             .field("parts", &self.stream_ctx.parts)
-            .field("prepare_scan_cost", &self.stream_ctx.prepare_scan_cost)
             .finish()
     }
 }

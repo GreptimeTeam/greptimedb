@@ -15,6 +15,7 @@
 use std::env;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use client::OutputData;
 use common_query::Output;
 use common_recordbatch::util;
@@ -36,7 +37,8 @@ pub(crate) trait RebuildableMockInstance: MockInstance {
     async fn rebuild(&mut self);
 }
 
-pub(crate) trait MockInstance: Sync + Send {
+#[async_trait]
+pub trait MockInstance: Sync + Send {
     fn frontend(&self) -> Arc<Instance>;
 
     fn is_distributed_mode(&self) -> bool;

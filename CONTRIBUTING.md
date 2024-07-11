@@ -4,10 +4,7 @@ Thanks a lot for considering contributing to GreptimeDB. We believe people like 
 
 You can find our contributors at https://github.com/GreptimeTeam/greptimedb/graphs/contributors. When you dedicate to GreptimeDB for a few months and keep bringing high-quality contributions (code, docs, advocate, etc.), you will be a candidate of a committer.
 
-A committer will be granted both read & write access to GreptimeDB repos. Here is a list of current committers except GreptimeDB team members:
-
-* [Eugene Tolbakov](https://github.com/etolbakov): PromQL support, SQL engine, InfluxDB APIs, and more.
-* [@NiwakaDev](https://github.com/NiwakaDev): SQL engine and storage layer.
+A committer will be granted both read & write access to GreptimeDB repos. Check the [AUTHOR.md](AUTHOR.md) file for all current individual committers.
 
 Please read the guidelines, and they can help you get started. Communicate respectfully with the developers maintaining and developing the project. In return, they should reciprocate that respect by addressing your issue, reviewing changes, as well as helping finalize and merge your pull requests.
 
@@ -58,7 +55,7 @@ GreptimeDB uses the [Apache 2.0 license](https://github.com/GreptimeTeam/greptim
 - To ensure that community is free and confident in its ability to use your contributions, please sign the Contributor License Agreement (CLA) which will be incorporated in the pull request process.
 - Make sure all files have proper license header (running `docker run --rm -v $(pwd):/github/workspace ghcr.io/korandoru/hawkeye-native:v3 format` from the project root).
 - Make sure all your codes are formatted and follow the [coding style](https://pingcap.github.io/style-guide/rust/) and [style guide](docs/style-guide.md).
-- Make sure all unit tests are passed (using `cargo test --workspace` or [nextest](https://nexte.st/index.html) `cargo nextest run`).
+- Make sure all unit tests are passed using [nextest](https://nexte.st/index.html) `cargo nextest run`.
 - Make sure all clippy warnings are fixed (you can check it locally by running `cargo clippy --workspace --all-targets -- -D warnings`).
 
 #### `pre-commit` Hooks

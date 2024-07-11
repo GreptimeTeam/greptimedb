@@ -21,7 +21,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 
-use crate::adapter::error::{Error, InvalidQuerySnafu};
+use crate::error::{Error, InvalidQuerySnafu};
 use crate::expr::error::EvalError;
 use crate::expr::{Id, InvalidArgumentSnafu, LocalId, ScalarExpr};
 use crate::repr::{self, value_to_internal_ts, Diff, Row};

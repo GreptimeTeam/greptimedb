@@ -40,8 +40,8 @@ pub struct Blob<R> {
     pub properties: HashMap<String, String>,
 }
 
-/// The trait for writing Puffin files synchronously
-pub trait PuffinSyncWriter {
+/// `SyncWriter` defines a synchronous writer for puffin data.
+pub trait SyncWriter {
     /// Set the properties of the Puffin file
     fn set_properties(&mut self, properties: HashMap<String, String>);
 
@@ -55,9 +55,9 @@ pub trait PuffinSyncWriter {
     fn finish(&mut self) -> Result<u64>;
 }
 
-/// The trait for writing Puffin files asynchronously
+/// `AsyncWriter` defines an asynchronous writer for puffin data.
 #[async_trait]
-pub trait PuffinAsyncWriter {
+pub trait AsyncWriter {
     /// Set the properties of the Puffin file
     fn set_properties(&mut self, properties: HashMap<String, String>);
 

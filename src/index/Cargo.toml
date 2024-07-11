@@ -24,9 +24,15 @@ pin-project.workspace = true
 prost.workspace = true
 regex.workspace = true
 regex-automata.workspace = true
+serde.workspace = true
 snafu.workspace = true
+tantivy = { version = "0.22", features = ["zstd-compression"] }
+tantivy-jieba = "0.11.0"
+tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
+common-test-util.workspace = true
 rand.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

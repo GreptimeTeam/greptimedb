@@ -25,16 +25,17 @@ use common_procedure::{
 use common_telemetry::info;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 
 use super::utils::{add_peer_context_if_needed, handle_retry_error};
 use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
-use crate::error::{self, Result, UnexpectedSnafu};
+use crate::error::{self, Result};
 use crate::flow_name::FlowName;
 use crate::instruction::{CacheIdent, DropFlow};
 use crate::key::flow::flow_info::FlowInfoValue;
+use crate::key::flow::flow_route::FlowRouteValue;
 use crate::lock_key::{CatalogLock, FlowLock};
 use crate::rpc::ddl::DropFlowTask;
 use crate::{metrics, ClusterId};
@@ -58,6 +59,7 @@ impl DropFlowProcedure {
                 cluster_id,
                 task,
                 flow_info_value: None,
+                flow_route_values: vec![],
             },
         }
     }
@@ -102,18 +104,9 @@ impl DropFlowProcedure {
         let flownode_ids = &self.data.flow_info_value.as_ref().unwrap().flownode_ids;
         let flow_id = self.data.task.flow_id;
         let mut drop_flow_tasks = Vec::with_capacity(flownode_ids.len());
-        let cluster_id = self.data.cluster_id;
 
-        for flownode in flownode_ids.values() {
-            let peer = self
-                .context
-                .peer_lookup_service
-                .flownode(cluster_id, *flownode)
-                .await?
-                .with_context(|| UnexpectedSnafu {
-                    err_msg: "Attempted to drop flow on a node that could not be found. Consider verifying node availability.",
-                })?;
-            let requester = self.context.node_manager.flownode(&peer).await;
+        for FlowRouteValue { peer } in &self.data.flow_route_values {
+            let requester = self.context.node_manager.flownode(peer).await;
             let request = FlowRequest {
                 body: Some(flow_request::Body::Drop(DropRequest {
                     flow_id: Some(api::v1::FlowId { id: flow_id }),
@@ -124,12 +117,13 @@ impl DropFlowProcedure {
             drop_flow_tasks.push(async move {
                 if let Err(err) = requester.handle(request).await {
                     if err.status_code() != StatusCode::FlowNotFound {
-                        return Err(add_peer_context_if_needed(peer)(err));
+                        return Err(add_peer_context_if_needed(peer.clone())(err));
                     }
                 }
                 Ok(())
             });
         }
+
         join_all(drop_flow_tasks)
             .await
             .into_iter()
@@ -227,6 +221,7 @@ pub(crate) struct DropFlowData {
     cluster_id: ClusterId,
     task: DropFlowTask,
     pub(crate) flow_info_value: Option<FlowInfoValue>,
+    pub(crate) flow_route_values: Vec<FlowRouteValue>,
 }
 
 /// The state of drop flow

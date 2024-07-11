@@ -17,7 +17,7 @@ use std::sync::atomic::AtomicUsize;
 use common_meta::peer::Peer;
 use snafu::ensure;
 
-use crate::error::{NoEnoughAvailableDatanodeSnafu, Result};
+use crate::error::{NoEnoughAvailableNodeSnafu, Result};
 use crate::lease;
 use crate::metasrv::{SelectTarget, SelectorContext};
 use crate::selector::{Namespace, Selector, SelectorOptions};
@@ -86,9 +86,10 @@ impl RoundRobinSelector {
 
         ensure!(
             !peers.is_empty(),
-            NoEnoughAvailableDatanodeSnafu {
+            NoEnoughAvailableNodeSnafu {
                 required: min_required_items,
                 available: 0usize,
+                select_target: self.select_target
             }
         );
 

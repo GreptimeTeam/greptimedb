@@ -115,12 +115,11 @@ datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev
 datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "d7bda5c9b762426e81f144296deadc87e5f4a0b8" }
 derive_builder = "0.12"
 dotenv = "0.15"
-# TODO(LFC): Wait for https://github.com/etcdv3/etcd-client/pull/76
-etcd-client = { git = "https://github.com/MichaelScofield/etcd-client.git", rev = "4c371e9b3ea8e0a8ee2f9cbd7ded26e54a45df3b" }
+etcd-client = { version = "0.13" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a70a6af9c69e40f9a918936a48717343402b4393" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "5c801650435d464891114502539b701c77a1b914" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"

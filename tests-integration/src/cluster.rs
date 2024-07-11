@@ -318,9 +318,10 @@ impl GreptimeDbClusterBuilder {
                 .channel_manager(metasrv.channel_manager)
                 .build();
         meta_client.start(&[&metasrv.server_addr]).await.unwrap();
+        let meta_client = Arc::new(meta_client);
 
         let meta_backend = Arc::new(MetaKvBackend {
-            client: Arc::new(meta_client.clone()),
+            client: meta_client.clone(),
         });
 
         let mut datanode = DatanodeBuilder::new(opts, Plugins::default())
@@ -376,14 +377,16 @@ impl GreptimeDbClusterBuilder {
             Arc::new(InvalidateTableCacheHandler::new(cache_registry.clone())),
         ]);
 
+        let options = FrontendOptions::default();
         let heartbeat_task = HeartbeatTask::new(
-            &FrontendOptions::default(),
+            &options,
             meta_client.clone(),
             HeartbeatOptions::default(),
             Arc::new(handlers_executor),
         );
 
         let instance = FrontendBuilder::new(
+            options,
             cached_meta_backend.clone(),
             cache_registry.clone(),
             catalog_manager,

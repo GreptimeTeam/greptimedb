@@ -1,0 +1,90 @@
+## The running mode of the flownode. It can be `standalone` or `distributed`.
+mode = "distributed"
+
+## The flownode identifier and should be unique in the cluster.
+## +toml2docs:none-default
+node_id = 14
+
+## The gRPC server options.
+[grpc]
+## The address to bind the gRPC server.
+addr = "127.0.0.1:6800"
+## The hostname advertised to the metasrv,
+## and used for connections from outside the host
+hostname = "127.0.0.1"
+## The number of server worker threads.
+runtime_size = 2
+## The maximum receive message size for gRPC server.
+max_recv_message_size = "512MB"
+## The maximum send message size for gRPC server.
+max_send_message_size = "512MB"
+
+
+## The metasrv client options.
+[meta_client]
+## The addresses of the metasrv.
+metasrv_addrs = ["127.0.0.1:3002"]
+
+## Operation timeout.
+timeout = "3s"
+
+## Heartbeat timeout.
+heartbeat_timeout = "500ms"
+
+## DDL timeout.
+ddl_timeout = "10s"
+
+## Connect server timeout.
+connect_timeout = "1s"
+
+## `TCP_NODELAY` option for accepted connections.
+tcp_nodelay = true
+
+## The configuration about the cache of the metadata.
+metadata_cache_max_capacity = 100000
+
+## TTL of the metadata cache.
+metadata_cache_ttl = "10m"
+
+# TTI of the metadata cache.
+metadata_cache_tti = "5m"
+
+## The heartbeat options.
+[heartbeat]
+## Interval for sending heartbeat messages to the metasrv.
+interval = "3s"
+
+## Interval for retrying to send heartbeat messages to the metasrv.
+retry_interval = "3s"
+
+## The logging options.
+[logging]
+## The directory to store the log files.
+dir = "/tmp/greptimedb/logs"
+
+## The log level. Can be `info`/`debug`/`warn`/`error`.
+## +toml2docs:none-default
+level = "info"
+
+## Enable OTLP tracing.
+enable_otlp_tracing = false
+
+## The OTLP tracing endpoint.
+## +toml2docs:none-default
+otlp_endpoint = ""
+
+## Whether to append logs to stdout.
+append_stdout = true
+
+## The percentage of tracing will be sampled and exported.
+## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
+## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
+[logging.tracing_sample_ratio]
+default_ratio = 1.0
+
+## The tracing options. Only effect when compiled with `tokio-console` feature.
+[tracing]
+## The tokio console address.
+## +toml2docs:none-default
+tokio_console_addr = "127.0.0.1"
+

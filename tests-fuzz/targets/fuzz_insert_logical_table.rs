@@ -36,14 +36,15 @@ use tests_fuzz::generator::create_expr::{
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    generate_random_timestamp_for_mysql, generate_random_value, replace_default, CreateTableExpr,
-    InsertIntoExpr,
+    generate_random_timestamp_for_mysql, generate_random_value, replace_default,
+    sort_by_primary_keys, CreateTableExpr, InsertIntoExpr,
 };
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{
-    compact_table, flush_memtable, init_greptime_connections_via_env, Connections,
+    compact_table, flush_memtable, get_gt_fuzz_input_max_rows, get_gt_fuzz_input_max_tables,
+    init_greptime_connections_via_env, Connections,
 };
 use tests_fuzz::validator;
 struct FuzzContext {
@@ -60,14 +61,18 @@ impl FuzzContext {
 struct FuzzInput {
     seed: u64,
     tables: usize,
+    rows: usize,
 }
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let tables = rng.gen_range(1..256);
-        Ok(FuzzInput { tables, seed })
+        let max_tables = get_gt_fuzz_input_max_tables();
+        let tables = rng.gen_range(1..max_tables);
+        let max_row = get_gt_fuzz_input_max_rows();
+        let rows = rng.gen_range(1..max_row);
+        Ok(FuzzInput { tables, seed, rows })
     }
 }
 
@@ -181,34 +186,18 @@ async fn validate_values(
     let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
     let mut expected_rows =
         replace_default(&insert_expr.values_list, &logical_table_ctx, insert_expr);
-    expected_rows.sort_by(|a, b| {
-        let a_keys: Vec<_> = primary_keys_idxs_in_insert_expr
-            .iter()
-            .map(|&i| &a[i])
-            .collect();
-        let b_keys: Vec<_> = primary_keys_idxs_in_insert_expr
-            .iter()
-            .map(|&i| &b[i])
-            .collect();
-        for (a_key, b_key) in a_keys.iter().zip(b_keys.iter()) {
-            match a_key.cmp(b_key) {
-                Some(std::cmp::Ordering::Equal) => continue,
-                non_eq => return non_eq.unwrap(),
-            }
-        }
-        std::cmp::Ordering::Equal
-    });
+    sort_by_primary_keys(&mut expected_rows, primary_keys_idxs_in_insert_expr);
     validator::row::assert_eq::<MySql>(&insert_expr.columns, &fetched_rows, &expected_rows)?;
 
     Ok(())
 }
 
 async fn insert_values<R: Rng + 'static>(
+    rows: usize,
     ctx: &FuzzContext,
     rng: &mut R,
     logical_table_ctx: TableContextRef,
 ) -> Result<InsertIntoExpr> {
-    let rows = rng.gen_range(1..2048);
     let insert_expr = generate_insert_expr(rows, rng, logical_table_ctx.clone())?;
     let translator = InsertIntoExprTranslator;
     let sql = translator.translate(&insert_expr)?;
@@ -257,7 +246,8 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         info!("Create logical table: {sql}, result: {result:?}");
         let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
 
-        let insert_expr = insert_values(&ctx, &mut rng, logical_table_ctx.clone()).await?;
+        let insert_expr =
+            insert_values(input.rows, &ctx, &mut rng, logical_table_ctx.clone()).await?;
         validate_values(&ctx, logical_table_ctx.clone(), &insert_expr).await?;
         tables.insert(logical_table_ctx.name.clone(), logical_table_ctx.clone());
         if rng.gen_bool(0.1) {

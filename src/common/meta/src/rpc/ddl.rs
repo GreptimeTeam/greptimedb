@@ -321,16 +321,33 @@ impl CreateViewTask {
         }
     }
 
+    /// Returns the encoded logical plan
     pub fn raw_logical_plan(&self) -> &Vec<u8> {
         &self.create_view.logical_plan
     }
 
+    /// Returns the view definition in SQL
+    pub fn view_definition(&self) -> &str {
+        &self.create_view.definition
+    }
+
+    /// Returns the resolved table names in view's logical plan
     pub fn table_names(&self) -> HashSet<TableName> {
         self.create_view
             .table_names
             .iter()
             .map(|t| t.clone().into())
             .collect()
+    }
+
+    /// Returns the view's columns
+    pub fn columns(&self) -> &Vec<String> {
+        &self.create_view.columns
+    }
+
+    /// Returns the original logical plan's columns
+    pub fn plan_columns(&self) -> &Vec<String> {
+        &self.create_view.plan_columns
     }
 }
 

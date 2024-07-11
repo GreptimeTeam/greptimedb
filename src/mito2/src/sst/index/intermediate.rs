@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
+
 use common_telemetry::warn;
 use object_store::util::{self, normalize_dir};
-use store_api::storage::RegionId;
+use store_api::storage::{ColumnId, RegionId};
 use uuid::Uuid;
 
 use crate::access_layer::new_fs_object_store;
@@ -27,14 +29,15 @@ const INTERMEDIATE_DIR: &str = "__intm";
 /// `IntermediateManager` provides store to access to intermediate files.
 #[derive(Clone)]
 pub struct IntermediateManager {
+    base_dir: PathBuf,
     store: InstrumentedStore,
 }
 
 impl IntermediateManager {
     /// Create a new `IntermediateManager` with the given root path.
     /// It will clean up all garbage intermediate files from previous runs.
-    pub async fn init_fs(root_path: impl AsRef<str>) -> Result<Self> {
-        let store = new_fs_object_store(&normalize_dir(root_path.as_ref())).await?;
+    pub async fn init_fs(aux_path: impl AsRef<str>) -> Result<Self> {
+        let store = new_fs_object_store(&normalize_dir(aux_path.as_ref())).await?;
         let store = InstrumentedStore::new(store);
 
         // Remove all garbage intermediate files from previous runs.
@@ -42,7 +45,10 @@ impl IntermediateManager {
             warn!(err; "Failed to remove garbage intermediate files");
         }
 
-        Ok(Self { store })
+        Ok(Self {
+            base_dir: PathBuf::from(aux_path.as_ref()),
+            store,
+        })
     }
 
     /// Set the write buffer size for the store.
@@ -56,11 +62,20 @@ impl IntermediateManager {
         &self.store
     }
 
-    #[cfg(test)]
-    pub(crate) fn new(store: object_store::ObjectStore) -> Self {
-        Self {
-            store: InstrumentedStore::new(store),
-        }
+    /// Returns the intermediate directory path for building fulltext index.
+    /// The format is `{aux_path}/__intm/{region_id}/{sst_file_id}/fulltext-{column_id}-{uuid}`.
+    pub(crate) fn fulltext_path(
+        &self,
+        region_id: &RegionId,
+        sst_file_id: &FileId,
+        column_id: ColumnId,
+    ) -> PathBuf {
+        let uuid = Uuid::new_v4();
+        self.base_dir
+            .join(INTERMEDIATE_DIR)
+            .join(region_id.as_u64().to_string())
+            .join(sst_file_id.to_string())
+            .join(format!("fulltext-{column_id}-{uuid}"))
     }
 }
 
@@ -69,7 +84,6 @@ impl IntermediateManager {
 #[derive(Debug, Clone)]
 pub struct IntermediateLocation {
     files_dir: String,
-    sst_dir: String,
 }
 
 impl IntermediateLocation {
@@ -82,13 +96,12 @@ impl IntermediateLocation {
         let uuid = Uuid::new_v4();
         Self {
             files_dir: format!("{INTERMEDIATE_DIR}/{region_id}/{sst_file_id}/{uuid}/"),
-            sst_dir: format!("{INTERMEDIATE_DIR}/{region_id}/{sst_file_id}/"),
         }
     }
 
     /// Returns the directory to clean up when the sorting is done
     pub fn dir_to_cleanup(&self) -> &str {
-        &self.sst_dir
+        &self.files_dir
     }
 
     /// Returns the path of the directory for intermediate files associated with a column:
@@ -106,6 +119,8 @@ impl IntermediateLocation {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use common_test_util::temp_dir;
     use regex::Regex;
 
@@ -137,11 +152,6 @@ mod tests {
         let sst_file_id = FileId::random();
         let location = IntermediateLocation::new(&RegionId::new(0, 0), &sst_file_id);
 
-        assert_eq!(
-            location.dir_to_cleanup(),
-            format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/")
-        );
-
         let re = Regex::new(&format!(
             "{INTERMEDIATE_DIR}/0/{sst_file_id}/{}/",
             r"\w{8}-\w{4}-\w{4}-\w{4}-\w{12}"
@@ -162,5 +172,29 @@ mod tests {
             location.file_path(column_id, im_file_id),
             format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/{uuid}/{column_id}/{im_file_id}.im")
         );
+    }
+
+    #[tokio::test]
+    async fn test_fulltext_intm_path() {
+        let temp_dir = temp_dir::create_temp_dir("test_fulltext_intm_path_");
+        let aux_path = temp_dir.path().to_string_lossy().to_string();
+
+        let manager = IntermediateManager::init_fs(&aux_path).await.unwrap();
+        let region_id = RegionId::new(0, 0);
+        let sst_file_id = FileId::random();
+        let column_id = 1;
+        let fulltext_path = manager.fulltext_path(&region_id, &sst_file_id, column_id);
+
+        let mut pi = fulltext_path.iter();
+        for a in temp_dir.path().iter() {
+            assert_eq!(a, pi.next().unwrap());
+        }
+        assert_eq!(pi.next().unwrap(), INTERMEDIATE_DIR);
+        assert_eq!(pi.next().unwrap(), "0"); // region id
+        assert_eq!(pi.next().unwrap(), OsStr::new(&sst_file_id.to_string())); // sst file id
+        assert!(Regex::new(r"fulltext-1-\w{8}-\w{4}-\w{4}-\w{4}-\w{12}")
+            .unwrap()
+            .is_match(&pi.next().unwrap().to_string_lossy())); // fulltext path
+        assert!(pi.next().is_none());
     }
 }

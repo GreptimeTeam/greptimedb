@@ -26,8 +26,10 @@ pub struct RegionFailureHandler {
 }
 
 impl RegionFailureHandler {
-    pub(crate) fn new(mut region_supervisor: RegionSupervisor) -> Self {
-        let heartbeat_acceptor = region_supervisor.heartbeat_acceptor();
+    pub(crate) fn new(
+        mut region_supervisor: RegionSupervisor,
+        heartbeat_acceptor: HeartbeatAcceptor,
+    ) -> Self {
         info!("Starting region supervisor");
         common_runtime::spawn_bg(async move { region_supervisor.run().await });
         Self { heartbeat_acceptor }
@@ -71,13 +73,13 @@ mod tests {
     use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
     use crate::metasrv::builder::MetasrvBuilder;
     use crate::region::supervisor::tests::new_test_supervisor;
-    use crate::region::supervisor::Event;
+    use crate::region::supervisor::{Event, HeartbeatAcceptor};
 
     #[tokio::test]
     async fn test_handle_heartbeat() {
-        let supervisor = new_test_supervisor();
-        let sender = supervisor.sender();
-        let handler = RegionFailureHandler::new(supervisor);
+        let (supervisor, sender) = new_test_supervisor();
+        let heartbeat_acceptor = HeartbeatAcceptor::new(sender.clone());
+        let handler = RegionFailureHandler::new(supervisor, heartbeat_acceptor);
         let req = &HeartbeatRequest::default();
         let builder = MetasrvBuilder::new();
         let metasrv = builder.build().await.unwrap();

@@ -100,6 +100,14 @@ impl MetaClientBuilder {
             .enable_heartbeat()
     }
 
+    /// Returns the role of Flownode's default options.
+    pub fn flownode_default_options(cluster_id: ClusterId, member_id: u64) -> Self {
+        Self::new(cluster_id, member_id, Role::Flownode)
+            .enable_store()
+            .enable_heartbeat()
+            .enable_procedure()
+    }
+
     pub fn enable_heartbeat(self) -> Self {
         Self {
             enable_heartbeat: true,
@@ -206,7 +214,7 @@ impl MetaClientBuilder {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct MetaClient {
     id: Id,
     channel_manager: ChannelManager,

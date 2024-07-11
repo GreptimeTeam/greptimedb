@@ -145,7 +145,7 @@ impl TypeConverter {
     ) -> Result<ScalarValue> {
         match (target_type, value) {
             (DataType::Timestamp(_, _), ScalarValue::Utf8(Some(v))) => {
-                string_to_timestamp_ms(v, Some(self.query_ctx.timezone().as_ref()))
+                string_to_timestamp_ms(v, Some(&self.query_ctx.timezone()))
             }
             (DataType::Boolean, ScalarValue::Utf8(Some(v))) => match v.to_lowercase().as_str() {
                 "true" => Ok(ScalarValue::Boolean(Some(true))),

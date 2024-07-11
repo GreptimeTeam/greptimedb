@@ -51,8 +51,10 @@ use tests_fuzz::utils::partition::{
 };
 use tests_fuzz::utils::pod_failure::{inject_datanode_pod_failure, recover_pod_failure};
 use tests_fuzz::utils::{
-    compact_table, flush_memtable, init_greptime_connections_via_env, Connections,
-    GT_FUZZ_CLUSTER_NAME, GT_FUZZ_CLUSTER_NAMESPACE,
+    compact_table, flush_memtable, get_gt_fuzz_input_max_columns,
+    get_gt_fuzz_input_max_insert_actions, get_gt_fuzz_input_max_rows, get_gt_fuzz_input_max_tables,
+    init_greptime_connections_via_env, Connections, GT_FUZZ_CLUSTER_NAME,
+    GT_FUZZ_CLUSTER_NAMESPACE,
 };
 use tests_fuzz::validator::row::count_values;
 use tokio::sync::Semaphore;
@@ -83,10 +85,14 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let columns = rng.gen_range(2..64);
-        let rows = rng.gen_range(2..4096);
-        let tables = rng.gen_range(1..64);
-        let inserts = rng.gen_range(2..16);
+        let max_columns = get_gt_fuzz_input_max_columns();
+        let columns = rng.gen_range(2..max_columns);
+        let max_rows = get_gt_fuzz_input_max_rows();
+        let rows = rng.gen_range(2..max_rows);
+        let max_tables = get_gt_fuzz_input_max_tables();
+        let tables = rng.gen_range(2..max_tables);
+        let max_inserts = get_gt_fuzz_input_max_insert_actions();
+        let inserts = rng.gen_range(2..max_inserts);
         Ok(FuzzInput {
             columns,
             rows,
@@ -264,7 +270,7 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let mut rng = ChaCha20Rng::seed_from_u64(input.seed);
     info!("Generates {} tables", input.tables);
     let exprs = generate_create_exprs(input.tables, input.columns, &mut rng)?;
-    let parallelism = 8;
+    let parallelism = 4;
     let table_ctxs = exprs
         .iter()
         .map(|expr| Arc::new(TableContext::from(expr)))
@@ -277,8 +283,6 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let partitions = collect_table_partitions(&ctx, &table_ctxs).await?;
     let region_distribution = region_distribution(partitions);
 
-    // Ensures num of datanode > 1.
-    assert!(region_distribution.len() > 1);
     pretty_print_region_distribution(&region_distribution);
     let nodes = region_distribution.keys().cloned().collect::<Vec<_>>();
     let selected_datanode = nodes
@@ -315,7 +319,7 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     wait_for_all_datanode_online(ctx.greptime.clone(), Duration::from_secs(60)).await;
 
     // Validates value rows
-    info!("Validates num of values");
+    info!("Validates num of rows");
     for (table_ctx, expected_rows) in table_ctxs.iter().zip(affected_rows) {
         let sql = format!("select count(1) as count from {}", table_ctx.name);
         let values = count_values(&ctx.greptime, &sql).await?;

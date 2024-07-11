@@ -42,7 +42,11 @@ impl InfluxdbLineProtocolHandler for Instance {
         interceptor_ref.pre_execute(&request.lines, ctx.clone())?;
 
         let requests = request.try_into()?;
-        self.handle_row_inserts(requests, ctx)
+        let requests = interceptor_ref
+            .post_lines_conversion(requests, ctx.clone())
+            .await?;
+
+        self.handle_influx_row_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(servers::error::ExecuteGrpcQuerySnafu)

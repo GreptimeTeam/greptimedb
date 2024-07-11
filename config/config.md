@@ -1,10 +1,12 @@
 # Configurations
 
-- [Standalone Mode](#standalone-mode)
-- [Distributed Mode](#distributed-mode)
+- [Configurations](#configurations)
+  - [Standalone Mode](#standalone-mode)
+  - [Distributed Mode](#distributed-mode)
     - [Frontend](#frontend)
     - [Metasrv](#metasrv)
     - [Datanode](#datanode)
+    - [Flownode](#flownode)
 
 ## Standalone Mode
 
@@ -118,12 +120,20 @@
 | `region_engine.mito.scan_parallelism` | Integer | `0` | Parallelism to scan a region (default: 1/4 of cpu cores).<br/>- `0`: using the default value (1/4 of cpu cores).<br/>- `1`: scan in current thread.<br/>- `n`: scan in parallelism n. |
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
+| `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
+| `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
+| `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
 | `region_engine.mito.inverted_index` | -- | -- | The options for inverted index in Mito engine. |
-| `region_engine.mito.inverted_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically<br/>- `disable`: never |
-| `region_engine.mito.inverted_index.create_on_compaction` | String | `auto` | Whether to create the index on compaction.<br/>- `auto`: automatically<br/>- `disable`: never |
-| `region_engine.mito.inverted_index.apply_on_query` | String | `auto` | Whether to apply the index on query<br/>- `auto`: automatically<br/>- `disable`: never |
-| `region_engine.mito.inverted_index.mem_threshold_on_create` | String | `64M` | Memory threshold for performing an external sort during index creation.<br/>Setting to empty will disable external sorting, forcing all sorting operations to happen in memory. |
-| `region_engine.mito.inverted_index.intermediate_path` | String | `""` | File system path to store intermediate files for external sorting (default `{data_home}/index_intermediate`). |
+| `region_engine.mito.inverted_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.inverted_index.create_on_compaction` | String | `auto` | Whether to create the index on compaction.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.inverted_index.apply_on_query` | String | `auto` | Whether to apply the index on query<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.inverted_index.mem_threshold_on_create` | String | `auto` | Memory threshold for performing an external sort during index creation.<br/>- `auto`: automatically determine the threshold based on the system memory size (default)<br/>- `unlimited`: no memory limit<br/>- `[size]` e.g. `64MB`: fixed memory threshold |
+| `region_engine.mito.inverted_index.intermediate_path` | String | `""` | Deprecated, use `region_engine.mito.index.aux_path` instead. |
+| `region_engine.mito.fulltext_index` | -- | -- | The options for full-text index in Mito engine. |
+| `region_engine.mito.fulltext_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.fulltext_index.create_on_compaction` | String | `auto` | Whether to create the index on compaction.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.fulltext_index.apply_on_query` | String | `auto` | Whether to apply the index on query<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.fulltext_index.mem_threshold_on_create` | String | `auto` | Memory threshold for index creation.<br/>- `auto`: automatically determine the threshold based on the system memory size (default)<br/>- `unlimited`: no memory limit<br/>- `[size]` e.g. `64MB`: fixed memory threshold |
 | `region_engine.mito.memtable` | -- | -- | -- |
 | `region_engine.mito.memtable.type` | String | `time_series` | Memtable type.<br/>- `time_series`: time-series memtable<br/>- `partition_tree`: partition tree memtable (experimental) |
 | `region_engine.mito.memtable.index_max_keys_per_shard` | Integer | `8192` | The max number of keys in one shard.<br/>Only available for `partition_tree` memtable. |
@@ -259,7 +269,7 @@
 | `failure_detector` | -- | -- | -- |
 | `failure_detector.threshold` | Float | `8.0` | -- |
 | `failure_detector.min_std_deviation` | String | `100ms` | -- |
-| `failure_detector.acceptable_heartbeat_pause` | String | `3000ms` | -- |
+| `failure_detector.acceptable_heartbeat_pause` | String | `10000ms` | -- |
 | `failure_detector.first_heartbeat_estimate` | String | `1000ms` | -- |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
@@ -399,12 +409,20 @@
 | `region_engine.mito.scan_parallelism` | Integer | `0` | Parallelism to scan a region (default: 1/4 of cpu cores).<br/>- `0`: using the default value (1/4 of cpu cores).<br/>- `1`: scan in current thread.<br/>- `n`: scan in parallelism n. |
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
+| `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
+| `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
+| `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
 | `region_engine.mito.inverted_index` | -- | -- | The options for inverted index in Mito engine. |
-| `region_engine.mito.inverted_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically<br/>- `disable`: never |
-| `region_engine.mito.inverted_index.create_on_compaction` | String | `auto` | Whether to create the index on compaction.<br/>- `auto`: automatically<br/>- `disable`: never |
-| `region_engine.mito.inverted_index.apply_on_query` | String | `auto` | Whether to apply the index on query<br/>- `auto`: automatically<br/>- `disable`: never |
-| `region_engine.mito.inverted_index.mem_threshold_on_create` | String | `64M` | Memory threshold for performing an external sort during index creation.<br/>Setting to empty will disable external sorting, forcing all sorting operations to happen in memory. |
-| `region_engine.mito.inverted_index.intermediate_path` | String | `""` | File system path to store intermediate files for external sorting (default `{data_home}/index_intermediate`). |
+| `region_engine.mito.inverted_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.inverted_index.create_on_compaction` | String | `auto` | Whether to create the index on compaction.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.inverted_index.apply_on_query` | String | `auto` | Whether to apply the index on query<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.inverted_index.mem_threshold_on_create` | String | `auto` | Memory threshold for performing an external sort during index creation.<br/>- `auto`: automatically determine the threshold based on the system memory size (default)<br/>- `unlimited`: no memory limit<br/>- `[size]` e.g. `64MB`: fixed memory threshold |
+| `region_engine.mito.inverted_index.intermediate_path` | String | `""` | Deprecated, use `region_engine.mito.index.aux_path` instead. |
+| `region_engine.mito.fulltext_index` | -- | -- | The options for full-text index in Mito engine. |
+| `region_engine.mito.fulltext_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.fulltext_index.create_on_compaction` | String | `auto` | Whether to create the index on compaction.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.fulltext_index.apply_on_query` | String | `auto` | Whether to apply the index on query<br/>- `auto`: automatically (default)<br/>- `disable`: never |
+| `region_engine.mito.fulltext_index.mem_threshold_on_create` | String | `auto` | Memory threshold for index creation.<br/>- `auto`: automatically determine the threshold based on the system memory size (default)<br/>- `unlimited`: no memory limit<br/>- `[size]` e.g. `64MB`: fixed memory threshold |
 | `region_engine.mito.memtable` | -- | -- | -- |
 | `region_engine.mito.memtable.type` | String | `time_series` | Memtable type.<br/>- `time_series`: time-series memtable<br/>- `partition_tree`: partition tree memtable (experimental) |
 | `region_engine.mito.memtable.index_max_keys_per_shard` | Integer | `8192` | The max number of keys in one shard.<br/>Only available for `partition_tree` memtable. |
@@ -426,5 +444,42 @@
 | `export_metrics.remote_write` | -- | -- | -- |
 | `export_metrics.remote_write.url` | String | `""` | The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`. |
 | `export_metrics.remote_write.headers` | InlineTable | -- | HTTP headers of Prometheus remote-write carry. |
+| `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
+| `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
+
+
+### Flownode
+
+| Key | Type | Default | Descriptions |
+| --- | -----| ------- | ----------- |
+| `mode` | String | `distributed` | The running mode of the flownode. It can be `standalone` or `distributed`. |
+| `node_id` | Integer | `None` | The flownode identifier and should be unique in the cluster. |
+| `grpc` | -- | -- | The gRPC server options. |
+| `grpc.addr` | String | `127.0.0.1:6800` | The address to bind the gRPC server. |
+| `grpc.hostname` | String | `127.0.0.1` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |
+| `grpc.runtime_size` | Integer | `2` | The number of server worker threads. |
+| `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
+| `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
+| `meta_client` | -- | -- | The metasrv client options. |
+| `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
+| `meta_client.timeout` | String | `3s` | Operation timeout. |
+| `meta_client.heartbeat_timeout` | String | `500ms` | Heartbeat timeout. |
+| `meta_client.ddl_timeout` | String | `10s` | DDL timeout. |
+| `meta_client.connect_timeout` | String | `1s` | Connect server timeout. |
+| `meta_client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |
+| `meta_client.metadata_cache_max_capacity` | Integer | `100000` | The configuration about the cache of the metadata. |
+| `meta_client.metadata_cache_ttl` | String | `10m` | TTL of the metadata cache. |
+| `meta_client.metadata_cache_tti` | String | `5m` | -- |
+| `heartbeat` | -- | -- | The heartbeat options. |
+| `heartbeat.interval` | String | `3s` | Interval for sending heartbeat messages to the metasrv. |
+| `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
+| `logging` | -- | -- | The logging options. |
+| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
+| `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
+| `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
+| `logging.otlp_endpoint` | String | `None` | The OTLP tracing endpoint. |
+| `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
+| `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
 | `tracing.tokio_console_addr` | String | `None` | The tokio console address. |

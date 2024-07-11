@@ -166,6 +166,21 @@ impl<'a> ParserContext<'a> {
                         self.parse_tql()
                     }
 
+                    Keyword::USE => {
+                        let _ = self.parser.next_token();
+
+                        let database_name = self.parser.parse_identifier(false).context(
+                            error::UnexpectedSnafu {
+                                sql: self.sql,
+                                expected: "a database name",
+                                actual: self.peek_token_as_string(),
+                            },
+                        )?;
+                        Ok(Statement::Use(
+                            Self::canonicalize_identifier(database_name).value,
+                        ))
+                    }
+
                     // todo(hl) support more statements.
                     _ => self.unsupported(self.peek_token_as_string()),
                 }
@@ -299,7 +314,7 @@ mod tests {
                 let ts_col = columns.first().unwrap();
                 assert_eq!(
                     expected_type,
-                    sql_data_type_to_concrete_data_type(&ts_col.data_type).unwrap()
+                    sql_data_type_to_concrete_data_type(ts_col.data_type()).unwrap()
                 );
             }
             _ => unreachable!(),

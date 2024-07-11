@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
+use api::v1::column_def::options_from_column_schema;
 use api::v1::region::InsertRequests as RegionInsertRequests;
 use api::v1::{ColumnSchema as GrpcColumnSchema, Row, Rows, Value as GrpcValue};
 use catalog::CatalogManager;
@@ -29,7 +30,7 @@ use table::TableRef;
 use crate::error::{
     CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
     ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
-    TableNotFoundSnafu,
+    SchemaReadOnlySnafu, TableNotFoundSnafu,
 };
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::insert::semantic_type;
@@ -64,6 +65,11 @@ impl<'a> StatementToRegion<'a> {
         let table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
         let table_info = table.table_info();
+
+        ensure!(
+            !common_catalog::consts::is_readonly_schema(&schema),
+            SchemaReadOnlySnafu { name: schema }
+        );
 
         let column_names = column_names(stmt, &table_schema);
         let column_count = column_names.len();
@@ -111,6 +117,7 @@ impl<'a> StatementToRegion<'a> {
                 datatype: datatype.into(),
                 semantic_type: semantic_type.into(),
                 datatype_extension,
+                options: options_from_column_schema(column_schema),
             };
             schema.push(grpc_column_schema);
 
@@ -144,7 +151,7 @@ impl<'a> StatementToRegion<'a> {
         match &obj_name.0[..] {
             [table] => Ok((
                 self.ctx.current_catalog().to_owned(),
-                self.ctx.current_schema().to_owned(),
+                self.ctx.current_schema(),
                 table.value.clone(),
             )),
             [schema, table] => Ok((
@@ -195,7 +202,7 @@ fn sql_value_to_grpc_value(
             column: column.clone(),
         })?
     } else {
-        statements::sql_value_to_value(column, &column_schema.data_type, sql_val, timezone)
+        statements::sql_value_to_value(column, &column_schema.data_type, sql_val, timezone, None)
             .context(ParseSqlSnafu)?
     };
 

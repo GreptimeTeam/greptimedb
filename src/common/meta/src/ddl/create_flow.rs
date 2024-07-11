@@ -41,8 +41,9 @@ use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::instruction::{CacheIdent, CreateFlow};
 use crate::key::flow::flow_info::FlowInfoValue;
+use crate::key::flow::flow_route::FlowRouteValue;
 use crate::key::table_name::TableNameKey;
-use crate::key::FlowId;
+use crate::key::{FlowId, FlowPartitionId};
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::{CreateFlowTask, QueryContext};
@@ -170,9 +171,10 @@ impl CreateFlowProcedure {
         // Safety: The flow id must be allocated.
         let flow_id = self.data.flow_id.unwrap();
         // TODO(weny): Support `or_replace`.
+        let (flow_info, flow_routes) = (&self.data).into();
         self.context
             .flow_metadata_manager
-            .create_flow_metadata(flow_id, (&self.data).into())
+            .create_flow_metadata(flow_id, flow_info, flow_routes)
             .await?;
         info!("Created flow metadata for flow {flow_id}");
         self.data.state = CreateFlowState::InvalidateFlowCache;
@@ -192,7 +194,7 @@ impl CreateFlowProcedure {
                 &ctx,
                 &[CacheIdent::CreateFlow(CreateFlow {
                     source_table_ids: self.data.source_table_ids.clone(),
-                    flownode_ids: self.data.peers.iter().map(|peer| peer.id).collect(),
+                    flownodes: self.data.peers.clone(),
                 })],
             )
             .await?;
@@ -292,7 +294,7 @@ impl From<&CreateFlowData> for CreateRequest {
     }
 }
 
-impl From<&CreateFlowData> for FlowInfoValue {
+impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteValue)>) {
     fn from(value: &CreateFlowData) -> Self {
         let CreateFlowTask {
             catalog_name,
@@ -311,17 +313,26 @@ impl From<&CreateFlowData> for FlowInfoValue {
             .enumerate()
             .map(|(idx, peer)| (idx as u32, peer.id))
             .collect::<BTreeMap<_, _>>();
+        let flow_routes = value
+            .peers
+            .iter()
+            .enumerate()
+            .map(|(idx, peer)| (idx as u32, FlowRouteValue { peer: peer.clone() }))
+            .collect::<Vec<_>>();
 
-        FlowInfoValue {
-            source_table_ids: value.source_table_ids.clone(),
-            sink_table_name,
-            flownode_ids,
-            catalog_name,
-            flow_name,
-            raw_sql: sql,
-            expire_after,
-            comment,
-            options,
-        }
+        (
+            FlowInfoValue {
+                source_table_ids: value.source_table_ids.clone(),
+                sink_table_name,
+                flownode_ids,
+                catalog_name,
+                flow_name,
+                raw_sql: sql,
+                expire_after,
+                comment,
+                options,
+            },
+            flow_routes,
+        )
     }
 }

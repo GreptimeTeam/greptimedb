@@ -25,6 +25,45 @@ pub struct InsertIntoExpr {
     pub values_list: Vec<RowValues>,
 }
 
+impl InsertIntoExpr {
+    /// Returns the timestamp column
+    pub fn timestamp_column(&self) -> Option<Column> {
+        self.columns.iter().find(|c| c.is_time_index()).cloned()
+    }
+
+    /// Returns index of the timestamp column
+    pub fn timestamp_column_idx(&self) -> Option<usize> {
+        self.columns
+            .iter()
+            .enumerate()
+            .find_map(|(idx, c)| if c.is_time_index() { Some(idx) } else { None })
+    }
+
+    /// Returns a vector of columns that are primary keys or time indices.
+    pub fn primary_key_columns(&self) -> Vec<Column> {
+        self.columns
+            .iter()
+            .filter(|c| c.is_primary_key() || c.is_time_index())
+            .cloned()
+            .collect::<Vec<_>>()
+    }
+
+    /// Returns the indices of columns that are primary keys or time indices.
+    pub fn primary_key_column_idx(&self) -> Vec<usize> {
+        self.columns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                if c.is_primary_key() || c.is_time_index() {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    }
+}
+
 pub type RowValues = Vec<RowValue>;
 
 #[derive(PartialEq, PartialOrd, Clone)]

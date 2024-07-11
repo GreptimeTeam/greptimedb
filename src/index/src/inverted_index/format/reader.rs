@@ -12,32 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod blob;
-mod footer;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_base::BitVec;
-use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
+use greptime_proto::v1::index::InvertedIndexMetas;
+use snafu::ResultExt;
 
-use crate::inverted_index::error::Result;
+use crate::inverted_index::error::{DecodeFstSnafu, Result};
 pub use crate::inverted_index::format::reader::blob::InvertedIndexBlobReader;
 use crate::inverted_index::FstMap;
+
+mod blob;
+mod footer;
 
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
 #[mockall::automock]
 #[async_trait]
 pub trait InvertedIndexReader: Send {
-    /// Retrieve metadata of all inverted indices stored within the blob.
-    async fn metadata(&mut self) -> Result<InvertedIndexMetas>;
+    /// Reads all data to dest.
+    async fn read_all(&mut self, dest: &mut Vec<u8>) -> Result<usize>;
 
-    /// Retrieve the finite state transducer (FST) map for a given inverted index metadata entry.
-    async fn fst(&mut self, meta: &InvertedIndexMeta) -> Result<FstMap>;
+    /// Seeks to given offset and reads data with exact size as provided.
+    async fn seek_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>>;
 
-    /// Retrieve the bitmap for a given inverted index metadata entry at the specified offset and size.
-    async fn bitmap(
-        &mut self,
-        meta: &InvertedIndexMeta,
-        relative_offset: u32,
-        size: u32,
-    ) -> Result<BitVec>;
+    /// Retrieves metadata of all inverted indices stored within the blob.
+    async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>>;
+
+    /// Retrieves the finite state transducer (FST) map from the given offset and size.
+    async fn fst(&mut self, offset: u64, size: u32) -> Result<FstMap> {
+        let fst_data = self.seek_read(offset, size).await?;
+        FstMap::new(fst_data).context(DecodeFstSnafu)
+    }
+
+    /// Retrieves the bitmap from the given offset and size.
+    async fn bitmap(&mut self, offset: u64, size: u32) -> Result<BitVec> {
+        self.seek_read(offset, size).await.map(BitVec::from_vec)
+    }
 }

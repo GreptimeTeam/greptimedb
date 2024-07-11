@@ -369,6 +369,7 @@ pub fn build_scripts_schema() -> (String, Vec<String>, Vec<ColumnDef>) {
             semantic_type: c.semantic_type,
             comment: "".to_string(),
             datatype_extension: None,
+            options: c.options,
         })
         .collect();
 

@@ -21,40 +21,41 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
-use catalog::CatalogManagerRef;
-use common_base::Plugins;
+use common_config::Configurable;
 use common_error::ext::BoxedError;
-use common_frontend::handler::FrontendInvoker;
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{debug, info};
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
 use itertools::Itertools;
-use query::{QueryEngine, QueryEngineFactory};
+use meta_client::MetaClientOptions;
+use query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
+use servers::heartbeat_options::HeartbeatOptions;
+use servers::Mode;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ConcreteDataType, RegionId};
 use table::metadata::TableId;
-use tokio::sync::{oneshot, watch, Mutex, RwLock};
+use tokio::sync::broadcast::error::TryRecvError;
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
-use crate::adapter::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::TableSource;
 use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
+use crate::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 use crate::expr::GlobalId;
 use crate::repr::{self, DiffRow, Row};
-use crate::transform::{register_function_to_query_engine, sql_to_flow_plan};
+use crate::transform::sql_to_flow_plan;
 
-pub(crate) mod error;
 mod flownode_impl;
 mod parse_expr;
-mod server;
 #[cfg(test)]
 mod tests;
 mod util;
@@ -63,7 +64,8 @@ mod worker;
 pub(crate) mod node_context;
 mod table_source;
 
-use error::Error;
+use crate::error::Error;
+use crate::FrontendInvoker;
 
 // TODO(discord9): replace this with `GREPTIME_TIMESTAMP` before v0.9
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
@@ -76,87 +78,51 @@ pub type FlowId = u64;
 pub type TableName = [String; 3];
 
 /// Options for flow node
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FlownodeOptions {
+    pub mode: Mode,
+    pub cluster_id: Option<u64>,
     pub node_id: Option<u64>,
     pub grpc: GrpcOptions,
+    pub meta_client: Option<MetaClientOptions>,
+    pub logging: LoggingOptions,
+    pub tracing: TracingOptions,
+    pub heartbeat: HeartbeatOptions,
 }
 
-/// Flownode Builder
-pub struct FlownodeBuilder {
-    flow_node_id: u32,
-    opts: FlownodeOptions,
-    plugins: Plugins,
-    table_meta: TableMetadataManagerRef,
-    catalog_manager: CatalogManagerRef,
-}
-
-impl FlownodeBuilder {
-    /// init flownode builder
-    pub fn new(
-        flow_node_id: u32,
-        opts: FlownodeOptions,
-        plugins: Plugins,
-        table_meta: TableMetadataManagerRef,
-        catalog_manager: CatalogManagerRef,
-    ) -> Self {
+impl Default for FlownodeOptions {
+    fn default() -> Self {
         Self {
-            flow_node_id,
-            opts,
-            plugins,
-            table_meta,
-            catalog_manager,
+            mode: servers::Mode::Standalone,
+            cluster_id: None,
+            node_id: None,
+            grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
+            meta_client: None,
+            logging: LoggingOptions::default(),
+            tracing: TracingOptions::default(),
+            heartbeat: HeartbeatOptions::default(),
         }
     }
-
-    /// TODO(discord9): error handling
-    pub async fn build(self) -> FlownodeManager {
-        let query_engine_factory = QueryEngineFactory::new_with_plugins(
-            // query engine in flownode only translate plan with resolved table source.
-            self.catalog_manager.clone(),
-            None,
-            None,
-            None,
-            false,
-            self.plugins.clone(),
-        );
-        let query_engine = query_engine_factory.query_engine();
-
-        register_function_to_query_engine(&query_engine);
-
-        let (tx, rx) = oneshot::channel();
-
-        let node_id = Some(self.flow_node_id);
-
-        let _handle = std::thread::spawn(move || {
-            let (flow_node_manager, mut worker) =
-                FlownodeManager::new_with_worker(node_id, query_engine, self.table_meta.clone());
-            let _ = tx.send(flow_node_manager);
-            info!("Flow Worker started in new thread");
-            worker.run();
-        });
-        let man = rx.await.unwrap();
-        info!("Flow Node Manager started");
-        man
-    }
 }
 
+impl Configurable for FlownodeOptions {}
+
 /// Arc-ed FlowNodeManager, cheaper to clone
-pub type FlownodeManagerRef = Arc<FlownodeManager>;
+pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
 
 /// FlowNodeManager manages the state of all tasks in the flow node, which should be run on the same thread
 ///
 /// The choice of timestamp is just using current system timestamp for now
-pub struct FlownodeManager {
+pub struct FlowWorkerManager {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
     pub worker_handles: Vec<Mutex<WorkerHandle>>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
-    query_engine: Arc<dyn QueryEngine>,
+    pub query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
     table_info_source: TableSource,
-    frontend_invoker: RwLock<Option<Box<dyn FrontendInvoker + Send + Sync>>>,
+    frontend_invoker: RwLock<Option<FrontendInvoker>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
@@ -166,12 +132,9 @@ pub struct FlownodeManager {
 }
 
 /// Building FlownodeManager
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// set frontend invoker
-    pub async fn set_frontend_invoker(
-        self: &Arc<Self>,
-        frontend: Box<dyn FrontendInvoker + Send + Sync>,
-    ) {
+    pub async fn set_frontend_invoker(&self, frontend: FrontendInvoker) {
         *self.frontend_invoker.write().await = Some(frontend);
     }
 
@@ -188,7 +151,7 @@ impl FlownodeManager {
         let node_context = FlownodeContext::default();
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
-        FlownodeManager {
+        FlowWorkerManager {
             worker_handles,
             query_engine,
             table_info_source: srv_map,
@@ -248,7 +211,7 @@ pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
 }
 
 /// This impl block contains methods to send writeback requests to frontend
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// TODO(discord9): merge all same type of diff row into one requests
     ///
     /// Return the number of requests it made
@@ -494,13 +457,16 @@ impl FlownodeManager {
 }
 
 /// Flow Runtime related methods
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// run in common_runtime background runtime
-    pub fn run_background(self: Arc<Self>) -> JoinHandle<()> {
+    pub fn run_background(
+        self: Arc<Self>,
+        shutdown: Option<broadcast::Receiver<()>>,
+    ) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
         // TODO(discord9): add heartbeat tasks here
         common_runtime::spawn_bg(async move {
-            self.run().await;
+            self.run(shutdown).await;
         })
     }
 
@@ -521,7 +487,7 @@ impl FlownodeManager {
     /// Trigger dataflow running, and then send writeback request to the source sender
     ///
     /// note that this method didn't handle input mirror request, as this should be handled by grpc server
-    pub async fn run(&self) {
+    pub async fn run(&self, mut shutdown: Option<broadcast::Receiver<()>>) {
         debug!("Starting to run");
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
@@ -533,8 +499,28 @@ impl FlownodeManager {
                 common_telemetry::error!(err;"Send writeback request errors");
             };
             self.log_all_errors().await;
+            match &shutdown.as_mut().map(|s| s.try_recv()) {
+                Some(Ok(())) => {
+                    info!("Shutdown flow's main loop");
+                    break;
+                }
+                Some(Err(TryRecvError::Empty)) => (),
+                Some(Err(TryRecvError::Closed)) => {
+                    common_telemetry::error!("Shutdown channel is closed");
+                    break;
+                }
+                Some(Err(TryRecvError::Lagged(num))) => {
+                    common_telemetry::error!("Shutdown channel is lagged by {}, meaning multiple shutdown cmd have been issued", num);
+                    break;
+                }
+                None => (),
+            }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
+        // flow is now shutdown, drop frontend_invoker early so a ref cycle(in standalone mode) can be prevent:
+        // FlowWorkerManager.frontend_invoker -> FrontendInvoker.inserter
+        // -> Inserter.node_manager -> NodeManager.flownode -> Flownode.flow_worker_manager.frontend_invoker
+        self.frontend_invoker.write().await.take();
     }
 
     /// Run all available subgraph in the flow node
@@ -604,7 +590,7 @@ impl FlownodeManager {
 }
 
 /// Create&Remove flow
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// remove a flow by it's id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {

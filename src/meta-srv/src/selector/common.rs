@@ -20,6 +20,7 @@ use snafu::ensure;
 use super::weighted_choose::{WeightedChoose, WeightedItem};
 use crate::error;
 use crate::error::Result;
+use crate::metasrv::SelectTarget;
 use crate::selector::SelectorOptions;
 
 /// According to the `opts`, choose peers from the `weight_array` through `weighted_choose`.
@@ -34,9 +35,10 @@ where
     let min_required_items = opts.min_required_items;
     ensure!(
         !weight_array.is_empty(),
-        error::NoEnoughAvailableDatanodeSnafu {
+        error::NoEnoughAvailableNodeSnafu {
             required: min_required_items,
             available: 0_usize,
+            select_target: SelectTarget::Datanode
         }
     );
 
@@ -52,9 +54,10 @@ where
         // or equal to min_required_items, otherwise it may cause an infinite loop.
         ensure!(
             weight_array_len >= min_required_items,
-            error::NoEnoughAvailableDatanodeSnafu {
+            error::NoEnoughAvailableNodeSnafu {
                 required: min_required_items,
                 available: weight_array_len,
+                select_target: SelectTarget::Datanode
             }
         );
 

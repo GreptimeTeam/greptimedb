@@ -14,11 +14,13 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use api::v1::CreateTableExpr;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{default_engine, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_telemetry::info;
+use futures::FutureExt;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use query::QueryEngineRef;
@@ -27,10 +29,13 @@ use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
 use crate::error::{CatalogSnafu, CreateTableSnafu, PipelineTableNotFoundSnafu, Result};
-use crate::table::{PipelineInfo, PipelineTable, PipelineTableRef, PipelineVersion};
+use crate::manager::{PipelineInfo, PipelineTableRef, PipelineVersion};
+use crate::metrics::{
+    METRIC_PIPELINE_CREATE_HISTOGRAM, METRIC_PIPELINE_DELETE_HISTOGRAM,
+    METRIC_PIPELINE_RETRIEVE_HISTOGRAM,
+};
+use crate::table::{PipelineTable, PIPELINE_TABLE_NAME};
 use crate::{GreptimeTransformer, Pipeline};
-
-pub const PIPELINE_TABLE_NAME: &str = "pipelines";
 
 /// PipelineOperator is responsible for managing pipelines.
 /// It provides the ability to:
@@ -50,7 +55,7 @@ pub struct PipelineOperator {
 
 impl PipelineOperator {
     /// Create a table request for the pipeline table.
-    pub fn create_table_request(&self, catalog: &str) -> RegisterSystemTableRequest {
+    fn create_table_request(&self, catalog: &str) -> RegisterSystemTableRequest {
         let (time_index, primary_keys, column_defs) = PipelineTable::build_pipeline_schema();
 
         let create_table_expr = CreateTableExpr {
@@ -146,19 +151,6 @@ impl PipelineOperator {
     pub fn get_pipeline_table_from_cache(&self, catalog: &str) -> Option<PipelineTableRef> {
         self.tables.read().unwrap().get(catalog).cloned()
     }
-
-    async fn insert_and_compile(
-        &self,
-        ctx: QueryContextRef,
-        name: &str,
-        content_type: &str,
-        pipeline: &str,
-    ) -> Result<PipelineInfo> {
-        self.get_pipeline_table_from_cache(ctx.current_catalog())
-            .context(PipelineTableNotFoundSnafu)?
-            .insert_and_compile(ctx.current_schema(), name, content_type, pipeline)
-            .await
-    }
 }
 
 impl PipelineOperator {
@@ -185,11 +177,19 @@ impl PipelineOperator {
         name: &str,
         version: PipelineVersion,
     ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
+        let schema = query_ctx.current_schema();
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
+
+        let timer = Instant::now();
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .get_pipeline(query_ctx.current_schema(), name, version)
+            .get_pipeline(&schema, name, version)
+            .inspect(|re| {
+                METRIC_PIPELINE_RETRIEVE_HISTOGRAM
+                    .with_label_values(&[&re.is_ok().to_string()])
+                    .observe(timer.elapsed().as_secs_f64())
+            })
             .await
     }
 
@@ -204,7 +204,38 @@ impl PipelineOperator {
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
 
-        self.insert_and_compile(query_ctx, name, content_type, pipeline)
+        let timer = Instant::now();
+        self.get_pipeline_table_from_cache(query_ctx.current_catalog())
+            .context(PipelineTableNotFoundSnafu)?
+            .insert_and_compile(&query_ctx.current_schema(), name, content_type, pipeline)
+            .inspect(|re| {
+                METRIC_PIPELINE_CREATE_HISTOGRAM
+                    .with_label_values(&[&re.is_ok().to_string()])
+                    .observe(timer.elapsed().as_secs_f64())
+            })
+            .await
+    }
+
+    /// Delete a pipeline by name from pipeline table.
+    pub async fn delete_pipeline(
+        &self,
+        name: &str,
+        version: PipelineVersion,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<()>> {
+        // trigger load pipeline table
+        self.create_pipeline_table_if_not_exists(query_ctx.clone())
+            .await?;
+
+        let timer = Instant::now();
+        self.get_pipeline_table_from_cache(query_ctx.current_catalog())
+            .context(PipelineTableNotFoundSnafu)?
+            .delete_pipeline(&query_ctx.current_schema(), name, version)
+            .inspect(|re| {
+                METRIC_PIPELINE_DELETE_HISTOGRAM
+                    .with_label_values(&[&re.is_ok().to_string()])
+                    .observe(timer.elapsed().as_secs_f64())
+            })
             .await
     }
 }

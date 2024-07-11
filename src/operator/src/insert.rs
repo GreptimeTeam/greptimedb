@@ -43,6 +43,7 @@ use sql::statements::insert::Insert;
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
+use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
 use table::requests::InsertRequest as TableInsertRequest;
 use table::table_reference::TableReference;
@@ -66,10 +67,17 @@ pub struct Inserter {
 
 pub type InserterRef = Arc<Inserter>;
 
+/// Hint for the table type to create automatically.
+#[derive(Clone)]
 enum AutoCreateTableType {
+    /// A logical table with the physical table name.
     Logical(String),
+    /// A physical table.
     Physical,
+    /// A log table which is append-only.
     Log,
+    /// A table that merges rows by `last_non_null` strategy.
+    LastNonNull,
 }
 
 impl AutoCreateTableType {
@@ -78,6 +86,7 @@ impl AutoCreateTableType {
             AutoCreateTableType::Logical(_) => "logical",
             AutoCreateTableType::Physical => "physical",
             AutoCreateTableType::Log => "log",
+            AutoCreateTableType::LastNonNull => "last_non_null",
         }
     }
 }
@@ -108,41 +117,61 @@ impl Inserter {
             .await
     }
 
+    /// Handles row inserts request and creates a physical table on demand.
     pub async fn handle_row_inserts(
         &self,
-        mut requests: RowInsertRequests,
+        requests: RowInsertRequests,
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
     ) -> Result<Output> {
-        // remove empty requests
-        requests.inserts.retain(|req| {
-            req.rows
-                .as_ref()
-                .map(|r| !r.rows.is_empty())
-                .unwrap_or_default()
-        });
-        validate_column_count_match(&requests)?;
-
-        let table_name_to_ids = self
-            .create_or_alter_tables_on_demand(
-                &requests,
-                &ctx,
-                AutoCreateTableType::Physical,
-                statement_executor,
-            )
-            .await?;
-        let inserts = RowToRegion::new(table_name_to_ids, self.partition_manager.as_ref())
-            .convert(requests)
-            .await?;
-
-        self.do_request(inserts, &ctx).await
+        self.handle_row_inserts_with_create_type(
+            requests,
+            ctx,
+            statement_executor,
+            AutoCreateTableType::Physical,
+        )
+        .await
     }
 
+    /// Handles row inserts request and creates a log table on demand.
     pub async fn handle_log_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
+    ) -> Result<Output> {
+        self.handle_row_inserts_with_create_type(
+            requests,
+            ctx,
+            statement_executor,
+            AutoCreateTableType::Log,
+        )
+        .await
+    }
+
+    /// Handles row inserts request and creates a table with `last_non_null` merge mode on demand.
+    pub async fn handle_last_non_null_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
+    ) -> Result<Output> {
+        self.handle_row_inserts_with_create_type(
+            requests,
+            ctx,
+            statement_executor,
+            AutoCreateTableType::LastNonNull,
+        )
+        .await
+    }
+
+    /// Handles row inserts request with specified [AutoCreateTableType].
+    async fn handle_row_inserts_with_create_type(
         &self,
         mut requests: RowInsertRequests,
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
+        create_type: AutoCreateTableType,
     ) -> Result<Output> {
         // remove empty requests
         requests.inserts.retain(|req| {
@@ -154,12 +183,7 @@ impl Inserter {
         validate_column_count_match(&requests)?;
 
         let table_name_to_ids = self
-            .create_or_alter_tables_on_demand(
-                &requests,
-                &ctx,
-                AutoCreateTableType::Log,
-                statement_executor,
-            )
+            .create_or_alter_tables_on_demand(&requests, &ctx, create_type, statement_executor)
             .await?;
         let inserts = RowToRegion::new(table_name_to_ids, self.partition_manager.as_ref())
             .convert(requests)
@@ -168,7 +192,7 @@ impl Inserter {
         self.do_request(inserts, &ctx).await
     }
 
-    /// Handle row inserts request with metric engine.
+    /// Handles row inserts request with metric engine.
     pub async fn handle_metric_row_inserts(
         &self,
         mut requests: RowInsertRequests,
@@ -334,15 +358,15 @@ impl Inserter {
                 // already know this is not source table
                 Some(None) => continue,
                 _ => {
-                    // TODO(discord9): determine where to store the flow node address in distributed mode
+                    // TODO(discord9): query metasrv for actual peer address
                     let peers = self
                         .table_flownode_set_cache
                         .get(table_id)
                         .await
                         .context(RequestInsertsSnafu)?
                         .unwrap_or_default()
-                        .into_iter()
-                        .map(|id| Peer::new(id, ""))
+                        .values()
+                        .cloned()
                         .collect::<Vec<_>>();
 
                     if !peers.is_empty() {
@@ -443,7 +467,7 @@ impl Inserter {
         for req in &requests.inserts {
             let catalog = ctx.current_catalog();
             let schema = ctx.current_schema();
-            let table = self.get_table(catalog, schema, &req.table_name).await?;
+            let table = self.get_table(catalog, &schema, &req.table_name).await?;
             match table {
                 Some(table) => {
                     let table_info = table.table_info();
@@ -486,21 +510,18 @@ impl Inserter {
                         .await?;
                 }
             }
-            AutoCreateTableType::Physical => {
+            AutoCreateTableType::Physical
+            | AutoCreateTableType::Log
+            | AutoCreateTableType::LastNonNull => {
                 for req in create_tables {
-                    let table = self.create_table(req, ctx, statement_executor).await?;
-                    let table_info = table.table_info();
-                    table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
-                }
-                for alter_expr in alter_tables.into_iter() {
-                    statement_executor
-                        .alter_table_inner(alter_expr, ctx.clone())
+                    let table = self
+                        .create_non_logical_table(
+                            req,
+                            ctx,
+                            statement_executor,
+                            auto_create_table_type.clone(),
+                        )
                         .await?;
-                }
-            }
-            AutoCreateTableType::Log => {
-                for req in create_tables {
-                    let table = self.create_log_table(req, ctx, statement_executor).await?;
                     let table_info = table.table_info();
                     table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
                 }
@@ -525,14 +546,14 @@ impl Inserter {
 
         // check if exist
         if self
-            .get_table(catalog_name, schema_name, &physical_table)
+            .get_table(catalog_name, &schema_name, &physical_table)
             .await?
             .is_some()
         {
             return Ok(());
         }
 
-        let table_reference = TableReference::full(catalog_name, schema_name, &physical_table);
+        let table_reference = TableReference::full(catalog_name, &schema_name, &physical_table);
         info!("Physical metric table `{table_reference}` does not exist, try creating table");
 
         // schema with timestamp and field column
@@ -542,12 +563,14 @@ impl Inserter {
                 datatype: ColumnDataType::TimestampMillisecond as _,
                 semantic_type: SemanticType::Timestamp as _,
                 datatype_extension: None,
+                options: None,
             },
             ColumnSchema {
                 column_name: GREPTIME_VALUE.to_string(),
                 datatype: ColumnDataType::Float64 as _,
                 semantic_type: SemanticType::Field as _,
                 datatype_extension: None,
+                options: None,
             },
         ];
         let create_table_expr = &mut build_create_table_expr(&table_reference, &default_schema)?;
@@ -612,69 +635,62 @@ impl Inserter {
         }))
     }
 
-    /// Create a table with schema from insert request.
-    ///
-    /// To create a metric engine logical table, specify the `on_physical_table` parameter.
-    async fn create_table(
+    /// Creates a non-logical table by create type.
+    /// # Panics
+    /// Panics if `create_type` is `AutoCreateTableType::Logical`.
+    async fn create_non_logical_table(
         &self,
         req: &RowInsertRequest,
         ctx: &QueryContextRef,
         statement_executor: &StatementExecutor,
+        create_type: AutoCreateTableType,
     ) -> Result<TableRef> {
-        let table_ref =
-            TableReference::full(ctx.current_catalog(), ctx.current_schema(), &req.table_name);
+        let options: &[(&str, &str)] = match create_type {
+            AutoCreateTableType::Logical(_) => unreachable!(),
+            AutoCreateTableType::Physical => &[],
+            // Set append_mode to true for log table.
+            // because log tables should keep rows with the same ts and tags.
+            AutoCreateTableType::Log => &[(APPEND_MODE_KEY, "true")],
+            AutoCreateTableType::LastNonNull => &[(MERGE_MODE_KEY, "last_non_null")],
+        };
+        self.create_table_with_options(req, ctx, statement_executor, options)
+            .await
+    }
 
+    /// Creates a table with options.
+    async fn create_table_with_options(
+        &self,
+        req: &RowInsertRequest,
+        ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
+        options: &[(&str, &str)],
+    ) -> Result<TableRef> {
+        let schema = ctx.current_schema();
+        let table_ref = TableReference::full(ctx.current_catalog(), &schema, &req.table_name);
+        // SAFETY: `req.rows` is guaranteed to be `Some` by `handle_row_inserts_with_create_type()`.
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let create_table_expr = &mut build_create_table_expr(&table_ref, request_schema)?;
 
         info!("Table `{table_ref}` does not exist, try creating table");
-
-        // TODO(weny): multiple regions table.
+        for (k, v) in options {
+            create_table_expr
+                .table_options
+                .insert(k.to_string(), v.to_string());
+        }
         let res = statement_executor
             .create_table_inner(create_table_expr, None, ctx.clone())
             .await;
 
         match res {
             Ok(table) => {
-                info!("Successfully created table {}", table_ref,);
+                info!(
+                    "Successfully created table {} with options: {:?}",
+                    table_ref, options
+                );
                 Ok(table)
             }
             Err(err) => {
                 error!(err; "Failed to create table {}", table_ref);
-                Err(err)
-            }
-        }
-    }
-
-    async fn create_log_table(
-        &self,
-        req: &RowInsertRequest,
-        ctx: &QueryContextRef,
-        statement_executor: &StatementExecutor,
-    ) -> Result<TableRef> {
-        let table_ref =
-            TableReference::full(ctx.current_catalog(), ctx.current_schema(), &req.table_name);
-        // SAFETY: `req.rows` is guaranteed to be `Some` by `handle_log_inserts`.
-        let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
-        let create_table_expr = &mut build_create_table_expr(&table_ref, request_schema)?;
-
-        info!("Table `{table_ref}` does not exist, try creating the log table");
-        // Set append_mode to true for log table.
-        // because log tables should keep rows with the same ts and tags.
-        create_table_expr
-            .table_options
-            .insert("append_mode".to_string(), "true".to_string());
-        let res = statement_executor
-            .create_table_inner(create_table_expr, None, ctx.clone())
-            .await;
-
-        match res {
-            Ok(table) => {
-                info!("Successfully created a log table {}", table_ref);
-                Ok(table)
-            }
-            Err(err) => {
-                error!(err; "Failed to create a log table {}", table_ref);
                 Err(err)
             }
         }
@@ -692,7 +708,7 @@ impl Inserter {
         let create_table_exprs = create_tables
             .iter()
             .map(|req| {
-                let table_ref = TableReference::full(catalog_name, schema_name, &req.table_name);
+                let table_ref = TableReference::full(catalog_name, &schema_name, &req.table_name);
                 let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
                 let mut create_table_expr = build_create_table_expr(&table_ref, request_schema)?;
 
@@ -707,7 +723,7 @@ impl Inserter {
             .collect::<Result<Vec<_>>>()?;
 
         let res = statement_executor
-            .create_logical_tables(catalog_name, schema_name, &create_table_exprs, ctx.clone())
+            .create_logical_tables(catalog_name, &schema_name, &create_table_exprs, ctx.clone())
             .await;
 
         match res {

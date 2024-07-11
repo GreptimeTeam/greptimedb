@@ -31,17 +31,21 @@ runs:
   using: composite
   steps:
   - name: Install GreptimeDB operator
-    shell: bash
-    run: |
-      helm repo add greptime https://greptimeteam.github.io/helm-charts/ 
-      helm repo update
-      helm upgrade \
-        --install \
-        --create-namespace \
-        greptimedb-operator greptime/greptimedb-operator \
-        -n greptimedb-admin \
-        --wait \
-        --wait-for-jobs
+    uses: nick-fields/retry@v3
+    with: 
+      timeout_minutes: 3
+      max_attempts: 3
+      shell: bash
+      command: |
+        helm repo add greptime https://greptimeteam.github.io/helm-charts/ 
+        helm repo update
+        helm upgrade \
+          --install \
+          --create-namespace \
+          greptimedb-operator greptime/greptimedb-operator \
+          -n greptimedb-admin \
+          --wait \
+          --wait-for-jobs
   - name: Install GreptimeDB cluster
     shell: bash
     run: | 

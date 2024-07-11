@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
-use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
@@ -26,8 +25,8 @@ use common_meta::heartbeat::handler::{
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info, trace, warn};
-use meta_client::client::{HeartbeatSender, MetaClient, MetaClientBuilder};
-use meta_client::MetaClientOptions;
+use meta_client::client::{HeartbeatSender, MetaClient};
+use meta_client::MetaClientRef;
 use servers::addrs;
 use snafu::ResultExt;
 use tokio::sync::{mpsc, Notify};
@@ -50,7 +49,7 @@ pub struct HeartbeatTask {
     node_epoch: u64,
     peer_addr: String,
     running: Arc<AtomicBool>,
-    meta_client: Arc<MetaClient>,
+    meta_client: MetaClientRef,
     region_server: RegionServer,
     interval: u64,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
@@ -68,7 +67,7 @@ impl HeartbeatTask {
     pub async fn try_new(
         opts: &DatanodeOptions,
         region_server: RegionServer,
-        meta_client: MetaClient,
+        meta_client: MetaClientRef,
     ) -> Result<Self> {
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
@@ -86,7 +85,7 @@ impl HeartbeatTask {
             node_epoch: common_time::util::current_time_millis() as u64,
             peer_addr: addrs::resolve_addr(&opts.grpc.addr, Some(&opts.grpc.hostname)),
             running: Arc::new(AtomicBool::new(false)),
-            meta_client: Arc::new(meta_client),
+            meta_client,
             region_server,
             interval: opts.heartbeat.interval.as_millis() as u64,
             resp_handler_executor,
@@ -158,7 +157,7 @@ impl HeartbeatTask {
         ctx: HeartbeatResponseHandlerContext,
         handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Result<()> {
-        trace!("heartbeat response: {:?}", ctx.response);
+        trace!("Heartbeat response: {:?}", ctx.response);
         handler_executor
             .handle(ctx)
             .await
@@ -245,7 +244,7 @@ impl HeartbeatTask {
                     }
                     _ = &mut sleep => {
                         let build_info = common_version::build_info();
-                        let region_stats = Self::load_region_stats(&region_server_clone).await;
+                        let region_stats = Self::load_region_stats(&region_server_clone);
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
                         let req = HeartbeatRequest {
@@ -313,30 +312,23 @@ impl HeartbeatTask {
         Ok(())
     }
 
-    async fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
-        let regions = region_server.reportable_regions();
-
-        let mut region_stats = Vec::new();
-        for stat in regions {
-            let approximate_bytes = region_server
-                .region_disk_usage(stat.region_id)
-                .await
-                .unwrap_or(0);
-            let region_stat = RegionStat {
+    fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
+        region_server
+            .reportable_regions()
+            .into_iter()
+            .map(|stat| RegionStat {
                 region_id: stat.region_id.as_u64(),
                 engine: stat.engine,
                 role: RegionRole::from(stat.role).into(),
-                approximate_bytes,
-                // TODO(ruihang): scratch more info
+                // TODO(jeremy): w/rcus
                 rcus: 0,
                 wcus: 0,
-            };
-            region_stats.push(region_stat);
-        }
-        region_stats
+                approximate_bytes: region_server.region_disk_usage(stat.region_id).unwrap_or(0),
+            })
+            .collect()
     }
 
-    pub async fn close(&self) -> Result<()> {
+    pub fn close(&self) -> Result<()> {
         let running = self.running.clone();
         if running
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
@@ -347,40 +339,4 @@ impl HeartbeatTask {
 
         Ok(())
     }
-}
-
-/// Create metasrv client instance and spawn heartbeat loop.
-pub async fn new_metasrv_client(
-    node_id: u64,
-    meta_config: &MetaClientOptions,
-) -> Result<MetaClient> {
-    let cluster_id = 0; // TODO(hl): read from config
-    let member_id = node_id;
-
-    let config = ChannelConfig::new()
-        .timeout(meta_config.timeout)
-        .connect_timeout(meta_config.connect_timeout)
-        .tcp_nodelay(meta_config.tcp_nodelay);
-    let channel_manager = ChannelManager::with_config(config.clone());
-    let heartbeat_channel_manager = ChannelManager::with_config(
-        config
-            .timeout(meta_config.timeout)
-            .connect_timeout(meta_config.connect_timeout),
-    );
-
-    let mut meta_client = MetaClientBuilder::datanode_default_options(cluster_id, member_id)
-        .channel_manager(channel_manager)
-        .heartbeat_channel_manager(heartbeat_channel_manager)
-        .build();
-    meta_client
-        .start(&meta_config.metasrv_addrs)
-        .await
-        .context(MetaClientInitSnafu)?;
-
-    // required only when the heartbeat_client is enabled
-    meta_client
-        .ask_leader()
-        .await
-        .context(MetaClientInitSnafu)?;
-    Ok(meta_client)
 }
