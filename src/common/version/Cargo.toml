@@ -12,9 +12,9 @@ codec = ["dep:serde", "dep:schemars"]
 
 [dependencies]
 const_format = "0.2"
-shadow-rs = "0.29"
 schemars = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+shadow-rs = "0.29"
 
 [build-dependencies]
 build-data = "0.2"
