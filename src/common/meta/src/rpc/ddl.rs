@@ -98,7 +98,7 @@ impl DdlTask {
         )
     }
 
-    /// Creates a [`DdlTask`] to alter a logical table.
+    /// Creates a [`DdlTask`] to alter several logical tables.
     pub fn new_alter_logical_tables(table_data: Vec<AlterExpr>) -> Self {
         DdlTask::AlterLogicalTables(
             table_data
