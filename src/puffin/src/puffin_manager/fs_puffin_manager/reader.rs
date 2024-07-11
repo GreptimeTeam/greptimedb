@@ -95,7 +95,7 @@ where
 impl<S, F> FsPuffinReader<S, F>
 where
     S: Stager,
-    F: PuffinFileAccessor,
+    F: PuffinFileAccessor + Clone,
 {
     fn init_blob_to_cache(
         puffin_file_name: String,
@@ -145,14 +145,16 @@ where
             let dir_meta: DirMetadata =
                 serde_json::from_slice(buf.as_slice()).context(DeserializeJsonSnafu)?;
 
-            let mut size = 0;
+            let mut tasks = vec![];
             for file_meta in dir_meta.files {
-                let blob_meta = puffin_metadata.blobs.get(file_meta.blob_index).context(
-                    BlobIndexOutOfBoundSnafu {
+                let blob_meta = puffin_metadata
+                    .blobs
+                    .get(file_meta.blob_index)
+                    .context(BlobIndexOutOfBoundSnafu {
                         index: file_meta.blob_index,
                         max_index: puffin_metadata.blobs.len(),
-                    },
-                )?;
+                    })?
+                    .clone();
                 ensure!(
                     blob_meta.blob_type == file_meta.key,
                     FileKeyNotMatchSnafu {
@@ -161,12 +163,23 @@ where
                     }
                 );
 
-                let reader = file.blob_reader(blob_meta)?;
+                let reader = accessor.reader(&puffin_file_name).await?;
                 let writer = writer_provider.writer(&file_meta.relative_path).await?;
-
-                let compression = blob_meta.compression_codec;
-                size += Self::handle_decompress(reader, writer, compression).await?;
+                let task = common_runtime::spawn_read(async move {
+                    let mut file = PuffinFileReader::new(reader);
+                    let reader = file.blob_reader(&blob_meta)?;
+                    let compression = blob_meta.compression_codec;
+                    let size = Self::handle_decompress(reader, writer, compression).await?;
+                    Ok(size)
+                });
+                tasks.push(task);
             }
+
+            let size = futures::future::try_join_all(tasks.into_iter())
+                .await
+                .into_iter()
+                .flatten()
+                .try_fold(0, |x, y| Ok(x + y?))?;
 
             Ok(size)
         })

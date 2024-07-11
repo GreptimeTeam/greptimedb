@@ -20,7 +20,7 @@ use snafu::ResultExt;
 use tantivy::collector::DocSetCollector;
 use tantivy::query::QueryParser;
 use tantivy::schema::Field;
-use tantivy::{Index, IndexReader};
+use tantivy::{Index, IndexReader, ReloadPolicy};
 
 use crate::fulltext_index::create::TEXT_FIELD_NAME;
 use crate::fulltext_index::error::{Result, TantivyParserSnafu, TantivySnafu};
@@ -40,7 +40,12 @@ impl TantivyFulltextIndexSearcher {
     /// Creates a new `TantivyFulltextIndexSearcher`.
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let index = Index::open_in_dir(path).context(TantivySnafu)?;
-        let reader = index.reader().context(TantivySnafu)?;
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .num_warming_threads(0)
+            .try_into()
+            .context(TantivySnafu)?;
         let default_field = index
             .schema()
             .get_field(TEXT_FIELD_NAME)
