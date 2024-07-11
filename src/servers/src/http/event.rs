@@ -254,14 +254,13 @@ pub async fn log_ingester(
             Deserializer::from_str(&payload).into_iter(),
             ignore_errors,
         )?,
-        ct if ct == ContentType::text() || ct == ContentType::text_utf8() => {
-            let a = payload
+        ct if ct == ContentType::text() || ct == ContentType::text_utf8() => Value::Array(
+            payload
                 .lines()
                 .filter(|line| !line.is_empty())
                 .map(|line| json!({ "line": line }))
-                .collect::<Vec<Value>>();
-            Value::Array(a)
-        }
+                .collect::<Vec<Value>>(),
+        ),
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
     };
 
