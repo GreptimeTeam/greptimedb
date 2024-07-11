@@ -376,7 +376,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                 let state = ctx.state();
 
                 // special handle EXPLAIN plan
-                if !matches!(df_plan, DfLogicalPlan::Explain(_)) {
+                if matches!(df_plan, DfLogicalPlan::Explain(_)) {
                     return state
                         .create_physical_plan(&df_plan)
                         .await
