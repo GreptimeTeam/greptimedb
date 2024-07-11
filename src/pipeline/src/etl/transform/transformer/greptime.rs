@@ -32,6 +32,7 @@ const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 #[derive(Debug, Clone)]
 pub struct GreptimeTransformer {
     transforms: Transforms,
+    schema: Vec<ColumnSchema>,
 }
 
 impl GreptimeTransformer {
@@ -51,9 +52,9 @@ impl GreptimeTransformer {
         }
     }
 
-    fn schemas(&self) -> Result<Vec<ColumnSchema>, String> {
+    fn schemas(transforms: &Transforms) -> Result<Vec<ColumnSchema>, String> {
         let mut schema = vec![];
-        for transform in self.transforms.iter() {
+        for transform in transforms.iter() {
             schema.extend(coerce_columns(transform)?);
         }
         Ok(schema)
@@ -143,9 +144,13 @@ impl Transformer for GreptimeTransformer {
         match timestamp_columns.len() {
             0 => {
                 transforms.push(GreptimeTransformer::default_greptime_timestamp_column());
-                Ok(GreptimeTransformer { transforms })
+                let schema = GreptimeTransformer::schemas(&transforms)?;
+                Ok(GreptimeTransformer { transforms, schema })
             }
-            1 => Ok(GreptimeTransformer { transforms }),
+            1 => {
+                let schema = GreptimeTransformer::schemas(&transforms)?;
+                Ok(GreptimeTransformer { transforms, schema })
+            }
             _ => {
                 let columns: String = timestamp_columns.iter().map(|s| s.to_string()).join(", ");
                 let count = timestamp_columns.len();
@@ -157,15 +162,20 @@ impl Transformer for GreptimeTransformer {
     }
 
     fn transform(&self, value: Value) -> Result<Self::Output, String> {
-        let schema = self.schemas()?;
         match value {
             Value::Map(map) => {
                 let rows = vec![self.transform_map(&map)?];
-                Ok(Rows { schema, rows })
+                Ok(Rows {
+                    schema: self.schema.clone(),
+                    rows,
+                })
             }
             Value::Array(arr) => {
                 let rows = self.transform_array(&arr)?;
-                Ok(Rows { schema, rows })
+                Ok(Rows {
+                    schema: self.schema.clone(),
+                    rows,
+                })
             }
             _ => Err(format!("Expected map or array, found: {}", value)),
         }

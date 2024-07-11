@@ -43,7 +43,7 @@ impl TryFrom<Value> for ValueData {
             Value::Float64(v) => Ok(ValueData::F64Value(v)),
 
             Value::Boolean(v) => Ok(ValueData::BoolValue(v)),
-            Value::String(v) => Ok(ValueData::StringValue(v.clone())),
+            Value::String(v) => Ok(ValueData::StringValue(v)),
 
             Value::Time(Time { nanosecond, .. }) => Ok(ValueData::TimeNanosecondValue(nanosecond)),
 

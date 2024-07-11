@@ -21,6 +21,7 @@ pub mod value;
 
 use itertools::Itertools;
 use transform::{Transformer, Transforms};
+use value::Map;
 use yaml_rust::YamlLoader;
 
 const DESCRIPTION: &str = "description";
@@ -97,13 +98,36 @@ impl<T> Pipeline<T>
 where
     T: Transformer,
 {
-    pub fn exec(&self, val: value::Value) -> Result<T::Output, String> {
-        let mut val = val;
+    fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
+        let mut v = map;
         for processor in self.processors.iter() {
-            val = processor.exec(val)?;
+            v = processor.exec_map(v)?;
         }
+        Ok(v)
+    }
 
-        self.transformer.transform(val)
+    pub fn exec(&self, mut val: value::Value) -> Result<T::Output, String> {
+        let result = match val {
+            value::Value::Map(ref mut map) => {
+                self.exec_map(map)?;
+                val
+            }
+            value::Value::Array(arr) => arr
+                .values
+                .into_iter()
+                .map(|mut v| match v {
+                    value::Value::Map(ref mut map) => {
+                        self.exec_map(map)?;
+                        Ok(v)
+                    }
+                    _ => Err(format!("expected a map, but got {}", v)),
+                })
+                .collect::<Result<Vec<value::Value>, String>>()
+                .map(|values| value::Value::Array(value::Array { values }))?,
+            _ => return Err(format!("expected a map or array, but got {}", val)),
+        };
+
+        self.transformer.transform(result)
     }
 }
 

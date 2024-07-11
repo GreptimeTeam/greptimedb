@@ -232,8 +232,9 @@ mod tests {
         let values: HashMap<String, Value> = [("data".into(), Value::String("1,2".into()))]
             .into_iter()
             .collect();
+        let mut m = Map { values };
 
-        let result = processor.exec(Value::Map(Map { values })).unwrap();
+        let result = processor.exec_map(&mut m).unwrap();
 
         let values = [
             ("data".into(), Value::String("1,2".into())),
@@ -242,9 +243,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let expected = Value::Map(Map { values });
+        let mut expected = Map { values };
 
-        assert_eq!(expected, result);
+        assert_eq!(&mut expected, result);
     }
 
     // test target_fields length larger than the record length
@@ -253,7 +254,7 @@ mod tests {
         let values = [("data".into(), Value::String("1,2".into()))]
             .into_iter()
             .collect();
-        let input = Value::Map(Map { values });
+        let mut input = Map { values };
 
         // with no empty value
         {
@@ -261,7 +262,7 @@ mod tests {
             let field = "data,, a,b,c".parse().unwrap();
             processor.with_fields(Fields::one(field));
 
-            let result = processor.exec(input.clone()).unwrap();
+            let result = processor.exec_map(&mut input).unwrap();
 
             let values = [
                 ("data".into(), Value::String("1,2".into())),
@@ -271,9 +272,9 @@ mod tests {
             ]
             .into_iter()
             .collect();
-            let expected = Value::Map(Map { values });
+            let mut expected = Map { values };
 
-            assert_eq!(expected, result);
+            assert_eq!(&mut expected, result);
         }
 
         // with empty value
@@ -283,7 +284,7 @@ mod tests {
             processor.with_fields(Fields::one(field));
             processor.with_empty_value("default".into());
 
-            let result = processor.exec(input).unwrap();
+            let result = processor.exec_map(&mut input).unwrap();
 
             let values = [
                 ("data".into(), Value::String("1,2".into())),
@@ -293,9 +294,9 @@ mod tests {
             ]
             .into_iter()
             .collect();
-            let expected = Value::Map(Map { values });
+            let mut expected = Map { values };
 
-            assert_eq!(expected, result);
+            assert_eq!(&mut expected, result);
         }
     }
 
@@ -305,13 +306,13 @@ mod tests {
         let values = [("data".into(), Value::String("1,2,3".into()))]
             .into_iter()
             .collect();
-        let input = Value::Map(Map { values });
+        let mut input = Map { values };
 
         let mut processor = CsvProcessor::new();
         let field = "data,,a,b".parse().unwrap();
         processor.with_fields(Fields::one(field));
 
-        let result = processor.exec(input).unwrap();
+        let result = processor.exec_map(&mut input).unwrap();
 
         let values = [
             ("data".into(), Value::String("1,2,3".into())),
@@ -320,8 +321,8 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let expected = Value::Map(Map { values });
+        let mut expected = Map { values };
 
-        assert_eq!(expected, result);
+        assert_eq!(&mut expected, result);
     }
 }

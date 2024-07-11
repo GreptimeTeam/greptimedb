@@ -7784,6 +7784,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "criterion 0.4.0",
  "crossbeam-utils",
  "csv",
  "dashmap",
