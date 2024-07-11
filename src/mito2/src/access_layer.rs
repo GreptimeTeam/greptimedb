@@ -208,23 +208,15 @@ pub(crate) struct SstWriteRequest {
     pub(crate) fulltext_index_config: FulltextIndexConfig,
 }
 
-async fn new_fs_store(root: &str) -> Result<ObjectStore> {
+pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
     let atomic_write_dir = join_dir(root, ".tmp/");
     clean_dir(&atomic_write_dir).await?;
 
     let mut builder = Fs::default();
     builder.root(root).atomic_write_dir(&atomic_write_dir);
-    Ok(ObjectStore::new(builder).context(OpenDalSnafu)?.finish())
-}
+    let store = ObjectStore::new(builder).context(OpenDalSnafu)?.finish();
 
-/// Creates a fs object store with atomic write dir.
-#[allow(unused)]
-pub(crate) async fn new_fs_object_store(root: &str) -> Result<ObjectStore> {
-    Ok(with_instrument_layers(new_fs_store(root).await?, true))
-}
-
-pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
-    Ok(with_instrument_layers(new_fs_store(root).await?, false))
+    Ok(with_instrument_layers(store, false))
 }
 
 /// Clean the directory.
