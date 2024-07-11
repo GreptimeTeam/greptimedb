@@ -139,6 +139,7 @@
 | `region_engine.mito.memtable.index_max_keys_per_shard` | Integer | `8192` | The max number of keys in one shard.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.mito.memtable.data_freeze_threshold` | Integer | `32768` | The max rows of data inside the actively writing buffer in one shard.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.mito.memtable.fork_dictionary_bytes` | String | `1GiB` | Max dictionary bytes.<br/>Only available for `partition_tree` memtable. |
+| `region_engine.file` | -- | -- | Enable the file engine. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
@@ -428,6 +429,7 @@
 | `region_engine.mito.memtable.index_max_keys_per_shard` | Integer | `8192` | The max number of keys in one shard.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.mito.memtable.data_freeze_threshold` | Integer | `32768` | The max rows of data inside the actively writing buffer in one shard.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.mito.memtable.fork_dictionary_bytes` | String | `1GiB` | Max dictionary bytes.<br/>Only available for `partition_tree` memtable. |
+| `region_engine.file` | -- | -- | Enable the file engine. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |

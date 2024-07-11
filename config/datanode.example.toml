@@ -478,6 +478,10 @@ data_freeze_threshold = 32768
 ## Only available for `partition_tree` memtable.
 fork_dictionary_bytes = "1GiB"
 
+[[region_engine]]
+## Enable the file engine.
+[region_engine.file]
+
 ## The logging options.
 [logging]
 ## The directory to store the log files.
