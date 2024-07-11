@@ -49,7 +49,7 @@ pub struct DropFlowProcedure {
 }
 
 impl DropFlowProcedure {
-    pub const TYPE_NAME: &'static str = "metasrv-procedure:DropFlow";
+    pub const TYPE_NAME: &'static str = "metasrv-procedure::DropFlow";
 
     pub fn new(cluster_id: ClusterId, task: DropFlowTask, context: DdlContext) -> Self {
         Self {

@@ -1,7 +1,3 @@
-CREATE DATABASE schema_for_view_test;
-
-USE schema_for_view_test;
-
 CREATE TABLE t1 (n INT, ts TIMESTAMP TIME INDEX);
 
 INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7), (8, 8), (9, 9), (10, 10);
@@ -59,6 +55,6 @@ ALTER TABLE t1 DROP COLUMN n;
 -- See https://github.com/apache/datafusion/issues/6489
 SELECT * FROM v1;
 
-USE public;
+DROP VIEW v1;
 
-DROP DATABASE schema_for_view_test;
+DROP TABLE t1;

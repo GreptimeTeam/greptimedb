@@ -1,7 +1,3 @@
-CREATE DATABASE schema_for_view_test;
-
-USE schema_for_view_test;
-
 CREATE TABLE t1(a INT, b STRING, c TIMESTAMP TIME INDEX);
 
 INSERT INTO t1 VALUES (41, "hello", 1), (42, "world", 2), (43, "greptime", 3);
@@ -38,7 +34,8 @@ SHOW CREATE VIEW v1;
 
 SELECT * FROM v1;
 
+DROP VIEW v1;
 
-USE public;
+DROP TABLE t1;
 
-DROP DATABASE schema_for_view_test;
+SHOW CREATE VIEW v1;

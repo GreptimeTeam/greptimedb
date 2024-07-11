@@ -666,7 +666,6 @@ impl ErrorExt for Error {
             | RouteInfoCorrupted { .. }
             | InvalidProtoMsg { .. }
             | InvalidTableMetadata { .. }
-            | InvalidViewInfo { .. }
             | MoveRegion { .. }
             | Unexpected { .. }
             | TableInfoNotFound { .. }
@@ -706,6 +705,7 @@ impl ErrorExt for Error {
             | Unsupported { .. } => StatusCode::Internal,
 
             ProcedureNotFound { .. }
+            | InvalidViewInfo { .. }
             | PrimaryKeyNotFound { .. }
             | EmptyKey { .. }
             | InvalidEngineType { .. }

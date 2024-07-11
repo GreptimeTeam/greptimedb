@@ -1,9 +1,4 @@
 --- test CREATE VIEW ---
-
-CREATE DATABASE schema_for_view_test;
-
-USE schema_for_view_test;
-
 CREATE TABLE test_table(a STRING, ts TIMESTAMP TIME INDEX);
 
 CREATE VIEW test_view;
@@ -47,6 +42,10 @@ SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'test_view';
 
 SELECT * FROM test_view LIMIT 10;
 
-USE public;
+DROP VIEW test_view;
 
-DROP DATABASE schema_for_view_test;
+DROP TABLE test_table;
+
+SELECT * FROM test_view LIMIT 10;
+
+SHOW TABLES;
