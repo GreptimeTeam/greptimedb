@@ -153,7 +153,7 @@ impl ScanHintRule {
 /// Traverse and fetch hints.
 #[derive(Default)]
 struct ScanHintVisitor {
-    /// The most closest order requirement to the leaf node.
+    /// The closest order requirement to the leaf node.
     order_expr: Option<Vec<Sort>>,
     /// Row selection on time series distribution.
     /// This field stores saved `group_by` columns when all aggregate functions are `last_value`
