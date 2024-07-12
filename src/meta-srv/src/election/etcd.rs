@@ -256,7 +256,11 @@ impl Election for EtcdElection {
                 }
             }
 
-            if self.is_leader.load(Ordering::Relaxed) {
+            if self
+                .is_leader
+                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
                 if let Err(e) = self
                     .leader_watcher
                     .send(LeaderChangeMessage::StepDown(Arc::new(leader.clone())))
@@ -264,7 +268,6 @@ impl Election for EtcdElection {
                     error!(e; "Failed to send leader change message");
                 }
             }
-            self.is_leader.store(false, Ordering::Relaxed);
         }
 
         Ok(())
