@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 use std::time::Instant;
@@ -283,11 +282,7 @@ fn extract_pipeline_value_by_content_type(
             let arr = payload
                 .lines()
                 .filter(|line| !line.is_empty())
-                .map(|line| {
-                    let mut map = HashMap::new();
-                    map.insert("line".to_string(), PipelineValue::String(line.to_string()));
-                    PipelineValue::Map(map.into())
-                })
+                .map(|line| PipelineValue::String(line.to_string()))
                 .collect::<Vec<PipelineValue>>();
             PipelineValue::Array(arr.into())
         }
@@ -341,4 +336,36 @@ pub type LogValidatorRef = Arc<dyn LogValidator + Send + Sync>;
 pub struct LogState {
     pub log_handler: LogHandlerRef,
     pub log_validator: Option<LogValidatorRef>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_transform_ndjson() {
+        let s = "{\"a\": 1}\n{\"b\": 2}";
+        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
+            .unwrap()
+            .to_string();
+        assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
+
+        let s = "{\"a\": 1}";
+        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
+            .unwrap()
+            .to_string();
+        assert_eq!(a, "[{\"a\":1}]");
+
+        let s = "[{\"a\": 1}]";
+        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
+            .unwrap()
+            .to_string();
+        assert_eq!(a, "[{\"a\":1}]");
+
+        let s = "[{\"a\": 1}, {\"b\": 2}]";
+        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
+            .unwrap()
+            .to_string();
+        assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
+    }
 }
