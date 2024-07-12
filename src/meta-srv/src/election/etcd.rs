@@ -235,8 +235,6 @@ impl Election for EtcdElection {
             let mut keep_alive_interval =
                 tokio::time::interval(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS));
             loop {
-                let _ = keep_alive_interval.tick().await;
-
                 // The keep alive operation MUST be done in `META_KEEP_ALIVE_INTERVAL_SECS`.
                 match timeout(
                     Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS),
@@ -245,7 +243,7 @@ impl Election for EtcdElection {
                 .await
                 {
                     Ok(Ok(())) => {
-                        // Do nothing
+                        let _ = keep_alive_interval.tick().await;
                     }
                     Ok(Err(err)) => {
                         error!(err; "Failed to keep alive");
