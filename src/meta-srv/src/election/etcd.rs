@@ -232,13 +232,13 @@ impl Election for EtcdElection {
                 .await
                 .context(error::EtcdFailedSnafu)?;
 
-            let mut keep_alive_interval =
-                tokio::time::interval(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS));
+            let keep_lease_duration = Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS);
+            let mut keep_alive_interval = tokio::time::interval(keep_lease_duration);
             keep_alive_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 // The keep alive operation MUST be done in `META_KEEP_ALIVE_INTERVAL_SECS`.
                 match timeout(
-                    Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS),
+                    keep_lease_duration,
                     self.keep_alive(&mut keeper, &mut receiver, leader),
                 )
                 .await
