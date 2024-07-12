@@ -233,7 +233,7 @@ impl StartCommand {
             &opts.component.tracing,
             None,
         );
-        log_versions(version!(), short_version!());
+        log_versions(version(), short_version());
 
         info!("Metasrv start command: {:#?}", self);
         info!("Metasrv options: {:#?}", opts);
@@ -296,7 +296,7 @@ mod tests {
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"
-            
+
             [failure_detector]
             threshold = 8.0
             min_std_deviation = "100ms"

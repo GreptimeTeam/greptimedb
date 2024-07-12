@@ -22,6 +22,7 @@ use std::time::Duration;
 use common_runtime::error::{Error, Result};
 use common_runtime::{BoxedTaskFunction, RepeatedTask, TaskFunction};
 use common_telemetry::{debug, info};
+use common_version::build_info;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 
@@ -114,11 +115,11 @@ pub enum Mode {
 #[async_trait::async_trait]
 pub trait Collector {
     fn get_version(&self) -> String {
-        env!("CARGO_PKG_VERSION").to_string()
+        build_info().version.to_string()
     }
 
     fn get_git_hash(&self) -> String {
-        env!("GIT_COMMIT").to_string()
+        build_info().commit.to_string()
     }
 
     fn get_os(&self) -> String {
@@ -286,6 +287,7 @@ mod tests {
     use std::time::Duration;
 
     use common_test_util::ports;
+    use common_version::build_info;
     use hyper::service::{make_service_fn, service_fn};
     use hyper::Server;
     use reqwest::{Client, Response};
@@ -431,8 +433,8 @@ mod tests {
         let body = response.json::<StatisticData>().await.unwrap();
         assert_eq!(env::consts::ARCH, body.arch);
         assert_eq!(env::consts::OS, body.os);
-        assert_eq!(env!("CARGO_PKG_VERSION"), body.version);
-        assert_eq!(env!("GIT_COMMIT"), body.git_commit);
+        assert_eq!(build_info().version, body.version);
+        assert_eq!(build_info().commit, body.git_commit);
         assert_eq!(Mode::Standalone, body.mode);
         assert_eq!(1, body.nodes.unwrap());
 

@@ -83,12 +83,10 @@ tikv-jemallocator = "0.5"
 [dev-dependencies]
 client = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
+common-version.workspace = true
 serde.workspace = true
 temp-env = "0.3"
 tempfile.workspace = true
 
 [target.'cfg(not(windows))'.dev-dependencies]
 rexpect = "0.5"
-
-[build-dependencies]
-common-version.workspace = true
