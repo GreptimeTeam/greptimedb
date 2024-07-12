@@ -51,4 +51,3 @@ drop flow filter_numbers;
 drop table out_num_cnt;
 
 drop table numbers_input;
-

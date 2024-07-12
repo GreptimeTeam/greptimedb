@@ -170,7 +170,7 @@ fn build_proto_lit(
 /// specially, if a argument is a literal, the replacement will not happen
 fn rewrite_scalar_function(
     f: &ScalarFunction,
-    arg_exprs_typed: &[TypedExpr],
+    arg_typed_exprs: &[TypedExpr],
 ) -> Result<ScalarFunction, Error> {
     let mut f_rewrite = f.clone();
     for (idx, raw_expr) in f_rewrite.arguments.iter_mut().enumerate() {
@@ -179,12 +179,12 @@ fn rewrite_scalar_function(
         // in both world to understand if it results in a literal
         match (
             is_proto_literal(raw_expr),
-            arg_exprs_typed[idx].expr.is_literal(),
+            arg_typed_exprs[idx].expr.is_literal(),
         ) {
             (false, false) => *raw_expr = proto_col(idx),
             (true, _) => (),
             (false, true) => {
-                if let ScalarExpr::Literal(val, ty) = &arg_exprs_typed[idx].expr {
+                if let ScalarExpr::Literal(val, ty) = &arg_typed_exprs[idx].expr {
                     let df_val = val
                         .try_to_scalar_value(ty)
                         .map_err(BoxedError::new)
@@ -196,7 +196,7 @@ fn rewrite_scalar_function(
                     UnexpectedSnafu {
                         reason: format!(
                             "Expect value to be literal, but found {:?}",
-                            arg_exprs_typed[idx].expr
+                            arg_typed_exprs[idx].expr
                         ),
                     }
                     .fail()?
@@ -210,16 +210,16 @@ fn rewrite_scalar_function(
 impl TypedExpr {
     pub async fn from_substrait_to_datafusion_scalar_func(
         f: &ScalarFunction,
-        arg_exprs_typed: Vec<TypedExpr>,
+        arg_typed_exprs: Vec<TypedExpr>,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
-        let (arg_exprs, arg_types): (Vec<_>, Vec<_>) = arg_exprs_typed
+        let (arg_exprs, arg_types): (Vec<_>, Vec<_>) = arg_typed_exprs
             .clone()
             .into_iter()
             .map(|e| (e.expr, e.typ))
             .unzip();
         debug!("Before rewrite: {:?}", f);
-        let f_rewrite = rewrite_scalar_function(f, &arg_exprs_typed)?;
+        let f_rewrite = rewrite_scalar_function(f, &arg_typed_exprs)?;
         debug!("After rewrite: {:?}", f_rewrite);
         let input_schema = RelationType::new(arg_types).into_unnamed();
         let raw_fn =

@@ -494,17 +494,14 @@ impl FlowWorkerManager {
     pub async fn run(&self, mut shutdown: Option<broadcast::Receiver<()>>) {
         debug!("Starting to run");
         let default_interval = Duration::from_secs(1);
-        let mut avg_spd = 0; //rows/sec
+        let mut avg_spd = 0; // rows/sec
         let mut since_last_run = tokio::time::Instant::now();
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
-            let row_cnt = match self.run_available(true).await {
-                Err(err) => {
-                    common_telemetry::error!(err;"Run available errors");
-                    0
-                }
-                Ok(r) => r,
-            };
+            let row_cnt = self.run_available(true).await.unwrap_or_else(|err| {
+                common_telemetry::error!(err;"Run available errors");
+                0
+            });
 
             // TODO(discord9): error handling
             if let Err(err) = self.send_writeback_requests().await {

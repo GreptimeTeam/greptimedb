@@ -191,93 +191,104 @@ pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Erro
             )),
             CDT::interval_year_month_datatype(),
         ),
-        Some(LiteralType::UserDefined(UserDefined {
-            val: Some(Val::Value(val)),
-            type_reference,
-            ..
-        })) => {
-            fn from_bytes<T: FromBytes>(i: &Bytes) -> Result<T, Error>
-            where
-                for<'a> &'a <T as num_traits::FromBytes>::Bytes:
-                    std::convert::TryFrom<&'a [u8], Error = TryFromSliceError>,
-            {
-                let (int_bytes, _rest) = i.split_at(std::mem::size_of::<T>());
-                let i = T::from_le_bytes(int_bytes.try_into().map_err(|e| {
-                    UnexpectedSnafu {
-                        reason: format!(
-                            "Expect slice to be {} bytes, found {} bytes, error={:?}",
-                            std::mem::size_of::<T>(),
-                            int_bytes.len(),
-                            e
-                        ),
-                    }
-                    .build()
-                })?);
-                Ok(i)
-            }
-            // see https://github.com/apache/datafusion/blob/146b679aa19c7749cc73d0c27440419d6498142b/datafusion/substrait/src/logical_plan/producer.rs#L1957
-            // for interval type's transform to substrait
-            match *type_reference {
-                INTERVAL_YEAR_MONTH_TYPE_REF => {
-                    ensure!(
-                        val.type_url == INTERVAL_YEAR_MONTH_TYPE_URL,
-                        UnexpectedSnafu {
-                            reason: format!(
-                                "Expect {}, found {} in type_url",
-                                INTERVAL_YEAR_MONTH_TYPE_URL, val.type_url
-                            )
-                        }
-                    );
-                    let i: i32 = from_bytes(&val.value)?;
-                    let value_interval = common_time::Interval::from_year_month(i);
-                    (
-                        Value::Interval(value_interval),
-                        CDT::interval_year_month_datatype(),
-                    )
-                }
-                INTERVAL_MONTH_DAY_NANO_TYPE_REF => {
-                    ensure!(
-                        val.type_url == INTERVAL_MONTH_DAY_NANO_TYPE_URL,
-                        UnexpectedSnafu {
-                            reason: format!(
-                                "Expect {}, found {} in type_url",
-                                INTERVAL_MONTH_DAY_NANO_TYPE_URL, val.type_url
-                            )
-                        }
-                    );
-                    let i: i128 = from_bytes(&val.value)?;
-                    let (months, days, nsecs) = ((i >> 96) as i32, (i >> 64) as i32, i as i64);
-                    let value_interval =
-                        common_time::Interval::from_month_day_nano(months, days, nsecs);
-                    (
-                        Value::Interval(value_interval),
-                        CDT::interval_month_day_nano_datatype(),
-                    )
-                }
-                INTERVAL_DAY_TIME_TYPE_REF => {
-                    ensure!(
-                        val.type_url == INTERVAL_DAY_TIME_TYPE_URL,
-                        UnexpectedSnafu {
-                            reason: format!(
-                                "Expect {}, found {} in type_url",
-                                INTERVAL_DAY_TIME_TYPE_URL, val.type_url
-                            )
-                        }
-                    );
-                    let i: i64 = from_bytes(&val.value)?;
-                    let (days, millis) = ((i >> 32) as i32, i as i32);
-                    let value_interval = common_time::Interval::from_day_time(days, millis);
-                    (
-                        Value::Interval(value_interval),
-                        CDT::interval_day_time_datatype(),
-                    )
-                }
-                _ => return not_impl_err!("unsupported literal_type: {:?}", &lit.literal_type)?,
-            }
+        Some(LiteralType::UserDefined(user_defined)) => {
+            from_substrait_user_defined_type(user_defined)?
         }
         _ => not_impl_err!("unsupported literal_type: {:?}", &lit.literal_type)?,
     };
     Ok(scalar_value)
+}
+
+fn from_bytes<T: FromBytes>(i: &Bytes) -> Result<T, Error>
+where
+    for<'a> &'a <T as num_traits::FromBytes>::Bytes:
+        std::convert::TryFrom<&'a [u8], Error = TryFromSliceError>,
+{
+    let (int_bytes, _rest) = i.split_at(std::mem::size_of::<T>());
+    let i = T::from_le_bytes(int_bytes.try_into().map_err(|e| {
+        UnexpectedSnafu {
+            reason: format!(
+                "Expect slice to be {} bytes, found {} bytes, error={:?}",
+                std::mem::size_of::<T>(),
+                int_bytes.len(),
+                e
+            ),
+        }
+        .build()
+    })?);
+    Ok(i)
+}
+
+fn from_substrait_user_defined_type(user_defined: &UserDefined) -> Result<(Value, CDT), Error> {
+    if let UserDefined {
+        type_reference,
+        type_parameters: _,
+        val: Some(Val::Value(val)),
+    } = user_defined
+    {
+        // see https://github.com/apache/datafusion/blob/146b679aa19c7749cc73d0c27440419d6498142b/datafusion/substrait/src/logical_plan/producer.rs#L1957
+        // for interval type's transform to substrait
+        let ret = match *type_reference {
+            INTERVAL_YEAR_MONTH_TYPE_REF => {
+                ensure!(
+                    val.type_url == INTERVAL_YEAR_MONTH_TYPE_URL,
+                    UnexpectedSnafu {
+                        reason: format!(
+                            "Expect {}, found {} in type_url",
+                            INTERVAL_YEAR_MONTH_TYPE_URL, val.type_url
+                        )
+                    }
+                );
+                let i: i32 = from_bytes(&val.value)?;
+                let value_interval = common_time::Interval::from_year_month(i);
+                (
+                    Value::Interval(value_interval),
+                    CDT::interval_year_month_datatype(),
+                )
+            }
+            INTERVAL_MONTH_DAY_NANO_TYPE_REF => {
+                ensure!(
+                    val.type_url == INTERVAL_MONTH_DAY_NANO_TYPE_URL,
+                    UnexpectedSnafu {
+                        reason: format!(
+                            "Expect {}, found {} in type_url",
+                            INTERVAL_MONTH_DAY_NANO_TYPE_URL, val.type_url
+                        )
+                    }
+                );
+                let i: i128 = from_bytes(&val.value)?;
+                let (months, days, nsecs) = ((i >> 96) as i32, (i >> 64) as i32, i as i64);
+                let value_interval =
+                    common_time::Interval::from_month_day_nano(months, days, nsecs);
+                (
+                    Value::Interval(value_interval),
+                    CDT::interval_month_day_nano_datatype(),
+                )
+            }
+            INTERVAL_DAY_TIME_TYPE_REF => {
+                ensure!(
+                    val.type_url == INTERVAL_DAY_TIME_TYPE_URL,
+                    UnexpectedSnafu {
+                        reason: format!(
+                            "Expect {}, found {} in type_url",
+                            INTERVAL_DAY_TIME_TYPE_URL, val.type_url
+                        )
+                    }
+                );
+                let i: i64 = from_bytes(&val.value)?;
+                let (days, millis) = ((i >> 32) as i32, i as i32);
+                let value_interval = common_time::Interval::from_day_time(days, millis);
+                (
+                    Value::Interval(value_interval),
+                    CDT::interval_day_time_datatype(),
+                )
+            }
+            _ => return not_impl_err!("unsupported user defined type: {:?}", user_defined)?,
+        };
+        Ok(ret)
+    } else {
+        not_impl_err!("Expect val to be Some(...)")
+    }
 }
 
 /// convert a Substrait type into a ConcreteDataType
