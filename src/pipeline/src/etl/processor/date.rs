@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
@@ -31,7 +34,7 @@ const LOCALE_NAME: &str = "locale";
 const OUTPUT_FORMAT_NAME: &str = "output_format"; // default with input format
 
 lazy_static! {
-    static ref DEFAULT_FORMATS: Vec<String> = vec![
+    static ref DEFAULT_FORMATS: Vec<Arc<String>> = vec![
                     // timezone with colon
                     "%Y-%m-%dT%H:%M:%S%:z",
                     "%Y-%m-%dT%H:%M:%S%.3f%:z",
@@ -50,15 +53,15 @@ lazy_static! {
                     "%Y-%m-%dT%H:%M:%S%.9f",
                 ]
                 .iter()
-                .map(|s| s.to_string())
+                .map(|s| Arc::new(s.to_string()))
                 .collect();
 }
 
 #[derive(Debug, Default)]
-struct Formats(Vec<String>);
+struct Formats(Vec<Arc<String>>);
 
 impl Formats {
-    fn new(mut formats: Vec<String>) -> Self {
+    fn new(mut formats: Vec<Arc<String>>) -> Self {
         formats.sort();
         formats.dedup();
         Formats(formats)
@@ -66,7 +69,7 @@ impl Formats {
 }
 
 impl std::ops::Deref for Formats {
-    type Target = Vec<String>;
+    type Target = Vec<Arc<String>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -78,9 +81,9 @@ pub struct DateProcessor {
     fields: Fields,
 
     formats: Formats,
-    timezone: Option<String>,
-    locale: Option<String>, // to support locale
-    output_format: Option<String>,
+    timezone: Option<Arc<String>>,
+    locale: Option<Arc<String>>, // to support locale
+    output_format: Option<Arc<String>>,
 
     ignore_missing: bool,
     // description
@@ -95,7 +98,7 @@ impl DateProcessor {
         self.fields = fields
     }
 
-    fn with_formats(&mut self, v: Option<Vec<String>>) {
+    fn with_formats(&mut self, v: Option<Vec<Arc<String>>>) {
         let v = match v {
             Some(v) if !v.is_empty() => v,
             _ => DEFAULT_FORMATS.clone(),
@@ -107,19 +110,19 @@ impl DateProcessor {
 
     fn with_timezone(&mut self, timezone: String) {
         if !timezone.is_empty() {
-            self.timezone = Some(timezone);
+            self.timezone = Some(Arc::new(timezone));
         }
     }
 
     fn with_locale(&mut self, locale: String) {
         if !locale.is_empty() {
-            self.locale = Some(locale);
+            self.locale = Some(Arc::new(locale));
         }
     }
 
     fn with_output_format(&mut self, output_format: String) {
         if !output_format.is_empty() {
-            self.output_format = Some(output_format);
+            self.output_format = Some(Arc::new(output_format));
         }
     }
 
@@ -127,7 +130,7 @@ impl DateProcessor {
         self.ignore_missing = ignore_missing;
     }
 
-    fn parse(&self, val: &str) -> Result<Time, String> {
+    fn parse<'val>(&self, val: &'val str) -> Result<Time, String> {
         let mut tz = Tz::UTC;
         if let Some(timezone) = &self.timezone {
             tz = timezone.parse::<Tz>().map_err(|e| e.to_string())?;
@@ -135,8 +138,8 @@ impl DateProcessor {
 
         for fmt in self.formats.iter() {
             if let Ok(ns) = try_parse(val, fmt, tz) {
-                let mut t = Time::new(val, ns);
-                t.with_format(fmt);
+                let mut t = Time::new(Cow::Borrowed(val), ns);
+                t.with_format(Some(fmt.clone()));
                 t.with_timezone(self.timezone.clone());
                 return Ok(t);
             }
@@ -178,7 +181,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessor {
 
                 FORMATS_NAME => {
                     let formats = yaml_strings(v, FORMATS_NAME)?;
-                    formats_opt = Some(formats);
+                    formats_opt = Some(formats.into_iter().map(Arc::new).collect());
                 }
                 TIMEZONE_NAME => {
                     processor.with_timezone(yaml_string(v, TIMEZONE_NAME)?);
@@ -226,6 +229,29 @@ impl Processor for DateProcessor {
             )),
         }
     }
+
+    fn ignore_processor_array_failure(&self) -> bool {
+        true
+    }
+
+    fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
+        for ff @ Field { field, .. } in self.fields().iter() {
+            match map.get(field) {
+                Some(v) => {
+                    map.extend(self.exec_field(v, ff)?);
+                }
+                None if self.ignore_missing() => {}
+                None => {
+                    return Err(std::format!(
+                        "{} processor: field '{field}' is required but missing in {map}",
+                        self.kind(),
+                    ))
+                }
+            }
+        }
+
+        Ok(map)
+    }
 }
 
 /// try to parse val with timezone first, if failed, parse without timezone
@@ -244,6 +270,8 @@ fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<i64, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use chrono_tz::Asia::Tokyo;
 
     use crate::etl::processor::date::{try_parse, DateProcessor};
@@ -299,7 +327,7 @@ mod tests {
             "%Y-%m-%dT%H:%M:%SZ",
         ]
         .into_iter()
-        .map(|s| s.to_string())
+        .map(|s| Arc::new(s.to_string()))
         .collect();
         processor.with_formats(Some(formats));
 

@@ -61,10 +61,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
         true
     }
 
-    /// default behavior does nothing and returns the input value
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        Ok(Map::one(field.get_field(), val.clone()))
-    }
+    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String>;
 
     fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
         for ff @ Field { field, .. } in self.fields().iter() {
