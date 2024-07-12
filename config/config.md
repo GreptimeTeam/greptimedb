@@ -259,6 +259,7 @@
 | `use_memory_store` | Bool | `false` | Store data in memory. |
 | `enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. |
 | `store_key_prefix` | String | `""` | If it's not empty, the metasrv will store all data with this key prefix. |
+| `enable_region_failover` | Bool | `false` | Whether to enable region failover.<br/>This feature is only available on GreptimeDB running on cluster mode and<br/>- Using Remote WAL<br/>- Using shared storage (e.g., s3). |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
