@@ -84,56 +84,16 @@ impl ScanHintRule {
                     {
                         // set order_hint
                         if let Some(order_expr) = &visitor.order_expr {
-                            let mut opts = Vec::with_capacity(order_expr.len());
-                            for sort in order_expr {
-                                let name = match sort.expr.try_as_col() {
-                                    Some(col) => col.name.clone(),
-                                    None => return Ok(Transformed::no(plan)),
-                                };
-                                opts.push(OrderOption {
-                                    name,
-                                    options: SortOptions {
-                                        descending: !sort.asc,
-                                        nulls_first: sort.nulls_first,
-                                    },
-                                })
-                            }
-                            adapter.with_ordering_hint(&opts);
+                            Self::set_order_hint(adapter, order_expr);
                         }
 
                         // set time series selector hint
                         if let Some((group_by_cols, order_by_col)) = &visitor.ts_row_selector {
-                            let mut should_set_selector_hint = true;
-                            let region_metadata = adapter.region_metadata();
-                            // check if order_by column is time index
-                            if let Some(column_metadata) =
-                                region_metadata.column_by_name(&order_by_col.name)
-                            {
-                                if column_metadata.semantic_type != SemanticType::Timestamp {
-                                    should_set_selector_hint = false;
-                                }
-                            } else {
-                                should_set_selector_hint = false;
-                            }
-
-                            // check if all group_by columns are primary key
-                            for col in group_by_cols {
-                                let Some(column_metadata) =
-                                    region_metadata.column_by_name(&col.name)
-                                else {
-                                    should_set_selector_hint = false;
-                                    break;
-                                };
-                                if column_metadata.semantic_type != SemanticType::Tag {
-                                    should_set_selector_hint = false;
-                                    break;
-                                }
-                            }
-
-                            if should_set_selector_hint {
-                                adapter
-                                    .with_time_series_selector_hint(TimeSeriesRowSelector::LastRow);
-                            }
+                            Self::set_time_series_row_selector_hint(
+                                adapter,
+                                group_by_cols,
+                                order_by_col,
+                            );
                         }
 
                         transformed = true;
@@ -146,6 +106,57 @@ impl ScanHintRule {
                 }
             }
             _ => Ok(Transformed::no(plan)),
+        }
+    }
+
+    fn set_order_hint(adapter: &DummyTableProvider, order_expr: &Vec<Sort>) {
+        let mut opts = Vec::with_capacity(order_expr.len());
+        for sort in order_expr {
+            let name = match sort.expr.try_as_col() {
+                Some(col) => col.name.clone(),
+                None => return,
+            };
+            opts.push(OrderOption {
+                name,
+                options: SortOptions {
+                    descending: !sort.asc,
+                    nulls_first: sort.nulls_first,
+                },
+            });
+        }
+        adapter.with_ordering_hint(&opts);
+    }
+
+    fn set_time_series_row_selector_hint(
+        adapter: &DummyTableProvider,
+        group_by_cols: &HashSet<Column>,
+        order_by_col: &Column,
+    ) {
+        let region_metadata = adapter.region_metadata();
+        let mut should_set_selector_hint = true;
+        // check if order_by column is time index
+        if let Some(column_metadata) = region_metadata.column_by_name(&order_by_col.name) {
+            if column_metadata.semantic_type != SemanticType::Timestamp {
+                should_set_selector_hint = false;
+            }
+        } else {
+            should_set_selector_hint = false;
+        }
+
+        // check if all group_by columns are primary key
+        for col in group_by_cols {
+            let Some(column_metadata) = region_metadata.column_by_name(&col.name) else {
+                should_set_selector_hint = false;
+                break;
+            };
+            if column_metadata.semantic_type != SemanticType::Tag {
+                should_set_selector_hint = false;
+                break;
+            }
+        }
+
+        if should_set_selector_hint {
+            adapter.with_time_series_selector_hint(TimeSeriesRowSelector::LastRow);
         }
     }
 }
