@@ -13,9 +13,9 @@
 // limitations under the License.
 
 pub mod count_wildcard;
-pub mod order_hint;
 pub mod parallelize_scan;
 pub mod remove_duplicate;
+pub mod scan_hint;
 pub mod string_normalization;
 #[cfg(test)]
 pub(crate) mod test_util;
