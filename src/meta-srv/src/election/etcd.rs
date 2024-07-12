@@ -23,7 +23,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
-use tokio::time::timeout;
+use tokio::time::{timeout, MissedTickBehavior};
 
 use crate::election::{Election, LeaderChangeMessage, CANDIDATES_ROOT, ELECTION_KEY};
 use crate::error;
@@ -234,6 +234,7 @@ impl Election for EtcdElection {
 
             let mut keep_alive_interval =
                 tokio::time::interval(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS));
+            keep_alive_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 // The keep alive operation MUST be done in `META_KEEP_ALIVE_INTERVAL_SECS`.
                 match timeout(
