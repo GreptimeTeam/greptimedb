@@ -12,21 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_telemetry::error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Time {
     pub value: String,
     pub nanosecond: i64,
-    pub format: Option<String>,
-    pub timezone: Option<String>,
+    pub format: Option<Arc<String>>,
+    pub timezone: Option<Arc<String>>,
     // TODO(yuanbohan): support locale
     // pub locale: Option<String>,
 }
 
 impl Time {
-    pub(crate) fn new(v: impl Into<String>, nanosecond: i64) -> Self {
-        let value = v.into();
+    pub(crate) fn new(value: impl Into<String>, nanosecond: i64) -> Self {
+        let value = value.into();
         Time {
             value,
             nanosecond,
@@ -35,11 +37,11 @@ impl Time {
         }
     }
 
-    pub(crate) fn with_format(&mut self, format: impl Into<String>) {
-        self.format = Some(format.into());
+    pub(crate) fn with_format(&mut self, format: Option<Arc<String>>) {
+        self.format = format;
     }
 
-    pub(crate) fn with_timezone(&mut self, timezone: Option<String>) {
+    pub(crate) fn with_timezone(&mut self, timezone: Option<Arc<String>>) {
         self.timezone = timezone;
     }
 
