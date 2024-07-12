@@ -45,10 +45,10 @@ use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
 use crate::sst::file::{overlaps, FileHandle, FileMeta};
-use crate::sst::index::fulltext_index::applier::builder::SstIndexApplierBuilder as FulltextIndexApplierBuilder;
-use crate::sst::index::fulltext_index::applier::SstIndexApplierRef as FulltextIndexApplier;
-use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder as InvertedIndexApplierBuilder;
-use crate::sst::index::inverted_index::applier::SstIndexApplierRef as InvertedIndexApplier;
+use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
+use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
+use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::FileRange;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
@@ -334,7 +334,7 @@ impl ScanRegion {
     }
 
     /// Use the latest schema to build the inveretd index applier.
-    fn build_invereted_index_applier(&self) -> Option<InvertedIndexApplier> {
+    fn build_invereted_index_applier(&self) -> Option<InvertedIndexApplierRef> {
         if self.ignore_inverted_index {
             return None;
         }
@@ -376,7 +376,7 @@ impl ScanRegion {
     }
 
     /// Use the latest schema to build the fulltext index applier.
-    fn build_fulltext_index_applier(&self) -> Option<FulltextIndexApplier> {
+    fn build_fulltext_index_applier(&self) -> Option<FulltextIndexApplierRef> {
         if self.ignore_fulltext_index {
             return None;
         }
@@ -436,8 +436,8 @@ pub(crate) struct ScanInput {
     /// Parallelism to scan data.
     pub(crate) parallelism: ScanParallism,
     /// Index appliers.
-    inverted_index_applier: Option<InvertedIndexApplier>,
-    fulltext_index_applier: Option<FulltextIndexApplier>,
+    inverted_index_applier: Option<InvertedIndexApplierRef>,
+    fulltext_index_applier: Option<FulltextIndexApplierRef>,
     /// Start time of the query.
     pub(crate) query_start: Option<Instant>,
     /// The region is using append mode.
@@ -527,7 +527,7 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_inverted_index_applier(
         mut self,
-        applier: Option<InvertedIndexApplier>,
+        applier: Option<InvertedIndexApplierRef>,
     ) -> Self {
         self.inverted_index_applier = applier;
         self
@@ -537,7 +537,7 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_fulltext_index_applier(
         mut self,
-        applier: Option<FulltextIndexApplier>,
+        applier: Option<FulltextIndexApplierRef>,
     ) -> Self {
         self.fulltext_index_applier = applier;
         self

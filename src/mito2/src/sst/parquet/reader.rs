@@ -52,8 +52,8 @@ use crate::metrics::{
 use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, SortField};
 use crate::sst::file::FileHandle;
-use crate::sst::index::fulltext_index::applier::SstIndexApplierRef as FulltextIndexApplier;
-use crate::sst::index::inverted_index::applier::SstIndexApplierRef as InvertedIndexApplier;
+use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
+use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::metadata::MetadataLoader;
@@ -82,8 +82,8 @@ pub struct ParquetReaderBuilder {
     /// Manager that caches SST data.
     cache_manager: Option<CacheManagerRef>,
     /// Index appliers.
-    inverted_index_applier: Option<InvertedIndexApplier>,
-    fulltext_index_applier: Option<FulltextIndexApplier>,
+    inverted_index_applier: Option<InvertedIndexApplierRef>,
+    fulltext_index_applier: Option<FulltextIndexApplierRef>,
     /// Expected metadata of the region while reading the SST.
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
@@ -145,7 +145,7 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub(crate) fn inverted_index_applier(
         mut self,
-        index_applier: Option<InvertedIndexApplier>,
+        index_applier: Option<InvertedIndexApplierRef>,
     ) -> Self {
         self.inverted_index_applier = index_applier;
         self
@@ -155,7 +155,7 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub(crate) fn fulltext_index_applier(
         mut self,
-        index_applier: Option<FulltextIndexApplier>,
+        index_applier: Option<FulltextIndexApplierRef>,
     ) -> Self {
         self.fulltext_index_applier = index_applier;
         self

@@ -306,7 +306,7 @@ mod tests {
     use super::*;
     use crate::cache::index::InvertedIndexCache;
     use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
-    use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
+    use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
 
@@ -416,7 +416,7 @@ mod tests {
         move |expr| {
             let _d = &d;
             let cache = Arc::new(InvertedIndexCache::new(10, 10));
-            let applier = SstIndexApplierBuilder::new(
+            let applier = InvertedIndexApplierBuilder::new(
                 region_dir.clone(),
                 object_store.clone(),
                 None,

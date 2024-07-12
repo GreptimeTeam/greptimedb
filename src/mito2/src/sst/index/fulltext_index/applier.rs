@@ -31,8 +31,8 @@ use crate::sst::location;
 
 pub mod builder;
 
-/// `SstIndexApplier` is responsible for applying fulltext index to the provided SST files
-pub struct SstIndexApplier {
+/// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
+pub struct FulltextIndexApplier {
     /// The root directory of the region.
     region_dir: String,
 
@@ -46,10 +46,10 @@ pub struct SstIndexApplier {
     store: ObjectStore,
 }
 
-pub type SstIndexApplierRef = Arc<SstIndexApplier>;
+pub type FulltextIndexApplierRef = Arc<FulltextIndexApplier>;
 
-impl SstIndexApplier {
-    /// Creates a new `SstIndexApplier`.
+impl FulltextIndexApplier {
+    /// Creates a new `FulltextIndexApplier`.
     pub fn new(
         region_dir: String,
         store: ObjectStore,

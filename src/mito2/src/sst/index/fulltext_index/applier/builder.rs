@@ -19,11 +19,11 @@ use store_api::metadata::RegionMetadata;
 use store_api::storage::ColumnId;
 
 use crate::error::Result;
-use crate::sst::index::fulltext_index::applier::SstIndexApplier;
+use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
-/// `SstIndexApplierBuilder` is a builder for `SstIndexApplier`.
-pub struct SstIndexApplierBuilder<'a> {
+/// `FulltextIndexApplierBuilder` is a builder for `FulltextIndexApplier`.
+pub struct FulltextIndexApplierBuilder<'a> {
     region_dir: String,
     store: ObjectStore,
     puffin_manager_factory: PuffinManagerFactory,
@@ -31,8 +31,8 @@ pub struct SstIndexApplierBuilder<'a> {
     queries: Vec<(ColumnId, String)>,
 }
 
-impl<'a> SstIndexApplierBuilder<'a> {
-    /// Creates a new `SstIndexApplierBuilder`.
+impl<'a> FulltextIndexApplierBuilder<'a> {
+    /// Creates a new `FulltextIndexApplierBuilder`.
     pub fn new(
         region_dir: String,
         store: ObjectStore,
@@ -49,7 +49,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
     }
 
     /// Builds `SstIndexApplier` from the given expressions.
-    pub fn build(mut self, exprs: &[Expr]) -> Result<Option<SstIndexApplier>> {
+    pub fn build(mut self, exprs: &[Expr]) -> Result<Option<FulltextIndexApplier>> {
         for expr in exprs {
             let Expr::ScalarFunction(f) = expr else {
                 continue;
@@ -75,11 +75,13 @@ impl<'a> SstIndexApplierBuilder<'a> {
             self.queries.push((column.column_id, query.to_string()));
         }
 
-        Ok((!self.queries.is_empty()).then_some(SstIndexApplier::new(
-            self.region_dir,
-            self.store,
-            self.queries,
-            self.puffin_manager_factory,
-        )))
+        Ok((!self.queries.is_empty()).then(|| {
+            FulltextIndexApplier::new(
+                self.region_dir,
+                self.store,
+                self.queries,
+                self.puffin_manager_factory,
+            )
+        }))
     }
 }

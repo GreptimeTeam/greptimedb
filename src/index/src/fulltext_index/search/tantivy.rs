@@ -14,8 +14,10 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::Instant;
 
 use async_trait::async_trait;
+use common_telemetry::debug;
 use snafu::ResultExt;
 use tantivy::collector::DocSetCollector;
 use tantivy::query::QueryParser;
@@ -39,7 +41,9 @@ pub struct TantivyFulltextIndexSearcher {
 impl TantivyFulltextIndexSearcher {
     /// Creates a new `TantivyFulltextIndexSearcher`.
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
-        let index = Index::open_in_dir(path).context(TantivySnafu)?;
+        let now = Instant::now();
+
+        let index = Index::open_in_dir(path.as_ref()).context(TantivySnafu)?;
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -50,6 +54,13 @@ impl TantivyFulltextIndexSearcher {
             .schema()
             .get_field(TEXT_FIELD_NAME)
             .context(TantivySnafu)?;
+
+        debug!(
+            "Opened tantivy index on {:?} in {:?}",
+            path.as_ref(),
+            now.elapsed()
+        );
+
         Ok(Self {
             index,
             reader,

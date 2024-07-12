@@ -36,9 +36,9 @@ use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::TYPE_INVERTED_INDEX;
 use crate::sst::location;
 
-/// The [`SstIndexApplier`] is responsible for applying predicates to the provided SST files
+/// `InvertedIndexApplier` is responsible for applying predicates to the provided SST files
 /// and returning the relevant row group ids for further scan.
-pub(crate) struct SstIndexApplier {
+pub(crate) struct InvertedIndexApplier {
     /// The root directory of the region.
     region_dir: String,
 
@@ -62,10 +62,10 @@ pub(crate) struct SstIndexApplier {
     inverted_index_cache: Option<InvertedIndexCacheRef>,
 }
 
-pub(crate) type SstIndexApplierRef = Arc<SstIndexApplier>;
+pub(crate) type InvertedIndexApplierRef = Arc<InvertedIndexApplier>;
 
-impl SstIndexApplier {
-    /// Creates a new [`SstIndexApplier`].
+impl InvertedIndexApplier {
+    /// Creates a new `InvertedIndexApplier`.
     pub fn new(
         region_dir: String,
         region_id: RegionId,
@@ -172,7 +172,7 @@ impl SstIndexApplier {
     }
 }
 
-impl Drop for SstIndexApplier {
+impl Drop for InvertedIndexApplier {
     fn drop(&mut self) {
         INDEX_APPLY_MEMORY_USAGE.sub(self.index_applier.memory_usage() as i64);
     }
@@ -215,7 +215,7 @@ mod tests {
             })
         });
 
-        let sst_index_applier = SstIndexApplier::new(
+        let sst_index_applier = InvertedIndexApplier::new(
             region_dir.clone(),
             RegionId::new(0, 0),
             object_store,
@@ -257,7 +257,7 @@ mod tests {
         mock_index_applier.expect_memory_usage().returning(|| 100);
         mock_index_applier.expect_apply().never();
 
-        let sst_index_applier = SstIndexApplier::new(
+        let sst_index_applier = InvertedIndexApplier::new(
             region_dir.clone(),
             RegionId::new(0, 0),
             object_store,

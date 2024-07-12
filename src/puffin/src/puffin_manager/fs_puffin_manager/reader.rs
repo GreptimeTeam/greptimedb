@@ -179,7 +179,7 @@ where
                 .await
                 .into_iter()
                 .flatten()
-                .try_fold(0, |x, y| Ok(x + y?))?;
+                .sum::<Result<_>>()?;
 
             Ok(size)
         })
