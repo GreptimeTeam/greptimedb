@@ -12,6 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-fn main() {
-    common_version::setup_build_info();
+use build_data::{format_timestamp, get_source_time};
+
+fn main() -> shadow_rs::SdResult<()> {
+    println!("cargo:rerun-if-changed=.git/refs/heads");
+    println!(
+        "cargo:rustc-env=SOURCE_TIMESTAMP={}",
+        if let Ok(t) = get_source_time() {
+            format_timestamp(t)
+        } else {
+            "".to_string()
+        }
+    );
+    build_data::set_BUILD_TIMESTAMP();
+    shadow_rs::new()
 }

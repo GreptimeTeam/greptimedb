@@ -153,6 +153,12 @@ pub enum Error {
         view_name: String,
         expected: usize,
         actual: usize,
+    },
+
+    #[snafu(display("Invalid view \"{view_name}\": {msg}"))]
+    InvalidView {
+        msg: String,
+        view_name: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -777,6 +783,7 @@ impl ErrorExt for Error {
             | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. }
             | Error::InvalidViewName { .. }
+            | Error::InvalidView { .. }
             | Error::InvalidExpr { .. }
             | Error::ViewColumnsMismatch { .. }
             | Error::InvalidViewStmt { .. }

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 fn main() {
-    common_version::setup_build_info();
     #[cfg(feature = "dashboard")]
     fetch_dashboard_assets();
 }
@@ -24,7 +23,7 @@ fn fetch_dashboard_assets() {
 
     let message = "Failed to fetch dashboard assets";
     let help = r#"
-You can manually execute "fetch-dashboard-assets.sh" to see why, 
+You can manually execute "fetch-dashboard-assets.sh" to see why,
 or it's a network error, just try again or enable/disable some proxy."#;
 
     // It's very unlikely to be failed to get the current dir here, see `current_dir`'s docs.

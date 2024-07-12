@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_time::Timestamp;
-use datafusion_expr::{and, col, lit, Expr};
+use datafusion_expr::{col, lit, Expr};
 use datatypes::timestamp::TimestampNanosecond;
 
 use crate::error::{InvalidPipelineVersionSnafu, Result};
@@ -34,19 +34,22 @@ pub fn to_pipeline_version(version_str: Option<String>) -> Result<PipelineVersio
     }
 }
 
-pub(crate) fn build_plan_filter(schema: &str, name: &str, version: PipelineVersion) -> Expr {
-    let schema_and_name_filter = and(
-        col(PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME).eq(lit(schema)),
+pub(crate) fn prepare_dataframe_conditions(
+    schema: &str,
+    name: &str,
+    version: PipelineVersion,
+) -> Expr {
+    let mut conditions = vec![
         col(PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME).eq(lit(name)),
-    );
+        col(PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME).eq(lit(schema)),
+    ];
+
     if let Some(v) = version {
-        and(
-            schema_and_name_filter,
-            col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).eq(lit(v.0.to_iso8601_string())),
-        )
-    } else {
-        schema_and_name_filter
+        conditions
+            .push(col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).eq(lit(v.0.to_iso8601_string())));
     }
+
+    conditions.into_iter().reduce(Expr::and).unwrap()
 }
 
 pub(crate) fn generate_pipeline_cache_key(

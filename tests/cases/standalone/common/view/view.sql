@@ -1,9 +1,4 @@
 -- From: https://github.com/duckdb/duckdb/blob/main/test/sql/catalog/view/test_view.test --
-
-CREATE DATABASE schema_for_view_test;
-
-USE schema_for_view_test;
-
 CREATE TABLE t1(i TIMESTAMP TIME INDEX);
 
 INSERT INTO t1 VALUES (41), (42), (43);
@@ -35,6 +30,15 @@ INSERT INTO v1 VALUES (1);
 
 CREATE VIEW v1 AS SELECT * FROM dontexist;
 
-USE public;
+DROP VIEW v1;
 
-DROP DATABASE schema_for_view_test;
+SELECT * FROM v1;
+
+--- view not exists ---
+DROP VIEW v2;
+
+DROP VIEW IF EXISTS v2;
+
+DROP TABLE t1;
+
+SHOW TABLES;

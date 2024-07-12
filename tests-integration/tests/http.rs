@@ -78,6 +78,7 @@ macro_rules! http_tests {
                 test_vm_proto_remote_write,
 
                 test_pipeline_api,
+                test_plain_text_ingestion,
             );
         )*
     };
@@ -838,7 +839,6 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-compress = true
 metadata_cache_size = "32MiB"
 content_cache_size = "32MiB"
 
@@ -1125,6 +1125,106 @@ transform:
         .await;
     // todo(shuiyisong): refactor http error handling
     assert_ne!(res.status(), StatusCode::OK);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_plain_text_ingestion(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
+
+    // handshake
+    let client = TestClient::new(app);
+
+    let body = r#"
+processors:
+  - dissect:
+      fields:
+        - line
+      patterns: 
+        - "%{+ts} %{+ts} %{content}"
+  - date:
+      fields: 
+        - ts
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+
+transform:
+  - fields:
+      - content
+    type: string
+  - field: ts
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(body)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let content = res.text().await;
+
+    let content = serde_json::from_str(&content);
+    assert!(content.is_ok());
+    //  {"execution_time_ms":13,"pipelines":[{"name":"test","version":"2024-07-04 08:31:00.987136"}]}
+    let content: Value = content.unwrap();
+
+    let version_str = content
+        .get("pipelines")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .get("version")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!version_str.is_empty());
+
+    // 2. write data
+    let data_body = r#"
+2024-05-25 20:16:37.217 hello
+2024-05-25 20:16:37.218 hello world
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "text/plain")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 3. select data
+    let res = client.get("/v1/sql?sql=select * from logs1").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+
+    let resp: Value = serde_json::from_str(&resp).unwrap();
+    let v = resp
+        .get("output")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .get("records")
+        .unwrap()
+        .get("rows")
+        .unwrap()
+        .to_string();
+
+    assert_eq!(
+        v,
+        r#"[["hello",1716668197217000000],["hello world",1716668197218000000]]"#,
+    );
 
     guard.remove_all().await;
 }

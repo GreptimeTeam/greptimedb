@@ -139,6 +139,7 @@
 | `region_engine.mito.memtable.index_max_keys_per_shard` | Integer | `8192` | The max number of keys in one shard.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.mito.memtable.data_freeze_threshold` | Integer | `32768` | The max rows of data inside the actively writing buffer in one shard.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.mito.memtable.fork_dictionary_bytes` | String | `1GiB` | Max dictionary bytes.<br/>Only available for `partition_tree` memtable. |
+| `region_engine.file` | -- | -- | Enable the file engine. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
@@ -258,6 +259,7 @@
 | `use_memory_store` | Bool | `false` | Store data in memory. |
 | `enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. |
 | `store_key_prefix` | String | `""` | If it's not empty, the metasrv will store all data with this key prefix. |
+| `enable_region_failover` | Bool | `false` | Whether to enable region failover.<br/>This feature is only available on GreptimeDB running on cluster mode and<br/>- Using Remote WAL<br/>- Using shared storage (e.g., s3). |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
@@ -428,6 +430,7 @@
 | `region_engine.mito.memtable.index_max_keys_per_shard` | Integer | `8192` | The max number of keys in one shard.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.mito.memtable.data_freeze_threshold` | Integer | `32768` | The max rows of data inside the actively writing buffer in one shard.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.mito.memtable.fork_dictionary_bytes` | String | `1GiB` | Max dictionary bytes.<br/>Only available for `partition_tree` memtable. |
+| `region_engine.file` | -- | -- | Enable the file engine. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |

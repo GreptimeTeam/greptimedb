@@ -371,9 +371,6 @@ pub struct InvertedIndexConfig {
     /// Memory threshold for performing an external sort during index creation.
     pub mem_threshold_on_create: MemoryThreshold,
 
-    /// Whether to compress the index data.
-    pub compress: bool,
-
     #[deprecated = "use [IndexConfig::aux_path] instead"]
     #[serde(skip_serializing)]
     pub intermediate_path: String,
@@ -396,7 +393,6 @@ impl Default for InvertedIndexConfig {
             create_on_compaction: Mode::Auto,
             apply_on_query: Mode::Auto,
             mem_threshold_on_create: MemoryThreshold::Auto,
-            compress: true,
             write_buffer_size: ReadableSize::mb(8),
             intermediate_path: String::new(),
             metadata_cache_size: ReadableSize::mb(32),

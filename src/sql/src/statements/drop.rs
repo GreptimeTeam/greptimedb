@@ -137,6 +137,30 @@ impl Display for DropFlow {
     }
 }
 
+/// `DROP VIEW` statement.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct DropView {
+    // The view name
+    pub view_name: ObjectName,
+    // drop view if exists
+    pub drop_if_exists: bool,
+}
+
+impl Display for DropView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "DROP VIEW{} {}",
+            if self.drop_if_exists {
+                " IF EXISTS"
+            } else {
+                ""
+            },
+            self.view_name
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;

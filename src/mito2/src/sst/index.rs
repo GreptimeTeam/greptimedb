@@ -223,7 +223,6 @@ impl<'a> IndexerBuilder<'a> {
             self.intermediate_manager.clone(),
             self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
-            self.inverted_index_config.compress,
             &self.index_options.inverted_index.ignore_column_ids,
         );
 

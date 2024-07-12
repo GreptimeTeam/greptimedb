@@ -14,7 +14,8 @@
 
 use common_telemetry::tracing::info;
 use greptime_proto::v1::value::ValueData::{
-    BoolValue, F64Value, StringValue, TimestampSecondValue, U32Value, U64Value, U8Value,
+    BoolValue, F64Value, StringValue, TimestampNanosecondValue, TimestampSecondValue, U32Value,
+    U64Value, U8Value,
 };
 use greptime_proto::v1::Value as GreptimeValue;
 use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Value};
@@ -454,4 +455,56 @@ transform:
         }
         info!("\n");
     }
+}
+
+#[test]
+fn test_simple_data() {
+    let input_value_str = r#"
+{
+    "line": "2024-05-25 20:16:37.217 hello world"
+}
+"#;
+    let input_value: Value = serde_json::from_str::<serde_json::Value>(input_value_str)
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    let pipeline_yaml = r#"
+processors:
+  - dissect:
+      fields:
+        - line
+      patterns: 
+        - "%{+ts} %{+ts} %{content}"
+  - date:
+      fields: 
+        - ts
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+
+transform:
+  - fields:
+      - content
+    type: string
+  - field: ts
+    type: time
+    index: timestamp
+"#;
+
+    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let output = pipeline.exec(input_value).unwrap();
+    let r = output
+        .rows
+        .into_iter()
+        .flat_map(|v| v.values)
+        .map(|v| v.value_data.unwrap())
+        .collect::<Vec<_>>();
+
+    let expected = vec![
+        StringValue("hello world".into()),
+        TimestampNanosecondValue(1716668197217000000),
+    ];
+
+    assert_eq!(expected, r);
 }

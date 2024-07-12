@@ -80,7 +80,7 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
                     "GIT_BRANCH",
                     "GIT_COMMIT",
                     "GIT_COMMIT_SHORT",
-                    "GIT_DIRTY",
+                    "GIT_CLEAN",
                     "PKG_VERSION",
                 ]),
                 vec![
@@ -89,7 +89,7 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
                     Arc::new(StringVector::from(vec![build_info
                         .commit_short
                         .to_string()])),
-                    Arc::new(StringVector::from(vec![build_info.dirty.to_string()])),
+                    Arc::new(StringVector::from(vec![build_info.clean.to_string()])),
                     Arc::new(StringVector::from(vec![build_info.version.to_string()])),
                 ],
             )

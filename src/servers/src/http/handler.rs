@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::env;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
@@ -311,13 +310,14 @@ pub async fn status() -> Json<StatusResponse<'static>> {
     let hostname = hostname::get()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
+    let build_info = common_version::build_info();
     Json(StatusResponse {
-        source_time: env!("SOURCE_TIMESTAMP"),
-        commit: env!("GIT_COMMIT"),
-        branch: env!("GIT_BRANCH"),
-        rustc_version: env!("RUSTC_VERSION"),
+        source_time: build_info.source_time,
+        commit: build_info.commit,
+        branch: build_info.branch,
+        rustc_version: build_info.rustc,
         hostname,
-        version: env!("CARGO_PKG_VERSION"),
+        version: build_info.version,
     })
 }
 

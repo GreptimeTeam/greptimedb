@@ -192,6 +192,21 @@ impl StatementExecutor {
                 let _ = self.create_view(stmt, query_ctx).await?;
                 Ok(Output::new_with_affected_rows(0))
             }
+            Statement::DropView(stmt) => {
+                let (catalog_name, schema_name, view_name) =
+                    table_idents_to_full_name(&stmt.view_name, &query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+
+                self.drop_view(
+                    catalog_name,
+                    schema_name,
+                    view_name,
+                    stmt.drop_if_exists,
+                    query_ctx,
+                )
+                .await
+            }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
                 let mut table_names = Vec::with_capacity(stmt.table_names().len());
