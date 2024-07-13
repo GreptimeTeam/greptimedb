@@ -32,6 +32,7 @@ pub(crate) fn row_selection_from_row_ranges(
     let mut last_processed_end = 0;
 
     for Range { start, end } in row_ranges {
+        let end = end.min(total_row_count);
         if start > last_processed_end {
             add_or_merge_selector(&mut selectors, start - last_processed_end, true);
         }
@@ -48,6 +49,9 @@ pub(crate) fn row_selection_from_row_ranges(
 }
 
 /// Converts an iterator of sorted row IDs into a `RowSelection`.
+///
+/// Note: the input iterator must be sorted in ascending order and
+///       contain unique row IDs in the range [0, total_row_count).
 pub(crate) fn row_selection_from_sorted_row_ids(
     row_ids: impl Iterator<Item = u32>,
     total_row_count: usize,
@@ -162,6 +166,14 @@ mod tests {
             RowSelector::select(1),
             RowSelector::skip(10139),
         ]);
+        assert_eq!(selection, expected);
+    }
+
+    #[test]
+    fn test_range_end_over_total_row_count() {
+        let ranges = [1..10];
+        let selection = row_selection_from_row_ranges(ranges.iter().cloned(), 5);
+        let expected = RowSelection::from(vec![RowSelector::skip(1), RowSelector::select(4)]);
         assert_eq!(selection, expected);
     }
 
