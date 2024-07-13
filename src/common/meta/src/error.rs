@@ -703,7 +703,7 @@ impl ErrorExt for Error {
                 StatusCode::Internal
             }
 
-            SchemaAlreadyExists { .. } => StatusCode::DatabaseAreadyExists,
+            SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
 
             ProcedureNotFound { .. }
             | InvalidViewInfo { .. }

@@ -906,7 +906,7 @@ impl ErrorExt for Error {
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
-            Error::SchemaAlreadyExists { .. } => StatusCode::DatabaseAreadyExists,
+            Error::SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
 
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }

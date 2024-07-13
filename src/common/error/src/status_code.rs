@@ -75,7 +75,7 @@ pub enum StatusCode {
     /// Table is temporarily unable to handle the request
     TableUnavailable = 4010,
     /// Database not found
-    DatabaseAreadyExists = 4011,
+    DatabaseAlreadyExists = 4011,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
@@ -140,7 +140,7 @@ impl StatusCode {
             | StatusCode::InvalidArguments
             | StatusCode::Cancelled
             | StatusCode::InvalidSyntax
-            | StatusCode::DatabaseAreadyExists
+            | StatusCode::DatabaseAlreadyExists
             | StatusCode::PlanQuery
             | StatusCode::EngineExecuteQuery
             | StatusCode::TableAlreadyExists
@@ -197,7 +197,7 @@ impl StatusCode {
             | StatusCode::RateLimited
             | StatusCode::UserNotFound
             | StatusCode::TableUnavailable
-            | StatusCode::DatabaseAreadyExists
+            | StatusCode::DatabaseAlreadyExists
             | StatusCode::UnsupportedPasswordType
             | StatusCode::UserPasswordMismatch
             | StatusCode::AuthHeaderNotFound
@@ -269,7 +269,7 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         StatusCode::TableAlreadyExists
         | StatusCode::TableColumnExists
         | StatusCode::RegionAlreadyExists
-        | StatusCode::DatabaseAreadyExists
+        | StatusCode::DatabaseAlreadyExists
         | StatusCode::FlowAlreadyExists => Code::AlreadyExists,
         StatusCode::TableNotFound
         | StatusCode::RegionNotFound

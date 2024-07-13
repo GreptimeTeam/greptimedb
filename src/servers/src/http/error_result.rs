@@ -97,7 +97,7 @@ impl IntoResponse for ErrorResponse {
             | StatusCode::TableNotFound
             | StatusCode::TableColumnNotFound
             | StatusCode::PlanQuery
-            | StatusCode::DatabaseAreadyExists
+            | StatusCode::DatabaseAlreadyExists
             | StatusCode::FlowNotFound
             | StatusCode::FlowAlreadyExists => HttpStatusCode::BAD_REQUEST,
 
