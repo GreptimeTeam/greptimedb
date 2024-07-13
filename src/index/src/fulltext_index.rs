@@ -18,6 +18,9 @@ pub mod create;
 pub mod error;
 pub mod search;
 
+#[cfg(test)]
+mod tests;
+
 /// Configuration for fulltext index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Config {

@@ -171,8 +171,8 @@ mod tests {
 
     #[test]
     fn test_range_end_over_total_row_count() {
-        let ranges = [1..10];
-        let selection = row_selection_from_row_ranges(ranges.iter().cloned(), 5);
+        let ranges = Some(1..10);
+        let selection = row_selection_from_row_ranges(ranges.into_iter(), 5);
         let expected = RowSelection::from(vec![RowSelector::skip(1), RowSelector::select(4)]);
         assert_eq!(selection, expected);
     }
