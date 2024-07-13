@@ -167,9 +167,11 @@ impl ErrorExt for Error {
             | Error::PollStream { .. }
             | Error::Format { .. }
             | Error::ToArrowScalar { .. }
-            | Error::ColumnNotExists { .. }
-            | Error::ProjectArrowRecordBatch { .. }
-            | Error::ArrowCompute { .. } => StatusCode::Internal,
+            | Error::ProjectArrowRecordBatch { .. } => StatusCode::Internal,
+
+            Error::ArrowCompute { .. } => StatusCode::IllegalState,
+
+            Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
 
             Error::External { source, .. } => source.status_code(),
 

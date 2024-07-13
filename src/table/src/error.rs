@@ -180,10 +180,8 @@ impl ErrorExt for Error {
             Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
             Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
-
-            Error::InvalidTable { .. } | Error::MissingTimeIndexColumn { .. } => {
-                StatusCode::Internal
-            }
+            Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
+            Error::InvalidTable { .. } => StatusCode::TableUnavailable,
         }
     }
 

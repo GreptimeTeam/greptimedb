@@ -205,13 +205,15 @@ impl ErrorExt for Error {
             Error::ToJson { .. }
             | Error::DeleteState { .. }
             | Error::FromJson { .. }
-            | Error::RetryTimesExceeded { .. }
-            | Error::RollbackTimesExceeded { .. }
-            | Error::RetryLater { .. }
             | Error::WaitWatcher { .. }
-            | Error::ManagerNotStart { .. }
-            | Error::RollbackProcedureRecovered { .. }
-            | Error::RollbackNotSupported { .. } => StatusCode::Internal,
+            | Error::RetryLater { .. }
+            | Error::RollbackProcedureRecovered { .. } => StatusCode::Internal,
+
+            Error::RetryTimesExceeded { .. }
+            | Error::RollbackTimesExceeded { .. }
+            | Error::ManagerNotStart { .. } => StatusCode::IllegalState,
+
+            Error::RollbackNotSupported { .. } => StatusCode::Unsupported,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }

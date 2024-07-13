@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -36,13 +36,6 @@ pub enum Error {
         error: std::io::Error,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Auth failed"))]
-    AuthBackend {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
     },
 
     #[snafu(display("User not found, username: {}", username))]
@@ -87,8 +80,7 @@ impl ErrorExt for Error {
             Error::IllegalParam { .. } => StatusCode::InvalidArguments,
             Error::FileWatch { .. } => StatusCode::InvalidArguments,
             Error::InternalState { .. } => StatusCode::Unexpected,
-            Error::Io { .. } => StatusCode::Internal,
-            Error::AuthBackend { .. } => StatusCode::Internal,
+            Error::Io { .. } => StatusCode::StorageUnavailable,
 
             Error::UserNotFound { .. } => StatusCode::UserNotFound,
             Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPasswordType,

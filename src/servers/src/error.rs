@@ -617,16 +617,19 @@ impl ErrorExt for Error {
             | TokioIo { .. }
             | StartHttp { .. }
             | StartGrpc { .. }
-            | AlreadyStarted { .. }
-            | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
             | SendPromRemoteRequest { .. }
             | TcpIncoming { .. }
-            | CatalogError { .. }
             | GrpcReflectionService { .. }
             | BuildHttpResponse { .. }
             | Arrow { .. }
             | FileWatch { .. } => StatusCode::Internal,
+
+            AlreadyStarted { .. } | InvalidPromRemoteReadQueryResult { .. } => {
+                StatusCode::IllegalState
+            }
+
+            CatalogError { source, .. } => source.status_code(),
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 

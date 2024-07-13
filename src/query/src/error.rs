@@ -358,6 +358,7 @@ impl ErrorExt for Error {
             DataFusion { error, .. } => match error {
                 DataFusionError::Internal(_) => StatusCode::Internal,
                 DataFusionError::NotImplemented(_) => StatusCode::Unsupported,
+                DataFusionError::ResourcesExhausted(_) => StatusCode::RuntimeResourcesExhausted,
                 DataFusionError::Plan(_) => StatusCode::PlanQuery,
                 _ => StatusCode::EngineExecuteQuery,
             },
@@ -369,7 +370,7 @@ impl ErrorExt for Error {
             RegionQuery { source, .. } => source.status_code(),
             TableMutation { source, .. } => source.status_code(),
             MissingTableMutationHandler { .. } => StatusCode::Unexpected,
-            GetRegionMetadata { .. } => StatusCode::Internal,
+            GetRegionMetadata { .. } => StatusCode::RegionNotReady,
             TableReadOnly { .. } => StatusCode::Unsupported,
             GetFulltextOptions { source, .. } => source.status_code(),
         }

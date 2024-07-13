@@ -413,10 +413,11 @@ impl ErrorExt for Error {
 
             Error::RequestQuery { source, .. } => source.status_code(),
 
-            Error::FindDatanode { .. }
-            | Error::VectorToGrpcColumn { .. }
-            | Error::InvalidRegionRequest { .. }
-            | Error::CacheRequired { .. } => StatusCode::Internal,
+            Error::FindDatanode { .. } => StatusCode::RegionNotReady,
+
+            Error::VectorToGrpcColumn { .. } | Error::CacheRequired { .. } => StatusCode::Internal,
+
+            Error::InvalidRegionRequest { .. } => StatusCode::IllegalState,
 
             Error::ContextValueNotFound { .. } => StatusCode::Unexpected,
 
