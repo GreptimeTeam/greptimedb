@@ -167,9 +167,9 @@ mod tests {
             ],
         );
 
-        assert_eq!(42, table.table_id);
-        assert_eq!(schema, SystemTable::schema(&table));
+        assert_eq!(42, table.table_id());
         assert_eq!("test", table.table_name);
+        assert_eq!(schema, SystemTable::schema(&table));
 
         let stream = table.to_stream(ScanRequest::default()).unwrap();
 
@@ -196,8 +196,9 @@ mod tests {
 
         let table = MemoryTable::new(42, "test", schema.clone(), vec![]);
 
-        assert_eq!(42, table.table_id);
-        assert_eq!("test", table.table_name);
+        assert_eq!(42, table.table_id());
+        assert_eq!("test", table.table_name());
+        assert_eq!(schema, SystemTable::schema(&table));
 
         let stream = table.to_stream(ScanRequest::default()).unwrap();
 

@@ -59,7 +59,6 @@ fn pg_type_schema_columns() -> (Vec<ColumnSchema>, Vec<VectorRef>) {
 }
 
 pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
-    //TODO(j0hn50n133): u32_column("typnamespace"), we don't have such thing as namespace id or database id.
     let (column_schemas, columns): (_, Vec<VectorRef>) = match table_name {
         PG_TYPE => pg_type_schema_columns(),
         _ => unreachable!("Unknown table in pg_catalog: {}", table_name),
