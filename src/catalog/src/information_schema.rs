@@ -25,6 +25,7 @@ mod table_constraints;
 mod table_names;
 pub mod tables;
 pub(crate) mod utils;
+mod views;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -46,6 +47,7 @@ use table::metadata::{
 };
 use table::{Table, TableRef};
 pub use table_names::*;
+use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
@@ -177,6 +179,7 @@ impl InformationSchemaProvider {
         }
 
         tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
+        tables.insert(VIEWS.to_string(), self.build_table(VIEWS).unwrap());
         tables.insert(SCHEMATA.to_string(), self.build_table(SCHEMATA).unwrap());
         tables.insert(COLUMNS.to_string(), self.build_table(COLUMNS).unwrap());
         tables.insert(
@@ -260,6 +263,10 @@ impl InformationSchemaProvider {
                 self.catalog_manager.clone(),
             )) as _),
             CLUSTER_INFO => Some(Arc::new(InformationSchemaClusterInfo::new(
+                self.catalog_manager.clone(),
+            )) as _),
+            VIEWS => Some(Arc::new(InformationSchemaViews::new(
+                self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
             _ => None,
