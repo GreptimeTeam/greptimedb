@@ -212,8 +212,9 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
                             break;
                         }
                     } else if let Expr::Sort(sort_expr) = first_order_by {
-                        // only allow `order by xxx [DESC]`, xxx is a bare column reference
-                        if sort_expr.asc || !matches!(&*sort_expr.expr, Expr::Column(_)) {
+                        // only allow `order by xxx`, xxx is a bare column reference so `last_value()` is the max
+                        // value of the column.
+                        if !sort_expr.asc || !matches!(&*sort_expr.expr, Expr::Column(_)) {
                             is_all_last_value = false;
                             break;
                         }
@@ -335,7 +336,7 @@ mod test {
                     filter: None,
                     order_by: Some(vec![Expr::Sort(Sort {
                         expr: Box::new(col("ts")),
-                        asc: false,
+                        asc: true,
                         nulls_first: true,
                     })]),
                     null_treatment: None,
