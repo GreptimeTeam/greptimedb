@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-<h1 align="center">Unified Time Series Database for Metrics, Events, and Logs</h1>
+<h2 align="center">Unified Time Series Database for Metrics, Events, and Logs</h2>
 
 <div align="center">
 <h3 align="center">
