@@ -32,7 +32,7 @@ use crate::statements::query::Query;
 use crate::statements::set_variables::SetVariables;
 use crate::statements::show::{
     ShowColumns, ShowCreateFlow, ShowCreateTable, ShowCreateView, ShowDatabases, ShowIndex,
-    ShowKind, ShowStatus, ShowTableStatus, ShowTables, ShowVariables,
+    ShowKind, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::tql::Tql;
 use crate::statements::truncate::TruncateTable;
@@ -91,6 +91,8 @@ pub enum Statement {
     ShowCreateView(ShowCreateView),
     // SHOW STATUS
     ShowStatus(ShowStatus),
+    // SHOW VIEWS
+    ShowViews(ShowViews),
     // DESCRIBE TABLE
     DescribeTable(DescribeTable),
     // EXPLAIN QUERY
@@ -132,6 +134,7 @@ impl Display for Statement {
             Statement::ShowCreateTable(s) => s.fmt(f),
             Statement::ShowCreateFlow(s) => s.fmt(f),
             Statement::ShowCreateView(s) => s.fmt(f),
+            Statement::ShowViews(s) => s.fmt(f),
             Statement::ShowStatus(s) => s.fmt(f),
             Statement::DescribeTable(s) => s.fmt(f),
             Statement::Explain(s) => s.fmt(f),

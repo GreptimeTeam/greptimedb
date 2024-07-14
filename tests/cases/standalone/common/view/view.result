@@ -52,6 +52,14 @@ CREATE VIEW v1 AS SELECT * FROM dontexist;
 
 Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.public.dontexist
 
+SHOW VIEWS;
+
++-------+
+| Views |
++-------+
+| v1    |
++-------+
+
 DROP VIEW v1;
 
 Affected Rows: 0
@@ -80,4 +88,9 @@ SHOW TABLES;
 +---------+
 | numbers |
 +---------+
+
+SHOW VIEWS;
+
+++
+++
 
