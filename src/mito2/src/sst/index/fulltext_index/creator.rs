@@ -36,6 +36,7 @@ use crate::sst::index::fulltext_index::INDEX_BLOB_TYPE;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
+use crate::sst::index::TYPE_FULLTEXT_INDEX;
 
 /// `FulltextIndexer` is responsible for creating fulltext indexes for SST files.
 pub struct FulltextIndexer {
@@ -104,7 +105,7 @@ impl FulltextIndexer {
         Ok(Self {
             creators,
             aborted: false,
-            stats: Statistics::default(),
+            stats: Statistics::new(TYPE_FULLTEXT_INDEX),
         })
     }
 

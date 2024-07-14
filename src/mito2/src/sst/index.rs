@@ -41,6 +41,9 @@ use crate::sst::index::inverted_index::creator::InvertedIndexer;
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
 
+pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
+pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
+
 /// Output of the index creation.
 #[derive(Debug, Clone, Default)]
 pub struct IndexOutput {
@@ -92,11 +95,12 @@ pub struct Indexer {
     file_id: FileId,
     file_path: String,
     region_id: RegionId,
-    last_memory_usage: usize,
 
     puffin_manager: Option<SstPuffinManager>,
     inverted_indexer: Option<InvertedIndexer>,
+    last_mem_inverted_index: usize,
     fulltext_indexer: Option<FulltextIndexer>,
+    last_mem_fulltext_index: usize,
 }
 
 impl Indexer {
@@ -104,35 +108,42 @@ impl Indexer {
     pub async fn update(&mut self, batch: &Batch) {
         self.do_update(batch).await;
 
-        let memory_usage = self.memory_usage();
-        INDEX_CREATE_MEMORY_USAGE.add(memory_usage as i64 - self.last_memory_usage as i64);
-        self.last_memory_usage = memory_usage;
+        self.flush_mem_metrics();
     }
 
     /// Finalizes the index creation.
     pub async fn finish(&mut self) -> IndexOutput {
-        INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
-        self.last_memory_usage = 0;
+        let output = self.do_finish().await;
 
-        self.do_finish().await
+        self.flush_mem_metrics();
+        output
     }
 
     /// Aborts the index creation.
     pub async fn abort(&mut self) {
-        INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
-        self.last_memory_usage = 0;
-
         self.do_abort().await;
+
+        self.flush_mem_metrics();
     }
 
-    fn memory_usage(&self) -> usize {
-        self.inverted_indexer
+    fn flush_mem_metrics(&mut self) {
+        let inverted_mem = self
+            .inverted_indexer
             .as_ref()
-            .map_or(0, |creator| creator.memory_usage())
-            + self
-                .fulltext_indexer
-                .as_ref()
-                .map_or(0, |creator| creator.memory_usage())
+            .map_or(0, |creator| creator.memory_usage());
+        INDEX_CREATE_MEMORY_USAGE
+            .with_label_values(&[TYPE_INVERTED_INDEX])
+            .add(inverted_mem as i64 - self.last_mem_inverted_index as i64);
+        self.last_mem_inverted_index = inverted_mem;
+
+        let fulltext_mem = self
+            .fulltext_indexer
+            .as_ref()
+            .map_or(0, |creator| creator.memory_usage());
+        INDEX_CREATE_MEMORY_USAGE
+            .with_label_values(&[TYPE_FULLTEXT_INDEX])
+            .add(fulltext_mem as i64 - self.last_mem_fulltext_index as i64);
+        self.last_mem_fulltext_index = fulltext_mem;
     }
 }
 
@@ -156,7 +167,6 @@ impl<'a> IndexerBuilder<'a> {
             file_id: self.file_id,
             file_path: self.file_path.clone(),
             region_id: self.metadata.region_id,
-            last_memory_usage: 0,
 
             ..Default::default()
         };

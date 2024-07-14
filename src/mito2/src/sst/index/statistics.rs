@@ -27,8 +27,9 @@ enum Stage {
 }
 
 /// Statistics for index creation. Flush metrics when dropped.
-#[derive(Default)]
 pub(crate) struct Statistics {
+    /// Index type.
+    index_type: &'static str,
     /// Accumulated elapsed time for the index update stage.
     update_elapsed: Duration,
     /// Accumulated elapsed time for the index finish stage.
@@ -42,6 +43,17 @@ pub(crate) struct Statistics {
 }
 
 impl Statistics {
+    pub fn new(index_type: &'static str) -> Self {
+        Self {
+            index_type,
+            update_elapsed: Duration::default(),
+            finish_elapsed: Duration::default(),
+            cleanup_eplased: Duration::default(),
+            row_count: 0,
+            byte_count: 0,
+        }
+    }
+
     /// Starts timing the update stage, returning a `TimerGuard` to automatically record duration.
     #[must_use]
     pub fn record_update(&mut self) -> TimerGuard<'_> {
@@ -74,20 +86,26 @@ impl Statistics {
 impl Drop for Statistics {
     fn drop(&mut self) {
         INDEX_CREATE_ELAPSED
-            .with_label_values(&["update"])
+            .with_label_values(&["update", self.index_type])
             .observe(self.update_elapsed.as_secs_f64());
         INDEX_CREATE_ELAPSED
-            .with_label_values(&["finish"])
+            .with_label_values(&["finish", self.index_type])
             .observe(self.finish_elapsed.as_secs_f64());
         INDEX_CREATE_ELAPSED
-            .with_label_values(&["cleanup"])
+            .with_label_values(&["cleanup", self.index_type])
             .observe(self.cleanup_eplased.as_secs_f64());
-        INDEX_CREATE_ELAPSED.with_label_values(&["total"]).observe(
-            (self.update_elapsed + self.finish_elapsed + self.cleanup_eplased).as_secs_f64(),
-        );
+        INDEX_CREATE_ELAPSED
+            .with_label_values(&["total", self.index_type])
+            .observe(
+                (self.update_elapsed + self.finish_elapsed + self.cleanup_eplased).as_secs_f64(),
+            );
 
-        INDEX_CREATE_ROWS_TOTAL.inc_by(self.row_count as _);
-        INDEX_CREATE_BYTES_TOTAL.inc_by(self.byte_count as _);
+        INDEX_CREATE_ROWS_TOTAL
+            .with_label_values(&[self.index_type])
+            .inc_by(self.row_count as _);
+        INDEX_CREATE_BYTES_TOTAL
+            .with_label_values(&[self.index_type])
+            .inc_by(self.byte_count as _);
     }
 }
 
@@ -142,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_statistics_basic() {
-        let mut stats = Statistics::default();
+        let mut stats = Statistics::new("test");
         {
             let mut guard = stats.record_update();
             guard.inc_byte_count(100);

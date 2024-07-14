@@ -49,6 +49,8 @@ mod projection_test;
 #[cfg(test)]
 mod prune_test;
 #[cfg(test)]
+mod row_selector_test;
+#[cfg(test)]
 mod set_readonly_test;
 #[cfg(test)]
 mod truncate_test;

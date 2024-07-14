@@ -222,8 +222,8 @@ impl ScanRegion {
 
     /// Returns a [Scanner] to scan the region.
     pub(crate) fn scanner(self) -> Result<Scanner> {
-        if self.version.options.append_mode {
-            // If table uses append mode, we use unordered scan in query.
+        if self.version.options.append_mode && self.request.series_row_selector.is_none() {
+            // If table is append only and there is no series row selector, we use unordered scan in query.
             // We still use seq scan in compaction.
             self.unordered_scan().map(Scanner::Unordered)
         } else {
