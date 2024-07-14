@@ -1177,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_row_groups_by_rows_from_emtpy() {
+    fn prune_row_groups_by_rows_from_empty() {
         let parquet_meta = mock_parquet_metadata_from_row_groups(vec![10, 10, 5]);
 
         let rows_in_row_groups = [
