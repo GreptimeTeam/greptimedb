@@ -37,8 +37,8 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
 
-/// `SstIndexCreator` is responsible for creating fulltext indexes for SST files.
-pub struct SstIndexCreator {
+/// `FulltextIndexer` is responsible for creating fulltext indexes for SST files.
+pub struct FulltextIndexer {
     /// Creators for each column.
     creators: HashMap<ColumnId, SingleCreator>,
     /// Whether the index creation was aborted.
@@ -47,8 +47,8 @@ pub struct SstIndexCreator {
     stats: Statistics,
 }
 
-impl SstIndexCreator {
-    /// Creates a new `SstIndexCreator`.
+impl FulltextIndexer {
+    /// Creates a new `FulltextIndexer`.
     pub async fn new(
         region_id: &RegionId,
         sst_file_id: &FileId,
@@ -172,7 +172,7 @@ impl SstIndexCreator {
     }
 }
 
-impl SstIndexCreator {
+impl FulltextIndexer {
     async fn do_update(&mut self, batch: &Batch) -> Result<()> {
         let mut guard = self.stats.record_update();
         guard.inc_row_count(batch.num_rows());

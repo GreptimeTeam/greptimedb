@@ -34,9 +34,9 @@ use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
 use crate::sst::file::FileId;
-use crate::sst::index::fulltext_index::creator::SstIndexCreator as FulltextIndexer;
+use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::inverted_index::creator::SstIndexCreator as InvertedIndexer;
+use crate::sst::index::inverted_index::creator::InvertedIndexer;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";

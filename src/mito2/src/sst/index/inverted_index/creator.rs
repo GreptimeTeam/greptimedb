@@ -50,8 +50,8 @@ const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
 
-/// Creates SST index.
-pub struct SstIndexCreator {
+/// `InvertedIndexer` creates inverted index for SST files.
+pub struct InvertedIndexer {
     /// The index creator.
     index_creator: Box<dyn InvertedIndexCreator>,
     /// The provider of intermediate files.
@@ -74,8 +74,8 @@ pub struct SstIndexCreator {
     column_ids: HashSet<ColumnId>,
 }
 
-impl SstIndexCreator {
-    /// Creates a new `SstIndexCreator`.
+impl InvertedIndexer {
+    /// Creates a new `InvertedIndexer`.
     /// Should ensure that the number of tag columns is greater than 0.
     pub fn new(
         sst_file_id: FileId,
@@ -383,7 +383,7 @@ mod tests {
         let memory_threshold = None;
         let segment_row_count = 2;
 
-        let mut creator = SstIndexCreator::new(
+        let mut creator = InvertedIndexer::new(
             sst_file_id,
             &region_metadata,
             intm_mgr,
