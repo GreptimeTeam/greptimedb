@@ -43,6 +43,7 @@ use crate::sst::index::inverted_index::creator::temp_provider::TempFileProvider;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
+use crate::sst::index::TYPE_INVERTED_INDEX;
 
 /// The minimum memory usage threshold for one column.
 const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
@@ -114,7 +115,7 @@ impl SstIndexCreator {
             index_creator,
             temp_file_provider,
             value_buf: vec![],
-            stats: Statistics::default(),
+            stats: Statistics::new(TYPE_INVERTED_INDEX),
             aborted: false,
             memory_usage,
             column_ids,
