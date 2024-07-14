@@ -6,12 +6,12 @@
   </picture>
 </p>
 
-<h1 align="center">Cloud-scale, Fast and Efficient Time Series Database</h1>
+<h1 align="center">Unified Time Series Database for Metrics, Events, and Logs</h1>
 
 <div align="center">
 <h3 align="center">
   <a href="https://greptime.com/product/cloud">GreptimeCloud</a> |
-  <a href="https://docs.greptime.com/">User guide</a> |
+  <a href="https://docs.greptime.com/">User Guide</a> |
   <a href="https://greptimedb.rs/">API Docs</a> |
   <a href="https://github.com/GreptimeTeam/greptimedb/issues/3412">Roadmap 2024</a>
 </h4>
@@ -50,24 +50,23 @@
 
 ## Introduction
 
-**GreptimeDB** is an open-source time-series database focusing on efficiency, scalability, and analytical capabilities.
-Designed to work on infrastructure of the cloud era, GreptimeDB benefits users with its elasticity and commodity storage, offering a fast and cost-effective **alternative to InfluxDB** and a **long-term storage for Prometheus**.
+**GreptimeDB** is an open-source unified time-series database for **metrics**, **events**, and **logs**. You can gain real-time insights from Edge to Cloud at any scale.
 
 ## Why GreptimeDB
 
 Our core developers have been building time-series data platforms for years. Based on our best-practices, GreptimeDB is born to give you:
 
+* **Unified all kinds of time series**
+
+  GreptimeDB treats all time series as contextual events with timestamp, and thus unifies the processing of metrics and events. It supports analyzing metrics and events with SQL and PromQL, and doing streaming with continuous aggregation.
+
+* **Cloud-Edge collaboration**
+
+  GreptimeDB can be deployed on ARM architecture-compatible Android/Linux systems as well as cloud environments from various vendors. Both sides run the same software, providing identical APIs and control plane, so your application can run at the edge or on the cloud without modification.
+
 * **Easy horizontal scaling**
 
-  Seamless scalability from a standalone binary at edge to a robust, highly available distributed cluster in cloud, with a transparent experience for both developers and administrators.
-
-* **Analyzing time-series data**
-
-  Query your time-series data with SQL and PromQL. Use Python scripts to facilitate complex analytical tasks.
-
-* **Cloud-native distributed database**
-
-  Fully open-source distributed cluster architecture that harnesses the power of cloud-native elastic computing resources.
+  By leveraging object storage (S3 and others), separating compute and storage, scaling stateless compute nodes arbitrarily, GreptimeDB implements seamless scalability. It also supports cross-cloud deployment with a built-in unified data access layer over different object storages.
 
 * **Performance and Cost-effective**
 
