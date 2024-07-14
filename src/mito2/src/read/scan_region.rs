@@ -817,8 +817,12 @@ impl StreamContext {
         }
     }
 
-    /// Format parts for explain.
-    pub(crate) fn format_parts(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+    /// Format the context for explain.
+    pub(crate) fn format_for_explain(
+        &self,
+        t: DisplayFormatType,
+        f: &mut fmt::Formatter,
+    ) -> fmt::Result {
         match self.parts.try_lock() {
             Ok(inner) => match t {
                 DisplayFormatType::Default => write!(
@@ -827,10 +831,14 @@ impl StreamContext {
                     inner.len(),
                     inner.num_mem_ranges(),
                     inner.num_file_ranges()
-                ),
-                DisplayFormatType::Verbose => write!(f, "{:?}", &*inner),
+                )?,
+                DisplayFormatType::Verbose => write!(f, "{:?}", &*inner)?,
             },
-            Err(_) => write!(f, "<locked>"),
+            Err(_) => write!(f, "<locked>")?,
         }
+        if let Some(selector) = &self.input.series_row_selector {
+            write!(f, ", selector={}", selector)?;
+        }
+        Ok(())
     }
 }

@@ -448,7 +448,7 @@ impl RegionScanner for SeqScan {
 impl DisplayAs for SeqScan {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "SeqScan: ")?;
-        self.stream_ctx.format_parts(t, f)
+        self.stream_ctx.format_for_explain(t, f)
     }
 }
 
