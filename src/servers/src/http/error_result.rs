@@ -97,6 +97,7 @@ impl IntoResponse for ErrorResponse {
             | StatusCode::TableNotFound
             | StatusCode::TableColumnNotFound
             | StatusCode::PlanQuery
+            | StatusCode::DatabaseAlreadyExists
             | StatusCode::FlowNotFound
             | StatusCode::FlowAlreadyExists => HttpStatusCode::BAD_REQUEST,
 
@@ -112,11 +113,13 @@ impl IntoResponse for ErrorResponse {
             StatusCode::RateLimited => HttpStatusCode::TOO_MANY_REQUESTS,
 
             StatusCode::RegionNotReady
+            | StatusCode::TableUnavailable
             | StatusCode::RegionBusy
             | StatusCode::StorageUnavailable => HttpStatusCode::SERVICE_UNAVAILABLE,
 
             StatusCode::Internal
             | StatusCode::Unexpected
+            | StatusCode::IllegalState
             | StatusCode::Unknown
             | StatusCode::RuntimeResourcesExhausted
             | StatusCode::EngineExecuteQuery => HttpStatusCode::INTERNAL_SERVER_ERROR,
