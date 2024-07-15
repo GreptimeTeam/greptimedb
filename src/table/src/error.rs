@@ -21,8 +21,6 @@ use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
 
-use crate::metadata::TableId;
-
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Default error implementation of table.
@@ -84,13 +82,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Duplicated call to plan execute method. table: {}", table))]
-    DuplicatedExecuteCall {
-        #[snafu(implicit)]
-        location: Location,
-        table: String,
-    },
-
     #[snafu(display(
         "Not allowed to remove index column {} from table {}",
         column_name,
@@ -117,13 +108,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Regions schemas mismatch in table: {}", table))]
-    RegionSchemaMismatch {
-        table: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to operate table"))]
     TableOperation { source: BoxedError },
 
@@ -146,13 +130,6 @@ pub enum Error {
         err: String,
     },
 
-    #[snafu(display("Invalid table state: {}", table_id))]
-    InvalidTable {
-        table_id: TableId,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Missing time index column in table: {}", table_name))]
     MissingTimeIndexColumn {
         table_name: String,
@@ -170,18 +147,14 @@ impl ErrorExt for Error {
             Error::RemoveColumnInIndex { .. }
             | Error::BuildColumnDescriptor { .. }
             | Error::InvalidAlterRequest { .. } => StatusCode::InvalidArguments,
-            Error::TablesRecordBatch { .. } | Error::DuplicatedExecuteCall { .. } => {
-                StatusCode::Unexpected
-            }
+            Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
             Error::SchemaBuild { source, .. } => source.status_code(),
             Error::TableOperation { source } => source.status_code(),
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
-            Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
             Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
             Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
-            Error::InvalidTable { .. } => StatusCode::TableUnavailable,
         }
     }
 

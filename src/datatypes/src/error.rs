@@ -224,9 +224,20 @@ impl ErrorExt for Error {
             | InvalidTimestampPrecision { .. }
             | InvalidPrecisionOrScale { .. } => StatusCode::InvalidArguments,
 
-            ValueExceedsPrecision { .. } => StatusCode::IllegalState,
-            // Inner encoding and decoding error should not be exposed to users.
-            _ => StatusCode::Internal,
+            ValueExceedsPrecision { .. }
+            | CastType { .. }
+            | CastTimeType { .. }
+            | Conversion { .. } => StatusCode::IllegalState,
+
+            Serialize { .. }
+            | Deserialize { .. }
+            | UnknownVector { .. }
+            | ParseSchemaVersion { .. }
+            | ArrowCompute { .. }
+            | ProjectArrowSchema { .. }
+            | ToScalarValue { .. }
+            | TryFromValue { .. }
+            | ConvertArrowArrayToScalars { .. } => StatusCode::Internal,
         }
     }
 
