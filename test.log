@@ -1,0 +1,1515 @@
+
+running 57 tests
+test adapter::parse_expr::test_parse_duration ... ok
+test adapter::parse_expr::test_parse_fixed ... ok
+test adapter::worker::test::drop_handle ... ok
+test compute::render::test::example_source_sink ... ok
+test expr::func::test_get_window_start ... ok
+test compute::render::test::test_tee_auto_schedule ... ok
+test compute::render::test::test_render_constant ... ok
+test expr::func::test_num_ops ... ok
+test expr::linear::test::test_mfp_chore ... ok
+test expr::linear::test::manipulation_mfp ... ok
+test compute::render::reduce::test::test_basic_distinct ... ok
+test expr::func::test_binary_func_spec ... ok
+test compute::render::map::test::test_render_mfp_multiple_times ... ok
+test adapter::worker::test::test_simple_get_with_worker_and_handle ... ok
+test expr::linear::test::test_mfp_out_of_order ... ok
+test compute::render::map::test::test_render_mfp ... ok
+test expr::linear::test::test_mfp_with_time ... ok
+test expr::relation::accum::test::test_accum ... ok
+test compute::render::reduce::test::test_delete_reduce_distinct_accum ... ok
+test expr::scalar::test::test_bad_permute ... ok
+test expr::linear::test::test_mfp ... ok
+test expr::linear::test::test_permute ... ok
+test compute::render::reduce::test::test_basic_reduce_accum ... ok
+test expr::scalar::test::test_extract_bound ... ok
+test repr::test::test_row ... ok
+test expr::relation::accum::test::test_fail_path_accum ... ok
+test compute::render::reduce::test::test_basic_reduce_distinct_accum ... ok
+test repr::test::test_cast_to_internal_ts ... ok
+test expr::linear::test::mfp_test_cast_and_filter ... ok
+test compute::render::reduce::test::test_avg_eval ... ok
+test transform::expr::test::test_func_sig ... ok
+test compute::render::map::test::test_render_mfp_with_temporal ... ok
+test utils::test::only_save_future_updates ... ok
+test utils::test::test_full_arrangement_get_from_first_entry ... ok
+test utils::test::test_apply_expired_keys ... ok
+test compute::render::reduce::test::test_composite_reduce_distinct_accum ... ok
+test utils::test::test_future_get ... ok
+test utils::test::test_get_by_range ... ok
+test utils::test::test_get_unaligned ... ok
+test utils::test::test_split_off ... ok
+test utils::test::test_out_of_order_apply_updates ... ok
+test utils::test::test_reduce_expire_keys ... ok
+test expr::scalar::test::test_df_scalar_function ... ok
+test transform::literal::test::test_literal ... ok
+test transform::expr::test::test_binary_func_and_constant_folding ... ok
+test transform::aggr::test::test_sum ... FAILED
+test transform::expr::test::test_implicitly_cast ... FAILED
+test transform::aggr::test::test_avg ... FAILED
+test transform::expr::test::test_select_add ... FAILED
+test transform::aggr::test::test_df_func_expr_tree ... FAILED
+test transform::plan::test::test_select ... FAILED
+test transform::aggr::test::test_df_func_basic ... FAILED
+test transform::expr::test::test_cast ... FAILED
+test transform::aggr::test::test_sum_add ... FAILED
+test transform::expr::test::test_where_and ... FAILED
+test transform::aggr::test::test_sum_group_by ... FAILED
+test transform::aggr::test::test_avg_group_by ... FAILED
+
+failures:
+
+---- transform::aggr::test::test_sum stdout ----
+thread 'transform::aggr::test::test_sum' panicked at src/flow/src/transform/aggr.rs:942:9:
+assertion failed: `(left == right)`
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+ TypedPlan {
+     schema: RelationDesc {
+         typ: RelationType {
+             column_types: [
+                 ColumnType {
+                     scalar_type: UInt64(
+                         UInt64Type,
+                     ),
+                     nullable: true,
+                 },
+             ],
+             keys: [],
+             time_index: None,
+             auto_columns: [],
+         },
+         names: [
+             None,
+         ],
+     },
+     plan: Mfp {
+         input: TypedPlan {
+             schema: RelationDesc {
+                 typ: RelationType {
+                     column_types: [
+                         ColumnType {
+                             scalar_type: UInt64(
+                                 UInt64Type,
+                             ),
+                             nullable: true,
+                         },
+                     ],
+                     keys: [],
+                     time_index: None,
+                     auto_columns: [],
+                 },
+                 names: [
+                     None,
+                 ],
+             },
+             plan: Reduce {
+                 input: TypedPlan {
+                     schema: RelationDesc {
+                         typ: RelationType {
+                             column_types: [
+                                 ColumnType {
+                                     scalar_type: UInt32(
+                                         UInt32Type,
+                                     ),
+                                     nullable: false,
+                                 },
+                             ],
+                             keys: [],
+                             time_index: None,
+                             auto_columns: [],
+                         },
+                         names: [
+                             Some(
+                                 "number",
+                             ),
+                         ],
+                     },
+                     plan: Get {
+                         id: Global(
+                             User(
+                                 0,
+                             ),
+                         ),
+                     },
+                 },
+                 key_val_plan: KeyValPlan {
+                     key_plan: SafeMfpPlan {
+                         mfp: MapFilterProject {
+                             expressions: [],
+                             predicates: [],
+                             projection: [],
+                             input_arity: 1,
+                         },
+                     },
+                     val_plan: SafeMfpPlan {
+                         mfp: MapFilterProject {
+                             expressions: [],
+                             predicates: [],
+                             projection: [
+                                 0,
+                             ],
+                             input_arity: 1,
+                         },
+                     },
+                 },
+                 reduce_plan: Accumulable(
+                     AccumulablePlan {
+                         full_aggrs: [
+                             AggregateExpr {
+                                 func: SumUInt32,
+                                 expr: Column(
+                                     0,
+                                 ),
+                                 distinct: false,
+                             },
+                         ],
+                         simple_aggrs: [
+                             AggrWithIndex {
+                                 expr: AggregateExpr {
+                                     func: SumUInt32,
+                                     expr: Column(
+                                         0,
+                                     ),
+                                     distinct: false,
+                                 },
+                                 input_idx: 0,
+                                 output_idx: 0,
+                             },
+                         ],
+                         distinct_aggrs: [],
+                     },
+                 ),
+             },
+         },
+         mfp: MapFilterProject {
+             expressions: [
+                 Column(
+                     0,
+                 ),
+[32m>                Column([0m
+[32m>                    1,[0m
+[32m>                ),[0m
+             ],
+             predicates: [],
+             projection: [
+[31m<                [0m[1;48;5;52;31m1[0m[31m,[0m
+[32m>                [0m[1;48;5;22;32m2[0m[32m,[0m
+             ],
+             input_arity: 1,
+         },
+     },
+ }
+
+
+
+---- transform::expr::test::test_implicitly_cast stdout ----
+thread 'transform::expr::test::test_implicitly_cast' panicked at src/flow/src/transform/expr.rs:590:9:
+assertion failed: `(left == right)`
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+ TypedPlan {
+     schema: RelationDesc {
+         typ: RelationType {
+             column_types: [
+                 ColumnType {
+                     scalar_type: UInt32(
+                         UInt32Type,
+                     ),
+[31m<                    nullable: [0m[1;48;5;52;31mfals[0m[31me,[0m
+[32m>                    nullable: [0m[1;48;5;22;32mtru[0m[32me,[0m
+                 },
+             ],
+             keys: [],
+             time_index: None,
+             auto_columns: [],
+         },
+         names: [
+[31m<            Some([0m
+[31m<                "number",[0m
+[31m<            ),[0m
+[32m>            None,[0m
+         ],
+     },
+[31m<    plan: Get {[0m
+[31m<        id: Global([0m
+[31m<            User([0m
+[31m<                0,[0m
+[31m<            ),[0m
+[31m<        ),[0m
+[32m>    plan: Mfp {[0m
+[32m>        input: TypedPlan {[0m
+[32m>            schema: RelationDesc {[0m
+[32m>                typ: RelationType {[0m
+[32m>                    column_types: [[0m
+[32m>                        ColumnType {[0m
+[32m>                            scalar_type: UInt32([0m
+[32m>                                UInt32Type,[0m
+[32m>                            ),[0m
+[32m>                            nullable: false,[0m
+[32m>                        },[0m
+[32m>                    ],[0m
+[32m>                    keys: [],[0m
+[32m>                    time_index: None,[0m
+[32m>                    auto_columns: [],[0m
+[32m>                },[0m
+[32m>                names: [[0m
+[32m>                    Some([0m
+[32m>                        "number",[0m
+[32m>                    ),[0m
+[32m>                ],[0m
+[32m>            },[0m
+[32m>            plan: Get {[0m
+[32m>                id: Global([0m
+[32m>                    User([0m
+[32m>                        0,[0m
+[32m>                    ),[0m
+[32m>                ),[0m
+[32m>            },[0m
+[32m>        },[0m
+[32m>        mfp: MapFilterProject {[0m
+[32m>            expressions: [[0m
+[32m>                CallBinary {[0m
+[32m>                    func: AddUInt32,[0m
+[32m>                    expr1: Column([0m
+[32m>                        0,[0m
+[32m>                    ),[0m
+[32m>                    expr2: Literal([0m
+[32m>                        UInt32([0m
+[32m>                            1,[0m
+[32m>                        ),[0m
+[32m>                        UInt32([0m
+[32m>                            UInt32Type,[0m
+[32m>                        ),[0m
+[32m>                    ),[0m
+[32m>                },[0m
+[32m>            ],[0m
+[32m>            predicates: [],[0m
+[32m>            projection: [[0m
+[32m>                1,[0m
+[32m>            ],[0m
+[32m>            input_arity: 1,[0m
+[32m>        },[0m
+     },
+ }
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- transform::aggr::test::test_avg stdout ----
+thread 'transform::aggr::test::test_avg' panicked at src/flow/src/transform/aggr.rs:879:9:
+assertion failed: `(left == right)`
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+ TypedPlan {
+     schema: RelationDesc {
+         typ: RelationType {
+             column_types: [
+                 ColumnType {
+                     scalar_type: UInt64(
+                         UInt64Type,
+                     ),
+                     nullable: true,
+                 },
+             ],
+             keys: [],
+             time_index: None,
+             auto_columns: [],
+         },
+         names: [
+             None,
+         ],
+     },
+     plan: Mfp {
+         input: TypedPlan {
+             schema: RelationDesc {
+                 typ: RelationType {
+                     column_types: [
+                         ColumnType {
+                             scalar_type: UInt64(
+                                 UInt64Type,
+                             ),
+                             nullable: true,
+                         },
+                         ColumnType {
+                             scalar_type: Int64(
+                                 Int64Type,
+                             ),
+                             nullable: true,
+                         },
+                     ],
+                     keys: [],
+                     time_index: None,
+                     auto_columns: [],
+                 },
+                 names: [
+                     None,
+                     None,
+                 ],
+             },
+             plan: Reduce {
+                 input: TypedPlan {
+                     schema: RelationDesc {
+                         typ: RelationType {
+                             column_types: [
+                                 ColumnType {
+                                     scalar_type: UInt32(
+                                         UInt32Type,
+                                     ),
+                                     nullable: false,
+                                 },
+                             ],
+                             keys: [],
+                             time_index: None,
+                             auto_columns: [],
+                         },
+                         names: [
+                             Some(
+                                 "number",
+                             ),
+                         ],
+                     },
+                     plan: Get {
+                         id: Global(
+                             User(
+                                 0,
+                             ),
+                         ),
+                     },
+                 },
+                 key_val_plan: KeyValPlan {
+                     key_plan: SafeMfpPlan {
+                         mfp: MapFilterProject {
+                             expressions: [],
+                             predicates: [],
+                             projection: [],
+                             input_arity: 1,
+                         },
+                     },
+                     val_plan: SafeMfpPlan {
+                         mfp: MapFilterProject {
+                             expressions: [],
+                             predicates: [],
+                             projection: [
+                                 0,
+                             ],
+                             input_arity: 1,
+                         },
+                     },
+                 },
+                 reduce_plan: Accumulable(
+                     AccumulablePlan {
+                         full_aggrs: [
+                             AggregateExpr {
+                                 func: SumUInt32,
+                                 expr: Column(
+                                     0,
+                                 ),
+                                 distinct: false,
+                             },
+                             AggregateExpr {
+                                 func: Count,
+                                 expr: Column(
+                                     0,
+                                 ),
+                                 distinct: false,
+                             },
+                         ],
+                         simple_aggrs: [
+                             AggrWithIndex {
+                                 expr: AggregateExpr {
+                                     func: SumUInt32,
+                                     expr: Column(
+                                         0,
+                                     ),
+                                     distinct: false,
+                                 },
+                                 input_idx: 0,
+                                 output_idx: 0,
+                             },
+                             AggrWithIndex {
+                                 expr: AggregateExpr {
+                                     func: Count,
+                                     expr: Column(
+                                         0,
+                                     ),
+                                     distinct: false,
+                                 },
+                                 input_idx: 0,
+                                 output_idx: 1,
+                             },
+                         ],
+                         distinct_aggrs: [],
+                     },
+                 ),
+             },
+         },
+         mfp: MapFilterProject {
+             expressions: [
+                 If {
+                     cond: CallBinary {
+                         func: NotEq,
+                         expr1: Column(
+                             1,
+                         ),
+                         expr2: Literal(
+                             Int64(
+                                 0,
+                             ),
+                             Int64(
+                                 Int64Type,
+                             ),
+                         ),
+                     },
+                     then: CallBinary {
+                         func: DivUInt64,
+                         expr1: Column(
+                             0,
+                         ),
+                         expr2: CallUnary {
+                             func: Cast(
+                                 UInt64(
+                                     UInt64Type,
+                                 ),
+                             ),
+                             expr: Column(
+                                 1,
+                             ),
+                         },
+                     },
+                     els: Literal(
+                         Null,
+                         UInt64(
+                             UInt64Type,
+                         ),
+                     ),
+                 },
+[32m>                Column([0m
+[32m>                    2,[0m
+[32m>                ),[0m
+             ],
+             predicates: [],
+             projection: [
+[31m<                [0m[1;48;5;52;31m2[0m[31m,[0m
+[32m>                [0m[1;48;5;22;32m3[0m[32m,[0m
+             ],
+             input_arity: 2,
+         },
+     },
+ }
+
+
+
+---- transform::expr::test::test_select_add stdout ----
+thread 'transform::expr::test::test_select_add' panicked at src/flow/src/transform/expr.rs:666:9:
+assertion failed: `(left == right)`
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+ TypedPlan {
+     schema: RelationDesc {
+         typ: RelationType {
+             column_types: [
+                 ColumnType {
+                     scalar_type: UInt32(
+                         UInt32Type,
+                     ),
+[31m<                    nullable: [0m[1;48;5;52;31mfals[0m[31me,[0m
+[32m>                    nullable: [0m[1;48;5;22;32mtru[0m[32me,[0m
+                 },
+             ],
+             keys: [],
+             time_index: None,
+             auto_columns: [],
+         },
+         names: [
+[31m<            Some([0m
+[31m<                "number",[0m
+[31m<            ),[0m
+[32m>            None,[0m
+         ],
+     },
+[31m<    plan: Get {[0m
+[31m<        id: Global([0m
+[31m<            User([0m
+[31m<                0,[0m
+[31m<            ),[0m
+[31m<        ),[0m
+[32m>    plan: Mfp {[0m
+[32m>        input: TypedPlan {[0m
+[32m>            schema: RelationDesc {[0m
+[32m>                typ: RelationType {[0m
+[32m>                    column_types: [[0m
+[32m>                        ColumnType {[0m
+[32m>                            scalar_type: UInt32([0m
+[32m>                                UInt32Type,[0m
+[32m>                            ),[0m
+[32m>                            nullable: false,[0m
+[32m>                        },[0m
+[32m>                    ],[0m
+[32m>                    keys: [],[0m
+[32m>                    time_index: None,[0m
+[32m>                    auto_columns: [],[0m
+[32m>                },[0m
+[32m>                names: [[0m
+[32m>                    Some([0m
+[32m>                        "number",[0m
+[32m>                    ),[0m
+[32m>                ],[0m
+[32m>            },[0m
+[32m>            plan: Get {[0m
+[32m>                id: Global([0m
+[32m>                    User([0m
+[32m>                        0,[0m
+[32m>                    ),[0m
+[32m>                ),[0m
+[32m>            },[0m
+[32m>        },[0m
+[32m>        mfp: MapFilterProject {[0m
+[32m>            expressions: [[0m
+[32m>                CallBinary {[0m
+[32m>                    func: AddUInt32,[0m
+[32m>                    expr1: Column([0m
+[32m>                        0,[0m
+[32m>                    ),[0m
+[32m>                    expr2: Column([0m
+[32m>                        0,[0m
+[32m>                    ),[0m
+[32m>                },[0m
+[32m>            ],[0m
+[32m>            predicates: [],[0m
+[32m>            projection: [[0m
+[32m>                1,[0m
+[32m>            ],[0m
+[32m>            input_arity: 1,[0m
+[32m>        },[0m
+     },
+ }
+
+
+
+---- transform::aggr::test::test_df_func_expr_tree stdout ----
+thread 'transform::aggr::test::test_df_func_expr_tree' panicked at src/flow/src/transform/aggr.rs:622:34:
+called `Result::unwrap()` on an `Err` value: 0: Invalid query: column index 3 out of range, expected at most 3 columns, at src/flow/src/expr/linear.rs:159:18
+
+---- transform::plan::test::test_select stdout ----
+thread 'transform::plan::test::test_select' panicked at src/flow/src/transform/plan.rs:272:9:
+assertion failed: `(left == right)`
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+ TypedPlan {
+     schema: RelationDesc {
+         typ: RelationType {
+             column_types: [
+                 ColumnType {
+                     scalar_type: UInt32(
+                         UInt32Type,
+                     ),
+                     nullable: false,
+                 },
+             ],
+             keys: [],
+             time_index: None,
+             auto_columns: [],
+         },
+         names: [
+             Some(
+                 "number",
+             ),
+         ],
+     },
+[31m<    plan: Get {[0m
+[31m<        id: Global([0m
+[31m<            User([0m
+[31m<                0,[0m
+[31m<            ),[0m
+[31m<        ),[0m
+[32m>    plan: Mfp {[0m
+[32m>        input: TypedPlan {[0m
+[32m>            schema: RelationDesc {[0m
+[32m>                typ: RelationType {[0m
+[32m>                    column_types: [[0m
+[32m>                        ColumnType {[0m
+[32m>                            scalar_type: UInt32([0m
+[32m>                                UInt32Type,[0m
+[32m>                            ),[0m
+[32m>                            nullable: false,[0m
+[32m>                        },[0m
+[32m>                    ],[0m
+[32m>                    keys: [],[0m
+[32m>                    time_index: None,[0m
+[32m>                    auto_columns: [],[0m
+[32m>                },[0m
+[32m>                names: [[0m
+[32m>                    Some([0m
+[32m>                        "number",[0m
+[32m>                    ),[0m
+[32m>                ],[0m
+[32m>            },[0m
+[32m>            plan: Get {[0m
+[32m>                id: Global([0m
+[32m>                    User([0m
+[32m>                        0,[0m
+[32m>                    ),[0m
+[32m>                ),[0m
+[32m>            },[0m
+[32m>        },[0m
+[32m>        mfp: MapFilterProject {[0m
+[32m>            expressions: [[0m
+[32m>                Column([0m
+[32m>                    0,[0m
+[32m>                ),[0m
+[32m>            ],[0m
+[32m>            predicates: [],[0m
+[32m>            projection: [[0m
+[32m>                1,[0m
+[32m>            ],[0m
+[32m>            input_arity: 1,[0m
+[32m>        },[0m
+     },
+ }
+
+
+
+---- transform::aggr::test::test_df_func_basic stdout ----
+thread 'transform::aggr::test::test_df_func_basic' panicked at src/flow/src/transform/aggr.rs:500:34:
+called `Result::unwrap()` on an `Err` value: 0: Invalid query: column index 3 out of range, expected at most 3 columns, at src/flow/src/expr/linear.rs:159:18
+
+---- transform::expr::test::test_cast stdout ----
+thread 'transform::expr::test::test_cast' panicked at src/flow/src/transform/expr.rs:629:9:
+assertion failed: `(left == right)`
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+ TypedPlan {
+     schema: RelationDesc {
+         typ: RelationType {
+             column_types: [
+                 ColumnType {
+[31m<                    scalar_type: UInt32([0m
+[31m<                        UInt32Type,[0m
+[32m>                    scalar_type: Int16([0m
+[32m>                        Int16Type,[0m
+                     ),
+[31m<                    nullable: [0m[1;48;5;52;31mfals[0m[31me,[0m
+[32m>                    nullable: [0m[1;48;5;22;32mtru[0m[32me,[0m
+                 },
+             ],
+             keys: [],
+             time_index: None,
+             auto_columns: [],
+         },
+         names: [
+[31m<            Some([0m
+[31m<                "number",[0m
+[31m<            ),[0m
+[32m>            None,[0m
+         ],
+     },
+[31m<    plan: Get {[0m
+[31m<        id: Global([0m
+[31m<            User([0m
+[31m<                0,[0m
+[31m<            ),[0m
+[31m<        ),[0m
+[32m>    plan: Mfp {[0m
+[32m>        input: TypedPlan {[0m
+[32m>            schema: RelationDesc {[0m
+[32m>                typ: RelationType {[0m
+[32m>                    column_types: [[0m
+[32m>                        ColumnType {[0m
+[32m>                            scalar_type: UInt32([0m
+[32m>                                UInt32Type,[0m
+[32m>                            ),[0m
+[32m>                            nullable: false,[0m
+[32m>                        },[0m
+[32m>                    ],[0m
+[32m>                    keys: [],[0m
+[32m>                    time_index: None,[0m
+[32m>                    auto_columns: [],[0m
+[32m>                },[0m
+[32m>                names: [[0m
+[32m>                    Some([0m
+[32m>                        "number",[0m
+[32m>                    ),[0m
+[32m>                ],[0m
+[32m>            },[0m
+[32m>            plan: Get {[0m
+[32m>                id: Global([0m
+[32m>                    User([0m
+[32m>                        0,[0m
+[32m>                    ),[0m
+[32m>                ),[0m
+[32m>            },[0m
+[32m>        },[0m
+[32m>        mfp: MapFilterProject {[0m
+[32m>            expressions: [[0m
+[32m>                CallUnary {[0m
+[32m>                    func: Cast([0m
+[32m>                        Int16([0m
+[32m>                            Int16Type,[0m
+[32m>                        ),[0m
+[32m>                    ),[0m
+[32m>                    expr: Literal([0m
+[32m>                        Int64([0m
+[32m>                            1,[0m
+[32m>                        ),[0m
+[32m>                        Int64([0m
+[32m>                            Int64Type,[0m
+[32m>                        ),[0m
+[32m>                    ),[0m
+[32m>                },[0m
+[32m>            ],[0m
+[32m>            predicates: [],[0m
+[32m>            projection: [[0m
+[32m>                1,[0m
+[32m>            ],[0m
+[32m>            input_arity: 1,[0m
+[32m>        },[0m
+     },
+ }
+
+
+
+---- transform::aggr::test::test_sum_add stdout ----
+thread 'transform::aggr::test::test_sum_add' panicked at src/flow/src/transform/aggr.rs:1088:9:
+assertion failed: `(left == right)`
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+ TypedPlan {
+     schema: RelationDesc {
+         typ: RelationType {
+             column_types: [
+                 ColumnType {
+                     scalar_type: UInt64(
+                         UInt64Type,
+                     ),
+                     nullable: true,
+                 },
+             ],
+             keys: [],
+             time_index: None,
+             auto_columns: [],
+         },
+         names: [
+             None,
+         ],
+     },
+     plan: Mfp {
+         input: TypedPlan {
+             schema: RelationDesc {
+                 typ: RelationType {
+                     column_types: [
+                         ColumnType {
+                             scalar_type: UInt64(
+                                 UInt64Type,
+                             ),
+                             nullable: true,
+                         },
+                     ],
+                     keys: [],
+                     time_index: None,
+                     auto_columns: [],
+                 },
+                 names: [
+                     None,
+                 ],
+             },
+             plan: Reduce {
+                 input: TypedPlan {
+                     schema: RelationDesc {
+                         typ: RelationType {
+                             column_types: [
+                                 ColumnType {
+                                     scalar_type: UInt32(
+                                         UInt32Type,
+                                     ),
+                                     nullable: false,
+                                 },
+                             ],
+                             keys: [],
+                             time_index: None,
+                             auto_columns: [],
+                         },
+                         names: [
+                             Some(
+                                 "number",
+                             ),
+                         ],
+                     },
+                     plan: Get {
+                         id: Global(
+                             User(
+                                 0,
+                             ),
+                         ),
+                     },
+                 },
+                 key_val_plan: KeyValPlan {
+                     key_plan: SafeMfpPlan {
+                         mfp: MapFilterProject {
+                             expressions: [],
+                             predicates: [],
+                             projection: [],
+                             input_arity: 1,
+                         },
+                     },
+                     val_plan: SafeMfpPlan {
+                         mfp: MapFilterProject {
+                             expressions: [
+                                 CallBinary {
+                                     func: AddUInt32,
+                                     expr1: Column(
+                                         0,
+                                     ),
+                                     expr2: Column(
+                                         0,
+                                     ),
+                                 },
+                             ],
+                             predicates: [],
+                             projection: [
+                                 1,
+                             ],
+                             input_arity: 1,
+                         },
+                     },
+                 },
+                 reduce_plan: Accumulable(
+                     AccumulablePlan {
+                         full_aggrs: [
+                             AggregateExpr {
+                                 func: SumUInt32,
+                                 expr: Column(
+                                     0,
+                                 ),
+                                 distinct: false,
+                             },
+                         ],
+                         simple_aggrs: [
+                             AggrWithIndex {
+                                 expr: AggregateExpr {
+                                     func: SumUInt32,
+                                     expr: Column(
+                                         0,
+                                     ),
+                                     distinct: false,
+                                 },
+                                 input_idx: 0,
+                                 output_idx: 0,
+                             },
+                         ],
+                         distinct_aggrs: [],
+                     },
+                 ),
+             },
+         },
+         mfp: MapFilterProject {
+             expressions: [
+                 Column(
+                     0,
+                 ),
+[32m>                Column([0m
+[32m>                    1,[0m
+[32m>                ),[0m
+             ],
+             predicates: [],
+             projection: [
+[31m<                [0m[1;48;5;52;31m1[0m[31m,[0m
+[32m>                [0m[1;48;5;22;32m2[0m[32m,[0m
+             ],
+             input_arity: 1,
+         },
+     },
+ }
+
+
+
+---- transform::expr::test::test_where_and stdout ----
+thread 'transform::expr::test::test_where_and' panicked at src/flow/src/transform/expr.rs:526:9:
+assertion failed: `(left == right)`
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+ TypedPlan {
+     schema: RelationDesc {
+         typ: RelationType {
+             column_types: [
+                 ColumnType {
+                     scalar_type: UInt32(
+                         UInt32Type,
+                     ),
+                     nullable: false,
+                 },
+             ],
+             keys: [],
+             time_index: None,
+             auto_columns: [],
+         },
+         names: [
+             Some(
+                 "number",
+             ),
+         ],
+     },
+     plan: Mfp {
+         input: TypedPlan {
+             schema: RelationDesc {
+                 typ: RelationType {
+                     column_types: [
+                         ColumnType {
+                             scalar_type: UInt32(
+                                 UInt32Type,
+                             ),
+                             nullable: false,
+                         },
+                     ],
+                     keys: [],
+                     time_index: None,
+                     auto_columns: [],
+                 },
+                 names: [
+                     Some(
+                         "number",
+                     ),
+                 ],
+             },
+             plan: Get {
+                 id: Global(
+                     User(
+                         0,
+                     ),
+                 ),
+             },
+         },
+         mfp: MapFilterProject {
+[31m<            expressions: [],[0m
+[32m>            expressions: [[0m
+[32m>                Column([0m
+[32m>                    0,[0m
+[32m>                ),[0m
+[32m>            ],[0m
+             predicates: [
+                 (
+                     1,
+                     CallVariadic {
+                         func: And,
+                         exprs: [
+                             CallBinary {
+                                 func: Gte,
+                                 expr1: Column(
+                                     0,
+                                 ),
+                                 expr2: Literal(
+                                     UInt32(
+                                         1,
+                                     ),
+                                     UInt32(
+                                         UInt32Type,
+                                     ),
+                                 ),
+                             },
+                             CallBinary {
+                                 func: Lte,
+                                 expr1: Column(
+                                     0,
+                                 ),
+                                 expr2: Literal(
+                                     UInt32(
+                                         3,
+                                     ),
+                                     UInt32(
+                                         UInt32Type,
+                                     ),
+                                 ),
+                             },
+                             CallBinary {
+                                 func: NotEq,
+                                 expr1: Column(
+                                     0,
+                                 ),
+                                 expr2: Literal(
+                                     UInt32(
+                                         2,
+                                     ),
+                                     UInt32(
+                                         UInt32Type,
+                                     ),
+                                 ),
+                             },
+                         ],
+                     },
+                 ),
+             ],
+             projection: [
+[31m<                [0m[1;48;5;52;31m0[0m[31m,[0m
+[32m>                [0m[1;48;5;22;32m1[0m[32m,[0m
+             ],
+             input_arity: 1,
+         },
+     },
+ }
+
+
+
+---- transform::aggr::test::test_sum_group_by stdout ----
+thread 'transform::aggr::test::test_sum_group_by' panicked at src/flow/src/transform/aggr.rs:1022:9:
+assertion failed: `(left == right)`
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+ TypedPlan {
+     schema: RelationDesc {
+         typ: RelationType {
+             column_types: [
+                 ColumnType {
+[31m<                    scalar_type: UInt32([0m
+[31m<                        UInt32Type,[0m
+[31m<                    ),[0m
+[31m<                    nullable: false,[0m
+[31m<                },[0m
+[31m<                ColumnType {[0m
+                     scalar_type: UInt64(
+                         UInt64Type,
+                     ),
+                     nullable: true,
+                 },
+[32m>                ColumnType {[0m
+[32m>                    scalar_type: UInt32([0m
+[32m>                        UInt32Type,[0m
+[32m>                    ),[0m
+[32m>                    nullable: false,[0m
+[32m>                },[0m
+             ],
+             keys: [
+                 Key {
+                     column_indices: [
+[31m<                        [0m[1;48;5;52;31m0[0m[31m,[0m
+[32m>                        [0m[1;48;5;22;32m1[0m[32m,[0m
+                     ],
+                 },
+             ],
+             time_index: None,
+             auto_columns: [],
+         },
+         names: [
+[32m>            None,[0m
+             Some(
+                 "number",
+             ),
+[31m<            None,[0m
+         ],
+     },
+     plan: Mfp {
+         input: TypedPlan {
+             schema: RelationDesc {
+                 typ: RelationType {
+                     column_types: [
+                         ColumnType {
+                             scalar_type: UInt32(
+                                 UInt32Type,
+                             ),
+                             nullable: false,
+                         },
+                         ColumnType {
+                             scalar_type: UInt64(
+                                 UInt64Type,
+                             ),
+                             nullable: true,
+                         },
+                     ],
+                     keys: [
+                         Key {
+                             column_indices: [
+                                 0,
+                             ],
+                         },
+                     ],
+                     time_index: None,
+                     auto_columns: [],
+                 },
+                 names: [
+                     Some(
+                         "number",
+                     ),
+                     None,
+                 ],
+             },
+             plan: Reduce {
+                 input: TypedPlan {
+                     schema: RelationDesc {
+                         typ: RelationType {
+                             column_types: [
+                                 ColumnType {
+                                     scalar_type: UInt32(
+                                         UInt32Type,
+                                     ),
+                                     nullable: false,
+                                 },
+                             ],
+                             keys: [],
+                             time_index: None,
+                             auto_columns: [],
+                         },
+                         names: [
+                             Some(
+                                 "number",
+                             ),
+                         ],
+                     },
+                     plan: Get {
+                         id: Global(
+                             User(
+                                 0,
+                             ),
+                         ),
+                     },
+                 },
+                 key_val_plan: KeyValPlan {
+                     key_plan: SafeMfpPlan {
+                         mfp: MapFilterProject {
+                             expressions: [
+                                 Column(
+                                     0,
+                                 ),
+                             ],
+                             predicates: [],
+                             projection: [
+                                 1,
+                             ],
+                             input_arity: 1,
+                         },
+                     },
+                     val_plan: SafeMfpPlan {
+                         mfp: MapFilterProject {
+                             expressions: [],
+                             predicates: [],
+                             projection: [
+                                 0,
+                             ],
+                             input_arity: 1,
+                         },
+                     },
+                 },
+                 reduce_plan: Accumulable(
+                     AccumulablePlan {
+                         full_aggrs: [
+                             AggregateExpr {
+                                 func: SumUInt32,
+                                 expr: Column(
+                                     0,
+                                 ),
+                                 distinct: false,
+                             },
+                         ],
+                         simple_aggrs: [
+                             AggrWithIndex {
+                                 expr: AggregateExpr {
+                                     func: SumUInt32,
+                                     expr: Column(
+                                         0,
+                                     ),
+                                     distinct: false,
+                                 },
+                                 input_idx: 0,
+                                 output_idx: 0,
+                             },
+                         ],
+                         distinct_aggrs: [],
+                     },
+                 ),
+             },
+         },
+         mfp: MapFilterProject {
+             expressions: [
+                 Column(
+                     1,
+                 ),
+[32m>                Column([0m
+[32m>                    2,[0m
+[32m>                ),[0m
+[32m>                Column([0m
+[32m>                    0,[0m
+[32m>                ),[0m
+             ],
+             predicates: [],
+             projection: [
+[31m<                0,[0m
+[31m<                2,[0m
+[32m>                3,[0m
+[32m>                4,[0m
+             ],
+             input_arity: 2,
+         },
+     },
+ }
+
+
+
+---- transform::aggr::test::test_avg_group_by stdout ----
+thread 'transform::aggr::test::test_avg_group_by' panicked at src/flow/src/transform/aggr.rs:785:9:
+assertion failed: `(left == right)`
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+ TypedPlan {
+     schema: RelationDesc {
+         typ: RelationType {
+             column_types: [
+                 ColumnType {
+[31m<                    scalar_type: UInt32([0m
+[31m<                        UInt32Type,[0m
+[31m<                    ),[0m
+[31m<                    nullable: false,[0m
+[31m<                },[0m
+[31m<                ColumnType {[0m
+                     scalar_type: UInt64(
+                         UInt64Type,
+                     ),
+                     nullable: true,
+                 },
+[32m>                ColumnType {[0m
+[32m>                    scalar_type: UInt32([0m
+[32m>                        UInt32Type,[0m
+[32m>                    ),[0m
+[32m>                    nullable: false,[0m
+[32m>                },[0m
+             ],
+             keys: [
+                 Key {
+                     column_indices: [
+[31m<                        [0m[1;48;5;52;31m0[0m[31m,[0m
+[32m>                        [0m[1;48;5;22;32m1[0m[32m,[0m
+                     ],
+                 },
+             ],
+             time_index: None,
+             auto_columns: [],
+         },
+         names: [
+[32m>            None,[0m
+             Some(
+                 "number",
+             ),
+[31m<            None,[0m
+         ],
+     },
+     plan: Mfp {
+         input: TypedPlan {
+             schema: RelationDesc {
+                 typ: RelationType {
+                     column_types: [
+                         ColumnType {
+                             scalar_type: UInt32(
+                                 UInt32Type,
+                             ),
+                             nullable: false,
+                         },
+                         ColumnType {
+                             scalar_type: UInt64(
+                                 UInt64Type,
+                             ),
+                             nullable: true,
+                         },
+                         ColumnType {
+                             scalar_type: Int64(
+                                 Int64Type,
+                             ),
+                             nullable: true,
+                         },
+                     ],
+                     keys: [
+                         Key {
+                             column_indices: [
+                                 0,
+                             ],
+                         },
+                     ],
+                     time_index: None,
+                     auto_columns: [],
+                 },
+                 names: [
+                     Some(
+                         "number",
+                     ),
+                     None,
+                     None,
+                 ],
+             },
+             plan: Reduce {
+                 input: TypedPlan {
+                     schema: RelationDesc {
+                         typ: RelationType {
+                             column_types: [
+                                 ColumnType {
+                                     scalar_type: UInt32(
+                                         UInt32Type,
+                                     ),
+                                     nullable: false,
+                                 },
+                             ],
+                             keys: [],
+                             time_index: None,
+                             auto_columns: [],
+                         },
+                         names: [
+                             Some(
+                                 "number",
+                             ),
+                         ],
+                     },
+                     plan: Get {
+                         id: Global(
+                             User(
+                                 0,
+                             ),
+                         ),
+                     },
+                 },
+                 key_val_plan: KeyValPlan {
+                     key_plan: SafeMfpPlan {
+                         mfp: MapFilterProject {
+                             expressions: [
+                                 Column(
+                                     0,
+                                 ),
+                             ],
+                             predicates: [],
+                             projection: [
+                                 1,
+                             ],
+                             input_arity: 1,
+                         },
+                     },
+                     val_plan: SafeMfpPlan {
+                         mfp: MapFilterProject {
+                             expressions: [],
+                             predicates: [],
+                             projection: [
+                                 0,
+                             ],
+                             input_arity: 1,
+                         },
+                     },
+                 },
+                 reduce_plan: Accumulable(
+                     AccumulablePlan {
+                         full_aggrs: [
+                             AggregateExpr {
+                                 func: SumUInt32,
+                                 expr: Column(
+                                     0,
+                                 ),
+                                 distinct: false,
+                             },
+                             AggregateExpr {
+                                 func: Count,
+                                 expr: Column(
+                                     0,
+                                 ),
+                                 distinct: false,
+                             },
+                         ],
+                         simple_aggrs: [
+                             AggrWithIndex {
+                                 expr: AggregateExpr {
+                                     func: SumUInt32,
+                                     expr: Column(
+                                         0,
+                                     ),
+                                     distinct: false,
+                                 },
+                                 input_idx: 0,
+                                 output_idx: 0,
+                             },
+                             AggrWithIndex {
+                                 expr: AggregateExpr {
+                                     func: Count,
+                                     expr: Column(
+                                         0,
+                                     ),
+                                     distinct: false,
+                                 },
+                                 input_idx: 0,
+                                 output_idx: 1,
+                             },
+                         ],
+                         distinct_aggrs: [],
+                     },
+                 ),
+             },
+         },
+         mfp: MapFilterProject {
+             expressions: [
+                 If {
+                     cond: CallBinary {
+                         func: NotEq,
+                         expr1: Column(
+                             2,
+                         ),
+                         expr2: Literal(
+                             Int64(
+                                 0,
+                             ),
+                             Int64(
+                                 Int64Type,
+                             ),
+                         ),
+                     },
+                     then: CallBinary {
+                         func: DivUInt64,
+                         expr1: Column(
+                             1,
+                         ),
+                         expr2: CallUnary {
+                             func: Cast(
+                                 UInt64(
+                                     UInt64Type,
+                                 ),
+                             ),
+                             expr: Column(
+                                 2,
+                             ),
+                         },
+                     },
+                     els: Literal(
+                         Null,
+                         UInt64(
+                             UInt64Type,
+                         ),
+                     ),
+                 },
+[32m>                Column([0m
+[32m>                    3,[0m
+[32m>                ),[0m
+[32m>                Column([0m
+[32m>                    0,[0m
+[32m>                ),[0m
+             ],
+             predicates: [],
+             projection: [
+[31m<                0,[0m
+[31m<                3,[0m
+[32m>                4,[0m
+[32m>                5,[0m
+             ],
+             input_arity: 3,
+         },
+     },
+ }
+
+
+
+
+failures:
+    transform::aggr::test::test_avg
+    transform::aggr::test::test_avg_group_by
+    transform::aggr::test::test_df_func_basic
+    transform::aggr::test::test_df_func_expr_tree
+    transform::aggr::test::test_sum
+    transform::aggr::test::test_sum_add
+    transform::aggr::test::test_sum_group_by
+    transform::expr::test::test_cast
+    transform::expr::test::test_implicitly_cast
+    transform::expr::test::test_select_add
+    transform::expr::test::test_where_and
+    transform::plan::test::test_select
+
+test result: FAILED. 45 passed; 12 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+

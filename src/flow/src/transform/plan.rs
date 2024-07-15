@@ -76,25 +76,9 @@ impl TypedPlan {
             return not_impl_err!("Projection without an input is not supported");
         };
 
-        // because this `input.schema` is incorrect for pre-expand substrait plan, so we have to use schema before expand multi-value
-        // function to correctly transform it, and late rewrite it
-        let schema_before_expand = {
-            let input_schema = input.schema.clone();
-            let auto_columns: HashSet<usize> =
-                HashSet::from_iter(input_schema.typ().auto_columns.clone());
-            let not_auto_added_columns = (0..input_schema.len()?)
-                .filter(|i| !auto_columns.contains(i))
-                .collect_vec();
-            let mfp = MapFilterProject::new(input_schema.len()?)
-                .project(not_auto_added_columns)?
-                .into_safe();
-
-            input_schema.apply_mfp(&mfp)?
-        };
-
         let mut exprs: Vec<TypedExpr> = Vec::with_capacity(p.expressions.len());
         for e in &p.expressions {
-            let expr = TypedExpr::from_substrait_rex(e, &schema_before_expand, extensions).await?;
+            let expr = TypedExpr::from_substrait_rex(e, &input.schema, extensions).await?;
             exprs.push(expr);
         }
         let is_literal = exprs.iter().all(|expr| expr.expr.is_literal());
@@ -117,17 +101,6 @@ impl TypedPlan {
                 plan,
             })
         } else {
-            match input.plan.clone() {
-                Plan::Reduce { key_val_plan, .. } => {
-                    rewrite_projection_after_reduce(key_val_plan, &input.schema, &mut exprs)?;
-                }
-                Plan::Mfp { input, mfp: _ } => {
-                    if let Plan::Reduce { key_val_plan, .. } = input.plan {
-                        rewrite_projection_after_reduce(key_val_plan, &input.schema, &mut exprs)?;
-                    }
-                }
-                _ => (),
-            }
             input.projection(exprs)
         }
     }
@@ -233,113 +206,6 @@ impl TypedPlan {
             _ => not_impl_err!("Unsupported relation type: {:?}", rel.rel_type),
         }
     }
-}
-
-/// if reduce_plan contains the special function like tumble floor/ceiling, add them to the proj_exprs
-/// so the effect is the window_start, window_end column are auto added to output rows
-///
-/// This is to fix a problem that we have certain functions that return two values, but since substrait doesn't know that, it will assume it return one value
-/// this function fix that and rewrite `proj_exprs` to correct form
-fn rewrite_projection_after_reduce(
-    key_val_plan: KeyValPlan,
-    reduce_output_type: &RelationDesc,
-    proj_exprs: &mut Vec<TypedExpr>,
-) -> Result<(), Error> {
-    // TODO(discord9): get keys correctly
-    let key_exprs = key_val_plan
-        .key_plan
-        .projection
-        .clone()
-        .into_iter()
-        .map(|i| {
-            if i < key_val_plan.key_plan.input_arity {
-                ScalarExpr::Column(i)
-            } else {
-                key_val_plan.key_plan.expressions[i - key_val_plan.key_plan.input_arity].clone()
-            }
-        })
-        .collect_vec();
-    let mut shift_offset = 0;
-    let mut shuffle: BTreeMap<usize, usize> = BTreeMap::new();
-    let special_keys = key_exprs
-        .clone()
-        .into_iter()
-        .enumerate()
-        .filter(|(idx, p)| {
-            shuffle.insert(*idx, *idx + shift_offset);
-            if matches!(
-                p,
-                ScalarExpr::CallUnary {
-                    func: UnaryFunc::TumbleWindowFloor { .. },
-                    ..
-                } | ScalarExpr::CallUnary {
-                    func: UnaryFunc::TumbleWindowCeiling { .. },
-                    ..
-                }
-            ) {
-                if matches!(
-                    p,
-                    ScalarExpr::CallUnary {
-                        func: UnaryFunc::TumbleWindowFloor { .. },
-                        ..
-                    }
-                ) {
-                    shift_offset += 1;
-                }
-                true
-            } else {
-                false
-            }
-        })
-        .collect_vec();
-    let spec_key_arity = special_keys.len();
-    if spec_key_arity == 0 {
-        return Ok(());
-    }
-
-    // shuffle proj_exprs
-    // because substrait use offset while assume `tumble` only return one value
-    for proj_expr in proj_exprs.iter_mut() {
-        proj_expr.expr.permute_map(&shuffle)?;
-    } // add key to the end
-    for (key_idx, _key_expr) in special_keys {
-        // here we assume the output type of reduce operator(`reduce_output_type`) is just first keys columns, then append value columns
-        // so we can use `key_idx` to index `reduce_output_type` and get the keys we need to append to `proj_exprs`
-        proj_exprs.push(
-            ScalarExpr::Column(key_idx)
-                .with_type(reduce_output_type.typ().column_types[key_idx].clone()),
-        );
-    }
-
-    // check if normal expr in group exprs are all in proj_exprs
-    let all_cols_ref_in_proj: BTreeSet<usize> = proj_exprs
-        .iter()
-        .filter_map(|e| {
-            if let ScalarExpr::Column(i) = &e.expr {
-                Some(*i)
-            } else {
-                None
-            }
-        })
-        .collect();
-    for (key_idx, key_expr) in key_exprs.iter().enumerate() {
-        if let ScalarExpr::Column(_) = key_expr {
-            if !all_cols_ref_in_proj.contains(&key_idx) {
-                let err_msg = format!(
-                    "Expect normal column in group by also appear in projection, but column {}(name is {}) is missing", 
-                    key_idx,
-                    reduce_output_type
-                        .get_name(key_idx)
-                        .clone()
-                        .map(|s|format!("'{}'",s))
-                        .unwrap_or("unknown".to_string())
-            );
-                return InvalidQuerySnafu { reason: err_msg }.fail();
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

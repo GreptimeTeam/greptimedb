@@ -146,46 +146,8 @@ pub async fn sql_to_flow_plan(
 }
 
 /// register flow-specific functions to the query engine
-pub fn register_function_to_query_engine(engine: &Arc<dyn QueryEngine>) {
-    engine.register_function(Arc::new(TumbleFunction {}));
-}
-
-#[derive(Debug)]
-pub struct TumbleFunction {}
-
-const TUMBLE_NAME: &str = "tumble";
-
-impl std::fmt::Display for TumbleFunction {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", TUMBLE_NAME.to_ascii_uppercase())
-    }
-}
-
-impl common_function::function::Function for TumbleFunction {
-    fn name(&self) -> &str {
-        TUMBLE_NAME
-    }
-
-    fn return_type(&self, _input_types: &[CDT]) -> common_query::error::Result<CDT> {
-        Ok(CDT::datetime_datatype())
-    }
-
-    fn signature(&self) -> common_query::prelude::Signature {
-        common_query::prelude::Signature::variadic_any(common_query::prelude::Volatility::Immutable)
-    }
-
-    fn eval(
-        &self,
-        _func_ctx: common_function::function::FunctionContext,
-        _columns: &[datatypes::prelude::VectorRef],
-    ) -> common_query::error::Result<datatypes::prelude::VectorRef> {
-        UnexpectedSnafu {
-            reason: "Tumbler function is not implemented for datafusion executor",
-        }
-        .fail()
-        .map_err(BoxedError::new)
-        .context(common_query::error::ExecuteSnafu)
-    }
+pub fn register_function_to_query_engine(_engine: &Arc<dyn QueryEngine>) {
+    // TODO(discord9): add custom functions here
 }
 
 #[cfg(test)]
@@ -295,7 +257,6 @@ mod test {
         let factory = query::QueryEngineFactory::new(catalog_list, None, None, None, false);
 
         let engine = factory.query_engine();
-        engine.register_function(Arc::new(TumbleFunction {}));
 
         assert_eq!("datafusion", engine.name());
         engine

@@ -64,5 +64,4 @@ pub enum GenericFn {
     // unmaterized func
     Now,
     CurrentSchema,
-    TumbleWindow,
 }
