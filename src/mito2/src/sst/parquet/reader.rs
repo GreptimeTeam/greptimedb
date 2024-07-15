@@ -1083,8 +1083,6 @@ impl RowGroupReader {
     }
 
     /// Tries to fetch next [RecordBatch] from the reader.
-    ///
-    /// If the reader is exhausted, reads next row group.
     fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
         self.reader.next().transpose().context(ArrowReaderSnafu {
             path: self.context.file_path(),
