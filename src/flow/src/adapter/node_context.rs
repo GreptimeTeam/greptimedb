@@ -84,6 +84,8 @@ impl Default for SourceSender {
 }
 
 impl SourceSender {
+    /// max number of iterations to try flush send buf
+    const MAX_ITERATIONS: usize = 16;
     pub fn get_receiver(&self) -> broadcast::Receiver<DiffRow> {
         self.sender.subscribe()
     }
@@ -92,7 +94,8 @@ impl SourceSender {
     /// until send buf is empty or broadchannel is full
     pub async fn try_flush(&self) -> Result<usize, Error> {
         let mut row_cnt = 0;
-        loop {
+        let mut iterations = 0;
+        while iterations < Self::MAX_ITERATIONS {
             let mut send_buf = self.send_buf_rx.write().await;
             // if inner sender channel is empty or send buf is empty, there
             // is nothing to do for now, just break
@@ -113,6 +116,7 @@ impl SourceSender {
                     row_cnt += 1;
                 }
             }
+            iterations += 1;
         }
         if row_cnt > 0 {
             debug!("Send {} rows", row_cnt);
