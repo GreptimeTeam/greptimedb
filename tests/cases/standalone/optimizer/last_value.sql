@@ -16,13 +16,14 @@ insert into t values
     (7, 'c', '🌔', 8.0),
     (8, 'd', '🌕', 9.0);
 
--- Wait for #4354
--- explain analyze
---     select 
---         last_value(host order by ts),
---         last_value(not_pk order by ts),
---         last_value(val order by ts)
---     from t
---     group by host;
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+explain analyze
+    select
+        last_value(host order by ts),
+        last_value(not_pk order by ts),
+        last_value(val order by ts)
+    from t
+    group by host;
 
 drop table t;
