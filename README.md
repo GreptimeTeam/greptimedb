@@ -50,7 +50,7 @@
 
 ## Introduction
 
-**GreptimeDB** is an open-source unified time-series database for **metrics**, **events**, and **logs**. You can gain real-time insights from Edge to Cloud at any scale.
+**GreptimeDB** is an open-source unified time-series database for **metrics**, **events**, and **logs** (also **trace** in plan). You can gain real-time insights from Edge to Cloud at any scale.
 
 ## Why GreptimeDB
 
@@ -62,9 +62,9 @@ Our core developers have been building time-series data platforms for years. Bas
 
 * **Cloud-Edge collaboration**
 
-  GreptimeDB can be deployed on ARM architecture-compatible Android/Linux systems as well as cloud environments from various vendors. Both sides run the same software, providing identical APIs and control plane, so your application can run at the edge or on the cloud without modification.
+  GreptimeDB can be deployed on ARM architecture-compatible Android/Linux systems as well as cloud environments from various vendors. Both sides run the same software, providing identical APIs and control planes, so your application can run at the edge or on the cloud without modification, and data synchronization also becomes extremely easy and efficient.
 
-* **Easy horizontal scaling**
+* **Cloud-native distributed database**
 
   By leveraging object storage (S3 and others), separating compute and storage, scaling stateless compute nodes arbitrarily, GreptimeDB implements seamless scalability. It also supports cross-cloud deployment with a built-in unified data access layer over different object storages.
 
