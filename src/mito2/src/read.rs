@@ -375,6 +375,19 @@ impl Batch {
         self.take_in_place(&indices)
     }
 
+    /// Returns the estimated memory size of the batch.
+    pub fn memory_size(&self) -> usize {
+        let mut size = std::mem::size_of::<Self>();
+        size += self.primary_key.len();
+        size += self.timestamps.memory_size();
+        size += self.sequences.memory_size();
+        size += self.op_types.memory_size();
+        for batch_column in &self.fields {
+            size += batch_column.data.memory_size();
+        }
+        size
+    }
+
     /// Returns ids and datatypes of fields in the [Batch] after applying the `projection`.
     pub(crate) fn projected_fields(
         metadata: &RegionMetadata,
