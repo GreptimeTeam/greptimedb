@@ -212,7 +212,7 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
                             break;
                         }
                     } else if let Expr::Sort(sort_expr) = first_order_by {
-                        // only allow `order by xxx`, xxx is a bare column reference so `last_value()` is the max
+                        // only allow `order by xxx [ASC]`, xxx is a bare column reference so `last_value()` is the max
                         // value of the column.
                         if !sort_expr.asc || !matches!(&*sort_expr.expr, Expr::Column(_)) {
                             is_all_last_value = false;
