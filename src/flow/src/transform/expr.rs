@@ -671,6 +671,7 @@ mod test {
             schema: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)])
                 .into_unnamed(),
             plan: Plan::Constant {
+                // cast of literal is constant folded
                 rows: vec![(repr::Row::new(vec![Value::from(1i16)]), i64::MIN, 1)],
             },
         };
