@@ -209,8 +209,36 @@ pub enum Error {
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        // Inner encoding and decoding error should not be exposed to users.
-        StatusCode::Internal
+        use Error::*;
+        match self {
+            UnsupportedOperation { .. }
+            | UnsupportedArrowType { .. }
+            | UnsupportedDefaultExpr { .. } => StatusCode::Unsupported,
+
+            DuplicateColumn { .. }
+            | BadArrayAccess { .. }
+            | NullDefault { .. }
+            | InvalidTimestampIndex { .. }
+            | DefaultValueType { .. }
+            | DuplicateMeta { .. }
+            | InvalidTimestampPrecision { .. }
+            | InvalidPrecisionOrScale { .. } => StatusCode::InvalidArguments,
+
+            ValueExceedsPrecision { .. }
+            | CastType { .. }
+            | CastTimeType { .. }
+            | Conversion { .. } => StatusCode::IllegalState,
+
+            Serialize { .. }
+            | Deserialize { .. }
+            | UnknownVector { .. }
+            | ParseSchemaVersion { .. }
+            | ArrowCompute { .. }
+            | ProjectArrowSchema { .. }
+            | ToScalarValue { .. }
+            | TryFromValue { .. }
+            | ConvertArrowArrayToScalars { .. } => StatusCode::Internal,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

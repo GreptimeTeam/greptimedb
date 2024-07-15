@@ -94,6 +94,8 @@ pub const INFORMATION_SCHEMA_REGION_PEERS_TABLE_ID: u32 = 29;
 pub const INFORMATION_SCHEMA_TABLE_CONSTRAINTS_TABLE_ID: u32 = 30;
 /// id for information_schema.cluster_info
 pub const INFORMATION_SCHEMA_CLUSTER_INFO_TABLE_ID: u32 = 31;
+/// id for information_schema.VIEWS
+pub const INFORMATION_SCHEMA_VIEW_TABLE_ID: u32 = 32;
 /// ----- End of information_schema tables -----
 
 /// ----- Begin of pg_catalog tables -----

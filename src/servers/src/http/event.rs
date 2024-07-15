@@ -25,7 +25,6 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, TypedHeader};
 use common_telemetry::{error, warn};
-use mime_guess::mime;
 use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
 use pipeline::util::to_pipeline_version;
 use pipeline::{PipelineVersion, Value as PipelineValue};
@@ -250,15 +249,7 @@ pub async fn log_ingester(
 
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
-    let m: mime::Mime = content_type.clone().into();
-    let value = match m.subtype() {
-        mime::JSON => transform_ndjson_array_factory(
-            Deserializer::from_str(&payload).into_iter(),
-            ignore_errors,
-        )?,
-        // add more content type support
-        _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
-    };
+    let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
 
     ingest_logs_inner(
         handler,
@@ -271,18 +262,43 @@ pub async fn log_ingester(
     .await
 }
 
+fn extract_pipeline_value_by_content_type(
+    content_type: ContentType,
+    payload: String,
+    ignore_errors: bool,
+) -> Result<PipelineValue> {
+    Ok(match content_type {
+        ct if ct == ContentType::json() => {
+            let json_value = transform_ndjson_array_factory(
+                Deserializer::from_str(&payload).into_iter(),
+                ignore_errors,
+            )?;
+
+            PipelineValue::try_from(json_value)
+                .map_err(|reason| CastTypeSnafu { msg: reason }.build())
+                .context(PipelineSnafu)?
+        }
+        ct if ct == ContentType::text() || ct == ContentType::text_utf8() => {
+            let arr = payload
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| PipelineValue::String(line.to_string()))
+                .collect::<Vec<PipelineValue>>();
+            PipelineValue::Array(arr.into())
+        }
+        _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
+    })
+}
+
 async fn ingest_logs_inner(
     state: LogHandlerRef,
     pipeline_name: String,
     version: PipelineVersion,
     table_name: String,
-    payload: Value,
+    pipeline_data: PipelineValue,
     query_ctx: QueryContextRef,
 ) -> Result<HttpResponse> {
     let start = std::time::Instant::now();
-    let pipeline_data = PipelineValue::try_from(payload)
-        .map_err(|reason| CastTypeSnafu { msg: reason }.build())
-        .context(PipelineSnafu)?;
 
     let pipeline = state
         .get_pipeline(&pipeline_name, version, query_ctx.clone())
@@ -320,4 +336,36 @@ pub type LogValidatorRef = Arc<dyn LogValidator + Send + Sync>;
 pub struct LogState {
     pub log_handler: LogHandlerRef,
     pub log_validator: Option<LogValidatorRef>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_transform_ndjson() {
+        let s = "{\"a\": 1}\n{\"b\": 2}";
+        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
+            .unwrap()
+            .to_string();
+        assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
+
+        let s = "{\"a\": 1}";
+        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
+            .unwrap()
+            .to_string();
+        assert_eq!(a, "[{\"a\":1}]");
+
+        let s = "[{\"a\": 1}]";
+        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
+            .unwrap()
+            .to_string();
+        assert_eq!(a, "[{\"a\":1}]");
+
+        let s = "[{\"a\": 1}, {\"b\": 2}]";
+        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
+            .unwrap()
+            .to_string();
+        assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
+    }
 }

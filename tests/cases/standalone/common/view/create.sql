@@ -1,9 +1,4 @@
 --- test CREATE VIEW ---
-
-CREATE DATABASE schema_for_view_test;
-
-USE schema_for_view_test;
-
 CREATE TABLE test_table(a STRING, ts TIMESTAMP TIME INDEX);
 
 CREATE VIEW test_view;
@@ -33,7 +28,8 @@ SHOW TABLES;
 SHOW FULL TABLES;
 
 -- SQLNESS REPLACE (\s\d+\s) ID
--- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
+-- SQLNESS REPLACE [\u0020\-]+
 SELECT * FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME, TABLE_TYPE;
 
 -- SQLNESS REPLACE (\s\d+\s) ID
@@ -47,6 +43,10 @@ SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'test_view';
 
 SELECT * FROM test_view LIMIT 10;
 
-USE public;
+DROP VIEW test_view;
 
-DROP DATABASE schema_for_view_test;
+DROP TABLE test_table;
+
+SELECT * FROM test_view LIMIT 10;
+
+SHOW TABLES;

@@ -24,7 +24,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::access_layer::{new_fs_object_store, SstWriteRequest};
+use crate::access_layer::{new_fs_cache_store, SstWriteRequest};
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
 use crate::metrics::{FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL};
@@ -86,7 +86,7 @@ impl WriteCache {
     ) -> Result<Self> {
         info!("Init write cache on {cache_dir}, capacity: {cache_capacity}");
 
-        let local_store = new_fs_object_store(cache_dir).await?;
+        let local_store = new_fs_cache_store(cache_dir).await?;
         Self::new(
             local_store,
             object_store_manager,

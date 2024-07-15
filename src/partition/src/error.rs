@@ -205,25 +205,31 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::GetCache { .. } | Error::FindLeader { .. } => StatusCode::StorageUnavailable,
-            Error::FindRegionRoutes { .. }
-            | Error::ConjunctExprWithNonExpr { .. }
+            Error::FindRegionRoutes { .. } => StatusCode::RegionNotReady,
+
+            Error::ConjunctExprWithNonExpr { .. }
             | Error::UnclosedValue { .. }
             | Error::InvalidExpr { .. }
-            | Error::FindTableRoutes { .. }
             | Error::UndefinedColumn { .. } => StatusCode::InvalidArguments,
+
             Error::FindRegion { .. }
             | Error::FindRegions { .. }
             | Error::RegionKeysSize { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. } => StatusCode::InvalidArguments,
-            Error::SerializeJson { .. } | Error::DeserializeJson { .. } => StatusCode::Internal,
+
+            Error::ConvertScalarValue { .. }
+            | Error::SerializeJson { .. }
+            | Error::DeserializeJson { .. } => StatusCode::Internal,
+
             Error::Unexpected { .. } => StatusCode::Unexpected,
-            Error::InvalidTableRouteData { .. } => StatusCode::Internal,
-            Error::ConvertScalarValue { .. } => StatusCode::Internal,
-            Error::FindDatanode { .. } => StatusCode::InvalidArguments,
+            Error::InvalidTableRouteData { .. } => StatusCode::TableUnavailable,
+            Error::FindTableRoutes { .. } | Error::FindDatanode { .. } => {
+                StatusCode::TableUnavailable
+            }
             Error::TableRouteNotFound { .. } => StatusCode::TableNotFound,
             Error::TableRouteManager { source, .. } => source.status_code(),
-            Error::MissingDefaultValue { .. } => StatusCode::Internal,
+            Error::MissingDefaultValue { .. } => StatusCode::IllegalState,
             Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
         }
     }

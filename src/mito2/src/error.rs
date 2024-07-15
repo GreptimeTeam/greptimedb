@@ -882,26 +882,32 @@ impl ErrorExt for Error {
             | WorkerStopped { .. }
             | Recv { .. }
             | EncodeWal { .. }
+            | ConvertMetaData { .. }
             | DecodeWal { .. }
+            | ComputeArrow { .. }
+            | BiError { .. }
+            | StopScheduler { .. }
+            | ComputeVector { .. }
+            | SerializeField { .. }
+            | EncodeMemtable { .. }
+            | ReadDataPart { .. }
+            | CorruptedEntry { .. }
             | BuildEntry { .. } => StatusCode::Internal,
+
             OpenRegion { source, .. } => source.status_code(),
 
-            WriteParquet { .. } => StatusCode::Internal,
+            WriteParquet { .. } => StatusCode::StorageUnavailable,
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),
-            SerializeField { .. } => StatusCode::Internal,
             NotSupportedField { .. } => StatusCode::Unsupported,
             DeserializeField { .. } => StatusCode::Unexpected,
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
-            ConvertMetaData { .. } => StatusCode::Internal,
-            ComputeArrow { .. } => StatusCode::Internal,
-            ComputeVector { .. } => StatusCode::Internal,
+
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
-            StopScheduler { .. } => StatusCode::Internal,
             DeleteSst { .. } | DeleteIndex { .. } => StatusCode::StorageUnavailable,
             FlushRegion { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
@@ -932,10 +938,6 @@ impl ErrorExt for Error {
             FilterRecordBatch { source, .. } => source.status_code(),
 
             Upload { .. } => StatusCode::StorageUnavailable,
-            BiError { .. } => StatusCode::Internal,
-            EncodeMemtable { .. } | ReadDataPart { .. } | CorruptedEntry { .. } => {
-                StatusCode::Internal
-            }
             ChecksumMismatch { .. } => StatusCode::Unexpected,
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,

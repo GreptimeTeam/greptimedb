@@ -54,8 +54,8 @@ pub enum Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::BigDecimalOutOfRange { .. } => StatusCode::Internal,
-            Error::ParseRustDecimalStr { .. }
+            Error::BigDecimalOutOfRange { .. }
+            | Error::ParseRustDecimalStr { .. }
             | Error::InvalidPrecisionOrScale { .. }
             | Error::ParseBigDecimalStr { .. } => StatusCode::InvalidArguments,
         }

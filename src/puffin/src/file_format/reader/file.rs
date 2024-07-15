@@ -61,6 +61,15 @@ impl<R> PuffinFileReader<R> {
         );
         Ok(())
     }
+
+    /// Converts the reader into an owned blob reader.
+    pub fn into_blob_reader(self, blob_metadata: &BlobMetadata) -> PartialReader<R> {
+        PartialReader::new(
+            self.source,
+            blob_metadata.offset as _,
+            blob_metadata.length as _,
+        )
+    }
 }
 
 impl<'a, R: io::Read + io::Seek + 'a> SyncReader<'a> for PuffinFileReader<R> {

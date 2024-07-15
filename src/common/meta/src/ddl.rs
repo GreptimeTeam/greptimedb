@@ -42,6 +42,7 @@ pub mod create_view;
 pub mod drop_database;
 pub mod drop_flow;
 pub mod drop_table;
+pub mod drop_view;
 pub mod flow_meta;
 mod physical_table_metadata;
 pub mod table_meta;

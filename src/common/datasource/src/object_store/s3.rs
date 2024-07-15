@@ -94,7 +94,7 @@ pub fn build_s3_backend(
                 .expect("input error level must be valid"),
         )
         .layer(object_store::layers::TracingLayer)
-        .layer(object_store::layers::PrometheusMetricsLayer)
+        .layer(object_store::layers::PrometheusMetricsLayer::new(true))
         .finish())
 }
 

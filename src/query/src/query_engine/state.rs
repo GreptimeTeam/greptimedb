@@ -42,9 +42,9 @@ use table::TableRef;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
-use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
+use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::ExtensionAnalyzerRule;
@@ -109,7 +109,7 @@ impl QueryEngineState {
         }
 
         let mut optimizer = Optimizer::new();
-        optimizer.rules.push(Arc::new(OrderHintRule));
+        optimizer.rules.push(Arc::new(ScanHintRule));
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();

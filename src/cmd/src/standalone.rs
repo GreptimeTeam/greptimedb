@@ -40,7 +40,7 @@ use common_telemetry::info;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, version};
-use common_wal::config::StandaloneWalConfig;
+use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
@@ -130,7 +130,7 @@ pub struct StandaloneOptions {
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
     pub prom_store: PromStoreOptions,
-    pub wal: StandaloneWalConfig,
+    pub wal: DatanodeWalConfig,
     pub storage: StorageConfig,
     pub metadata_store: KvBackendConfig,
     pub procedure: ProcedureConfig,
@@ -155,7 +155,7 @@ impl Default for StandaloneOptions {
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
             prom_store: PromStoreOptions::default(),
-            wal: StandaloneWalConfig::default(),
+            wal: DatanodeWalConfig::default(),
             storage: StorageConfig::default(),
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
@@ -204,7 +204,7 @@ impl StandaloneOptions {
         DatanodeOptions {
             node_id: Some(0),
             enable_telemetry: cloned_opts.enable_telemetry,
-            wal: cloned_opts.wal.into(),
+            wal: cloned_opts.wal,
             storage: cloned_opts.storage,
             region_engine: cloned_opts.region_engine,
             grpc: cloned_opts.grpc,
@@ -413,7 +413,7 @@ impl StartCommand {
             &opts.component.tracing,
             None,
         );
-        log_versions(version!(), short_version!());
+        log_versions(version(), short_version());
 
         info!("Standalone start command: {:#?}", self);
         info!("Standalone options: {opts:#?}");
