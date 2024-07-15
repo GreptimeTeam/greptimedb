@@ -50,6 +50,7 @@ use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_TOTAL,
     READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED,
 };
+use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, SortField};
 use crate::sst::file::FileHandle;
@@ -694,7 +695,7 @@ fn time_range_to_predicate(
 }
 
 /// Parquet reader metrics.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ReaderMetrics {
     /// Number of row groups before filtering.
     pub(crate) num_row_groups_before_filtering: usize,
@@ -820,16 +821,16 @@ impl RowGroupReaderBuilder {
 /// The state of a [ParquetReader].
 enum ReaderState {
     /// The reader is reading a row group.
-    Readable(RowGroupReader),
+    Readable(PruneReader),
     /// The reader is exhausted.
     Exhausted(ReaderMetrics),
 }
 
 impl ReaderState {
     /// Returns the metrics of the reader.
-    fn metrics(&self) -> &ReaderMetrics {
+    fn metrics(&mut self) -> &ReaderMetrics {
         match self {
-            ReaderState::Readable(reader) => &reader.metrics,
+            ReaderState::Readable(reader) => reader.metrics(),
             ReaderState::Exhausted(m) => m,
         }
     }
@@ -946,15 +947,19 @@ impl BatchReader for ParquetReader {
                 .reader_builder()
                 .build(row_group_idx, row_selection)
                 .await?;
+
             // Resets the parquet reader.
-            reader.reset_reader(parquet_reader);
+            reader.reset_source(Source::RowGroup(RowGroupReader::new(
+                self.context.clone(),
+                parquet_reader,
+            )));
             if let Some(batch) = reader.next_batch().await? {
                 return Ok(Some(batch));
             }
         }
 
         // The reader is exhausted.
-        self.reader_state = ReaderState::Exhausted(std::mem::take(&mut reader.metrics));
+        self.reader_state = ReaderState::Exhausted(reader.metrics().clone());
         Ok(None)
     }
 }
@@ -1023,7 +1028,10 @@ impl ParquetReader {
                 .reader_builder()
                 .build(row_group_idx, row_selection)
                 .await?;
-            ReaderState::Readable(RowGroupReader::new(context.clone(), parquet_reader))
+            ReaderState::Readable(PruneReader::new_with_row_group_reader(
+                context.clone(),
+                RowGroupReader::new(context.clone(), parquet_reader),
+            ))
         } else {
             ReaderState::Exhausted(ReaderMetrics::default())
         };
@@ -1072,11 +1080,6 @@ impl RowGroupReader {
     /// Gets the metrics.
     pub(crate) fn metrics(&self) -> &ReaderMetrics {
         &self.metrics
-    }
-
-    /// Resets the parquet reader.
-    fn reset_reader(&mut self, reader: ParquetRecordBatchReader) {
-        self.reader = reader;
     }
 
     /// Tries to fetch next [RecordBatch] from the reader.

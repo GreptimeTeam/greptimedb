@@ -18,7 +18,7 @@ use crate::read::{Batch, BatchReader};
 use crate::sst::parquet::file_range::FileRangeContextRef;
 use crate::sst::parquet::reader::{ReaderMetrics, RowGroupReader};
 
-enum Source {
+pub enum Source {
     RowGroup(RowGroupReader),
     LastRow(LastRowReader),
 }
@@ -60,6 +60,10 @@ impl PruneReader {
             source: Source::LastRow(reader),
             metrics: Default::default(),
         }
+    }
+
+    pub(crate) fn reset_source(&mut self, source: Source) {
+        self.source = source;
     }
 
     pub(crate) fn metrics(&mut self) -> &ReaderMetrics {
