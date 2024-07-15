@@ -67,7 +67,7 @@ mod table_source;
 use crate::error::Error;
 use crate::FrontendInvoker;
 
-// TODO(discord9): replace this with `GREPTIME_TIMESTAMP` before v0.9
+// `GREPTIME_TIMESTAMP` is not used to distinguish when table is created automatically by flow
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 
 pub const UPDATE_AT_TS_COL: &str = "update_at";
@@ -212,8 +212,6 @@ pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
 
 /// This impl block contains methods to send writeback requests to frontend
 impl FlowWorkerManager {
-    /// TODO(discord9): merge all same type of diff row into one requests
-    ///
     /// Return the number of requests it made
     pub async fn send_writeback_requests(&self) -> Result<usize, Error> {
         let all_reqs = self.generate_writeback_request().await;
@@ -464,7 +462,6 @@ impl FlowWorkerManager {
         shutdown: Option<broadcast::Receiver<()>>,
     ) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
-        // TODO(discord9): add heartbeat tasks here
         common_runtime::spawn_bg(async move {
             self.run(shutdown).await;
         })
@@ -503,7 +500,6 @@ impl FlowWorkerManager {
                 0
             });
 
-            // TODO(discord9): error handling
             if let Err(err) = self.send_writeback_requests().await {
                 common_telemetry::error!(err;"Send writeback request errors");
             };
@@ -612,8 +608,6 @@ impl FlowWorkerManager {
         );
         let table_id = region_id.table_id();
         self.node_context.read().await.send(table_id, rows).await?;
-        // TODO(discord9): put it in a background task?
-        // self.run_available(false).await?;
         Ok(())
     }
 }
