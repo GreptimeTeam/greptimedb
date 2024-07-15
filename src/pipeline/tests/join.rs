@@ -32,20 +32,16 @@ transform:
 
 lazy_static! {
     pub static ref EXPECTED_SCHEMA: Vec<ColumnSchema> = vec![
-        ColumnSchema {
-            column_name: "join_test".to_string(),
-            datatype: ColumnDataType::String.into(),
-            semantic_type: SemanticType::Field.into(),
-            datatype_extension: None,
-            options: None,
-        },
-        ColumnSchema {
-            column_name: "greptime_timestamp".to_string(),
-            datatype: ColumnDataType::TimestampNanosecond.into(),
-            semantic_type: SemanticType::Timestamp.into(),
-            datatype_extension: None,
-            options: None,
-        },
+        common::make_column_schema(
+            "join_test".to_string(),
+            ColumnDataType::String,
+            SemanticType::Field,
+        ),
+        common::make_column_schema(
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
+        ),
     ];
 }
 

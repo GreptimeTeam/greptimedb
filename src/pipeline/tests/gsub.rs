@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use greptime_proto::v1::value::ValueData::TimestampMillisecondValue;
-use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
+use greptime_proto::v1::{ColumnDataType, SemanticType};
 
 mod common;
 
@@ -49,13 +49,11 @@ transform:
 
     let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
-    let expected_schema = vec![ColumnSchema {
-        column_name: "reqTimeSec".to_string(),
-        datatype: ColumnDataType::TimestampMillisecond.into(),
-        semantic_type: SemanticType::Timestamp.into(),
-        datatype_extension: None,
-        options: None,
-    }];
+    let expected_schema = vec![common::make_column_schema(
+        "reqTimeSec".to_string(),
+        ColumnDataType::TimestampMillisecond,
+        SemanticType::Timestamp,
+    )];
 
     assert_eq!(output.schema, expected_schema);
     assert_eq!(
