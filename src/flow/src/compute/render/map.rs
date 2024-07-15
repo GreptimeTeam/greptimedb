@@ -148,11 +148,7 @@ fn mfp_subgraph(
 
     err_collector.run(|| {
         snafu::ensure!(
-            if !mfp_plan.is_temporal() {
-                output_kv.is_empty()
-            } else {
-                true
-            },
+            mfp_plan.is_temporal() || output_kv.is_empty(),
             crate::expr::error::InternalSnafu {
                 reason: "Output from future should be empty since temporal filter is not applied"
             }
