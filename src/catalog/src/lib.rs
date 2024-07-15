@@ -33,8 +33,7 @@ pub mod memory;
 mod metrics;
 pub mod system_schema;
 pub mod information_schema {
-    // TODO(j0hn50n133): migrate to the new path later
-    // re-export to make it compatible with the legacy code
+    // TODO(j0hn50n133): re-export to make it compatible with the legacy code, migrate to the new path later
     pub use crate::system_schema::information_schema::*;
 }
 
