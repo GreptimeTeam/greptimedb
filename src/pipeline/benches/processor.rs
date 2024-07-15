@@ -209,7 +209,7 @@ transform:
 fn criterion_benchmark(c: &mut Criterion) {
     let input_value_str = include_str!("./data.log");
     let mut group = c.benchmark_group("pipeline");
-    group.sample_size(10);
+    group.sample_size(50);
     group.bench_function("processor 20", |b| {
         b.iter(|| processor(black_box(input_value_str)))
     });

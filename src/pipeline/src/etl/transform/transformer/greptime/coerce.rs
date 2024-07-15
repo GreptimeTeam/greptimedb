@@ -345,67 +345,64 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>, 
     Ok(Some(val))
 }
 
+macro_rules! coerce_string_value {
+    ($s:expr, $transform:expr, $type:ident, $parse:ident) => {
+        match $s.parse::<$type>() {
+            Ok(v) => Ok(Some(ValueData::$parse(v))),
+            Err(_) => match $transform.on_failure {
+                Some(OnFailure::Ignore) => Ok(None),
+                Some(OnFailure::Default) => match $transform.get_default() {
+                    Some(default) => coerce_value(default, $transform),
+                    None => coerce_value($transform.get_type_matched_default_val(), $transform),
+                },
+                None => Err(format!(
+                    "failed to coerce string value '{}' to type '{}'",
+                    $s,
+                    $transform.type_.to_str_type()
+                )),
+            },
+        }
+    };
+}
+
 fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueData>, String> {
     match transform.type_ {
-        Value::Int8(_) if s.parse::<i32>().is_ok() => {
-            Ok(Some(ValueData::I8Value(s.parse().unwrap())))
+        Value::Int8(_) => {
+            coerce_string_value!(s, transform, i32, I8Value)
         }
-        Value::Int16(_) if s.parse::<i32>().is_ok() => {
-            Ok(Some(ValueData::I16Value(s.parse().unwrap())))
+        Value::Int16(_) => {
+            coerce_string_value!(s, transform, i32, I16Value)
         }
-        Value::Int32(_) if s.parse::<i32>().is_ok() => {
-            Ok(Some(ValueData::I32Value(s.parse().unwrap())))
+        Value::Int32(_) => {
+            coerce_string_value!(s, transform, i32, I32Value)
         }
-        Value::Int64(_) if s.parse::<i64>().is_ok() => {
-            Ok(Some(ValueData::I64Value(s.parse().unwrap())))
-        }
-
-        Value::Uint8(_) if s.parse::<u32>().is_ok() => {
-            Ok(Some(ValueData::U8Value(s.parse().unwrap())))
-        }
-        Value::Uint16(_) if s.parse::<u32>().is_ok() => {
-            Ok(Some(ValueData::U16Value(s.parse().unwrap())))
-        }
-        Value::Uint32(_) if s.parse::<u32>().is_ok() => {
-            Ok(Some(ValueData::U32Value(s.parse().unwrap())))
-        }
-        Value::Uint64(_) if s.parse::<u64>().is_ok() => {
-            Ok(Some(ValueData::U64Value(s.parse().unwrap())))
+        Value::Int64(_) => {
+            coerce_string_value!(s, transform, i64, I64Value)
         }
 
-        Value::Float32(_) if s.parse::<f32>().is_ok() => {
-            Ok(Some(ValueData::F32Value(s.parse().unwrap())))
+        Value::Uint8(_) => {
+            coerce_string_value!(s, transform, u32, U8Value)
         }
-        Value::Float64(_) if s.parse::<f64>().is_ok() => {
-            Ok(Some(ValueData::F64Value(s.parse().unwrap())))
+        Value::Uint16(_) => {
+            coerce_string_value!(s, transform, u32, U16Value)
+        }
+        Value::Uint32(_) => {
+            coerce_string_value!(s, transform, u32, U32Value)
+        }
+        Value::Uint64(_) => {
+            coerce_string_value!(s, transform, u64, U64Value)
         }
 
-        Value::Boolean(_) if s.parse::<bool>().is_ok() => {
-            Ok(Some(ValueData::BoolValue(s.parse().unwrap())))
+        Value::Float32(_) => {
+            coerce_string_value!(s, transform, f32, F32Value)
+        }
+        Value::Float64(_) => {
+            coerce_string_value!(s, transform, f64, F64Value)
         }
 
-        // on_failure
-        Value::Int8(_)
-        | Value::Int16(_)
-        | Value::Int32(_)
-        | Value::Int64(_)
-        | Value::Uint8(_)
-        | Value::Uint16(_)
-        | Value::Uint32(_)
-        | Value::Uint64(_)
-        | Value::Float32(_)
-        | Value::Float64(_)
-        | Value::Boolean(_) => match transform.on_failure {
-            Some(OnFailure::Ignore) => Ok(None),
-            Some(OnFailure::Default) => match transform.get_default() {
-                Some(default) => coerce_value(default, transform),
-                None => coerce_value(transform.get_type_matched_default_val(), transform),
-            },
-            None => Err(format!(
-                "failed to coerce string value '{s}' to type '{}'",
-                transform.type_.to_str_type()
-            )),
-        },
+        Value::Boolean(_) => {
+            coerce_string_value!(s, transform, bool, BoolValue)
+        }
 
         Value::String(_) => Ok(Some(ValueData::StringValue(s.to_string()))),
 
