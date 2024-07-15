@@ -33,12 +33,12 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
 pub fn make_column_schema(
     column_name: String,
     datatype: ColumnDataType,
-    sematic_type: SemanticType,
+    semantic_type: SemanticType,
 ) -> ColumnSchema {
     ColumnSchema {
         column_name,
         datatype: datatype.into(),
-        semantic_type: sematic_type.into(),
+        semantic_type: semantic_type.into(),
         ..Default::default()
     }
 }
