@@ -17,6 +17,7 @@ insert into t values
     (8, 'd', '🌕', 9.0);
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
 explain analyze
     select
         last_value(host order by ts),
