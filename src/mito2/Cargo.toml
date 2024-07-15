@@ -73,6 +73,7 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+common-function.workspace = true
 common-procedure-test.workspace = true
 common-test-util.workspace = true
 criterion = "0.4"
@@ -82,6 +83,7 @@ object-store = { workspace = true, features = ["services-memory"] }
 rskafka.workspace = true
 rstest.workspace = true
 rstest_reuse.workspace = true
+session.workspace = true
 toml.workspace = true
 
 [[bench]]

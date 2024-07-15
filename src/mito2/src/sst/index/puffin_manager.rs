@@ -39,7 +39,9 @@ pub(crate) type SstPuffinManager =
     FsPuffinManager<Arc<BoundedStager>, ObjectStorePuffinFileAccessor>;
 pub(crate) type SstPuffinReader = <SstPuffinManager as PuffinManager>::Reader;
 pub(crate) type SstPuffinWriter = <SstPuffinManager as PuffinManager>::Writer;
-pub(crate) type BlobReader = <<SstPuffinReader as PuffinReader>::Blob as BlobGuard>::Reader;
+pub(crate) type SstPuffinBlob = <SstPuffinReader as PuffinReader>::Blob;
+pub(crate) type SstPuffinDir = <SstPuffinReader as PuffinReader>::Dir;
+pub(crate) type BlobReader = <SstPuffinBlob as BlobGuard>::Reader;
 
 const STAGING_DIR: &str = "staging";
 

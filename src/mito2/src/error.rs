@@ -556,8 +556,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to apply index"))]
-    ApplyIndex {
+    #[snafu(display("Failed to apply inverted index"))]
+    ApplyInvertedIndex {
         source: index::inverted_index::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -821,6 +821,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to apply fulltext index"))]
+    ApplyFulltextIndex {
+        source: index::fulltext_index::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -924,7 +931,7 @@ impl ErrorExt for Error {
             ConvertValue { source, .. } => source.status_code(),
             BuildIndexApplier { source, .. }
             | PushIndexValue { source, .. }
-            | ApplyIndex { source, .. }
+            | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
             PuffinReadMetadata { source, .. }
             | PuffinReadBlob { source, .. }
@@ -948,7 +955,9 @@ impl ErrorExt for Error {
             FulltextOptions { source, .. } => source.status_code(),
             CreateFulltextCreator { source, .. } => source.status_code(),
             CastVector { source, .. } => source.status_code(),
-            FulltextPushText { source, .. } | FulltextFinish { source, .. } => source.status_code(),
+            FulltextPushText { source, .. }
+            | FulltextFinish { source, .. }
+            | ApplyFulltextIndex { source, .. } => source.status_code(),
         }
     }
 
