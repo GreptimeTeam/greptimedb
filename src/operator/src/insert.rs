@@ -358,7 +358,6 @@ impl Inserter {
                 // already know this is not source table
                 Some(None) => continue,
                 _ => {
-                    // TODO(discord9): query metasrv for actual peer address
                     let peers = self
                         .table_flownode_set_cache
                         .get(table_id)
