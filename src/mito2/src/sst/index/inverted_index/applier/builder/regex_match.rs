@@ -17,9 +17,9 @@ use datafusion_expr::Expr as DfExpr;
 use index::inverted_index::search::predicate::{Predicate, RegexMatchPredicate};
 
 use crate::error::Result;
-use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> SstIndexApplierBuilder<'a> {
+impl<'a> InvertedIndexApplierBuilder<'a> {
     /// Collects a regex match expression in the form of `column ~ pattern`.
     pub(crate) fn collect_regex_match(&mut self, column: &DfExpr, pattern: &DfExpr) -> Result<()> {
         let Some(column_name) = Self::column_name(column) else {
@@ -59,7 +59,7 @@ mod tests {
     fn test_regex_match_basic() {
         let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_regex_match_basic_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -88,7 +88,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_regex_match_field_column_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -110,7 +110,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_regex_match_type_mismatch_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -132,7 +132,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_regex_match_type_nonexist_column_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
