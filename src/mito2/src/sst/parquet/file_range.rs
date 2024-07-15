@@ -19,11 +19,12 @@ use std::ops::BitAnd;
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
 use parquet::arrow::arrow_reader::RowSelection;
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::TimeSeriesRowSelector;
 
 use crate::error::{
     DecodeStatsSnafu, FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result, StatsNotPresentSnafu,
@@ -64,27 +65,36 @@ impl FileRange {
     }
 
     /// Returns a reader to read the [FileRange].
-    pub(crate) async fn reader(&self) -> Result<PruneReader> {
+    pub(crate) async fn reader(
+        &self,
+        selector: Option<TimeSeriesRowSelector>,
+    ) -> Result<PruneReader> {
         let parquet_reader = self
             .context
             .reader_builder
             .build(self.row_group_idx, self.row_selection.clone())
             .await?;
 
-        let put_only = self
-            .context
-            .contains_delete(self.row_group_idx)
-            .inspect_err(|e| {
-                error!(e; "Failed to decode min value of op_type, fallback to RowGroupReader");
-            })
-            .unwrap_or(true);
-        let prune_reader = if put_only {
-            // Row group contains DELETE, fallback to default reader.
-            PruneReader::new_with_row_group_reader(
-                self.context.clone(),
-                RowGroupReader::new(self.context.clone(), parquet_reader),
-            )
-        } else {
+        let use_last_row_reader = {
+            if selector
+                .map(|s| s == TimeSeriesRowSelector::LastRow)
+                .unwrap_or(false)
+            {
+                // Only use LastRowReader if row group does not contain DELETE.
+                !self
+                    .context
+                    .contains_delete(self.row_group_idx)
+                    .inspect_err(|e| {
+                        error!(e; "Failed to decode min value of op_type, fallback to RowGroupReader");
+                    })
+                    .unwrap_or(true)
+            } else {
+                // No selector provided, use RowGroupReader
+                false
+            }
+        };
+
+        let prune_reader = if use_last_row_reader {
             // Row group is PUT only, use LastRowReader to skip unnecessary rows.
             PruneReader::new_with_last_row_reader(
                 self.context.clone(),
@@ -92,6 +102,12 @@ impl FileRange {
                     self.context.clone(),
                     parquet_reader,
                 )) as _),
+            )
+        } else {
+            // Row group contains DELETE, fallback to default reader.
+            PruneReader::new_with_row_group_reader(
+                self.context.clone(),
+                RowGroupReader::new(self.context.clone(), parquet_reader),
             )
         };
 

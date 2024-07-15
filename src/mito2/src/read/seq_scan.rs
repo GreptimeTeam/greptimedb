@@ -103,7 +103,11 @@ impl SeqScan {
     }
 
     /// Builds sources from a [ScanPart].
-    fn build_part_sources(part: &ScanPart, sources: &mut Vec<Source>) -> Result<()> {
+    fn build_part_sources(
+        part: &ScanPart,
+        sources: &mut Vec<Source>,
+        row_selector: Option<TimeSeriesRowSelector>,
+    ) -> Result<()> {
         sources.reserve(part.memtable_ranges.len() + part.file_ranges.len());
         // Read memtables.
         for mem in &part.memtable_ranges {
@@ -125,7 +129,7 @@ impl SeqScan {
                 let region_id = ranges[0].file_handle().region_id();
                 let range_num = ranges.len();
                 for range in ranges {
-                    let mut reader = range.reader().await?;
+                    let mut reader = range.reader(row_selector).await?;
                     let compat_batch = range.compat_batch();
                     while let Some(mut batch) = reader.next_batch().await? {
                         if let Some(compat) = compat_batch {
@@ -166,7 +170,7 @@ impl SeqScan {
                 return Ok(None);
             };
 
-            Self::build_part_sources(part, &mut sources)?;
+            Self::build_part_sources(part, &mut sources, None)?;
         }
 
         Self::build_reader_from_sources(stream_ctx, sources, semaphore).await
@@ -189,7 +193,7 @@ impl SeqScan {
             return Ok(None);
         };
 
-        Self::build_part_sources(part, &mut sources)?;
+        Self::build_part_sources(part, &mut sources, stream_ctx.input.series_row_selector)?;
 
         Self::build_reader_from_sources(stream_ctx, sources, semaphore).await
     }

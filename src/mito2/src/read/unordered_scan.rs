@@ -182,7 +182,7 @@ impl RegionScanner for UnorderedScan {
             let mut reader_metrics = ReaderMetrics::default();
             // Safety: UnorderedDistributor::build_parts() ensures this.
             for file_range in &part.file_ranges[0] {
-                let reader = file_range.reader().await.map_err(BoxedError::new).context(ExternalSnafu)?;
+                let reader = file_range.reader(None).await.map_err(BoxedError::new).context(ExternalSnafu)?;
                 let compat_batch = file_range.compat_batch();
                 let mut source = Source::PruneReader(reader);
                 while let Some(batch) = Self::fetch_from_source(&mut source, mapper, cache, compat_batch, &mut metrics).await? {
