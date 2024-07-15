@@ -313,7 +313,7 @@ impl ScanRegion {
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
-            .with_series_row_selector(self.request.series_row_selector.clone());
+            .with_series_row_selector(self.request.series_row_selector);
         Ok(input)
     }
 

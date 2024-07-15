@@ -19,7 +19,7 @@ use std::ops::BitAnd;
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
-use common_telemetry::{error, info};
+use common_telemetry::error;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
 use parquet::arrow::arrow_reader::RowSelection;
@@ -64,6 +64,21 @@ impl FileRange {
         }
     }
 
+    /// Returns true if [FileRange] selects all rows in row group.
+    fn select_all(&self) -> bool {
+        let rows_in_group = self
+            .context
+            .reader_builder
+            .parquet_metadata()
+            .row_group(self.row_group_idx)
+            .num_rows();
+
+        let Some(row_selection) = &self.row_selection else {
+            return true;
+        };
+        row_selection.row_count() == rows_in_group as usize
+    }
+
     /// Returns a reader to read the [FileRange].
     pub(crate) async fn reader(
         &self,
@@ -75,23 +90,23 @@ impl FileRange {
             .build(self.row_group_idx, self.row_selection.clone())
             .await?;
 
-        let use_last_row_reader = {
-            if selector
-                .map(|s| s == TimeSeriesRowSelector::LastRow)
-                .unwrap_or(false)
-            {
-                // Only use LastRowReader if row group does not contain DELETE.
-                !self
-                    .context
-                    .contains_delete(self.row_group_idx)
-                    .inspect_err(|e| {
-                        error!(e; "Failed to decode min value of op_type, fallback to RowGroupReader");
-                    })
-                    .unwrap_or(true)
-            } else {
-                // No selector provided, use RowGroupReader
-                false
-            }
+        let use_last_row_reader = if selector
+            .map(|s| s == TimeSeriesRowSelector::LastRow)
+            .unwrap_or(false)
+        {
+            // Only use LastRowReader if row group does not contain DELETE
+            // and all rows are selected.
+            let put_only = !self
+                .context
+                .contains_delete(self.row_group_idx)
+                .inspect_err(|e| {
+                    error!(e; "Failed to decode min value of op_type, fallback to RowGroupReader");
+                })
+                .unwrap_or(true);
+            put_only && self.select_all()
+        } else {
+            // No selector provided, use RowGroupReader
+            false
         };
 
         let prune_reader = if use_last_row_reader {
