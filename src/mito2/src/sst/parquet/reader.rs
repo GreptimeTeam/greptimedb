@@ -697,31 +697,31 @@ fn time_range_to_predicate(
 #[derive(Debug, Default)]
 pub(crate) struct ReaderMetrics {
     /// Number of row groups before filtering.
-    num_row_groups_before_filtering: usize,
+    pub(crate) num_row_groups_before_filtering: usize,
     /// Number of row groups filtered by fulltext index.
-    num_row_groups_fulltext_index_filtered: usize,
+    pub(crate) num_row_groups_fulltext_index_filtered: usize,
     /// Number of row groups filtered by inverted index.
-    num_row_groups_inverted_index_filtered: usize,
+    pub(crate) num_row_groups_inverted_index_filtered: usize,
     /// Number of row groups filtered by min-max index.
-    num_row_groups_min_max_filtered: usize,
+    pub(crate) num_row_groups_min_max_filtered: usize,
     /// Number of rows filtered by precise filter.
-    num_rows_precise_filtered: usize,
+    pub(crate) num_rows_precise_filtered: usize,
     /// Number of rows in row group before filtering.
-    num_rows_in_row_group_before_filtering: usize,
+    pub(crate) num_rows_in_row_group_before_filtering: usize,
     /// Number of rows in row group filtered by fulltext index.
-    num_rows_in_row_group_fulltext_index_filtered: usize,
+    pub(crate) num_rows_in_row_group_fulltext_index_filtered: usize,
     /// Number of rows in row group filtered by inverted index.
-    num_rows_in_row_group_inverted_index_filtered: usize,
+    pub(crate) num_rows_in_row_group_inverted_index_filtered: usize,
     /// Duration to build the parquet reader.
-    build_cost: Duration,
+    pub(crate) build_cost: Duration,
     /// Duration to scan the reader.
-    scan_cost: Duration,
+    pub(crate) scan_cost: Duration,
     /// Number of record batches read.
-    num_record_batches: usize,
+    pub(crate) num_record_batches: usize,
     /// Number of batches decoded.
-    num_batches: usize,
+    pub(crate) num_batches: usize,
     /// Number of rows read.
-    num_rows: usize,
+    pub(crate) num_rows: usize,
 }
 
 impl ReaderMetrics {
