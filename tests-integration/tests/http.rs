@@ -888,6 +888,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "sst_meta_cache_size =",
         "vector_cache_size =",
         "page_cache_size =",
+        "selector_result_cache_size =",
     ];
 
     input
@@ -1141,10 +1142,10 @@ processors:
   - dissect:
       fields:
         - line
-      patterns: 
+      patterns:
         - "%{+ts} %{+ts} %{content}"
   - date:
-      fields: 
+      fields:
         - ts
       formats:
         - "%Y-%m-%d %H:%M:%S%.3f"
