@@ -39,7 +39,7 @@ Error: 4001(TableNotFound), Table not found: t
 
 SELECT * FROM t;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.public.t
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.t
 
 CREATE TABLE t(i INTEGER, j TIMESTAMP TIME INDEX);
 

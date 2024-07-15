@@ -18,6 +18,7 @@ use std::fmt::Debug;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_query::error::datafusion_status_code;
 use datafusion::error::DataFusionError;
 use snafu::{Location, Snafu};
 
@@ -282,9 +283,8 @@ impl ErrorExt for Error {
             }
 
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
-            Error::ProjectViewColumns { .. } | Error::Datafusion { .. } => {
-                StatusCode::EngineExecuteQuery
-            }
+            Error::Datafusion { error, .. } => datafusion_status_code::<Self>(error, None),
+            Error::ProjectViewColumns { .. } => StatusCode::EngineExecuteQuery,
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::GetViewCache { source, .. } | Error::GetTableCache { source, .. } => {
                 source.status_code()
@@ -299,7 +299,7 @@ impl ErrorExt for Error {
 
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> Self {
-        DataFusionError::Internal(e.to_string())
+        DataFusionError::External(Box::new(e))
     }
 }
 
@@ -338,7 +338,7 @@ mod tests {
         }
         .into();
         match e {
-            DataFusionError::Internal(_) => {}
+            DataFusionError::External(_) => {}
             _ => {
                 panic!("catalog error should be converted to DataFusionError::Internal")
             }

@@ -26,12 +26,11 @@ use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::variable::VarType;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::DataFusionError;
 use datafusion_expr::var_provider::is_system_variables;
 use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::parser::Statement as DfStatement;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{Location, ResultExt};
 
 use crate::error::{CatalogSnafu, DataFusionSnafu, Result};
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
@@ -119,7 +118,13 @@ impl ContextProvider for DfContextProviderAdapter {
         self.tables
             .get(&table_ref.to_string())
             .cloned()
-            .ok_or_else(|| DataFusionError::Plan(format!("Table not found: {}", table_ref)))
+            .ok_or_else(|| {
+                crate::error::Error::TableNotFound {
+                    table: table_ref.to_string(),
+                    location: Location::default(),
+                }
+                .into()
+            })
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {

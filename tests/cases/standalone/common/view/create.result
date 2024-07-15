@@ -157,7 +157,7 @@ Affected Rows: 0
 
 SELECT * FROM test_view LIMIT 10;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.public.test_view
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.test_view
 
 SHOW TABLES;
 

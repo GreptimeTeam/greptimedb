@@ -49,7 +49,7 @@ use crate::mysql::helper::{
     self, format_placeholder, replace_placeholders, transform_placeholders,
 };
 use crate::mysql::writer;
-use crate::mysql::writer::create_mysql_column;
+use crate::mysql::writer::{create_mysql_column, handle_err};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::SqlPlan;
 
@@ -332,18 +332,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 let plan = match replace_params_with_values(&plan, param_types, &params) {
                     Ok(plan) => plan,
                     Err(e) => {
-                        if e.status_code().should_log_error() {
-                            error!(e; "params: {}", params
-                                .iter()
-                                .map(|x| format!("({:?}, {:?})", x.value, x.coltype))
-                                .join(", "));
-                        }
+                        let (kind, err) = handle_err(e);
+                        w.error(kind, err.as_bytes()).await?;
 
-                        w.error(
-                            ErrorKind::ER_TRUNCATED_WRONG_VALUE,
-                            e.output_msg().as_bytes(),
-                        )
-                        .await?;
                         return Ok(());
                     }
                 };
@@ -454,19 +445,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                             {
                                 Ok(plan) => plan,
                                 Err(e) => {
-                                    if e.status_code().should_log_error() {
-                                        error!(e; "params: {}", params
-                                .iter()
-                                .map(|x| format!("({:?})", x))
-                                .join(", "));
-                                    }
+                                    let (kind, err) = handle_err(e);
+                                    writer.error(kind, err.as_bytes()).await?;
 
-                                    writer
-                                        .error(
-                                            ErrorKind::ER_TRUNCATED_WRONG_VALUE,
-                                            e.output_msg().as_bytes(),
-                                        )
-                                        .await?;
                                     return Ok(());
                                 }
                             };

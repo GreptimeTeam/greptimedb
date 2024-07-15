@@ -261,16 +261,19 @@ impl ErrorExt for Error {
         match self {
             Error::UdfTempRecordBatch { .. }
             | Error::PyUdf { .. }
-            | Error::ExecuteFunction { .. }
-            | Error::GenerateFunction { .. }
             | Error::CreateAccumulator { .. }
             | Error::DowncastVector { .. }
             | Error::InvalidInputState { .. }
             | Error::InvalidInputCol { .. }
+            | Error::GenerateFunction { .. }
             | Error::BadAccumulatorImpl { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }
             | Error::ArrowCompute { .. } => StatusCode::EngineExecuteQuery,
+
+            Error::ExecuteFunction { error, .. } | Error::GeneralDataFusion { error, .. } => {
+                datafusion_status_code::<Self>(error, None)
+            }
 
             Error::InvalidInputType { source, .. }
             | Error::IntoVector { source, .. }
@@ -281,8 +284,7 @@ impl ErrorExt for Error {
             Error::MissingTableMutationHandler { .. }
             | Error::MissingProcedureServiceHandler { .. }
             | Error::ExecuteRepeatedly { .. }
-            | Error::ThreadJoin { .. }
-            | Error::GeneralDataFusion { .. } => StatusCode::Unexpected,
+            | Error::ThreadJoin { .. } => StatusCode::Unexpected,
 
             Error::UnsupportedInputDataType { .. }
             | Error::TypeCast { .. }
@@ -308,5 +310,25 @@ impl ErrorExt for Error {
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
+    }
+}
+
+/// Try to get the proper [`StatusCode`] of [`DataFusionError].
+pub fn datafusion_status_code<T: ErrorExt + 'static>(
+    e: &DataFusionError,
+    default_status: Option<StatusCode>,
+) -> StatusCode {
+    match e {
+        DataFusionError::Internal(_) => StatusCode::Internal,
+        DataFusionError::NotImplemented(_) => StatusCode::Unsupported,
+        DataFusionError::Plan(_) => StatusCode::PlanQuery,
+        DataFusionError::External(e) => {
+            if let Some(ext) = (*e).downcast_ref::<T>() {
+                ext.status_code()
+            } else {
+                default_status.unwrap_or(StatusCode::EngineExecuteQuery)
+            }
+        }
+        _ => default_status.unwrap_or(StatusCode::EngineExecuteQuery),
     }
 }
