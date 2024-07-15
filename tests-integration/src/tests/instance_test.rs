@@ -462,6 +462,7 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
 +--------------------+
 | greptime_private   |
 | information_schema |
+| pg_catalog         |
 | public             |
 +--------------------+\
 ";
@@ -1899,6 +1900,7 @@ async fn test_show_databases(instance: Arc<dyn MockInstance>) {
 +--------------------+
 | greptime_private   |
 | information_schema |
+| pg_catalog         |
 | public             |
 +--------------------+";
     check_output_stream(output, expected).await;
@@ -1912,6 +1914,7 @@ async fn test_show_databases(instance: Arc<dyn MockInstance>) {
 | Database           |
 +--------------------+
 | information_schema |
+| pg_catalog         |
 +--------------------+";
     check_output_stream(output, expected).await;
 }

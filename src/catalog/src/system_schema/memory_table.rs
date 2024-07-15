@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod tables;
+mod table_columns;
+pub mod tables;
+
 use std::sync::Arc;
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -27,22 +29,21 @@ use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
-pub use tables::get_schema_columns;
 
+use super::SystemTable;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
-use crate::information_schema::InformationTable;
 
 /// A memory table with specified schema and columns.
-pub(super) struct MemoryTable {
-    table_id: TableId,
-    table_name: &'static str,
-    schema: SchemaRef,
-    columns: Vec<VectorRef>,
+pub(crate) struct MemoryTable {
+    pub(crate) table_id: TableId,
+    pub(crate) table_name: &'static str,
+    pub(crate) schema: SchemaRef,
+    pub(crate) columns: Vec<VectorRef>,
 }
 
 impl MemoryTable {
     /// Creates a memory table with table id, name, schema and columns.
-    pub(super) fn new(
+    pub fn new(
         table_id: TableId,
         table_name: &'static str,
         schema: SchemaRef,
@@ -56,12 +57,54 @@ impl MemoryTable {
         }
     }
 
-    fn builder(&self) -> MemoryTableBuilder {
+    pub fn builder(&self) -> MemoryTableBuilder {
         MemoryTableBuilder::new(self.schema.clone(), self.columns.clone())
     }
 }
 
-impl InformationTable for MemoryTable {
+pub(crate) struct MemoryTableBuilder {
+    schema: SchemaRef,
+    columns: Vec<VectorRef>,
+}
+
+impl MemoryTableBuilder {
+    fn new(schema: SchemaRef, columns: Vec<VectorRef>) -> Self {
+        Self { schema, columns }
+    }
+
+    /// Construct the `information_schema.{table_name}` virtual table
+    pub async fn memory_records(&mut self) -> Result<RecordBatch> {
+        if self.columns.is_empty() {
+            RecordBatch::new_empty(self.schema.clone()).context(CreateRecordBatchSnafu)
+        } else {
+            RecordBatch::new(self.schema.clone(), std::mem::take(&mut self.columns))
+                .context(CreateRecordBatchSnafu)
+        }
+    }
+}
+
+impl DfPartitionStream for MemoryTable {
+    fn schema(&self) -> &ArrowSchemaRef {
+        self.schema.arrow_schema()
+    }
+
+    fn execute(&self, _: Arc<TaskContext>) -> DfSendableRecordBatchStream {
+        let schema = self.schema.arrow_schema().clone();
+        let mut builder = self.builder();
+        Box::pin(DfRecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::once(async move {
+                builder
+                    .memory_records()
+                    .await
+                    .map(|x| x.into_df_record_batch())
+                    .map_err(Into::into)
+            }),
+        ))
+    }
+}
+
+impl SystemTable for MemoryTable {
     fn table_id(&self) -> TableId {
         self.table_id
     }
@@ -95,48 +138,6 @@ impl InformationTable for MemoryTable {
     }
 }
 
-struct MemoryTableBuilder {
-    schema: SchemaRef,
-    columns: Vec<VectorRef>,
-}
-
-impl MemoryTableBuilder {
-    fn new(schema: SchemaRef, columns: Vec<VectorRef>) -> Self {
-        Self { schema, columns }
-    }
-
-    /// Construct the `information_schema.{table_name}` virtual table
-    async fn memory_records(&mut self) -> Result<RecordBatch> {
-        if self.columns.is_empty() {
-            RecordBatch::new_empty(self.schema.clone()).context(CreateRecordBatchSnafu)
-        } else {
-            RecordBatch::new(self.schema.clone(), std::mem::take(&mut self.columns))
-                .context(CreateRecordBatchSnafu)
-        }
-    }
-}
-
-impl DfPartitionStream for MemoryTable {
-    fn schema(&self) -> &ArrowSchemaRef {
-        self.schema.arrow_schema()
-    }
-
-    fn execute(&self, _: Arc<TaskContext>) -> DfSendableRecordBatchStream {
-        let schema = self.schema.arrow_schema().clone();
-        let mut builder = self.builder();
-        Box::pin(DfRecordBatchStreamAdapter::new(
-            schema,
-            futures::stream::once(async move {
-                builder
-                    .memory_records()
-                    .await
-                    .map(|x| x.into_df_record_batch())
-                    .map_err(Into::into)
-            }),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -147,6 +148,7 @@ mod tests {
     use datatypes::vectors::StringVector;
 
     use super::*;
+    use crate::system_schema::SystemTable;
 
     #[tokio::test]
     async fn test_memory_table() {
@@ -166,8 +168,8 @@ mod tests {
         );
 
         assert_eq!(42, table.table_id());
-        assert_eq!("test", table.table_name());
-        assert_eq!(schema, InformationTable::schema(&table));
+        assert_eq!("test", table.table_name);
+        assert_eq!(schema, SystemTable::schema(&table));
 
         let stream = table.to_stream(ScanRequest::default()).unwrap();
 
@@ -196,7 +198,7 @@ mod tests {
 
         assert_eq!(42, table.table_id());
         assert_eq!("test", table.table_name());
-        assert_eq!(schema, InformationTable::schema(&table));
+        assert_eq!(schema, SystemTable::schema(&table));
 
         let stream = table.to_stream(ScanRequest::default()).unwrap();
 

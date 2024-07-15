@@ -37,8 +37,8 @@ use crate::error::{
     CastManagerSnafu, CreateRecordBatchSnafu, GetViewCacheSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu, ViewInfoNotFoundSnafu,
 };
-use crate::information_schema::{InformationTable, Predicates};
 use crate::kvbackend::KvBackendCatalogManager;
+use crate::system_schema::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 const INIT_CAPACITY: usize = 42;
 
