@@ -19,7 +19,7 @@ use object_store::util::{self, normalize_dir};
 use store_api::storage::{ColumnId, RegionId};
 use uuid::Uuid;
 
-use crate::access_layer::new_fs_object_store;
+use crate::access_layer::new_fs_cache_store;
 use crate::error::Result;
 use crate::sst::file::FileId;
 use crate::sst::index::store::InstrumentedStore;
@@ -37,7 +37,7 @@ impl IntermediateManager {
     /// Create a new `IntermediateManager` with the given root path.
     /// It will clean up all garbage intermediate files from previous runs.
     pub async fn init_fs(aux_path: impl AsRef<str>) -> Result<Self> {
-        let store = new_fs_object_store(&normalize_dir(aux_path.as_ref())).await?;
+        let store = new_fs_cache_store(&normalize_dir(aux_path.as_ref())).await?;
         let store = InstrumentedStore::new(store);
 
         // Remove all garbage intermediate files from previous runs.

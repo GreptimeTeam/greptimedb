@@ -138,7 +138,7 @@ pub(crate) fn extract_parent_path(path: &str) -> &str {
 }
 
 /// Attaches instrument layers to the object store.
-pub fn with_instrument_layers(object_store: ObjectStore) -> ObjectStore {
+pub fn with_instrument_layers(object_store: ObjectStore, path_label: bool) -> ObjectStore {
     object_store
         .layer(
             LoggingLayer::default()
@@ -148,7 +148,7 @@ pub fn with_instrument_layers(object_store: ObjectStore) -> ObjectStore {
                 .expect("input error level must be valid"),
         )
         .layer(TracingLayer)
-        .layer(PrometheusMetricsLayer)
+        .layer(PrometheusMetricsLayer::new(path_label))
 }
 
 #[cfg(test)]

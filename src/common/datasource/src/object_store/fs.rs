@@ -31,7 +31,7 @@ pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
                 .expect("input error level must be valid"),
         )
         .layer(object_store::layers::TracingLayer)
-        .layer(object_store::layers::PrometheusMetricsLayer)
+        .layer(object_store::layers::PrometheusMetricsLayer::new(true))
         .finish();
     Ok(object_store)
 }
