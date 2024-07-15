@@ -136,6 +136,8 @@ impl StatementExecutor {
 
             Statement::ShowCharset(kind) => self.show_charset(kind, query_ctx).await,
 
+            Statement::ShowViews(stmt) => self.show_views(stmt, query_ctx).await,
+
             Statement::Copy(sql::statements::copy::Copy::CopyTable(stmt)) => {
                 let req = to_copy_table_request(stmt, query_ctx.clone())?;
                 match req.direction {

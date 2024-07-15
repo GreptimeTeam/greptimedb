@@ -200,6 +200,25 @@ impl Display for ShowCreateView {
     }
 }
 
+/// SQL structure for `SHOW VIEWS`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ShowViews {
+    pub kind: ShowKind,
+    pub database: Option<String>,
+}
+
+impl Display for ShowViews {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SHOW VIEWS")?;
+        if let Some(database) = &self.database {
+            write!(f, " IN {database}")?;
+        }
+        format_kind!(self, f);
+
+        Ok(())
+    }
+}
+
 /// SQL structure for `SHOW VARIABLES xxx`.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowVariables {
@@ -464,6 +483,49 @@ SHOW FULL TABLES IN d1"#,
                 assert_eq!(
                     r#"
 SHOW FULL TABLES"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_show_views() {
+        let sql = r"show views in d1;";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowViews { .. });
+        match &stmts[0] {
+            Statement::ShowViews(show) => {
+                let new_sql = format!("\n{}", show);
+                assert_eq!(
+                    r#"
+SHOW VIEWS IN d1"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"show views;";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowViews { .. });
+        match &stmts[0] {
+            Statement::ShowViews(show) => {
+                let new_sql = format!("\n{}", show);
+                assert_eq!(
+                    r#"
+SHOW VIEWS"#,
                     &new_sql
                 );
             }
