@@ -103,6 +103,7 @@ SELECT * FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME, TABLE_TYPE;
 |greptime|public|test_table|BASETABLE|ID|ID|ID|ID|ID|ID|mito|ID|Fixed|ID|ID|ID|DATETIME||||ID|||N|
 |greptime|public|test_view|VIEW|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME||||ID|||N|
 |greptime|information_schema|triggers|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME||||ID|||Y|
+|greptime|information_schema|views|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME||||ID|||Y|
 +++++++++++++++++++++++++
 
 -- SQLNESS REPLACE (\s\d+\s) ID
@@ -165,3 +166,4 @@ SHOW TABLES;
 +---------+
 | numbers |
 +---------+
+
