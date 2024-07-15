@@ -749,7 +749,7 @@ impl ReaderMetrics {
 pub(crate) struct RowGroupReaderBuilder {
     /// SST file to read.
     ///
-    /// Holds the file handle to avoid the file purge purge it.
+    /// Holds the file handle to avoid the file purge it.
     file_handle: FileHandle,
     /// Path of the file.
     file_path: String,
@@ -774,6 +774,10 @@ impl RowGroupReaderBuilder {
     /// Handle of the file to read.
     pub(crate) fn file_handle(&self) -> &FileHandle {
         &self.file_handle
+    }
+
+    pub(crate) fn parquet_metadata(&self) -> &Arc<ParquetMetaData> {
+        &self.parquet_meta
     }
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
@@ -1075,8 +1079,19 @@ impl RowGroupReader {
         self.reader = reader;
     }
 
-    /// Tries to fetch next [Batch] from the reader.
-    pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
+    /// Tries to fetch next [RecordBatch] from the reader.
+    ///
+    /// If the reader is exhausted, reads next row group.
+    fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
+        self.reader.next().transpose().context(ArrowReaderSnafu {
+            path: self.context.file_path(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl BatchReader for RowGroupReader {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
         let scan_start = Instant::now();
         if let Some(batch) = self.batches.pop_front() {
             self.metrics.num_rows += batch.num_rows();
@@ -1095,52 +1110,12 @@ impl RowGroupReader {
             self.context
                 .read_format()
                 .convert_record_batch(&record_batch, &mut self.batches)?;
-            self.prune_batches()?;
             self.metrics.num_batches += self.batches.len();
         }
         let batch = self.batches.pop_front();
         self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
         self.metrics.scan_cost += scan_start.elapsed();
         Ok(batch)
-    }
-
-    /// Tries to fetch next [RecordBatch] from the reader.
-    ///
-    /// If the reader is exhausted, reads next row group.
-    fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
-        self.reader.next().transpose().context(ArrowReaderSnafu {
-            path: self.context.file_path(),
-        })
-    }
-
-    /// Prunes batches by the pushed down predicate.
-    fn prune_batches(&mut self) -> Result<()> {
-        // fast path
-        if self.context.filters().is_empty() {
-            return Ok(());
-        }
-
-        let mut new_batches = VecDeque::new();
-        let batches = std::mem::take(&mut self.batches);
-        for batch in batches {
-            let num_rows_before_filter = batch.num_rows();
-            let Some(batch_filtered) = self.context.precise_filter(batch)? else {
-                // the entire batch is filtered out
-                self.metrics.num_rows_precise_filtered += num_rows_before_filter;
-                continue;
-            };
-
-            // update metric
-            let filtered_rows = num_rows_before_filter - batch_filtered.num_rows();
-            self.metrics.num_rows_precise_filtered += filtered_rows;
-
-            if !batch_filtered.is_empty() {
-                new_batches.push_back(batch_filtered);
-            }
-        }
-        self.batches = new_batches;
-
-        Ok(())
     }
 }
 

@@ -18,14 +18,19 @@
 use std::ops::BitAnd;
 use std::sync::Arc;
 
-use api::v1::SemanticType;
+use api::v1::{OpType, SemanticType};
+use common_telemetry::error;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
 use parquet::arrow::arrow_reader::RowSelection;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result};
+use crate::error::{
+    DecodeStatsSnafu, FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result, StatsNotPresentSnafu,
+};
 use crate::read::compat::CompatBatch;
+use crate::read::last_row::LastRowReader;
+use crate::read::prune::PruneReader;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
 use crate::sst::file::FileHandle;
@@ -59,14 +64,38 @@ impl FileRange {
     }
 
     /// Returns a reader to read the [FileRange].
-    pub(crate) async fn reader(&self) -> Result<RowGroupReader> {
+    pub(crate) async fn reader(&self) -> Result<PruneReader> {
         let parquet_reader = self
             .context
             .reader_builder
             .build(self.row_group_idx, self.row_selection.clone())
             .await?;
 
-        Ok(RowGroupReader::new(self.context.clone(), parquet_reader))
+        let put_only = self
+            .context
+            .contains_delete(self.row_group_idx)
+            .inspect_err(|e| {
+                error!(e; "Failed to decode min value of op_type, fallback to RowGroupReader");
+            })
+            .unwrap_or(true);
+        let prune_reader = if put_only {
+            // Row group contains DELETE, fallback to default reader.
+            PruneReader::new_with_row_group_reader(
+                self.context.clone(),
+                RowGroupReader::new(self.context.clone(), parquet_reader),
+            )
+        } else {
+            // Row group is PUT only, use LastRowReader to skip unnecessary rows.
+            PruneReader::new_with_last_row_reader(
+                self.context.clone(),
+                LastRowReader::new(Box::new(RowGroupReader::new(
+                    self.context.clone(),
+                    parquet_reader,
+                )) as _),
+            )
+        };
+
+        Ok(prune_reader)
     }
 
     /// Returns the helper to compat batches.
@@ -143,6 +172,34 @@ impl FileRangeContext {
     /// Return the filtered batch. If the entire batch is filtered out, return None.
     pub(crate) fn precise_filter(&self, input: Batch) -> Result<Option<Batch>> {
         self.base.precise_filter(input)
+    }
+
+    //// Decodes parquet metadata and finds if row group contains delete op.
+    pub(crate) fn contains_delete(&self, row_group_index: usize) -> Result<bool> {
+        let metadata = self.reader_builder.parquet_metadata();
+        let row_group_metadata = &metadata.row_groups()[row_group_index];
+
+        // safety: The last column of SST must be op_type
+        let column_metadata = &row_group_metadata.columns().last().unwrap();
+        let stats = column_metadata.statistics().context(StatsNotPresentSnafu {
+            file_path: self.reader_builder.file_path(),
+        })?;
+        if stats.has_min_max_set() {
+            stats
+                .min_bytes()
+                .try_into()
+                .map(i32::from_le_bytes)
+                .map(|min_op_type| min_op_type == OpType::Delete as i32)
+                .ok()
+                .context(DecodeStatsSnafu {
+                    file_path: self.reader_builder.file_path(),
+                })
+        } else {
+            DecodeStatsSnafu {
+                file_path: self.reader_builder.file_path(),
+            }
+            .fail()
+        }
     }
 }
 

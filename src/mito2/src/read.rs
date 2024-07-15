@@ -19,6 +19,7 @@ pub mod dedup;
 pub(crate) mod last_row;
 pub mod merge;
 pub mod projection;
+pub(crate) mod prune;
 pub(crate) mod scan_region;
 pub(crate) mod seq_scan;
 pub(crate) mod unordered_scan;
@@ -54,7 +55,7 @@ use crate::error::{
 };
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
-use crate::sst::parquet::reader::RowGroupReader;
+use crate::read::prune::PruneReader;
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -686,8 +687,8 @@ pub enum Source {
     Iter(BoxedBatchIterator),
     /// Source from a [BoxedBatchStream].
     Stream(BoxedBatchStream),
-    /// Source from a [RowGroupReader].
-    RowGroupReader(RowGroupReader),
+    /// Source from a [PruneReader].
+    PruneReader(PruneReader),
 }
 
 impl Source {
@@ -697,7 +698,7 @@ impl Source {
             Source::Reader(reader) => reader.next_batch().await,
             Source::Iter(iter) => iter.next().transpose(),
             Source::Stream(stream) => stream.try_next().await,
-            Source::RowGroupReader(reader) => reader.next_batch().await,
+            Source::PruneReader(reader) => reader.next_batch().await,
         }
     }
 }
