@@ -50,6 +50,7 @@ use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_TOTAL,
     READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED,
 };
+use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, SortField};
 use crate::sst::file::FileHandle;
@@ -694,34 +695,34 @@ fn time_range_to_predicate(
 }
 
 /// Parquet reader metrics.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ReaderMetrics {
     /// Number of row groups before filtering.
-    num_row_groups_before_filtering: usize,
+    pub(crate) num_row_groups_before_filtering: usize,
     /// Number of row groups filtered by fulltext index.
-    num_row_groups_fulltext_index_filtered: usize,
+    pub(crate) num_row_groups_fulltext_index_filtered: usize,
     /// Number of row groups filtered by inverted index.
-    num_row_groups_inverted_index_filtered: usize,
+    pub(crate) num_row_groups_inverted_index_filtered: usize,
     /// Number of row groups filtered by min-max index.
-    num_row_groups_min_max_filtered: usize,
+    pub(crate) num_row_groups_min_max_filtered: usize,
     /// Number of rows filtered by precise filter.
-    num_rows_precise_filtered: usize,
+    pub(crate) num_rows_precise_filtered: usize,
     /// Number of rows in row group before filtering.
-    num_rows_in_row_group_before_filtering: usize,
+    pub(crate) num_rows_in_row_group_before_filtering: usize,
     /// Number of rows in row group filtered by fulltext index.
-    num_rows_in_row_group_fulltext_index_filtered: usize,
+    pub(crate) num_rows_in_row_group_fulltext_index_filtered: usize,
     /// Number of rows in row group filtered by inverted index.
-    num_rows_in_row_group_inverted_index_filtered: usize,
+    pub(crate) num_rows_in_row_group_inverted_index_filtered: usize,
     /// Duration to build the parquet reader.
-    build_cost: Duration,
+    pub(crate) build_cost: Duration,
     /// Duration to scan the reader.
-    scan_cost: Duration,
+    pub(crate) scan_cost: Duration,
     /// Number of record batches read.
-    num_record_batches: usize,
+    pub(crate) num_record_batches: usize,
     /// Number of batches decoded.
-    num_batches: usize,
+    pub(crate) num_batches: usize,
     /// Number of rows read.
-    num_rows: usize,
+    pub(crate) num_rows: usize,
 }
 
 impl ReaderMetrics {
@@ -749,7 +750,7 @@ impl ReaderMetrics {
 pub(crate) struct RowGroupReaderBuilder {
     /// SST file to read.
     ///
-    /// Holds the file handle to avoid the file purge purge it.
+    /// Holds the file handle to avoid the file purge it.
     file_handle: FileHandle,
     /// Path of the file.
     file_path: String,
@@ -774,6 +775,10 @@ impl RowGroupReaderBuilder {
     /// Handle of the file to read.
     pub(crate) fn file_handle(&self) -> &FileHandle {
         &self.file_handle
+    }
+
+    pub(crate) fn parquet_metadata(&self) -> &Arc<ParquetMetaData> {
+        &self.parquet_meta
     }
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
@@ -816,16 +821,16 @@ impl RowGroupReaderBuilder {
 /// The state of a [ParquetReader].
 enum ReaderState {
     /// The reader is reading a row group.
-    Readable(RowGroupReader),
+    Readable(PruneReader),
     /// The reader is exhausted.
     Exhausted(ReaderMetrics),
 }
 
 impl ReaderState {
     /// Returns the metrics of the reader.
-    fn metrics(&self) -> &ReaderMetrics {
+    fn metrics(&mut self) -> &ReaderMetrics {
         match self {
-            ReaderState::Readable(reader) => &reader.metrics,
+            ReaderState::Readable(reader) => reader.metrics(),
             ReaderState::Exhausted(m) => m,
         }
     }
@@ -942,15 +947,19 @@ impl BatchReader for ParquetReader {
                 .reader_builder()
                 .build(row_group_idx, row_selection)
                 .await?;
+
             // Resets the parquet reader.
-            reader.reset_reader(parquet_reader);
+            reader.reset_source(Source::RowGroup(RowGroupReader::new(
+                self.context.clone(),
+                parquet_reader,
+            )));
             if let Some(batch) = reader.next_batch().await? {
                 return Ok(Some(batch));
             }
         }
 
         // The reader is exhausted.
-        self.reader_state = ReaderState::Exhausted(std::mem::take(&mut reader.metrics));
+        self.reader_state = ReaderState::Exhausted(reader.metrics().clone());
         Ok(None)
     }
 }
@@ -1019,7 +1028,10 @@ impl ParquetReader {
                 .reader_builder()
                 .build(row_group_idx, row_selection)
                 .await?;
-            ReaderState::Readable(RowGroupReader::new(context.clone(), parquet_reader))
+            ReaderState::Readable(PruneReader::new_with_row_group_reader(
+                context.clone(),
+                RowGroupReader::new(context.clone(), parquet_reader),
+            ))
         } else {
             ReaderState::Exhausted(ReaderMetrics::default())
         };
@@ -1070,13 +1082,17 @@ impl RowGroupReader {
         &self.metrics
     }
 
-    /// Resets the parquet reader.
-    fn reset_reader(&mut self, reader: ParquetRecordBatchReader) {
-        self.reader = reader;
+    /// Tries to fetch next [RecordBatch] from the reader.
+    fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
+        self.reader.next().transpose().context(ArrowReaderSnafu {
+            path: self.context.file_path(),
+        })
     }
+}
 
-    /// Tries to fetch next [Batch] from the reader.
-    pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
+#[async_trait::async_trait]
+impl BatchReader for RowGroupReader {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
         let scan_start = Instant::now();
         if let Some(batch) = self.batches.pop_front() {
             self.metrics.num_rows += batch.num_rows();
@@ -1095,52 +1111,12 @@ impl RowGroupReader {
             self.context
                 .read_format()
                 .convert_record_batch(&record_batch, &mut self.batches)?;
-            self.prune_batches()?;
             self.metrics.num_batches += self.batches.len();
         }
         let batch = self.batches.pop_front();
         self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
         self.metrics.scan_cost += scan_start.elapsed();
         Ok(batch)
-    }
-
-    /// Tries to fetch next [RecordBatch] from the reader.
-    ///
-    /// If the reader is exhausted, reads next row group.
-    fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
-        self.reader.next().transpose().context(ArrowReaderSnafu {
-            path: self.context.file_path(),
-        })
-    }
-
-    /// Prunes batches by the pushed down predicate.
-    fn prune_batches(&mut self) -> Result<()> {
-        // fast path
-        if self.context.filters().is_empty() {
-            return Ok(());
-        }
-
-        let mut new_batches = VecDeque::new();
-        let batches = std::mem::take(&mut self.batches);
-        for batch in batches {
-            let num_rows_before_filter = batch.num_rows();
-            let Some(batch_filtered) = self.context.precise_filter(batch)? else {
-                // the entire batch is filtered out
-                self.metrics.num_rows_precise_filtered += num_rows_before_filter;
-                continue;
-            };
-
-            // update metric
-            let filtered_rows = num_rows_before_filter - batch_filtered.num_rows();
-            self.metrics.num_rows_precise_filtered += filtered_rows;
-
-            if !batch_filtered.is_empty() {
-                new_batches.push_back(batch_filtered);
-            }
-        }
-        self.batches = new_batches;
-
-        Ok(())
     }
 }
 
