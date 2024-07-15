@@ -386,13 +386,11 @@ mod tests {
     }
 
     fn new_batch(
-        rows: impl Iterator<
-            Item = (
-                Option<impl AsRef<str>>, // text_english_case_sensitive
-                Option<impl AsRef<str>>, // text_english_case_insensitive
-                Option<impl AsRef<str>>, // text_chinese
-            ),
-        >,
+        rows: &[(
+            Option<&str>, // text_english_case_sensitive
+            Option<&str>, // text_english_case_insensitive
+            Option<&str>, // text_chinese
+        )],
     ) -> Batch {
         let mut vec_english_sensitive =
             ConcreteDataType::string_datatype().create_mutable_vector(0);
@@ -402,15 +400,15 @@ mod tests {
 
         for (text_english_case_sensitive, text_english_case_insensitive, text_chinese) in rows {
             match text_english_case_sensitive {
-                Some(s) => vec_english_sensitive.push_value_ref(s.as_ref().into()),
+                Some(s) => vec_english_sensitive.push_value_ref((*s).into()),
                 None => vec_english_sensitive.push_null(),
             }
             match text_english_case_insensitive {
-                Some(s) => vec_english_insensitive.push_value_ref(s.as_ref().into()),
+                Some(s) => vec_english_insensitive.push_value_ref((*s).into()),
                 None => vec_english_insensitive.push_null(),
             }
             match text_chinese {
-                Some(s) => vec_chinese.push_value_ref(s.as_ref().into()),
+                Some(s) => vec_chinese.push_value_ref((*s).into()),
                 None => vec_chinese.push_null(),
             }
         }
@@ -447,13 +445,11 @@ mod tests {
 
     async fn build_applier_factory(
         prefix: &str,
-        rows: impl Iterator<
-            Item = (
-                Option<impl AsRef<str>>, // text_english_case_sensitive
-                Option<impl AsRef<str>>, // text_english_case_insensitive
-                Option<impl AsRef<str>>, // text_chinese
-            ),
-        >,
+        rows: &[(
+            Option<&str>, // text_english_case_sensitive
+            Option<&str>, // text_english_case_insensitive
+            Option<&str>, // text_chinese
+        )],
     ) -> impl Fn(Vec<(ColumnId, &str)>) -> BoxFuture<'static, BTreeSet<RowId>> {
         let (d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
         let region_dir = "region0".to_string();
@@ -502,7 +498,7 @@ mod tests {
     async fn test_fulltext_index_basic() {
         let applier_factory = build_applier_factory(
             "test_fulltext_index_basic_",
-            vec![
+            &[
                 (Some("hello"), None, Some("你好")),
                 (Some("world"), Some("world"), None),
                 (None, Some("World"), Some("世界")),
@@ -511,8 +507,7 @@ mod tests {
                     Some("Hello, World"),
                     Some("你好，世界"),
                 ),
-            ]
-            .into_iter(),
+            ],
         )
         .await;
 
@@ -539,7 +534,7 @@ mod tests {
     async fn test_fulltext_index_multi_columns() {
         let applier_factory = build_applier_factory(
             "test_fulltext_index_multi_columns_",
-            vec![
+            &[
                 (Some("hello"), None, Some("你好")),
                 (Some("world"), Some("world"), None),
                 (None, Some("World"), Some("世界")),
@@ -548,8 +543,7 @@ mod tests {
                     Some("Hello, World"),
                     Some("你好，世界"),
                 ),
-            ]
-            .into_iter(),
+            ],
         )
         .await;
 
