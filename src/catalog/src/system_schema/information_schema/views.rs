@@ -124,9 +124,7 @@ impl InformationTable for InformationSchemaViews {
                     .make_views(Some(request))
                     .await
                     .map(|x| x.into_df_record_batch())
-                    .map_err(|err| {
-                        datafusion::error::DataFusionError::External(format!("{err:?}").into())
-                    })
+                    .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))
             }),
         ));
         Ok(Box::pin(

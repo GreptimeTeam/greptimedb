@@ -264,7 +264,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert!(body.error().contains("Table not found"));
-    assert_eq!(body.code(), ErrorCode::PlanQuery as u32);
+    assert_eq!(body.code(), ErrorCode::TableNotFound as u32);
 
     // test database given
     let res = client

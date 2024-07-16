@@ -17,6 +17,7 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_query::error::datafusion_status_code;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
@@ -141,9 +142,10 @@ pub enum Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::Datafusion { .. }
-            | Error::SchemaConversion { .. }
-            | Error::TableProjection { .. } => StatusCode::EngineExecuteQuery,
+            Error::Datafusion { error, .. } => datafusion_status_code::<Self>(error, None),
+            Error::SchemaConversion { .. } | Error::TableProjection { .. } => {
+                StatusCode::EngineExecuteQuery
+            }
             Error::RemoveColumnInIndex { .. }
             | Error::BuildColumnDescriptor { .. }
             | Error::InvalidAlterRequest { .. } => StatusCode::InvalidArguments,

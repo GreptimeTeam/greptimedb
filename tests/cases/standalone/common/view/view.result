@@ -50,7 +50,7 @@ Error: 1004(InvalidArguments), Invalid SQL, error: column count mismatch, column
 
 CREATE VIEW v1 AS SELECT * FROM dontexist;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.public.dontexist
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.dontexist
 
 SHOW VIEWS;
 
@@ -66,7 +66,7 @@ Affected Rows: 0
 
 SELECT * FROM v1;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.public.v1
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.v1
 
 --- view not exists ---
 DROP VIEW v2;

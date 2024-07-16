@@ -49,15 +49,15 @@ SELECT INTERVAL '1 year 2 months 3 days 4 hours' - INTERVAL '1 year';
 
 SELECT INTERVAL '6 years' * 2;
 
-Error: 3000(PlanQuery), Failed to plan SQL: This feature is not implemented: Unsupported interval operator: Multiply
+Error: 1001(Unsupported), Failed to plan SQL: This feature is not implemented: Unsupported interval operator: Multiply
 
 SELECT INTERVAL '6 years' / 2;
 
-Error: 3000(PlanQuery), Failed to plan SQL: This feature is not implemented: Unsupported interval operator: Divide
+Error: 1001(Unsupported), Failed to plan SQL: This feature is not implemented: Unsupported interval operator: Divide
 
 SELECT INTERVAL '6 years' = INTERVAL '72 months';
 
-Error: 3000(PlanQuery), Failed to plan SQL: This feature is not implemented: Unsupported interval operator: Eq
+Error: 1001(Unsupported), Failed to plan SQL: This feature is not implemented: Unsupported interval operator: Eq
 
 SELECT arrow_typeof(INTERVAL '1 month');
 
