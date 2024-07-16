@@ -418,12 +418,14 @@ pub struct SelectorResultKey {
 pub struct SelectorResultValue {
     /// Batches of rows selected by the selector.
     pub result: Vec<Batch>,
+    /// Projection of rows.
+    pub projection: Vec<usize>,
 }
 
 impl SelectorResultValue {
     /// Creates a new selector result value.
-    pub fn new(result: Vec<Batch>) -> SelectorResultValue {
-        SelectorResultValue { result }
+    pub fn new(result: Vec<Batch>, projection: Vec<usize>) -> SelectorResultValue {
+        SelectorResultValue { result, projection }
     }
 
     /// Returns memory used by the value (estimated).
@@ -555,7 +557,7 @@ mod tests {
             selector: TimeSeriesRowSelector::LastRow,
         };
         assert!(cache.get_selector_result(&key).is_none());
-        let result = Arc::new(SelectorResultValue::new(Vec::new()));
+        let result = Arc::new(SelectorResultValue::new(Vec::new(), Vec::new()));
         cache.put_selector_result(key, result);
         assert!(cache.get_selector_result(&key).is_some());
     }

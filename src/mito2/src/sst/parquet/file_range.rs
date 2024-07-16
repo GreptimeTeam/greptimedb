@@ -30,6 +30,7 @@ use crate::error::{
     DecodeStatsSnafu, FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result, StatsNotPresentSnafu,
 };
 use crate::read::compat::CompatBatch;
+use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::PruneReader;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
@@ -110,7 +111,7 @@ impl FileRange {
 
         let prune_reader = if use_last_row_reader {
             // Row group is PUT only, use LastRowReader to skip unnecessary rows.
-            let reader = crate::read::last_row::RowGroupLastRowCachedReader::new(
+            let reader = RowGroupLastRowCachedReader::new(
                 self.file_handle().file_id(),
                 self.row_group_idx,
                 self.context.reader_builder.cache_manager().clone(),

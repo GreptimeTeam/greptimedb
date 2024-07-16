@@ -92,42 +92,30 @@ impl RowGroupLastRowCachedReader {
         };
 
         let Some(cache_manager) = cache_manager else {
-            return Self::Miss(RowGroupLastRowReader {
-                key,
-                reader: row_group_reader,
-                selector: Default::default(),
-                yielded_batches: vec![],
-                cache_manager: None,
-            });
+            return Self::Miss(RowGroupLastRowReader::new(key, row_group_reader, None));
         };
         if let Some(value) = cache_manager.get_selector_result(&key) {
-            let schema_matches = value.result[0].fields.len() + 4
+            let schema_matches = value.projection
                 == row_group_reader
                     .context()
                     .read_format()
-                    .projection_indices()
-                    .len();
-
+                    .projection_indices();
             if schema_matches {
                 // Schema matches, use cache batches.
                 Self::Hit(LastRowCacheReader { value, idx: 0 })
             } else {
-                Self::Miss(RowGroupLastRowReader {
+                Self::Miss(RowGroupLastRowReader::new(
                     key,
-                    reader: row_group_reader,
-                    selector: Default::default(),
-                    yielded_batches: vec![],
-                    cache_manager: Some(cache_manager),
-                })
+                    row_group_reader,
+                    Some(cache_manager),
+                ))
             }
         } else {
-            Self::Miss(RowGroupLastRowReader {
+            Self::Miss(RowGroupLastRowReader::new(
                 key,
-                reader: row_group_reader,
-                selector: Default::default(),
-                yielded_batches: vec![],
-                cache_manager: Some(cache_manager),
-            })
+                row_group_reader,
+                Some(cache_manager),
+            ))
         }
     }
 }
@@ -170,6 +158,20 @@ pub(crate) struct RowGroupLastRowReader {
 }
 
 impl RowGroupLastRowReader {
+    fn new(
+        key: SelectorResultKey,
+        reader: RowGroupReader,
+        cache_manager: Option<CacheManagerRef>,
+    ) -> Self {
+        Self {
+            key,
+            reader,
+            selector: LastRowSelector::default(),
+            yielded_batches: vec![],
+            cache_manager,
+        }
+    }
+
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         while let Some(batch) = self.reader.next_batch().await? {
             if let Some(yielded) = self.selector.on_next(batch) {
@@ -198,6 +200,12 @@ impl RowGroupLastRowReader {
         if let Some(cache) = &self.cache_manager {
             let value = Arc::new(SelectorResultValue {
                 result: std::mem::take(&mut self.yielded_batches),
+                projection: self
+                    .reader
+                    .context()
+                    .read_format()
+                    .projection_indices()
+                    .to_vec(),
             });
             cache.put_selector_result(self.key, value)
         }
