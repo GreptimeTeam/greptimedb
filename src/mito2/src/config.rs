@@ -84,6 +84,8 @@ pub struct MitoConfig {
     pub vector_cache_size: ReadableSize,
     /// Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
     pub page_cache_size: ReadableSize,
+    /// Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.
+    pub selector_result_cache_size: ReadableSize,
     /// Whether to enable the experimental write cache.
     pub enable_experimental_write_cache: bool,
     /// File system path for write cache, defaults to `{data_home}/write_cache`.
@@ -133,6 +135,7 @@ impl Default for MitoConfig {
             sst_meta_cache_size: ReadableSize::mb(128),
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
+            selector_result_cache_size: ReadableSize::mb(512),
             enable_experimental_write_cache: false,
             experimental_write_cache_path: String::new(),
             experimental_write_cache_size: ReadableSize::mb(512),
@@ -237,6 +240,7 @@ impl MitoConfig {
         self.sst_meta_cache_size = sst_meta_cache_size;
         self.vector_cache_size = mem_cache_size;
         self.page_cache_size = mem_cache_size;
+        self.selector_result_cache_size = mem_cache_size;
     }
 
     /// Enable experimental write cache.

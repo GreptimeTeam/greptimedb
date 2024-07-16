@@ -18,6 +18,8 @@ insert into t values
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE \-+
+-- SQLNESS REPLACE (\s\s+) _
 explain analyze
     select
         last_value(host order by ts),

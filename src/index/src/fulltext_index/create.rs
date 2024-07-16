@@ -15,7 +15,7 @@
 mod tantivy;
 
 use async_trait::async_trait;
-pub use tantivy::TantivyFulltextIndexCreator;
+pub use tantivy::{TantivyFulltextIndexCreator, TEXT_FIELD_NAME};
 
 use crate::fulltext_index::error::Result;
 

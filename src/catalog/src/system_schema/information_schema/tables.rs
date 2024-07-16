@@ -38,7 +38,7 @@ use super::TABLES;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::information_schema::{InformationTable, Predicates};
+use crate::system_schema::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
 pub const TABLE_CATALOG: &str = "table_catalog";

@@ -587,6 +587,10 @@ pub struct MfpPlan {
 }
 
 impl MfpPlan {
+    /// Indicates if the `MfpPlan` contains temporal predicates. That is have outputs that may occur in future.
+    pub fn is_temporal(&self) -> bool {
+        !self.lower_bounds.is_empty() || !self.upper_bounds.is_empty()
+    }
     /// find `now` in `predicates` and put them into lower/upper temporal bounds for temporal filter to use
     pub fn create_from(mut mfp: MapFilterProject) -> Result<Self, Error> {
         let mut lower_bounds = Vec::new();

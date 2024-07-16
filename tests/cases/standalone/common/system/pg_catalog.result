@@ -1,0 +1,32 @@
+-- should not able to create pg_catalog
+create database pg_catalog;
+
+Error: 1004(InvalidArguments), Schema pg_catalog already exists
+
+select * from pg_catalog.pg_type order by oid;
+
++-----+-----------+--------+
+| oid | typname   | typlen |
++-----+-----------+--------+
+| 1   | String    | -1     |
+| 2   | Binary    | -1     |
+| 3   | Int8      | 1      |
+| 4   | Int16     | 2      |
+| 5   | Int32     | 4      |
+| 6   | Int64     | 8      |
+| 7   | UInt8     | 1      |
+| 8   | UInt16    | 2      |
+| 9   | UInt32    | 4      |
+| 10  | UInt64    | 8      |
+| 11  | Float32   | 4      |
+| 12  | Float64   | 8      |
+| 13  | Decimal   | 16     |
+| 14  | Date      | 4      |
+| 15  | DateTime  | 8      |
+| 16  | Timestamp | 8      |
+| 17  | Time      | 8      |
+| 18  | Duration  | 8      |
+| 19  | Interval  | 16     |
+| 20  | List      | -1     |
++-----+-----------+--------+
+

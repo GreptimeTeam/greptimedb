@@ -124,3 +124,127 @@ DROP TABLE out_num_cnt_df_func;
 
 Affected Rows: 0
 
+-- test date_bin
+CREATE TABLE numbers_input (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+CREATE FLOW test_numbers 
+SINK TO out_num_cnt
+AS 
+SELECT max(number) - min(number), date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond) FROM numbers_input GROUP BY date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond);
+
+Affected Rows: 0
+
+INSERT INTO numbers_input 
+VALUES
+    (20, "2021-07-01 00:00:00.200"),
+    (22, "2021-07-01 00:00:00.600");
+
+Affected Rows: 2
+
+-- SQLNESS SLEEP 3s
+SELECT col_0, col_1 FROM out_num_cnt;
+
++-------+---------------------+
+| col_0 | col_1               |
++-------+---------------------+
+| 2     | 2021-07-01T00:00:00 |
++-------+---------------------+
+
+INSERT INTO numbers_input 
+VALUES
+    (23,"2021-07-01 00:00:01.000"),
+    (24,"2021-07-01 00:00:01.500");
+
+Affected Rows: 2
+
+-- SQLNESS SLEEP 2s
+SELECT col_0, col_1 FROM out_num_cnt;
+
++-------+---------------------+
+| col_0 | col_1               |
++-------+---------------------+
+| 2     | 2021-07-01T00:00:00 |
+| 1     | 2021-07-01T00:00:01 |
++-------+---------------------+
+
+DROP FLOW test_numbers;
+
+Affected Rows: 0
+
+DROP TABLE numbers_input;
+
+Affected Rows: 0
+
+DROP TABLE out_num_cnt;
+
+Affected Rows: 0
+
+-- test date_trunc
+CREATE TABLE numbers_input (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+CREATE FLOW test_numbers 
+SINK TO out_num_cnt
+AS 
+SELECT date_trunc('second', ts), sum(number) FROM numbers_input GROUP BY date_trunc('second', ts);
+
+Affected Rows: 0
+
+INSERT INTO numbers_input 
+VALUES
+    (20, "2021-07-01 00:00:00.200"),
+    (22, "2021-07-01 00:00:00.600");
+
+Affected Rows: 2
+
+-- SQLNESS SLEEP 3s
+SELECT col_0, col_1 FROM out_num_cnt;
+
++---------------------+-------+
+| col_0               | col_1 |
++---------------------+-------+
+| 2021-07-01T00:00:00 | 42    |
++---------------------+-------+
+
+INSERT INTO numbers_input 
+VALUES
+    (23,"2021-07-01 00:00:01.000"),
+    (24,"2021-07-01 00:00:01.500");
+
+Affected Rows: 2
+
+-- SQLNESS SLEEP 2s
+SELECT col_0, col_1 FROM out_num_cnt;
+
++---------------------+-------+
+| col_0               | col_1 |
++---------------------+-------+
+| 2021-07-01T00:00:00 | 42    |
+| 2021-07-01T00:00:01 | 47    |
++---------------------+-------+
+
+DROP FLOW test_numbers;
+
+Affected Rows: 0
+
+DROP TABLE numbers_input;
+
+Affected Rows: 0
+
+DROP TABLE out_num_cnt;
+
+Affected Rows: 0
+

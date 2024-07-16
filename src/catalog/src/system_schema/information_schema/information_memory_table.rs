@@ -15,17 +15,19 @@
 use std::sync::Arc;
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
-use datatypes::prelude::{ConcreteDataType, VectorRef};
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::vectors::{Int64Vector, StringVector};
+use datatypes::schema::{Schema, SchemaRef};
+use datatypes::vectors::{Int64Vector, StringVector, VectorRef};
 
-use crate::information_schema::table_names::*;
+use super::table_names::*;
+use crate::system_schema::memory_table::tables::{
+    bigint_column, datetime_column, string_column, string_columns,
+};
 
 const NO_VALUE: &str = "NO";
 
 /// Find the schema and columns by the table_name, only valid for memory tables.
 /// Safety: the user MUST ensure the table schema exists, panic otherwise.
-pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
+pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
     let (column_schemas, columns): (_, Vec<VectorRef>) = match table_name {
         COLUMN_PRIVILEGES => (
             string_columns(&[
@@ -413,51 +415,4 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
     };
 
     (Arc::new(Schema::new(column_schemas)), columns)
-}
-
-fn string_columns(names: &[&'static str]) -> Vec<ColumnSchema> {
-    names.iter().map(|name| string_column(name)).collect()
-}
-
-fn string_column(name: &str) -> ColumnSchema {
-    ColumnSchema::new(
-        str::to_lowercase(name),
-        ConcreteDataType::string_datatype(),
-        false,
-    )
-}
-
-fn bigint_column(name: &str) -> ColumnSchema {
-    ColumnSchema::new(
-        str::to_lowercase(name),
-        ConcreteDataType::int64_datatype(),
-        false,
-    )
-}
-
-fn datetime_column(name: &str) -> ColumnSchema {
-    ColumnSchema::new(
-        str::to_lowercase(name),
-        ConcreteDataType::datetime_datatype(),
-        false,
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_string_columns() {
-        let columns = ["a", "b", "c"];
-        let column_schemas = string_columns(&columns);
-
-        assert_eq!(3, column_schemas.len());
-        for (i, name) in columns.iter().enumerate() {
-            let cs = column_schemas.get(i).unwrap();
-
-            assert_eq!(*name, cs.name);
-            assert_eq!(ConcreteDataType::string_datatype(), cs.data_type);
-        }
-    }
 }

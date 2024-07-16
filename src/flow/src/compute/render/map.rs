@@ -146,6 +146,16 @@ fn mfp_subgraph(
     // find all updates that need to be send from arrangement
     let output_kv = arrange.read().get_updates_in_range(range);
 
+    err_collector.run(|| {
+        snafu::ensure!(
+            mfp_plan.is_temporal() || output_kv.is_empty(),
+            crate::expr::error::InternalSnafu {
+                reason: "Output from future should be empty since temporal filter is not applied"
+            }
+        );
+        Ok(())
+    });
+
     // the output is expected to be key -> empty val
     let output = output_kv
         .into_iter()

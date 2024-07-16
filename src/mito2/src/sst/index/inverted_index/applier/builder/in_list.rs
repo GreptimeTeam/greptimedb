@@ -18,9 +18,9 @@ use datafusion_expr::expr::InList;
 use index::inverted_index::search::predicate::{InListPredicate, Predicate};
 
 use crate::error::Result;
-use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> SstIndexApplierBuilder<'a> {
+impl<'a> InvertedIndexApplierBuilder<'a> {
     /// Collects an in list expression in the form of `column IN (lit, lit, ...)`.
     pub(crate) fn collect_inlist(&mut self, inlist: &InList) -> Result<()> {
         if inlist.negated {
@@ -65,7 +65,7 @@ mod tests {
     fn test_collect_in_list_basic() {
         let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_in_list_basic_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -98,7 +98,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_in_list_negated_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -123,7 +123,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_in_list_field_column_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -148,7 +148,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_in_list_type_mismatch_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -175,7 +175,7 @@ mod tests {
             PuffinManagerFactory::new_for_test_block("test_collect_in_list_nonexistent_column_");
 
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,

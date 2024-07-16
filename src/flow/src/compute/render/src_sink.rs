@@ -96,12 +96,8 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     }
                 }
                 let all = prev_avail.chain(to_send).collect_vec();
-                if !all.is_empty() || !to_arrange.is_empty() {
-                    debug!(
-                        "Rendered Source All send: {} rows, not yet send: {} rows",
-                        all.len(),
-                        to_arrange.len()
-                    );
+                if !to_arrange.is_empty() {
+                    debug!("Source Operator buffered {} rows", to_arrange.len());
                 }
                 err_collector.run(|| arranged.apply_updates(now, to_arrange));
                 send.give(all);
