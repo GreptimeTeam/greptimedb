@@ -16,7 +16,7 @@
 
 pub mod compat;
 pub mod dedup;
-pub(crate) mod last_row;
+pub mod last_row;
 pub mod merge;
 pub mod projection;
 pub(crate) mod prune;
