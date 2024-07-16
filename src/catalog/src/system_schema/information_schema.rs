@@ -104,6 +104,7 @@ macro_rules! setup_memory_table {
 pub struct InformationSchemaProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+    flow_metadata_manager: Arc<FlowMetadataManager>,
     tables: HashMap<String, TableRef>,
 }
 
@@ -181,6 +182,10 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
             VIEWS => Some(Arc::new(InformationSchemaViews::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
+            )) as _),
+            FLOWS => Some(Arc::new(InformationSchemaFlows::new(
+                self.catalog_name.clone(),
+                self.flow_metadata_manager.clone(),
             )) as _),
             _ => None,
         }

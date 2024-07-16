@@ -43,6 +43,8 @@ use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchDeleteRequest;
 
+pub const FLOW_PREFIX: &str = "__flow";
+
 /// The key of `__flow/` scope.
 #[derive(Debug, PartialEq)]
 pub struct FlowScoped<T> {

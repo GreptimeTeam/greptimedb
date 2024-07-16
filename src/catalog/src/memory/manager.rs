@@ -23,6 +23,8 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME,
     INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
 };
+use common_meta::key::flow::FlowMetadataManager;
+use common_meta::kv_backend::memory::MemoryKvBackend;
 use futures_util::stream::BoxStream;
 use snafu::OptionExt;
 use table::TableRef;
@@ -298,6 +300,7 @@ impl MemoryCatalogManager {
         let information_schema_provider = InformationSchemaProvider::new(
             catalog,
             Arc::downgrade(self) as Weak<dyn CatalogManager>,
+            Arc::new(FlowMetadataManager::new(Arc::new(MemoryKvBackend::new()))),
         );
         let information_schema = information_schema_provider.tables().clone();
 

@@ -57,6 +57,29 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to list flows in catalog {catalog}: {source}"))]
+    ListFlows {
+        #[snafu(implicit)]
+        location: Location,
+        catalog: String,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Flow info not found: {flow_name} in catalog {catalog_name}"))]
+    FlowInfoNotFound {
+        flow_name: String,
+        catalog_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Can't convert value to json: {raw:?}"))]
+    Json {
+        raw: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to re-compile script due to internal error"))]
     CompileScriptInternal {
         #[snafu(implicit)]
@@ -254,11 +277,14 @@ impl ErrorExt for Error {
             | Error::FindPartitions { .. }
             | Error::FindRegionRoutes { .. }
             | Error::CacheNotFound { .. }
-            | Error::CastManager { .. } => StatusCode::Unexpected,
+            | Error::CastManager { .. }
+            | Error::Json { .. } => StatusCode::Unexpected,
 
             Error::ViewPlanColumnsChanged { .. } => StatusCode::InvalidArguments,
 
             Error::ViewInfoNotFound { .. } => StatusCode::TableNotFound,
+
+            Error::FlowInfoNotFound { .. } => StatusCode::TableNotFound,
 
             Error::SystemCatalog { .. } => StatusCode::StorageUnavailable,
 
@@ -270,7 +296,8 @@ impl ErrorExt for Error {
             Error::ListCatalogs { source, .. }
             | Error::ListNodes { source, .. }
             | Error::ListSchemas { source, .. }
-            | Error::ListTables { source, .. } => source.status_code(),
+            | Error::ListTables { source, .. }
+            | Error::ListFlows { source, .. } => source.status_code(),
 
             Error::CreateTable { source, .. } => source.status_code(),
 

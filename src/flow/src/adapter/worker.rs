@@ -436,7 +436,11 @@ impl InterThreadCallServer {
 
 fn from_send_error<T>(err: mpsc::error::SendError<T>) -> Error {
     InternalSnafu {
-        reason: format!("InterThreadCallServer resp failed: {}", err),
+        // this `err` will simply display `channel closed`
+        reason: format!(
+            "Worker's receiver channel have been closed unexpected: {}",
+            err
+        ),
     }
     .build()
 }

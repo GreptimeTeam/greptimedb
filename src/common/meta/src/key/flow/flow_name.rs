@@ -12,17 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Result};
-use crate::key::flow::FlowScoped;
+use crate::key::flow::{FlowScoped, FLOW_PREFIX};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, FlowId, MetaKey, TableMetaValue, NAME_PATTERN};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
+use crate::rpc::store::RangeRequest;
+use crate::rpc::KeyValue;
 
 const FLOW_NAME_KEY_PREFIX: &str = "name";
 
@@ -43,6 +49,10 @@ impl<'a> FlowNameKey<'a> {
     pub fn new(catalog: &'a str, flow_name: &'a str) -> FlowNameKey<'a> {
         let inner = FlowNameKeyInner::new(catalog, flow_name);
         FlowNameKey(FlowScoped::new(inner))
+    }
+
+    pub fn range_start_key(catalog: &str) -> String {
+        format!("{}/{}/{}/", FLOW_PREFIX, FLOW_NAME_KEY_PREFIX, catalog)
     }
 
     #[cfg(test)]
@@ -140,6 +150,12 @@ impl FlowNameValue {
     }
 }
 
+pub fn flow_name_decoder(kv: KeyValue) -> Result<(String, FlowNameValue)> {
+    let flow_name = std::str::from_utf8(&kv.key).context(error::ConvertRawKeySnafu)?;
+    let flow_id = FlowNameValue::try_from_raw_value(&kv.value)?;
+    Ok((flow_name.to_string(), flow_id))
+}
+
 /// The manager of [FlowNameKey].
 pub struct FlowNameManager {
     kv_backend: KvBackendRef,
@@ -160,6 +176,25 @@ impl FlowNameManager {
             .await?
             .map(|x| FlowNameValue::try_from_raw_value(&x.value))
             .transpose()
+    }
+
+    /// Return all flows' names and ids
+    pub async fn flow_names(
+        &self,
+        catalog: &str,
+    ) -> BoxStream<'static, Result<(String, FlowNameValue)>> {
+        let start_key = FlowNameKey::range_start_key(catalog);
+        common_telemetry::debug!("flow_names: start_key: {:?}", start_key);
+        let req = RangeRequest::new().with_prefix(start_key.as_bytes());
+
+        let stream = PaginationStream::new(
+            self.kv_backend.clone(),
+            req,
+            DEFAULT_PAGE_SIZE,
+            Arc::new(flow_name_decoder),
+        );
+
+        Box::pin(stream)
     }
 
     /// Returns true if the `flow` exists.

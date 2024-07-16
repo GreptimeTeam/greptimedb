@@ -26,7 +26,7 @@ use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, info, trace};
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
@@ -535,10 +535,10 @@ impl FlowWorkerManager {
             } else {
                 (9 * avg_spd + cur_spd) / 10
             };
-            debug!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
+            trace!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
             let new_wait = BATCH_SIZE * 1000 / avg_spd.max(1); //in ms
             let new_wait = Duration::from_millis(new_wait as u64).min(default_interval);
-            debug!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
+            trace!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
             since_last_run = tokio::time::Instant::now();
             tokio::time::sleep(new_wait).await;
         }
