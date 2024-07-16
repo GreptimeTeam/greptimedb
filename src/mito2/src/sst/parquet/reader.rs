@@ -781,6 +781,10 @@ impl RowGroupReaderBuilder {
         &self.parquet_meta
     }
 
+    pub(crate) fn cache_manager(&self) -> &Option<CacheManagerRef> {
+        &self.cache_manager
+    }
+
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
     pub(crate) async fn build(
         &self,
@@ -1080,6 +1084,9 @@ impl RowGroupReader {
     /// Gets the metrics.
     pub(crate) fn metrics(&self) -> &ReaderMetrics {
         &self.metrics
+    }
+    pub(crate) fn context(&self) -> &FileRangeContextRef {
+        &self.context
     }
 
     /// Tries to fetch next [RecordBatch] from the reader.

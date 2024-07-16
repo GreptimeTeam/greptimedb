@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use crate::error::Result;
-use crate::read::last_row::LastRowReader;
+use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::{Batch, BatchReader};
 use crate::sst::parquet::file_range::FileRangeContextRef;
 use crate::sst::parquet::reader::{ReaderMetrics, RowGroupReader};
 
 pub enum Source {
     RowGroup(RowGroupReader),
-    LastRow(LastRowReader),
+    LastRow(RowGroupLastRowCachedReader),
 }
 
 impl Source {
@@ -53,7 +53,7 @@ impl PruneReader {
 
     pub(crate) fn new_with_last_row_reader(
         ctx: FileRangeContextRef,
-        reader: LastRowReader,
+        reader: RowGroupLastRowCachedReader,
     ) -> Self {
         Self {
             context: ctx,

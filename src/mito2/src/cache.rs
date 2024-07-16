@@ -404,7 +404,7 @@ impl PageValue {
 }
 
 /// Cache key for time series row selector result.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SelectorResultKey {
     /// Id of the SST file.
     pub file_id: FileId,
@@ -556,7 +556,7 @@ mod tests {
         };
         assert!(cache.get_selector_result(&key).is_none());
         let result = Arc::new(SelectorResultValue::new(Vec::new()));
-        cache.put_selector_result(key.clone(), result);
+        cache.put_selector_result(key, result);
         assert!(cache.get_selector_result(&key).is_some());
     }
 }
