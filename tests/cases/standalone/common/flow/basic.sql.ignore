@@ -32,7 +32,7 @@ DROP FLOW test_numbers;
 DROP TABLE numbers_input;
 DROP TABLE out_num_cnt;
 
--- test interprete interval
+-- test interpret interval
 
 CREATE TABLE numbers_input (
     number INT,
