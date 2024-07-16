@@ -16,7 +16,7 @@ VALUES
     (20, "2021-07-01 00:00:00.200"),
     (22, "2021-07-01 00:00:00.600");
 
--- SQLNESS SLEEP 2s
+-- SQLNESS SLEEP 3s
 SELECT col_0, window_start, window_end FROM out_num_cnt;
 
 -- SQLNESS SLEEP 500ms
@@ -25,7 +25,7 @@ VALUES
     (23,"2021-07-01 00:00:01.000"),
     (24,"2021-07-01 00:00:01.500");
 
--- SQLNESS SLEEP 2s
+-- SQLNESS SLEEP 3s
 SELECT col_0, window_start, window_end FROM out_num_cnt;
 
 DROP FLOW test_numbers;
