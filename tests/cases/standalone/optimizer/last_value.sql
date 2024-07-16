@@ -22,7 +22,7 @@ insert into t values
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (Duration.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
 explain analyze
     select
         last_value(host order by ts),
