@@ -15,6 +15,7 @@ SELECT sum(abs(number)) FROM numbers_input_df_func GROUP BY tumble(ts, '1 second
 
 Affected Rows: 0
 
+-- SQLNESS SLEEP 500ms
 INSERT INTO numbers_input_df_func 
 VALUES
     (-20, "2021-07-01 00:00:00.200"),
@@ -32,6 +33,7 @@ SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 | 42    | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
 +-------+---------------------+---------------------+
 
+-- SQLNESS SLEEP 500ms
 INSERT INTO numbers_input_df_func 
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -39,7 +41,7 @@ VALUES
 
 Affected Rows: 2
 
--- SQLNESS SLEEP 2s
+-- SQLNESS SLEEP 3s
 SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 
 +-------+---------------------+---------------------+
@@ -78,6 +80,7 @@ SELECT abs(sum(number)) FROM numbers_input_df_func GROUP BY tumble(ts, '1 second
 
 Affected Rows: 0
 
+-- SQLNESS SLEEP 500ms
 INSERT INTO numbers_input_df_func 
 VALUES
     (-20, "2021-07-01 00:00:00.200"),
@@ -95,6 +98,7 @@ SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 | 2     | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
 +-------+---------------------+---------------------+
 
+-- SQLNESS SLEEP 500ms
 INSERT INTO numbers_input_df_func 
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -102,7 +106,7 @@ VALUES
 
 Affected Rows: 2
 
--- SQLNESS SLEEP 2s
+-- SQLNESS SLEEP 3s
 SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 
 +-------+---------------------+---------------------+
@@ -141,6 +145,7 @@ SELECT max(number) - min(number), date_bin(INTERVAL '1 second', ts, '2021-07-01 
 
 Affected Rows: 0
 
+-- SQLNESS SLEEP 500ms
 INSERT INTO numbers_input 
 VALUES
     (20, "2021-07-01 00:00:00.200"),
@@ -157,6 +162,7 @@ SELECT col_0, col_1 FROM out_num_cnt;
 | 2     | 2021-07-01T00:00:00 |
 +-------+---------------------+
 
+-- SQLNESS SLEEP 500ms
 INSERT INTO numbers_input 
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -164,7 +170,7 @@ VALUES
 
 Affected Rows: 2
 
--- SQLNESS SLEEP 2s
+-- SQLNESS SLEEP 3s
 SELECT col_0, col_1 FROM out_num_cnt;
 
 +-------+---------------------+
@@ -203,6 +209,7 @@ SELECT date_trunc('second', ts), sum(number) FROM numbers_input GROUP BY date_tr
 
 Affected Rows: 0
 
+-- SQLNESS SLEEP 500ms
 INSERT INTO numbers_input 
 VALUES
     (20, "2021-07-01 00:00:00.200"),
@@ -219,6 +226,7 @@ SELECT col_0, col_1 FROM out_num_cnt;
 | 2021-07-01T00:00:00 | 42    |
 +---------------------+-------+
 
+-- SQLNESS SLEEP 500ms
 INSERT INTO numbers_input 
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -226,7 +234,7 @@ VALUES
 
 Affected Rows: 2
 
--- SQLNESS SLEEP 2s
+-- SQLNESS SLEEP 3s
 SELECT col_0, col_1 FROM out_num_cnt;
 
 +---------------------+-------+
