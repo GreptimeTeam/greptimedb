@@ -16,10 +16,13 @@ insert into t values
     (7, 'c', '🌔', 8.0),
     (8, 'd', '🌕', 9.0);
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
--- SQLNESS REPLACE \-+
--- SQLNESS REPLACE (\s\s+) _
 explain analyze
     select
         last_value(host order by ts),
