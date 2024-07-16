@@ -12,13 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use ahash::{HashMap, HashMapExt};
 
 use crate::etl::value::Value;
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Map {
     pub values: HashMap<String, Value>,
+}
+
+impl Default for Map {
+    fn default() -> Self {
+        Self {
+            values: HashMap::with_capacity(30),
+        }
+    }
 }
 
 impl Map {

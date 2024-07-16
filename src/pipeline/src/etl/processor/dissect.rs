@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
-
+use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use common_telemetry::warn;
 use itertools::Itertools;
 
@@ -594,6 +593,34 @@ impl Processor for DissectProcessor {
         &self.fields
     }
 
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.patterns
+            .iter()
+            .flat_map(|p| {
+                p.parts
+                    .iter()
+                    .filter(|p| {
+                        if let Part::Name(name) = p {
+                            !name.is_empty()
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|p| {
+                        if let Part::Name(name) = p {
+                            name.to_string()
+                        } else {
+                            unreachable!()
+                        }
+                    })
+            })
+            .collect()
+    }
+
     fn exec_field(&self, val: &Value, _field: &Field) -> Result<Map, String> {
         match val {
             Value::String(val) => match self.process(val) {
@@ -617,7 +644,7 @@ fn is_valid_char(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use ahash::HashMap;
 
     use super::{DissectProcessor, EndModifier, Name, Part, Pattern, StartModifier};
     use crate::etl::value::{Map, Value};
@@ -1118,5 +1145,24 @@ mod tests {
                 expected.collect::<HashMap<String, Value>>(),
             );
         }
+    }
+
+    #[test]
+    fn test_abc() {
+        let pattern_str = "%{endpoint}/%{query}";
+        let input = "/query/conceptional-theomania-Caesardom-sybaritism-platybrachycephalous-escropulo-dodecane";
+        let expected = [
+            ("endpoint", "/query"),
+            (
+                "query",
+                "conceptional-theomania-Caesardom-sybaritism-platybrachycephalous-escropulo-dodecane",
+            ),
+        ];
+        let chs = input.chars().collect::<Vec<char>>();
+        let pattern: Pattern = pattern_str.parse().unwrap();
+        println!("{:?}", pattern);
+        let processor = DissectProcessor::default();
+        let map = processor.process_pattern(&chs, &pattern).unwrap();
+        println!("{:?}", map);
     }
 }

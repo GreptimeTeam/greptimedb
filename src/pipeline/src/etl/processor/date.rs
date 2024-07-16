@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ahash::HashSet;
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -218,6 +219,14 @@ impl Processor for DateProcessor {
 
     fn fields(&self) -> &Fields {
         &self.fields
+    }
+
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields.iter().map(|f| f.get_target_field().to_string()).collect()
     }
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {

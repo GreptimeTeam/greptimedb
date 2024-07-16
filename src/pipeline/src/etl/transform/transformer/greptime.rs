@@ -61,16 +61,20 @@ impl GreptimeTransformer {
     }
 
     fn transform_map(&self, map: &Map) -> Result<Row, String> {
-        let mut values = vec![];
+        let mut values = Vec::with_capacity(self.schema.len());
 
         for transform in self.transforms.iter() {
             for field in transform.fields.iter() {
                 let value_data = match map.get(field.get_field()) {
                     Some(val) => coerce_value(val, transform)?,
-                    None if transform.get_default().is_some() => {
-                        coerce_value(transform.get_default().unwrap(), transform)?
+                    None => {
+                        let default = transform.get_default();
+                        if default.is_some() {
+                            coerce_value(default.unwrap(), transform)?
+                        } else {
+                            None
+                        }
                     }
-                    None => None,
                 };
                 values.push(GreptimeValue { value_data });
             }
@@ -80,7 +84,7 @@ impl GreptimeTransformer {
     }
 
     fn transform_array(&self, arr: &Array) -> Result<Vec<Row>, String> {
-        let mut rows = vec![];
+        let mut rows = Vec::with_capacity(arr.len());
         for v in arr.iter() {
             match v {
                 Value::Map(map) => {
@@ -179,5 +183,9 @@ impl Transformer for GreptimeTransformer {
             }
             _ => Err(format!("Expected map or array, found: {}", value)),
         }
+    }
+
+    fn transforms(&self) -> &Transforms {
+        &self.transforms
     }
 }

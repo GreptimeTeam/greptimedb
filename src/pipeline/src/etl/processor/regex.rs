@@ -18,6 +18,7 @@ const PATTERNS_NAME: &str = "patterns";
 
 pub(crate) const PROCESSOR_REGEX: &str = "regex";
 
+use ahash::HashSet;
 use lazy_static::lazy_static;
 use regex::Regex;
 
@@ -117,6 +118,10 @@ impl RegexProcessor {
         Ok(self)
     }
 
+    fn generate_key(prefix: &str, group: &str) -> String {
+        format!("{prefix}_{group}")
+    }
+
     fn process_field(&self, val: &str, field: &Field, gr: &GroupRegex) -> Result<Map, String> {
         let mut map = Map::default();
 
@@ -129,7 +134,7 @@ impl RegexProcessor {
                         None => &field.field,
                     };
 
-                    let key = format!("{prefix}_{group}");
+                    let key = Self::generate_key(prefix, group);
 
                     map.insert(key, Value::String(value));
                 }
@@ -185,6 +190,23 @@ impl Processor for RegexProcessor {
 
     fn fields(&self) -> &Fields {
         &self.fields
+    }
+
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .flat_map(|f| {
+                self.patterns.iter().flat_map(move |p| {
+                    p.groups
+                        .iter()
+                        .map(move |g| Self::generate_key(&f.field, g))
+                })
+            })
+            .collect()
     }
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {

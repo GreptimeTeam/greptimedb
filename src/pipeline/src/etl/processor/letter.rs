@@ -18,6 +18,7 @@ use crate::etl::processor::{
     IGNORE_MISSING_NAME, METHOD_NAME,
 };
 use crate::etl::value::{Map, Value};
+use ahash::HashSet;
 
 pub(crate) const PROCESSOR_LETTER: &str = "letter";
 
@@ -133,6 +134,17 @@ impl Processor for LetterProcessor {
 
     fn fields(&self) -> &Fields {
         &self.fields
+    }
+
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .map(|f| f.get_target_field().to_string())
+            .collect()
     }
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {

@@ -25,6 +25,7 @@ pub mod urlencoding;
 
 use std::sync::Arc;
 
+use ahash::HashSet;
 use cmcd::CMCDProcessor;
 use csv::CsvProcessor;
 use date::DateProcessor;
@@ -54,12 +55,15 @@ const SEPARATOR_NAME: &str = "separator";
 
 pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
     fn fields(&self) -> &Fields;
+    fn fields_mut(&mut self) -> &mut Fields;
     fn kind(&self) -> &str;
     fn ignore_missing(&self) -> bool;
 
     fn ignore_processor_array_failure(&self) -> bool {
         true
     }
+
+    fn output_keys(&self) -> HashSet<String>;
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String>;
 
@@ -78,27 +82,151 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
                 }
             }
         }
-        
+
         Ok(map)
+    }
+}
+
+#[derive(Debug)]
+pub enum ProcessorKind {
+    CMCD(CMCDProcessor),
+    Csv(CsvProcessor),
+    Date(DateProcessor),
+    Dissect(DissectProcessor),
+    Epoch(EpochProcessor),
+    Gsub(GsubProcessor),
+    Join(JoinProcessor),
+    Letter(LetterProcessor),
+    Regex(RegexProcessor),
+    UrlEncoding(UrlEncodingProcessor),
+}
+
+impl Clone for ProcessorKind {
+    fn clone(&self) -> Self {
+        todo!()
+    }
+}
+
+impl Processor for ProcessorKind {
+    fn fields(&self) -> &Fields {
+        match self {
+            ProcessorKind::CMCD(p) => p.fields(),
+            ProcessorKind::Csv(p) => p.fields(),
+            ProcessorKind::Date(p) => p.fields(),
+            ProcessorKind::Dissect(p) => p.fields(),
+            ProcessorKind::Epoch(p) => p.fields(),
+            ProcessorKind::Gsub(p) => p.fields(),
+            ProcessorKind::Join(p) => p.fields(),
+            ProcessorKind::Letter(p) => p.fields(),
+            ProcessorKind::Regex(p) => p.fields(),
+            ProcessorKind::UrlEncoding(p) => p.fields(),
+        }
+    }
+
+    fn kind(&self) -> &str {
+        match self {
+            ProcessorKind::CMCD(p) => p.kind(),
+            ProcessorKind::Csv(p) => p.kind(),
+            ProcessorKind::Date(p) => p.kind(),
+            ProcessorKind::Dissect(p) => p.kind(),
+            ProcessorKind::Epoch(p) => p.kind(),
+            ProcessorKind::Gsub(p) => p.kind(),
+            ProcessorKind::Join(p) => p.kind(),
+            ProcessorKind::Letter(p) => p.kind(),
+            ProcessorKind::Regex(p) => p.kind(),
+            ProcessorKind::UrlEncoding(p) => p.kind(),
+        }
+    }
+
+    fn ignore_missing(&self) -> bool {
+        match self {
+            ProcessorKind::CMCD(p) => p.ignore_missing(),
+            ProcessorKind::Csv(p) => p.ignore_missing(),
+            ProcessorKind::Date(p) => p.ignore_missing(),
+            ProcessorKind::Dissect(p) => p.ignore_missing(),
+            ProcessorKind::Epoch(p) => p.ignore_missing(),
+            ProcessorKind::Gsub(p) => p.ignore_missing(),
+            ProcessorKind::Join(p) => p.ignore_missing(),
+            ProcessorKind::Letter(p) => p.ignore_missing(),
+            ProcessorKind::Regex(p) => p.ignore_missing(),
+            ProcessorKind::UrlEncoding(p) => p.ignore_missing(),
+        }
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        match self {
+            ProcessorKind::CMCD(p) => p.output_keys(),
+            ProcessorKind::Csv(p) => p.output_keys(),
+            ProcessorKind::Date(p) => p.output_keys(),
+            ProcessorKind::Dissect(p) => p.output_keys(),
+            ProcessorKind::Epoch(p) => p.output_keys(),
+            ProcessorKind::Gsub(p) => p.output_keys(),
+            ProcessorKind::Join(p) => p.output_keys(),
+            ProcessorKind::Letter(p) => p.output_keys(),
+            ProcessorKind::Regex(p) => p.output_keys(),
+            ProcessorKind::UrlEncoding(p) => p.output_keys(),
+        }
+    }
+
+    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
+        match self {
+            ProcessorKind::CMCD(p) => p.exec_field(val, field),
+            ProcessorKind::Csv(p) => p.exec_field(val, field),
+            ProcessorKind::Date(p) => p.exec_field(val, field),
+            ProcessorKind::Dissect(p) => p.exec_field(val, field),
+            ProcessorKind::Epoch(p) => p.exec_field(val, field),
+            ProcessorKind::Gsub(p) => p.exec_field(val, field),
+            ProcessorKind::Join(p) => p.exec_field(val, field),
+            ProcessorKind::Letter(p) => p.exec_field(val, field),
+            ProcessorKind::Regex(p) => p.exec_field(val, field),
+            ProcessorKind::UrlEncoding(p) => p.exec_field(val, field),
+        }
+    }
+
+    fn fields_mut(&mut self) -> &mut Fields {
+        match self {
+            ProcessorKind::CMCD(p) => p.fields_mut(),
+            ProcessorKind::Csv(p) => p.fields_mut(),
+            ProcessorKind::Date(p) => p.fields_mut(),
+            ProcessorKind::Dissect(p) => p.fields_mut(),
+            ProcessorKind::Epoch(p) => p.fields_mut(),
+            ProcessorKind::Gsub(p) => p.fields_mut(),
+            ProcessorKind::Join(p) => p.fields_mut(),
+            ProcessorKind::Letter(p) => p.fields_mut(),
+            ProcessorKind::Regex(p) => p.fields_mut(),
+            ProcessorKind::UrlEncoding(p) => p.fields_mut(),
+        }
     }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct Processors {
-    pub processors: Vec<Arc<dyn Processor>>,
-}
-
-impl Processors {
-    pub fn new() -> Self {
-        Processors { processors: vec![] }
-    }
+    pub processors: Vec<ProcessorKind>,
+    pub required_keys: Vec<String>,
+    pub output_keys: Vec<String>,
 }
 
 impl std::ops::Deref for Processors {
-    type Target = Vec<Arc<dyn Processor>>;
+    type Target = Vec<ProcessorKind>;
 
     fn deref(&self) -> &Self::Target {
         &self.processors
+    }
+}
+
+impl std::ops::DerefMut for Processors {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.processors
+    }
+}
+
+impl Processors {
+    pub fn required_keys(&self) -> &Vec<String> {
+        &self.required_keys
+    }
+
+    pub fn output_keys(&self) -> &Vec<String> {
+        &self.output_keys
     }
 }
 
@@ -107,16 +235,36 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Processors {
 
     fn try_from(vec: &Vec<yaml_rust::Yaml>) -> Result<Self, Self::Error> {
         let mut processors = vec![];
-
+        let mut all_output_keys: Vec<String> = Vec::with_capacity(50);
+        let mut all_required_keys = Vec::with_capacity(50);
         for doc in vec {
-            processors.push(parse_processor(doc)?);
+            let processor = parse_processor(doc)?;
+
+            // get all required keys
+            let processor_required_keys: Vec<String> =
+                processor.fields().iter().map(|f| f.field.clone()).collect();
+            // check all required keys are not in all_output_keys
+            for key in &processor_required_keys {
+                if !all_output_keys.contains(key) && !all_required_keys.contains(key) {
+                    all_required_keys.push(key.clone());
+                }
+            }
+
+            let mut processor_output_keys = processor.output_keys().into_iter().collect();
+            all_output_keys.append(&mut processor_output_keys);
+
+            processors.push(processor);
         }
 
-        Ok(Processors { processors })
+        Ok(Processors {
+            processors,
+            required_keys: all_required_keys,
+            output_keys: all_output_keys,
+        })
     }
 }
 
-fn parse_processor(doc: &yaml_rust::Yaml) -> Result<Arc<dyn Processor>, String> {
+fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind, String> {
     let map = doc.as_hash().ok_or("processor must be a map".to_string())?;
 
     let key = map
@@ -134,17 +282,19 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<Arc<dyn Processor>, String> 
         .as_str()
         .ok_or("processor key must be a string".to_string())?;
 
-    let processor: Arc<dyn Processor> = match str_key {
-        cmcd::PROCESSOR_CMCD => Arc::new(CMCDProcessor::try_from(value)?),
-        csv::PROCESSOR_CSV => Arc::new(CsvProcessor::try_from(value)?),
-        date::PROCESSOR_DATE => Arc::new(DateProcessor::try_from(value)?),
-        dissect::PROCESSOR_DISSECT => Arc::new(DissectProcessor::try_from(value)?),
-        epoch::PROCESSOR_EPOCH => Arc::new(EpochProcessor::try_from(value)?),
-        gsub::PROCESSOR_GSUB => Arc::new(GsubProcessor::try_from(value)?),
-        join::PROCESSOR_JOIN => Arc::new(JoinProcessor::try_from(value)?),
-        letter::PROCESSOR_LETTER => Arc::new(LetterProcessor::try_from(value)?),
-        regex::PROCESSOR_REGEX => Arc::new(RegexProcessor::try_from(value)?),
-        urlencoding::PROCESSOR_URL_ENCODING => Arc::new(UrlEncodingProcessor::try_from(value)?),
+    let processor = match str_key {
+        cmcd::PROCESSOR_CMCD => ProcessorKind::CMCD(CMCDProcessor::try_from(value)?),
+        csv::PROCESSOR_CSV => ProcessorKind::Csv(CsvProcessor::try_from(value)?),
+        date::PROCESSOR_DATE => ProcessorKind::Date(DateProcessor::try_from(value)?),
+        dissect::PROCESSOR_DISSECT => ProcessorKind::Dissect(DissectProcessor::try_from(value)?),
+        epoch::PROCESSOR_EPOCH => ProcessorKind::Epoch(EpochProcessor::try_from(value)?),
+        gsub::PROCESSOR_GSUB => ProcessorKind::Gsub(GsubProcessor::try_from(value)?),
+        join::PROCESSOR_JOIN => ProcessorKind::Join(JoinProcessor::try_from(value)?),
+        letter::PROCESSOR_LETTER => ProcessorKind::Letter(LetterProcessor::try_from(value)?),
+        regex::PROCESSOR_REGEX => ProcessorKind::Regex(RegexProcessor::try_from(value)?),
+        urlencoding::PROCESSOR_URL_ENCODING => {
+            ProcessorKind::UrlEncoding(UrlEncodingProcessor::try_from(value)?)
+        }
         _ => return Err(format!("unsupported {} processor", str_key)),
     };
 

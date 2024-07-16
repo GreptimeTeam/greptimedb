@@ -16,8 +16,7 @@ pub mod array;
 pub mod map;
 pub mod time;
 
-pub use std::collections::HashMap;
-
+use ahash::{HashMap, HashMapExt};
 pub use array::Array;
 pub use map::Map;
 pub use time::{Epoch, Time};
@@ -275,14 +274,14 @@ impl TryFrom<serde_json::Value> for Value {
             }
             serde_json::Value::String(v) => Ok(Value::String(v)),
             serde_json::Value::Array(v) => {
-                let mut values = vec![];
+                let mut values = Vec::with_capacity(v.len());
                 for v in v {
                     values.push(Value::try_from(v)?);
                 }
                 Ok(Value::Array(Array { values }))
             }
             serde_json::Value::Object(v) => {
-                let mut values = HashMap::new();
+                let mut values = HashMap::with_capacity(v.len());
                 for (k, v) in v {
                     values.insert(k, Value::try_from(v)?);
                 }

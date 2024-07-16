@@ -1,10 +1,24 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Value as PipelineValue};
+use pipeline::{parse, Array, Content, GreptimeTransformer, Pipeline, Value as PipelineValue};
 use serde_json::Deserializer;
 
-fn processor(input: &str) -> impl IntoIterator<Item = greptime_proto::v1::Rows> + '_ {
+fn processor(
+    pipeline: &Pipeline<GreptimeTransformer>,
+    input: &str,
+) -> impl IntoIterator<Item = greptime_proto::v1::Rows> {
     let input_values = Deserializer::from_str(input).into_iter::<serde_json::Value>();
+    let pipeline_data = input_values
+        .into_iter()
+        .map(|v| PipelineValue::try_from(v.unwrap()).unwrap())
+        .collect::<Vec<_>>();
 
+    let transformed_data = pipeline.exec(PipelineValue::Array(Array {
+        values: pipeline_data,
+    }));
+    transformed_data
+}
+
+fn prepare_pipeline() -> Pipeline<GreptimeTransformer> {
     let pipeline_yaml = r#"
 ---
 description: Pipeline for Akamai DataStream2 Log
@@ -194,24 +208,36 @@ transform:
     type: uint32
 "#;
 
-    let pipeline: Pipeline<GreptimeTransformer> =
-        parse(&Content::Yaml(pipeline_yaml.into())).unwrap();
-    let pipeline_data = input_values
-        .into_iter()
-        .map(|v| PipelineValue::try_from(v.unwrap()).unwrap());
-    let transformed_data = pipeline_data
-        .into_iter()
-        .map(move |v| pipeline.exec(v).unwrap())
-        .collect::<Vec<_>>();
-    transformed_data
+    parse(&Content::Yaml(pipeline_yaml.into())).unwrap()
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
     let input_value_str = include_str!("./data.log");
+    let pipeline = prepare_pipeline();
+    // println!(
+    //     "processor required_keys: {:?}",
+    //     pipeline.processors().required_keys()
+    // );
+    // println!(
+    //     "processor output_keys: {:?}",
+    //     pipeline.processors().output_keys()
+    // );
+    // println!(
+    //     "transform output_keys: {:?}",
+    //     pipeline.transformer().transforms().output_keys()
+    // );
+
+    // println!(
+    //     "transform required_keys: {:?}",
+    //     pipeline.transformer().transforms().required_keys()
+    // );
+
+    println!("pipeline required_keys: {:?}", pipeline.required_keys());
+    println!("pipeline output_keys: {:?}", pipeline.output_keys());
     let mut group = c.benchmark_group("pipeline");
     group.sample_size(50);
     group.bench_function("processor 20", |b| {
-        b.iter(|| processor(black_box(input_value_str)))
+        b.iter(|| processor(black_box(&pipeline), black_box(input_value_str)))
     });
     group.finish();
 }

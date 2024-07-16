@@ -66,6 +66,33 @@ impl std::ops::Deref for Fields {
     }
 }
 
+impl std::ops::DerefMut for Fields {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+pub struct FieldInfo {
+    pub(crate) field: String,
+    pub(crate) index: usize,
+}
+
+impl FieldInfo {
+    pub(crate) fn new(field: impl Into<String>, index: usize) -> Self {
+        FieldInfo {
+            field: field.into(),
+            index,
+        }
+    }
+
+    pub(crate) fn name(field: impl Into<String>) -> Self {
+        FieldInfo {
+            field: field.into(),
+            index: 0,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Field {
     pub field: String,
@@ -95,6 +122,10 @@ impl Field {
 
     pub(crate) fn get_field(&self) -> &str {
         &self.field
+    }
+
+    pub(crate) fn set_index(&mut self, index: usize) {
+        todo!()
     }
 }
 

@@ -36,6 +36,7 @@ pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     type Output;
 
     fn new(transforms: Transforms) -> Result<Self, String>;
+    fn transforms(&self) -> &Transforms;
     fn transform(&self, val: crate::etl::value::Value) -> Result<Self::Output, String>;
 }
 
@@ -74,6 +75,18 @@ impl std::fmt::Display for OnFailure {
 #[derive(Debug, Default, Clone)]
 pub struct Transforms {
     transforms: Vec<Transform>,
+    output_keys: Vec<String>,
+    required_keys: Vec<String>,
+}
+
+impl Transforms {
+    pub fn output_keys(&self) -> &Vec<String> {
+        &self.output_keys
+    }
+
+    pub fn required_keys(&self) -> &Vec<String> {
+        &self.required_keys
+    }
 }
 
 impl std::fmt::Display for Transforms {
@@ -106,17 +119,33 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
     type Error = String;
 
     fn try_from(docs: &Vec<yaml_rust::Yaml>) -> Result<Self, Self::Error> {
-        let mut transforms = vec![];
-
+        let mut transforms = Vec::with_capacity(50);
+        let mut all_output_keys: Vec<String> = Vec::with_capacity(50);
+        let mut all_required_keys = Vec::with_capacity(50);
         for doc in docs {
             let transform: Transform = doc
                 .as_hash()
                 .ok_or("transform element must be a map".to_string())?
                 .try_into()?;
+            let mut transform_output_keys = transform
+                .fields
+                .iter()
+                .map(|f| f.get_target_field().to_string())
+                .collect();
+            all_output_keys.append(&mut transform_output_keys);
+
+            let mut transform_required_keys =
+                transform.fields.iter().map(|f| f.field.clone()).collect();
+            all_required_keys.append(&mut transform_required_keys);
+
             transforms.push(transform);
         }
 
-        Ok(Transforms { transforms })
+        Ok(Transforms {
+            transforms,
+            output_keys: all_output_keys,
+            required_keys: all_required_keys,
+        })
     }
 }
 

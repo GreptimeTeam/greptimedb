@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::etl::field::{Field, Fields};
+use ahash::HashSet;
 use crate::etl::processor::{
     yaml_bool, yaml_field, yaml_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
     IGNORE_MISSING_NAME,
@@ -173,6 +174,17 @@ impl Processor for EpochProcessor {
 
     fn fields(&self) -> &Fields {
         &self.fields
+    }
+
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .map(|f| f.get_target_field().to_string())
+            .collect()
     }
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {

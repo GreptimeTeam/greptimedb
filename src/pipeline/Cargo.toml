@@ -54,6 +54,7 @@ table.workspace = true
 tokio.workspace = true
 urlencoding = "2.1"
 yaml-rust = "0.4"
+ahash = "0.8"
 
 [dev-dependencies]
 catalog = { workspace = true, features = ["testing"] }
@@ -61,7 +62,7 @@ rayon = "1.0"
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 session = { workspace = true, features = ["testing"] }
-criterion = { version = "0.4" }
+criterion = { version = "0.4", features = ["html_reports"] }
 
 [[bench]]
 name = "processor"

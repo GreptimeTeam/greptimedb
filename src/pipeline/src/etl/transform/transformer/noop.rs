@@ -33,4 +33,8 @@ impl Transformer for NoopTransformer {
     fn transform(&self, val: Value) -> Result<Self::Output, String> {
         Ok(val)
     }
+
+    fn transforms(&self) -> &Transforms {
+        unimplemented!()
+    }
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ahash::HashSet;
 use urlencoding::decode;
 
 use crate::etl::field::{Field, Fields};
@@ -40,6 +41,27 @@ const CMCD_KEY_ST: &str = "st"; // Stream type, Token - one of [v,l]
 const CMCD_KEY_SU: &str = "su"; // Startup, Boolean
 const CMCD_KEY_TB: &str = "tb"; // Top bitrate, Integer kbps
 const CMCD_KEY_V: &str = "v"; // Version
+
+const CMCD_KEYS: [&str; 18] = [
+    CMCD_KEY_BR,
+    CMCD_KEY_BL,
+    CMCD_KEY_BS,
+    CMCD_KEY_CID,
+    CMCD_KEY_D,
+    CMCD_KEY_DL,
+    CMCD_KEY_MTP,
+    CMCD_KEY_NOR,
+    CMCD_KEY_NRR,
+    CMCD_KEY_OT,
+    CMCD_KEY_PR,
+    CMCD_KEY_RTP,
+    CMCD_KEY_SF,
+    CMCD_KEY_SID,
+    CMCD_KEY_ST,
+    CMCD_KEY_SU,
+    CMCD_KEY_TB,
+    CMCD_KEY_V,
+];
 
 /// Common Media Client Data Specification:
 /// https://cdn.cta.tech/cta/media/media/resources/standards/pdfs/cta-5004-final.pdf
@@ -196,6 +218,27 @@ impl crate::etl::processor::Processor for CMCDProcessor {
         &self.fields
     }
 
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .map(|field| {
+                field
+                    .target_field
+                    .clone()
+                    .unwrap_or_else(|| field.get_field().to_string())
+            })
+            .flat_map(|keys| {
+                CMCD_KEYS
+                    .iter()
+                    .map(move |key| format!("{}_{}", keys, *key))
+            })
+            .collect()
+    }
+
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         match val {
             Value::String(val) => self.process_field(val, field),
@@ -209,8 +252,7 @@ impl crate::etl::processor::Processor for CMCDProcessor {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
+    use ahash::HashMap;
     use urlencoding::decode;
 
     use super::CMCDProcessor;

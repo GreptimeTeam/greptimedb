@@ -14,8 +14,7 @@
 
 // Reference: https://www.elastic.co/guide/en/elasticsearch/reference/current/csv-processor.html
 
-use std::collections::HashMap;
-
+use ahash::{HashMap, HashSet};
 use csv::{ReaderBuilder, Trim};
 use itertools::EitherOrBoth::{Both, Left, Right};
 use itertools::Itertools;
@@ -202,6 +201,17 @@ impl Processor for CsvProcessor {
         &self.fields
     }
 
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .map(|f| f.get_target_field().to_string())
+            .collect()
+    }
+
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         match val {
             Value::String(val) => self.process_field(val, field),
@@ -216,7 +226,7 @@ impl Processor for CsvProcessor {
 // TODO(yuanbohan): more test cases
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use ahash::HashMap;
 
     use super::{CsvProcessor, Value};
     use crate::etl::field::Fields;

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use regex::Regex;
+use ahash::HashSet;
 
 use crate::etl::field::{Field, Fields};
 use crate::etl::processor::{
@@ -158,6 +159,17 @@ impl crate::etl::processor::Processor for GsubProcessor {
 
     fn fields(&self) -> &Fields {
         &self.fields
+    }
+
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .map(|f| f.get_target_field().to_string())
+            .collect()
     }
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {

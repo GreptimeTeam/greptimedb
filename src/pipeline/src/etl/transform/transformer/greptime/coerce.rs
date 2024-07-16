@@ -365,7 +365,7 @@ macro_rules! coerce_string_value {
     };
 }
 
-fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueData>, String> {
+fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<ValueData>, String> {
     match transform.type_ {
         Value::Int8(_) => {
             coerce_string_value!(s, transform, i32, I8Value)

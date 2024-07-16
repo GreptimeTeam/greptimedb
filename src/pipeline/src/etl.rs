@@ -19,7 +19,9 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
-use itertools::Itertools;
+use ahash::HashSet;
+use itertools::{merge, Itertools};
+use processor::Processor;
 use transform::{Transformer, Transforms};
 use value::Map;
 use yaml_rust::YamlLoader;
@@ -45,7 +47,7 @@ where
 
             let description = doc[DESCRIPTION].as_str().map(|s| s.to_string());
 
-            let processors = if let Some(v) = doc[PROCESSORS].as_vec() {
+            let mut processors = if let Some(v) = doc[PROCESSORS].as_vec() {
                 v.try_into()?
             } else {
                 processor::Processors::default()
@@ -57,10 +59,51 @@ where
                 Transforms::default()
             };
 
+            let processors_output_keys = processors.output_keys();
+            let processors_required_keys = processors.required_keys();
+
+            let transforms_output_keys = transforms.output_keys();
+            let transforms_required_keys = transforms.required_keys();
+            let mut tr_keys = Vec::with_capacity(50);
+            for key in transforms_required_keys.iter() {
+                if !processors_output_keys.contains(key) && !processors_required_keys.contains(key)
+                {
+                    tr_keys.push(key.clone());
+                }
+            }
+
+            let required_keys = processors_required_keys
+                .iter()
+                .chain(tr_keys.iter())
+                .cloned()
+                .collect::<Vec<String>>();
+
+            let intermediate_keys: Vec<String> =
+                merge(processors_required_keys, transforms_required_keys)
+                    .cloned()
+                    .collect::<HashSet<String>>()
+                    .into_iter()
+                    .collect();
+
+            let output_keys = transforms_output_keys.clone();
+            processors.iter_mut().map(|p| {
+                p.fields_mut().iter_mut().map(|f| {
+                    let name = &f.field;
+                    let index = required_keys.iter().position(|r| r == name).ok_or(format!(
+                        "field {name} is not found in required keys: {required_keys:?}"
+                    ))?;
+                    f.set_index(index);
+                    Ok::<(), String>(())
+                })
+            });
+
             Ok(Pipeline {
                 description,
                 processors,
                 transformer: T::new(transforms)?,
+                required_keys,
+                output_keys,
+                intermediate_keys,
             })
         }
         Content::Json(_) => unimplemented!(),
@@ -75,6 +118,9 @@ where
     description: Option<String>,
     processors: processor::Processors,
     transformer: T,
+    required_keys: Vec<String>,
+    output_keys: Vec<String>,
+    intermediate_keys: Vec<String>,
     // pub on_failure: processor::Processors,
 }
 
@@ -128,6 +174,22 @@ where
         };
 
         self.transformer.transform(result)
+    }
+
+    pub fn processors(&self) -> &processor::Processors {
+        &self.processors
+    }
+
+    pub fn transformer(&self) -> &T {
+        &self.transformer
+    }
+
+    pub fn required_keys(&self) -> &Vec<String> {
+        &self.required_keys
+    }
+
+    pub fn output_keys(&self) -> &Vec<String> {
+        &self.output_keys
     }
 }
 
