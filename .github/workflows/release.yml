@@ -9,7 +9,7 @@ on:
       - "v*.*.*"
   schedule:
     # At 00:00 on Monday.
-    - cron: '0 0 * * 1'
+    - cron: "0 0 * * 1"
   workflow_dispatch: # Allows you to run this workflow manually.
     # Notes: The GitHub Actions ONLY support 10 inputs, and it's already used up.
     inputs:
@@ -91,7 +91,7 @@ env:
   # The scheduled version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD', like v0.2.0-nigthly-20230313;
   NIGHTLY_RELEASE_PREFIX: nightly
   # Note: The NEXT_RELEASE_VERSION should be modified manually by every formal release.
-  NEXT_RELEASE_VERSION: v0.9.0
+  NEXT_RELEASE_VERSION: v0.10.0
 
 # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
 permissions:
@@ -168,9 +168,7 @@ jobs:
   build-linux-amd64-artifacts:
     name: Build linux-amd64 artifacts
     if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
-    needs: [
-      allocate-runners,
-    ]
+    needs: [allocate-runners]
     runs-on: ${{ needs.allocate-runners.outputs.linux-amd64-runner }}
     steps:
       - uses: actions/checkout@v4
@@ -187,9 +185,7 @@ jobs:
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
     if: ${{ inputs.build_linux_arm64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
-    needs: [
-      allocate-runners,
-    ]
+    needs: [allocate-runners]
     runs-on: ${{ needs.allocate-runners.outputs.linux-arm64-runner }}
     steps:
       - uses: actions/checkout@v4
@@ -228,9 +224,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     outputs:
       build-macos-result: ${{ steps.set-build-macos-result.outputs.build-macos-result }}
-    needs: [
-      allocate-runners,
-    ]
+    needs: [allocate-runners]
     if: ${{ inputs.build_macos_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
     steps:
       - uses: actions/checkout@v4
@@ -269,9 +263,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     outputs:
       build-windows-result: ${{ steps.set-build-windows-result.outputs.build-windows-result }}
-    needs: [
-      allocate-runners,
-    ]
+    needs: [allocate-runners]
     if: ${{ inputs.build_windows_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
     steps:
       - run: git config --global core.autocrlf false
@@ -298,11 +290,12 @@ jobs:
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
     if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
-    needs: [
-      allocate-runners,
-      build-linux-amd64-artifacts,
-      build-linux-arm64-artifacts,
-    ]
+    needs:
+      [
+        allocate-runners,
+        build-linux-amd64-artifacts,
+        build-linux-arm64-artifacts,
+      ]
     runs-on: ubuntu-2004-16-cores
     outputs:
       build-image-result: ${{ steps.set-build-image-result.outputs.build-image-result }}
@@ -328,14 +321,15 @@ jobs:
   release-cn-artifacts:
     name: Release artifacts to CN region
     if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
-    needs: [ # The job have to wait for all the artifacts are built.
-      allocate-runners,
-      build-linux-amd64-artifacts,
-      build-linux-arm64-artifacts,
-      build-macos-artifacts,
-      build-windows-artifacts,
-      release-images-to-dockerhub,
-    ]
+    needs: # The job have to wait for all the artifacts are built.
+      [
+        allocate-runners,
+        build-linux-amd64-artifacts,
+        build-linux-arm64-artifacts,
+        build-macos-artifacts,
+        build-windows-artifacts,
+        release-images-to-dockerhub,
+      ]
     runs-on: ubuntu-20.04
     # When we push to ACR, it's easy to fail due to some unknown network issues.
     # However, we don't want to fail the whole workflow because of this.
@@ -368,14 +362,15 @@ jobs:
   publish-github-release:
     name: Create GitHub release and upload artifacts
     if: ${{ inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule' }}
-    needs: [ # The job have to wait for all the artifacts are built.
-      allocate-runners,
-      build-linux-amd64-artifacts,
-      build-linux-arm64-artifacts,
-      build-macos-artifacts,
-      build-windows-artifacts,
-      release-images-to-dockerhub,
-    ]
+    needs: # The job have to wait for all the artifacts are built.
+      [
+        allocate-runners,
+        build-linux-amd64-artifacts,
+        build-linux-arm64-artifacts,
+        build-macos-artifacts,
+        build-windows-artifacts,
+        release-images-to-dockerhub,
+      ]
     runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v4
@@ -395,10 +390,7 @@ jobs:
     # Only run this job when the runner is allocated.
     if: ${{ always() }}
     runs-on: ubuntu-20.04
-    needs: [
-      allocate-runners,
-      build-linux-amd64-artifacts,
-    ]
+    needs: [allocate-runners, build-linux-amd64-artifacts]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -420,10 +412,7 @@ jobs:
     # Only run this job when the runner is allocated.
     if: ${{ always() }}
     runs-on: ubuntu-20.04
-    needs: [
-      allocate-runners,
-      build-linux-arm64-artifacts,
-    ]
+    needs: [allocate-runners, build-linux-arm64-artifacts]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -443,11 +432,12 @@ jobs:
   notification:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'push' || github.event_name == 'schedule') && always() }}
     name: Send notification to Greptime team
-    needs: [
-      release-images-to-dockerhub,
-      build-macos-artifacts,
-      build-windows-artifacts,
-    ]
+    needs:
+      [
+        release-images-to-dockerhub,
+        build-macos-artifacts,
+        build-windows-artifacts,
+      ]
     runs-on: ubuntu-20.04
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
