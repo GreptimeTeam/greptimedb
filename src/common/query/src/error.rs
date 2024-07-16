@@ -321,6 +321,7 @@ pub fn datafusion_status_code<T: ErrorExt + 'static>(
     match e {
         DataFusionError::Internal(_) => StatusCode::Internal,
         DataFusionError::NotImplemented(_) => StatusCode::Unsupported,
+        DataFusionError::ResourcesExhausted(_) => StatusCode::RuntimeResourcesExhausted,
         DataFusionError::Plan(_) => StatusCode::PlanQuery,
         DataFusionError::External(e) => {
             if let Some(ext) = (*e).downcast_ref::<T>() {

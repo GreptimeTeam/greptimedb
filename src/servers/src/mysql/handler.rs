@@ -333,6 +333,10 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     Ok(plan) => plan,
                     Err(e) => {
                         let (kind, err) = handle_err(e);
+                        debug!(
+                            "Failed to replace params on execute, kind: {:?}, err: {}",
+                            kind, err
+                        );
                         w.error(kind, err.as_bytes()).await?;
 
                         return Ok(());
@@ -446,6 +450,10 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                                 Ok(plan) => plan,
                                 Err(e) => {
                                     let (kind, err) = handle_err(e);
+                                    debug!(
+                                        "Failed to replace params on query, kind: {:?}, err: {}",
+                                        kind, err
+                                    );
                                     writer.error(kind, err.as_bytes()).await?;
 
                                     return Ok(());

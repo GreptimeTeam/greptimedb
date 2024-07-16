@@ -55,18 +55,21 @@ pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
 /// Handle GreptimeDB error, convert it to MySQL error
 pub fn handle_err(e: impl ErrorExt) -> (ErrorKind, String) {
     let status_code = e.status_code();
+    let kind = mysql_error_kind(&status_code);
 
-    let err = if status_code.should_log_error() {
-        error!(e; "Failed to handle mysql query");
-        e.output_msg()
+    if status_code.should_log_error() {
+        error!(e; "Failed to handle mysql query, code: {}, kind: {:?}", status_code, kind);
     } else {
-        debug!("Failed to handle mysql query, error: {e:?}");
-        let msg = e.output_msg();
-        // Inline the status code to output message for MySQL
-        format!("({status_code}): {msg}")
+        debug!(
+            "Failed to handle mysql query, code: {}, kind: {:?}, error: {:?}",
+            status_code, kind, e
+        );
     };
+    let msg = e.output_msg();
+    // Inline the status code to output message for MySQL
+    let err_msg = format!("({status_code}): {msg}");
 
-    (mysql_error_kind(&status_code), err)
+    (kind, err_msg)
 }
 
 struct QueryResult {
@@ -167,6 +170,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         }
                         Err(e) => {
                             let (kind, err) = handle_err(e);
+                            debug!("Failed to get result, kind: {:?}, err: {}", kind, err);
                             row_writer.finish_error(kind, &err.as_bytes()).await?;
 
                             return Ok(());
@@ -236,6 +240,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
             .inc();
 
         let (kind, err) = handle_err(error);
+        debug!("Write query error, kind: {:?}, err: {}", kind, err);
         w.error(kind, err.as_bytes()).await?;
         Ok(())
     }
@@ -305,12 +310,11 @@ pub fn create_mysql_column_def(schema: &SchemaRef) -> Result<Vec<Column>> {
 
 fn mysql_error_kind(status_code: &StatusCode) -> ErrorKind {
     match status_code {
+        StatusCode::Success => ErrorKind::ER_YES,
         StatusCode::Unknown => ErrorKind::ER_UNKNOWN_ERROR,
-
+        StatusCode::Unsupported => ErrorKind::ER_NOT_SUPPORTED_YET,
         StatusCode::Cancelled => ErrorKind::ER_QUERY_INTERRUPTED,
-
         StatusCode::RuntimeResourcesExhausted => ErrorKind::ER_OUT_OF_RESOURCES,
-
         StatusCode::InvalidSyntax => ErrorKind::ER_SYNTAX_ERROR,
         StatusCode::RegionAlreadyExists | StatusCode::TableAlreadyExists => {
             ErrorKind::ER_TABLE_EXISTS_ERROR
@@ -327,7 +331,22 @@ fn mysql_error_kind(status_code: &StatusCode) -> ErrorKind {
         StatusCode::InvalidAuthHeader | StatusCode::AuthHeaderNotFound => {
             ErrorKind::ER_NOT_SUPPORTED_AUTH_MODE
         }
-
-        _ => ErrorKind::ER_INTERNAL_ERROR,
+        StatusCode::Unexpected
+        | StatusCode::Internal
+        | StatusCode::IllegalState
+        | StatusCode::PlanQuery
+        | StatusCode::EngineExecuteQuery
+        | StatusCode::RegionNotReady
+        | StatusCode::RegionBusy
+        | StatusCode::TableUnavailable
+        | StatusCode::StorageUnavailable
+        | StatusCode::RequestOutdated => ErrorKind::ER_INTERNAL_ERROR,
+        StatusCode::InvalidArguments => ErrorKind::ER_WRONG_ARGUMENTS,
+        StatusCode::TableColumnNotFound => ErrorKind::ER_BAD_FIELD_ERROR,
+        StatusCode::TableColumnExists => ErrorKind::ER_DUP_FIELDNAME,
+        StatusCode::DatabaseAlreadyExists => ErrorKind::ER_DB_CREATE_EXISTS,
+        StatusCode::RateLimited => ErrorKind::ER_TOO_MANY_CONCURRENT_TRXS,
+        StatusCode::FlowAlreadyExists => ErrorKind::ER_TABLE_EXISTS_ERROR,
+        StatusCode::FlowNotFound => ErrorKind::ER_NO_SUCH_TABLE,
     }
 }

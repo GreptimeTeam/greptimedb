@@ -213,15 +213,14 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .fetch_all(&pool)
         .await;
     assert!(query_re.is_err());
+    let err = query_re.unwrap_err();
+    common_telemetry::info!("Error is {}", err);
     assert_eq!(
-        query_re
-            .err()
-            .unwrap()
-            .into_database_error()
+        err.into_database_error()
             .unwrap()
             .downcast::<MySqlDatabaseError>()
-            .code(),
-        Some("22007")
+            .number(),
+        1210,
     );
 
     let _ = sqlx::query("delete from demo")
