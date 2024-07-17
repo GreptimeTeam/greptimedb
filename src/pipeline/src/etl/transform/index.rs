@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-const INDEX_TIMESTAMP: &str = "timestamp";
+const INDEX_TIMESTAMP: &str = "timeindex";
 const INDEX_TAG: &str = "tag";
 const INDEX_FULLTEXT: &str = "fulltext";
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Index {
-    Timestamp,
+    TimeIndex,
     Tag,
     Fulltext,
 }
@@ -26,7 +26,7 @@ pub enum Index {
 impl std::fmt::Display for Index {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let index = match self {
-            Index::Timestamp => INDEX_TIMESTAMP,
+            Index::TimeIndex => INDEX_TIMESTAMP,
             Index::Tag => INDEX_TAG,
             Index::Fulltext => INDEX_FULLTEXT,
         };
@@ -48,7 +48,7 @@ impl TryFrom<&str> for Index {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            INDEX_TIMESTAMP => Ok(Index::Timestamp),
+            INDEX_TIMESTAMP => Ok(Index::TimeIndex),
             INDEX_TAG => Ok(Index::Tag),
             INDEX_FULLTEXT => Ok(Index::Fulltext),
             _ => Err(format!("unsupported index type: {}", value)),

@@ -59,6 +59,12 @@ impl std::ops::Deref for Map {
     }
 }
 
+impl std::ops::DerefMut for Map {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
+    }
+}
+
 impl std::fmt::Display for Map {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let values = self

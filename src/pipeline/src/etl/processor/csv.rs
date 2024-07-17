@@ -21,8 +21,8 @@ use itertools::Itertools;
 
 use crate::etl::field::{Field, Fields};
 use crate::etl::processor::{
-    yaml_bool, yaml_field, yaml_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME,
+    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
+    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::{Map, Value};
 
@@ -64,7 +64,8 @@ impl CsvProcessor {
         }
     }
 
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        update_one_one_output_keys(&mut fields);
         self.fields = fields;
     }
 
@@ -120,7 +121,7 @@ impl CsvProcessor {
                 .as_ref()
                 .ok_or(format!(
                     "target fields must be set after '{}'",
-                    field.get_field()
+                    field.get_field_name()
                 ))?
                 .iter()
                 .map(|f| f.to_string())
@@ -208,7 +209,7 @@ impl Processor for CsvProcessor {
     fn output_keys(&self) -> HashSet<String> {
         self.fields
             .iter()
-            .map(|f| f.get_target_field().to_string())
+            .map(|f| f.get_renamed_field().to_string())
             .collect()
     }
 

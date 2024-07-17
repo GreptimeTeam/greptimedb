@@ -106,12 +106,17 @@ pub struct CMCDProcessor {
 }
 
 impl CMCDProcessor {
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        Self::update_output_keys(&mut fields);
         self.fields = fields;
     }
 
     fn with_ignore_missing(&mut self, ignore_missing: bool) {
         self.ignore_missing = ignore_missing;
+    }
+
+    fn generate_key(prefix: &str, key: &str) -> String {
+        format!("{}_{}", prefix, key)
     }
 
     fn parse(prefix: &str, s: &str) -> Result<Map, String> {
@@ -122,7 +127,7 @@ impl CMCDProcessor {
             let k = kv.next().ok_or(format!("{part} missing key in {s}"))?;
             let v = kv.next();
 
-            let key = format!("{prefix}_{k}");
+            let key = Self::generate_key(prefix, k);
             match k {
                 CMCD_KEY_BS | CMCD_KEY_SU => {
                     map.insert(key, Value::Boolean(true));
@@ -166,12 +171,19 @@ impl CMCDProcessor {
     }
 
     fn process_field(&self, val: &str, field: &Field) -> Result<Map, String> {
-        let prefix = match field.target_field {
-            Some(ref target_field) => target_field,
-            None => field.get_field(),
-        };
+        let prefix = field.get_renamed_field();
 
         Self::parse(prefix, val)
+    }
+
+    fn update_output_keys(fields: &mut Fields) {
+        for field in fields.iter_mut() {
+            for key in CMCD_KEYS.iter() {
+                field
+                    .output_fields
+                    .insert(Self::generate_key(field.get_renamed_field(), key), 0);
+            }
+        }
     }
 }
 
@@ -227,9 +239,9 @@ impl crate::etl::processor::Processor for CMCDProcessor {
             .iter()
             .map(|field| {
                 field
-                    .target_field
+                    .renamed_field
                     .clone()
-                    .unwrap_or_else(|| field.get_field().to_string())
+                    .unwrap_or_else(|| field.get_field_name().to_string())
             })
             .flat_map(|keys| {
                 CMCD_KEYS
@@ -247,6 +259,24 @@ impl crate::etl::processor::Processor for CMCDProcessor {
                 self.kind()
             )),
         }
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            match val.get(field.input_field.index) {
+                Some(Value::String(v)) => {
+                    let map = self.process_field(v, field)?;
+                    for (k, v) in map.values.into_iter() {
+                        field.output_fields.get(&k).map(|index| {
+                            val.insert(*index, v);
+                        });
+                    }
+                }
+                Some(_) => {}
+                None => {}
+            }
+        }
+        Ok(())
     }
 }
 

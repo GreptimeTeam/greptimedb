@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ahash::HashSet;
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use ahash::HashSet;
 use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
 use crate::etl::field::{Field, Fields};
 use crate::etl::processor::{
-    yaml_bool, yaml_field, yaml_fields, yaml_string, yaml_strings, Processor, FIELDS_NAME,
-    FIELD_NAME, IGNORE_MISSING_NAME,
+    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, yaml_strings,
+    Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::{Map, Time, Value};
 
@@ -95,7 +95,8 @@ pub struct DateProcessor {
 }
 
 impl DateProcessor {
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        update_one_one_output_keys(&mut fields);
         self.fields = fields
     }
 
@@ -131,7 +132,7 @@ impl DateProcessor {
         self.ignore_missing = ignore_missing;
     }
 
-    fn parse<'val>(&self, val: &'val str) -> Result<Time, String> {
+    fn parse(&self, val: &str) -> Result<Time, String> {
         let mut tz = Tz::UTC;
         if let Some(timezone) = &self.timezone {
             tz = timezone.parse::<Tz>().map_err(|e| e.to_string())?;
@@ -150,10 +151,7 @@ impl DateProcessor {
     }
 
     fn process_field(&self, val: &str, field: &Field) -> Result<Map, String> {
-        let key = match field.target_field {
-            Some(ref target_field) => target_field,
-            None => field.get_field(),
-        };
+        let key = field.get_renamed_field();
 
         Ok(Map::one(key, Value::Time(self.parse(val)?)))
     }
@@ -226,7 +224,10 @@ impl Processor for DateProcessor {
     }
 
     fn output_keys(&self) -> HashSet<String> {
-        self.fields.iter().map(|f| f.get_target_field().to_string()).collect()
+        self.fields
+            .iter()
+            .map(|f| f.get_renamed_field().to_string())
+            .collect()
     }
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
@@ -239,28 +240,64 @@ impl Processor for DateProcessor {
         }
     }
 
-    fn ignore_processor_array_failure(&self) -> bool {
-        true
-    }
-
-    fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
-        for ff @ Field { field, .. } in self.fields().iter() {
-            match map.get(field) {
-                Some(v) => {
-                    map.extend(self.exec_field(v, ff)?);
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields().iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                Some(Value::String(s)) => {
+                    let mut map = self.process_field(s, field)?;
+                    field.output_fields.iter().for_each(|(k, output_index)| {
+                        if let Some(v) = map.remove(k) {
+                            val[*output_index] = v;
+                        }
+                    });
+                }
+                Some(_) if self.ignore_missing() => {}
+                Some(_) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {val:?}",
+                        self.kind()
+                    ))
                 }
                 None if self.ignore_missing() => {}
                 None => {
-                    return Err(std::format!(
-                        "{} processor: field '{field}' is required but missing in {map}",
+                    return Err(format!(
+                        "{} processor: field '{}' is required but missing in {val:?}",
                         self.kind(),
+                        field.input_field.name
                     ))
                 }
             }
         }
-
-        Ok(map)
+        Ok(())
     }
+
+    fn ignore_processor_array_failure(&self) -> bool {
+        true
+    }
+
+    // fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
+    //     for ff @ Field {
+    //         input_field: field, ..
+    //     } in self.fields().iter()
+    //     {
+    //         match map.get(&field.name) {
+    //             Some(v) => {
+    //                 map.extend(self.exec_field(v, ff)?);
+    //             }
+    //             None if self.ignore_missing() => {}
+    //             None => {
+    //                 return Err(std::format!(
+    //                     "{} processor: field '{}' is required but missing in {map}",
+    //                     self.kind(),
+    //                     field.name
+    //                 ))
+    //             }
+    //         }
+    //     }
+
+    //     Ok(map)
+    // }
 }
 
 /// try to parse val with timezone first, if failed, parse without timezone

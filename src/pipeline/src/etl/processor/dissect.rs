@@ -542,6 +542,20 @@ impl DissectProcessor {
 
         Err("No matching pattern found".to_string())
     }
+
+    fn update_output_keys(&mut self) {
+        for fields in self.fields.iter_mut() {
+            for pattern in self.patterns.iter() {
+                for part in pattern.iter() {
+                    if let Part::Name(name) = part {
+                        if !name.is_empty() {
+                            fields.output_fields.insert(name.to_string(), 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessor {
@@ -575,7 +589,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessor {
                 _ => {}
             }
         }
-
+        processor.update_output_keys();
         Ok(processor)
     }
 }
@@ -635,6 +649,28 @@ impl Processor for DissectProcessor {
                 self.kind()
             )),
         }
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                Some(Value::String(val_str)) => match self.process(val_str) {
+                    Ok(mut map) => {
+                        field.output_fields.iter().for_each(|(k, output_index)| {
+                            if let Some(v) = map.remove(k) {
+                                val[*output_index] = v
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        warn!("dissect processor: {}", e);
+                    }
+                },
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1149,15 +1185,8 @@ mod tests {
 
     #[test]
     fn test_abc() {
-        let pattern_str = "%{endpoint}/%{query}";
-        let input = "/query/conceptional-theomania-Caesardom-sybaritism-platybrachycephalous-escropulo-dodecane";
-        let expected = [
-            ("endpoint", "/query"),
-            (
-                "query",
-                "conceptional-theomania-Caesardom-sybaritism-platybrachycephalous-escropulo-dodecane",
-            ),
-        ];
+        let pattern_str = r#"%{ip_address} - - [%{timestamp}] "%{http_method} %{request_line}" %{status_code} %{response_size} "-" "%{user_agent}""#;
+        let input = r#"127.0.0.1 - - [25/May/2024:20:16:37 +0000] "GET /index.html HTTP/1.1" 200 612 "-" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36""#;
         let chs = input.chars().collect::<Vec<char>>();
         let pattern: Pattern = pattern_str.parse().unwrap();
         println!("{:?}", pattern);

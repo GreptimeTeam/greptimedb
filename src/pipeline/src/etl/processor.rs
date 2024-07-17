@@ -23,15 +23,14 @@ pub mod letter;
 pub mod regex;
 pub mod urlencoding;
 
-use std::sync::Arc;
-
-use ahash::HashSet;
+use ahash::{HashSet, HashSetExt};
 use cmcd::CMCDProcessor;
 use csv::CsvProcessor;
 use date::DateProcessor;
 use dissect::DissectProcessor;
 use epoch::EpochProcessor;
 use gsub::GsubProcessor;
+use itertools::Itertools;
 use join::JoinProcessor;
 use letter::LetterProcessor;
 use regex::RegexProcessor;
@@ -67,17 +66,26 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String>;
 
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        todo!()
+    }
+
     fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
-        for ff @ Field { field, .. } in self.fields().iter() {
-            match map.get(field) {
+        for ff @ Field {
+            input_field: field_info,
+            ..
+        } in self.fields().iter()
+        {
+            match map.get(&field_info.name) {
                 Some(v) => {
                     map.extend(self.exec_field(v, ff)?);
                 }
                 None if self.ignore_missing() => {}
                 None => {
                     return Err(format!(
-                        "{} processor: field '{field}' is required but missing in {map}",
+                        "{} processor: field '{}' is required but missing in {map}",
                         self.kind(),
+                        field_info.name,
                     ))
                 }
             }
@@ -203,6 +211,7 @@ impl Processor for ProcessorKind {
 pub struct Processors {
     pub processors: Vec<ProcessorKind>,
     pub required_keys: Vec<String>,
+    pub required_original_keys: Vec<String>,
     pub output_keys: Vec<String>,
 }
 
@@ -228,6 +237,10 @@ impl Processors {
     pub fn output_keys(&self) -> &Vec<String> {
         &self.output_keys
     }
+
+    pub fn required_original_keys(&self) -> &Vec<String> {
+        &self.required_original_keys
+    }
 }
 
 impl TryFrom<&Vec<yaml_rust::Yaml>> for Processors {
@@ -235,31 +248,42 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Processors {
 
     fn try_from(vec: &Vec<yaml_rust::Yaml>) -> Result<Self, Self::Error> {
         let mut processors = vec![];
-        let mut all_output_keys: Vec<String> = Vec::with_capacity(50);
-        let mut all_required_keys = Vec::with_capacity(50);
+        let mut all_output_keys = HashSet::with_capacity(50);
+        let mut all_required_keys = HashSet::with_capacity(50);
+        let mut all_required_original_keys = HashSet::with_capacity(50);
         for doc in vec {
             let processor = parse_processor(doc)?;
 
             // get all required keys
-            let processor_required_keys: Vec<String> =
-                processor.fields().iter().map(|f| f.field.clone()).collect();
-            // check all required keys are not in all_output_keys
+            let processor_required_keys: Vec<String> = processor
+                .fields()
+                .iter()
+                .map(|f| f.input_field.name.clone())
+                .collect();
+
             for key in &processor_required_keys {
-                if !all_output_keys.contains(key) && !all_required_keys.contains(key) {
-                    all_required_keys.push(key.clone());
+                if !all_output_keys.contains(key) {
+                    all_required_original_keys.insert(key.clone());
                 }
             }
 
-            let mut processor_output_keys = processor.output_keys().into_iter().collect();
-            all_output_keys.append(&mut processor_output_keys);
+            all_required_keys.extend(processor_required_keys);
+
+            let processor_output_keys = processor.output_keys().into_iter();
+            all_output_keys.extend(processor_output_keys);
 
             processors.push(processor);
         }
+
+        let all_required_keys = all_required_keys.into_iter().sorted().collect();
+        let all_output_keys = all_output_keys.into_iter().sorted().collect();
+        let all_required_original_keys = all_required_original_keys.into_iter().sorted().collect();
 
         Ok(Processors {
             processors,
             required_keys: all_required_keys,
             output_keys: all_output_keys,
+            required_original_keys: all_required_original_keys,
         })
     }
 }
@@ -350,4 +374,12 @@ pub(crate) fn yaml_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields, St
 
 pub(crate) fn yaml_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field, String> {
     yaml_parse_string(v, field)
+}
+
+pub(crate) fn update_one_one_output_keys(fields: &mut Fields) {
+    for field in fields.iter_mut() {
+        field
+            .output_fields
+            .insert(field.get_renamed_field().to_string(), 0 as usize);
+    }
 }

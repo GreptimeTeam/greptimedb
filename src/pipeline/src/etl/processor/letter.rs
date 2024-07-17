@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ahash::HashSet;
+
 use crate::etl::field::{Field, Fields};
 use crate::etl::processor::{
-    yaml_bool, yaml_field, yaml_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME, METHOD_NAME,
+    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
+    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, METHOD_NAME,
 };
 use crate::etl::value::{Map, Value};
-use ahash::HashSet;
 
 pub(crate) const PROCESSOR_LETTER: &str = "letter";
 
@@ -62,7 +63,8 @@ pub struct LetterProcessor {
 }
 
 impl LetterProcessor {
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        update_one_one_output_keys(&mut fields);
         self.fields = fields;
     }
 
@@ -82,10 +84,7 @@ impl LetterProcessor {
         };
         let val = Value::String(processed);
 
-        let key = match field.target_field {
-            Some(ref target_field) => target_field,
-            None => field.get_field(),
-        };
+        let key = field.get_renamed_field();
 
         Ok(Map::one(key, val))
     }
@@ -143,7 +142,7 @@ impl Processor for LetterProcessor {
     fn output_keys(&self) -> HashSet<String> {
         self.fields
             .iter()
-            .map(|f| f.get_target_field().to_string())
+            .map(|f| f.get_renamed_field().to_string())
             .collect()
     }
 
@@ -155,6 +154,32 @@ impl Processor for LetterProcessor {
                 self.kind()
             )),
         }
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                Some(Value::String(s)) => {
+                    let mut processed = self.process_field(s, field)?;
+                    field.output_fields.iter().for_each(|(k, output_index)| {
+                        if let Some(v) = processed.remove(k) {
+                            val.insert(*output_index, v);
+                        }
+                    });
+                }
+                _ => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: expect string value, but got {val:?}",
+                            self.kind()
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

@@ -129,10 +129,7 @@ impl RegexProcessor {
             for group in &gr.groups {
                 if let Some(capture) = captures.name(group) {
                     let value = capture.as_str().to_string();
-                    let prefix = match &field.target_field {
-                        Some(s) => s,
-                        None => &field.field,
-                    };
+                    let prefix = field.get_renamed_field();
 
                     let key = Self::generate_key(prefix, group);
 
@@ -142,6 +139,19 @@ impl RegexProcessor {
         }
 
         Ok(map)
+    }
+
+    fn update_output_keys(&mut self) {
+        for field in self.fields.iter_mut() {
+            for gr in &self.patterns {
+                for group in &gr.groups {
+                    field.output_fields.insert(
+                        Self::generate_key(field.get_renamed_field(), group),
+                        0 as usize,
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -175,7 +185,10 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessor {
             }
         }
 
-        processor.check()
+        processor.check().map(|mut p| {
+            p.update_output_keys();
+            p
+        })
     }
 }
 
@@ -203,7 +216,7 @@ impl Processor for RegexProcessor {
                 self.patterns.iter().flat_map(move |p| {
                     p.groups
                         .iter()
-                        .map(move |g| Self::generate_key(&f.field, g))
+                        .map(move |g| Self::generate_key(&f.input_field.name, g))
                 })
             })
             .collect()
@@ -224,6 +237,45 @@ impl Processor for RegexProcessor {
                 self.kind()
             )),
         }
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                Some(Value::String(v)) => {
+                    let mut map = Map::default();
+                    for gr in &self.patterns {
+                        let m = self.process_field(v, field, gr)?;
+                        map.extend(m);
+                    }
+
+                    field.output_fields.iter().for_each(|(k, output_index)| {
+                        if let Some(v) = map.remove(k) {
+                            val.insert(*output_index, v);
+                        }
+                    });
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {val:?}",
+                        self.kind()
+                    ))
+                }
+                None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    
     }
 }
 #[cfg(test)]

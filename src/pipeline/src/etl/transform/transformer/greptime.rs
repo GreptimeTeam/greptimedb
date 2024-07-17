@@ -47,7 +47,7 @@ impl GreptimeTransformer {
             fields,
             type_,
             default,
-            index: Some(Index::Timestamp),
+            index: Some(Index::TimeIndex),
             on_failure: None,
         }
     }
@@ -57,7 +57,10 @@ impl GreptimeTransformer {
         for transform in transforms.iter() {
             schema.extend(coerce_columns(transform)?);
         }
-        Ok(schema)
+        Ok(schema
+            .into_iter()
+            .sorted_by(|left, right| left.column_name.cmp(&right.column_name))
+            .collect())
     }
 
     fn transform_map(&self, map: &Map) -> Result<Row, String> {
@@ -65,7 +68,7 @@ impl GreptimeTransformer {
 
         for transform in self.transforms.iter() {
             for field in transform.fields.iter() {
-                let value_data = match map.get(field.get_field()) {
+                let value_data = match map.get(field.get_field_name()) {
                     Some(val) => coerce_value(val, transform)?,
                     None => {
                         let default = transform.get_default();
@@ -119,7 +122,7 @@ impl Transformer for GreptimeTransformer {
             let target_fields_set = transform
                 .fields
                 .iter()
-                .map(|f| f.get_target_field())
+                .map(|f| f.get_renamed_field())
                 .collect::<HashSet<_>>();
 
             let intersections: Vec<_> = column_names_set.intersection(&target_fields_set).collect();
@@ -133,9 +136,9 @@ impl Transformer for GreptimeTransformer {
             column_names_set.extend(target_fields_set);
 
             if let Some(idx) = transform.index {
-                if idx == Index::Timestamp {
+                if idx == Index::TimeIndex {
                     match transform.fields.len() {
-                        1 => timestamp_columns.push(transform.fields.first().unwrap().get_field()),
+                        1 => timestamp_columns.push(transform.fields.first().unwrap().get_field_name()),
                         _ => return Err(format!(
                             "Illegal to set multiple timestamp Index columns, please set only one: {}",
                             transform.fields.get_target_fields().join(", ")
@@ -187,5 +190,9 @@ impl Transformer for GreptimeTransformer {
 
     fn transforms(&self) -> &Transforms {
         &self.transforms
+    }
+
+    fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema> {
+        &self.schema
     }
 }

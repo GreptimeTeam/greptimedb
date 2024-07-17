@@ -16,6 +16,7 @@ mod etl;
 mod manager;
 mod metrics;
 
+pub use etl::processor::Processor;
 pub use etl::transform::{GreptimeTransformer, Transformer};
 pub use etl::value::{Array, Map, Value};
 pub use etl::{parse, Content, Pipeline};

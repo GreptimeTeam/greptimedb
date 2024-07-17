@@ -61,7 +61,8 @@ pub struct UrlEncodingProcessor {
 }
 
 impl UrlEncodingProcessor {
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        Self::update_output_keys(&mut fields);
         self.fields = fields;
     }
 
@@ -80,12 +81,17 @@ impl UrlEncodingProcessor {
         };
         let val = Value::String(processed);
 
-        let key = match field.target_field {
-            Some(ref target_field) => target_field,
-            None => field.get_field(),
-        };
+        let key = field.get_renamed_field();
 
         Ok(Map::one(key, val))
+    }
+
+    fn update_output_keys(fields: &mut Fields) {
+        for field in fields.iter_mut() {
+            field
+                .output_fields
+                .insert(field.get_renamed_field().to_string(), 0 as usize);
+        }
     }
 }
 
@@ -144,7 +150,7 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
     fn output_keys(&self) -> HashSet<String> {
         self.fields
             .iter()
-            .map(|f| f.get_target_field().to_string())
+            .map(|f| f.get_renamed_field().to_string())
             .collect()
     }
 
@@ -156,6 +162,36 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
                 self.kind()
             )),
         }
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                Some(Value::String(v)) => {
+                    let mut map = self.process_field(v, field)?;
+                    field.output_fields.iter().for_each(|(k, output_index)| {
+                        if let Some(v) = map.remove(k) {
+                            val.insert(*output_index, v);
+                        }
+                    });
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "{PROCESSOR_URL_ENCODING} processor: expect string value, but got {val:?}",
+                    ));
+                }
+                None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{PROCESSOR_URL_ENCODING} processor: missing field {}",
+                            field.get_field_name()
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 

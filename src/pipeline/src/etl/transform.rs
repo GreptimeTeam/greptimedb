@@ -18,7 +18,7 @@ pub mod transformer;
 use itertools::Itertools;
 
 use crate::etl::field::Fields;
-use crate::etl::processor::{yaml_field, yaml_fields, yaml_string};
+use crate::etl::processor::{update_one_one_output_keys, yaml_field, yaml_fields, yaml_string};
 use crate::etl::transform::index::Index;
 use crate::etl::value::Value;
 
@@ -36,8 +36,12 @@ pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     type Output;
 
     fn new(transforms: Transforms) -> Result<Self, String>;
+    fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema>;
     fn transforms(&self) -> &Transforms;
-    fn transform(&self, val: crate::etl::value::Value) -> Result<Self::Output, String>;
+    fn transform(&self, val: Value) -> Result<Self::Output, String>;
+    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::Output, String> {
+        todo!()
+    }
 }
 
 /// On Failure behavior when transform fails
@@ -119,9 +123,9 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
     type Error = String;
 
     fn try_from(docs: &Vec<yaml_rust::Yaml>) -> Result<Self, Self::Error> {
-        let mut transforms = Vec::with_capacity(50);
-        let mut all_output_keys: Vec<String> = Vec::with_capacity(50);
-        let mut all_required_keys = Vec::with_capacity(50);
+        let mut transforms = Vec::with_capacity(100);
+        let mut all_output_keys: Vec<String> = Vec::with_capacity(100);
+        let mut all_required_keys = Vec::with_capacity(100);
         for doc in docs {
             let transform: Transform = doc
                 .as_hash()
@@ -130,16 +134,22 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
             let mut transform_output_keys = transform
                 .fields
                 .iter()
-                .map(|f| f.get_target_field().to_string())
+                .map(|f| f.get_renamed_field().to_string())
                 .collect();
             all_output_keys.append(&mut transform_output_keys);
 
-            let mut transform_required_keys =
-                transform.fields.iter().map(|f| f.field.clone()).collect();
+            let mut transform_required_keys = transform
+                .fields
+                .iter()
+                .map(|f| f.input_field.name.clone())
+                .collect();
             all_required_keys.append(&mut transform_required_keys);
 
             transforms.push(transform);
         }
+
+        all_required_keys.sort();
+        all_output_keys.sort();
 
         Ok(Transforms {
             transforms,
@@ -202,7 +212,8 @@ impl Default for Transform {
 }
 
 impl Transform {
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        update_one_one_output_keys(&mut fields);
         self.fields = fields;
     }
 

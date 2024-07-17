@@ -37,4 +37,8 @@ impl Transformer for NoopTransformer {
     fn transforms(&self) -> &Transforms {
         unimplemented!()
     }
+
+    fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema> {
+        unimplemented!()
+    }
 }

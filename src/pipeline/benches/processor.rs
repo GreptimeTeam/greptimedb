@@ -1,5 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use pipeline::{parse, Array, Content, GreptimeTransformer, Pipeline, Value as PipelineValue};
+use pipeline::{
+    parse, Array, Content, GreptimeTransformer, Pipeline, Processor, Value as PipelineValue,
+};
 use serde_json::Deserializer;
 
 fn processor(
@@ -135,7 +137,7 @@ transform:
   - field: reqTimeSec, req_time_sec
     # epoch time is special, the resolution MUST BE specified
     type: epoch, ms
-    index: timestamp
+    index: timeindex
 
   # the following is from cmcd
   - fields:
@@ -231,9 +233,23 @@ fn criterion_benchmark(c: &mut Criterion) {
     //     "transform required_keys: {:?}",
     //     pipeline.transformer().transforms().required_keys()
     // );
-
+    pipeline.processors().processors.iter().for_each(|p| {
+        println!("processor fields : {:?}", p.fields());
+    });
     println!("pipeline required_keys: {:?}", pipeline.required_keys());
     println!("pipeline output_keys: {:?}", pipeline.output_keys());
+    println!(
+        "pipeline intermediate_keys: {:?}",
+        pipeline.intermediate_keys()
+    );
+    println!(
+        "pipeline schemas: {:?}",
+        pipeline
+            .schemas()
+            .iter()
+            .map(|s| &s.column_name)
+            .collect::<Vec<_>>()
+    );
     let mut group = c.benchmark_group("pipeline");
     group.sample_size(50);
     group.bench_function("processor 20", |b| {

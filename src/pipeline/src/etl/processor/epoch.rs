@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::etl::field::{Field, Fields};
 use ahash::HashSet;
+
+use crate::etl::field::{Field, Fields};
 use crate::etl::processor::{
-    yaml_bool, yaml_field, yaml_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME,
+    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
+    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::time::{
     MICROSECOND_RESOLUTION, MICRO_RESOLUTION, MILLISECOND_RESOLUTION, MILLI_RESOLUTION,
@@ -65,7 +66,8 @@ pub struct EpochProcessor {
 }
 
 impl EpochProcessor {
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        update_one_one_output_keys(&mut fields);
         self.fields = fields
     }
 
@@ -120,10 +122,7 @@ impl EpochProcessor {
     }
 
     fn process_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        let key = match field.target_field {
-            Some(ref target_field) => target_field,
-            None => field.get_field(),
-        };
+        let key = field.get_renamed_field();
 
         Ok(Map::one(key, Value::Epoch(self.parse(val)?)))
     }
@@ -183,12 +182,37 @@ impl Processor for EpochProcessor {
     fn output_keys(&self) -> HashSet<String> {
         self.fields
             .iter()
-            .map(|f| f.get_target_field().to_string())
+            .map(|f| f.get_renamed_field().to_string())
             .collect()
     }
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         self.process_field(val, field)
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                Some(v) => {
+                    let mut map = self.process_field(v, field)?;
+                    field.output_fields.iter().for_each(|(k, output_index)| {
+                        if let Some(v) = map.remove(k) {
+                            val.insert(*output_index, v);
+                        }
+                    });
+                }
+                None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{PROCESSOR_EPOCH} processor: missing field {}",
+                            field.get_field_name()
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
