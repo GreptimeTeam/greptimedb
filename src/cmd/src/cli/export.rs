@@ -46,7 +46,10 @@ enum ExportTarget {
     #[default]
     CreateTable,
     /// Corresponding to `EXPORT TABLE`
+    #[deprecated(note = "Please use `DatabaseData` instead.")]
     TableData,
+    /// Corresponding to `EXPORT DATABASE`
+    DatabaseData,
 }
 
 #[derive(Debug, Default, Parser)]
@@ -409,14 +412,84 @@ impl Export {
 
         Ok(())
     }
+
+    async fn export_database_data(&self) -> Result<()> {
+        let timer = Instant::now();
+        let semaphore = Arc::new(Semaphore::new(self.parallelism));
+        let db_names = self.iter_db_names().await?;
+        let db_count = db_names.len();
+        let mut tasks = Vec::with_capacity(db_names.len());
+        for (catalog, schema) in db_names {
+            let semaphore_moved = semaphore.clone();
+            tasks.push(async move {
+                let _permit = semaphore_moved.acquire().await.unwrap();
+                tokio::fs::create_dir_all(&self.output_dir)
+                    .await
+                    .context(FileIoSnafu)?;
+                let output_dir = Path::new(&self.output_dir).join(format!("{catalog}-{schema}/"));
+                let sql = format!(
+                    r#"COPY DATABASE "{}"."{}" TO '{}' WITH (FORMAT='parquet');"#,
+                    catalog,
+                    schema,
+                    output_dir.to_str().unwrap()
+                );
+
+                info!("Executing sql: {sql}");
+
+                self.sql(&sql).await?;
+
+                info!("Finished exporting {catalog}.{schema} data");
+
+                // export copy from sql
+                let copy_from_file = Path::new(&self.output_dir)
+                    .join(format!("{catalog}-{schema}_copy_database_from.sql"));
+                let mut writer =
+                    BufWriter::new(File::create(copy_from_file).await.context(FileIoSnafu)?);
+                let copy_database_from_sql = format!(
+                    r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='parquet');"#,
+                    catalog,
+                    schema,
+                    output_dir.to_str().unwrap()
+                );
+                writer
+                    .write(copy_database_from_sql.as_bytes())
+                    .await
+                    .context(FileIoSnafu)?;
+                writer.flush().await.context(FileIoSnafu)?;
+
+                info!("finished exporting {catalog}.{schema} copy_database_from.sql");
+
+                Ok::<(), Error>(())
+            })
+        }
+
+        let success = futures::future::join_all(tasks)
+            .await
+            .into_iter()
+            .filter(|r| match r {
+                Ok(_) => true,
+                Err(e) => {
+                    error!(e; "export database job failed");
+                    false
+                }
+            })
+            .count();
+        let elapsed = timer.elapsed();
+
+        info!("Success {success}/{db_count} jobs, costs: {:?}", elapsed);
+
+        Ok(())
+    }
 }
 
+#[allow(deprecated)]
 #[async_trait]
 impl Tool for Export {
     async fn do_work(&self) -> Result<()> {
         match self.target {
             ExportTarget::CreateTable => self.export_create_table().await,
             ExportTarget::TableData => self.export_table_data().await,
+            ExportTarget::DatabaseData => self.export_database_data().await,
         }
     }
 }
