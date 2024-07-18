@@ -11,15 +11,21 @@ create table out_num_cnt (
 
 SELECT flow_name, catalog_name, raw_sql FROM INFORMATION_SCHEMA.FLOWS;
 
+SHOW FLOWS;
+
 CREATE FLOW filter_numbers SINK TO out_num_cnt AS SELECT number FROM numbers_input where number > 10;
 
 SHOW CREATE FLOW filter_numbers;
 
 SELECT flow_name, catalog_name, raw_sql FROM INFORMATION_SCHEMA.FLOWS;
 
+SHOW FLOWS;
+
 drop flow filter_numbers;
 
 SELECT flow_name, catalog_name, raw_sql FROM INFORMATION_SCHEMA.FLOWS;
+
+SHOW FLOWS;
 
 drop table out_num_cnt;
 

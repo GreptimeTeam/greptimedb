@@ -23,7 +23,7 @@ use snafu::{OptionExt, ResultExt};
 use sql::ast::Ident;
 use sql::statements::create::Partitions;
 use sql::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowIndex, ShowKind,
+    ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind,
     ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use table::metadata::TableType;
@@ -159,6 +159,17 @@ impl StatementExecutor {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         query::sql::show_views(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub(super) async fn show_flows(
+        &self,
+        stmt: ShowFlows,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_flows(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
             .await
             .context(ExecuteStatementSnafu)
     }

@@ -21,8 +21,8 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowCreateView, ShowDatabases, ShowIndex,
-    ShowKind, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
+    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowCreateView, ShowDatabases, ShowFlows,
+    ShowIndex, ShowKind, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::statement::Statement;
 
@@ -46,6 +46,8 @@ impl<'a> ParserContext<'a> {
             }
         } else if self.consume_token("VIEWS") {
             self.parse_show_views()
+        } else if self.consume_token("FLOWS") {
+            self.parse_show_flows()
         } else if self.matches_keyword(Keyword::CHARSET) {
             self.parser.next_token();
             Ok(Statement::ShowCharset(self.parse_show_kind()?))
@@ -453,6 +455,28 @@ impl<'a> ParserContext<'a> {
         let kind = self.parse_show_kind()?;
 
         Ok(Statement::ShowViews(ShowViews { kind, database }))
+    }
+
+    fn parse_show_flows(&mut self) -> Result<Statement> {
+        let database = match self.parser.peek_token().token {
+            Token::EOF | Token::SemiColon => {
+                return Ok(Statement::ShowFlows(ShowFlows {
+                    kind: ShowKind::All,
+                    database: None,
+                }));
+            }
+
+            // SHOW VIEWS [in | FROM] [DATABASE]
+            Token::Word(w) => match w.keyword {
+                Keyword::IN | Keyword::FROM => self.parse_db_name()?,
+                _ => None,
+            },
+            _ => None,
+        };
+
+        let kind = self.parse_show_kind()?;
+
+        Ok(Statement::ShowFlows(ShowFlows { kind, database }))
     }
 }
 
@@ -994,6 +1018,40 @@ mod tests {
         assert_eq!(
             stmts[0],
             Statement::ShowViews(ShowViews {
+                kind: ShowKind::All,
+                database: Some("d1".to_string()),
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[test]
+    pub fn test_show_flows() {
+        let sql = "SHOW FLOWS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowFlows(ShowFlows {
+                kind: ShowKind::All,
+                database: None,
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[test]
+    pub fn test_show_flows_in_db() {
+        let sql = "SHOW FLOWS IN d1";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowFlows(ShowFlows {
                 kind: ShowKind::All,
                 database: Some("d1".to_string()),
             })

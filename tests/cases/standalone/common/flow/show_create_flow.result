@@ -20,6 +20,11 @@ SELECT flow_name, catalog_name, raw_sql FROM INFORMATION_SCHEMA.FLOWS;
 +-----------+--------------+---------+
 +-----------+--------------+---------+
 
+SHOW FLOWS;
+
+++
+++
+
 CREATE FLOW filter_numbers SINK TO out_num_cnt AS SELECT number FROM numbers_input where number > 10;
 
 Affected Rows: 0
@@ -42,6 +47,14 @@ SELECT flow_name, catalog_name, raw_sql FROM INFORMATION_SCHEMA.FLOWS;
 | filter_numbers | greptime     | SELECT number FROM numbers_input WHERE number > 10 |
 +----------------+--------------+----------------------------------------------------+
 
+SHOW FLOWS;
+
++----------------+
+| Flows          |
++----------------+
+| filter_numbers |
++----------------+
+
 drop flow filter_numbers;
 
 Affected Rows: 0
@@ -52,6 +65,11 @@ SELECT flow_name, catalog_name, raw_sql FROM INFORMATION_SCHEMA.FLOWS;
 | flow_name | catalog_name | raw_sql |
 +-----------+--------------+---------+
 +-----------+--------------+---------+
+
+SHOW FLOWS;
+
+++
+++
 
 drop table out_num_cnt;
 

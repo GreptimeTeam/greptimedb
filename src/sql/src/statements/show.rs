@@ -187,6 +187,25 @@ impl Display for ShowCreateFlow {
     }
 }
 
+/// SQL structure for `SHOW FLOWS`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ShowFlows {
+    pub kind: ShowKind,
+    pub database: Option<String>,
+}
+
+impl Display for ShowFlows {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SHOW FLOWS")?;
+        if let Some(database) = &self.database {
+            write!(f, " IN {database}")?;
+        }
+        format_kind!(self, f);
+
+        Ok(())
+    }
+}
+
 /// SQL structure for `SHOW CREATE VIEW`.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowCreateView {
@@ -531,6 +550,49 @@ SHOW VIEWS"#,
             }
             _ => {
                 unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_show_flows() {
+        let sql = r"show flows in d1;";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowFlows { .. });
+        match &stmts[0] {
+            Statement::ShowFlows(show) => {
+                let new_sql = format!("\n{}", show);
+                assert_eq!(
+                    r#"
+SHOW FLOWS IN d1"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"show flows;";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowFlows { .. });
+        match &stmts[0] {
+            Statement::ShowFlows(show) => {
+                let new_sql = format!("\n{}", show);
+                assert_eq!(
+                    r#"
+SHOW FLOWS"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!("{:?}", &stmts[0]);
             }
         }
     }

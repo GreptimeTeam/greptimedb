@@ -14,7 +14,7 @@
 
 mod cluster_info;
 pub mod columns;
-mod flows;
+pub mod flows;
 mod information_memory_table;
 pub mod key_column_usage;
 mod partitions;
