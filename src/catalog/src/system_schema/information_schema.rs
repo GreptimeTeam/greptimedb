@@ -14,6 +14,7 @@
 
 mod cluster_info;
 pub mod columns;
+mod flows;
 mod information_memory_table;
 pub mod key_column_usage;
 mod partitions;
@@ -31,6 +32,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
+use common_meta::key::flow::FlowMetadataManager;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
@@ -46,6 +48,7 @@ use self::columns::InformationSchemaColumns;
 use super::{SystemSchemaProviderInner, SystemTable, SystemTableRef};
 use crate::error::Result;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
+use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
 use crate::system_schema::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
 use crate::system_schema::information_schema::partitions::InformationSchemaPartitions;
@@ -193,10 +196,15 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
 }
 
 impl InformationSchemaProvider {
-    pub fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+    pub fn new(
+        catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
+        flow_metadata_manager: Arc<FlowMetadataManager>,
+    ) -> Self {
         let mut provider = Self {
             catalog_name,
             catalog_manager,
+            flow_metadata_manager,
             tables: HashMap::new(),
         };
 
@@ -243,6 +251,7 @@ impl InformationSchemaProvider {
             TABLE_CONSTRAINTS.to_string(),
             self.build_table(TABLE_CONSTRAINTS).unwrap(),
         );
+        tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
 
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
