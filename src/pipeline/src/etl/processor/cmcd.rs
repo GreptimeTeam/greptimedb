@@ -268,7 +268,7 @@ impl crate::etl::processor::Processor for CMCDProcessor {
                     let map = self.process_field(v, field)?;
                     for (k, v) in map.values.into_iter() {
                         field.output_fields.get(&k).map(|index| {
-                            val.insert(*index, v);
+                            val[*index] = v;
                         });
                     }
                 }

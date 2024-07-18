@@ -140,7 +140,7 @@ impl Processor for JoinProcessor {
                     let mut map = self.process_field(arr, field)?;
                     field.output_fields.iter().for_each(|(k, ouput_index)| {
                         if let Some(v) = map.remove(k) {
-                            val.insert(*ouput_index, v);
+                            val[*ouput_index] = v;
                         }
                     });
                 }

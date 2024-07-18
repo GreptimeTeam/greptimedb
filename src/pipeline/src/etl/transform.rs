@@ -34,14 +34,13 @@ pub use transformer::greptime::GreptimeTransformer;
 
 pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     type Output;
+    type VecOutput;
 
     fn new(transforms: Transforms) -> Result<Self, String>;
     fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema>;
     fn transforms(&self) -> &Transforms;
     fn transform(&self, val: Value) -> Result<Self::Output, String>;
-    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::Output, String> {
-        todo!()
-    }
+    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput, String>;
 }
 
 /// On Failure behavior when transform fails
@@ -90,6 +89,10 @@ impl Transforms {
 
     pub fn required_keys(&self) -> &Vec<String> {
         &self.required_keys
+    }
+
+    pub fn transforms(&self) -> &Vec<Transform> {
+        &self.transforms
     }
 }
 

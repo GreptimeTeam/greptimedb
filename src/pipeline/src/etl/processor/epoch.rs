@@ -81,7 +81,9 @@ impl EpochProcessor {
 
     fn parse(&self, val: &Value) -> Result<Epoch, String> {
         let t: i64 = match val {
-            Value::String(s) => s.parse::<i64>().map_err(|e| e.to_string())?,
+            Value::String(s) => s
+                .parse::<i64>()
+                .map_err(|e| format!("Failed to parse {} to number: {}", s, e.to_string()))?,
             Value::Int16(i) => *i as i64,
             Value::Int32(i) => *i as i64,
             Value::Int64(i) => *i,
@@ -198,7 +200,7 @@ impl Processor for EpochProcessor {
                     let mut map = self.process_field(v, field)?;
                     field.output_fields.iter().for_each(|(k, output_index)| {
                         if let Some(v) = map.remove(k) {
-                            val.insert(*output_index, v);
+                            val[*output_index] = v;
                         }
                     });
                 }

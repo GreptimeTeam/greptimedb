@@ -84,11 +84,12 @@ where
             let mut required_keys = processors_required_original_keys.clone();
 
             required_keys.append(&mut tr_keys);
+            required_keys.sort();
 
             debug!("required_keys: {:?}", required_keys);
 
             // intermediate keys are the keys that all processor and transformer required
-            let intermediate_keys: Vec<String> =
+            let ordered_intermediate_keys: Vec<String> =
                 merge(processors_required_keys, transforms_required_keys)
                     .cloned()
                     .collect::<HashSet<String>>()
@@ -96,31 +97,35 @@ where
                     .sorted()
                     .collect();
 
-            let mut required_keys_iter = required_keys.iter();
-            let mut current_required_key = required_keys_iter.next();
-            let mut final_intermediate_keys = Vec::with_capacity(intermediate_keys.len());
+            let mut final_intermediate_keys = Vec::with_capacity(ordered_intermediate_keys.len());
             let mut intermediate_keys_exclude_original =
-                Vec::with_capacity(intermediate_keys.len());
+                Vec::with_capacity(ordered_intermediate_keys.len());
 
-            for key_name in intermediate_keys.iter() {
-                match current_required_key {
-                    Some(required_key) if required_key == key_name => {
-                        final_intermediate_keys.push(required_key.clone());
-                        current_required_key = required_keys_iter.next();
-                    }
-                    _ => {
-                        intermediate_keys_exclude_original.push(key_name.clone());
-                    }
+            for key_name in ordered_intermediate_keys.iter() {
+                if required_keys.contains(key_name) {
+                    final_intermediate_keys.push(key_name.clone());
+                } else {
+                    intermediate_keys_exclude_original.push(key_name.clone());
                 }
             }
 
+            println!(
+                "-------------------- final_intermediate_keys: {:?}",
+                final_intermediate_keys
+            );
+
             final_intermediate_keys.extend(intermediate_keys_exclude_original);
 
+            println!(
+                "-------------------- final_intermediate_keys: {:?}",
+                final_intermediate_keys
+            );
+
             let output_keys = transforms.output_keys().clone();
-            let _ = processors
+            processors
                 .iter_mut()
                 .map(|processor| {
-                    let q = processor
+                    processor
                         .fields_mut()
                         .iter_mut()
                         .map(|field| {
@@ -128,7 +133,7 @@ where
                                 .iter()
                                 .position(|r| *r == field.input_field.name)
                                 .ok_or(format!(
-                                    "input field {} is not found in required keys: {final_intermediate_keys:?}:{intermediate_keys:?}",
+                                    "input field {} is not found in required keys: {final_intermediate_keys:?}:{ordered_intermediate_keys:?}",
                                     field.input_field.name
                                 ))?;
                             field.set_input_index(index);
@@ -140,7 +145,7 @@ where
                                         .iter()
                                         .position(|r| r == k)
                                         .ok_or(format!(
-                                        "output field {k} is not found in required keys: {final_intermediate_keys:?}:{intermediate_keys:?}"
+                                        "output field {k} is not found in required keys: {final_intermediate_keys:?}:{ordered_intermediate_keys:?}"
                                     ))?;
                                     *v = index;
                                     Ok::<(), String>(())
@@ -148,19 +153,18 @@ where
                                 .collect::<Result<Vec<_>, String>>()?;
                             Ok::<(), String>(())
                         })
-                        .collect::<Result<Vec<()>, String>>();
-                    q
+                        .collect::<Result<Vec<()>, String>>()
                 })
                 .collect::<Result<Vec<Vec<()>>, String>>()?;
 
-            let _ = transforms.iter_mut()
+            transforms.iter_mut()
             .map(|transform| {
-                let q = transform.fields.iter_mut()
+                transform.fields.iter_mut()
                 .map(|field| {
                     let index = final_intermediate_keys.iter()
                     .position(|r| *r == field.input_field.name)
                     .ok_or(format!(
-                        "input field {} is not found in required keys: {final_intermediate_keys:?}:{intermediate_keys:?}",
+                        "input field {} is not found in required keys: {final_intermediate_keys:?}:{ordered_intermediate_keys:?}",
                         field.input_field.name
                     ))?;
                     field.set_input_index(index);
@@ -172,7 +176,7 @@ where
                         .iter()
                         .position(|r| r == k)
                         .ok_or(format!(
-                            "output field {k} is not found in required keys: {final_intermediate_keys:?}:{intermediate_keys:?}"
+                            "output field {k} is not found in required keys: {final_intermediate_keys:?}:{ordered_intermediate_keys:?}"
                         ))?;
                         *v = index;
                         Ok::<(), String>(())
@@ -180,9 +184,8 @@ where
                     .collect::<Result<Vec<_>, String>>()?;
                     Ok::<(), String>(())
                 })
-                .collect::<Result<Vec<()>, String>>();
-                q
-            });
+                .collect::<Result<Vec<()>, String>>()
+            }).collect::<Result<Vec<_>,String>>()?;
 
             Ok(Pipeline {
                 description,
@@ -267,11 +270,41 @@ where
         self.transformer.transform(result)
     }
 
-    pub fn exec_mut(&self, val: &mut Vec<value::Value>) -> Result<T::Output, String> {
+    pub fn exec_mut(&self, val: &mut Vec<value::Value>) -> Result<T::VecOutput, String> {
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
         }
+
         self.transformer.transform_mut(val)
+    }
+
+    pub fn preprepase(&self, val: serde_json::Value) -> Result<Vec<value::Value>, String> {
+        let mut result = Vec::with_capacity(self.intermediate_keys.len());
+        match val {
+            serde_json::Value::Object(mut map) => {
+                for required_key in self.required_keys.iter() {
+                    match map.remove(required_key) {
+                        Some(value) => {
+                            result.push(value.try_into()?);
+                        }
+                        None => {
+                            result.push(crate::Value::Null);
+                        }
+                    }
+                }
+                if result.len() != self.required_keys.len() {
+                    return Err("missing required keys".to_string());
+                } else {
+                    for _ in 0..(self.intermediate_keys.len() - self.required_keys.len()) {
+                        result.push(value::Value::Null);
+                    }
+                }
+            }
+            _ => {
+                return Err("expect object".to_string());
+            }
+        }
+        Ok(result)
     }
 
     pub fn processors(&self) -> &processor::Processors {

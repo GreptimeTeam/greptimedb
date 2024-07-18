@@ -164,7 +164,7 @@ impl Processor for LetterProcessor {
                     let mut processed = self.process_field(s, field)?;
                     field.output_fields.iter().for_each(|(k, output_index)| {
                         if let Some(v) = processed.remove(k) {
-                            val.insert(*output_index, v);
+                            val[*output_index] = v;
                         }
                     });
                 }

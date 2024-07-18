@@ -222,6 +222,10 @@ impl Processor for CsvProcessor {
             )),
         }
     }
+    
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        todo!()
+    }
 }
 
 // TODO(yuanbohan): more test cases

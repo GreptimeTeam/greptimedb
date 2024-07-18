@@ -25,6 +25,7 @@ impl std::fmt::Display for NoopTransformer {
 
 impl Transformer for NoopTransformer {
     type Output = Value;
+    type VecOutput = Vec<Value>;
 
     fn new(_transforms: Transforms) -> Result<Self, String> {
         Ok(NoopTransformer)
@@ -39,6 +40,10 @@ impl Transformer for NoopTransformer {
     }
 
     fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema> {
+        unimplemented!()
+    }
+
+    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput, String> {
         unimplemented!()
     }
 }

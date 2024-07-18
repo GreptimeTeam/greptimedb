@@ -243,25 +243,36 @@ impl Processor for RegexProcessor {
         for field in self.fields.iter() {
             let index = field.input_field.index;
             match val.get(index) {
-                Some(Value::String(v)) => {
-                    let mut map = Map::default();
-                    for gr in &self.patterns {
-                        let m = self.process_field(v, field, gr)?;
-                        map.extend(m);
-                    }
-
-                    field.output_fields.iter().for_each(|(k, output_index)| {
-                        if let Some(v) = map.remove(k) {
-                            val.insert(*output_index, v);
+                Some(v) => match v {
+                    Value::String(s) => {
+                        let mut map = Map::default();
+                        for gr in &self.patterns {
+                            let m = self.process_field(s, field, gr)?;
+                            map.extend(m);
                         }
-                    });
-                }
-                Some(_) => {
-                    return Err(format!(
-                        "{} processor: expect string value, but got {val:?}",
-                        self.kind()
-                    ))
-                }
+
+                        field.output_fields.iter().for_each(|(k, output_index)| {
+                            if let Some(v) = map.remove(k) {
+                                val[*output_index] = v;
+                            }
+                        });
+                    }
+                    Value::Null => {
+                        if !self.ignore_missing {
+                            return Err(format!(
+                                "{} processor: missing field {}",
+                                self.kind(),
+                                field.get_field_name()
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "{} processor: expect string value, but got {v:?}",
+                            self.kind()
+                        ));
+                    }
+                },
                 None => {
                     if !self.ignore_missing {
                         return Err(format!(
@@ -275,7 +286,6 @@ impl Processor for RegexProcessor {
         }
 
         Ok(())
-    
     }
 }
 #[cfg(test)]

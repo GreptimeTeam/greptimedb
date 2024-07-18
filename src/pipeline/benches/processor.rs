@@ -1,22 +1,37 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pipeline::{
-    parse, Array, Content, GreptimeTransformer, Pipeline, Processor, Value as PipelineValue,
+    parse, Array, Content, GreptimeTransformer, Pipeline, Processor, Transformer,
+    Value as PipelineValue,
 };
-use serde_json::Deserializer;
+use serde_json::{Deserializer, Value};
 
-fn processor(
+fn processor_map(
     pipeline: &Pipeline<GreptimeTransformer>,
-    input: &str,
+    input_values: Vec<Value>,
 ) -> impl IntoIterator<Item = greptime_proto::v1::Rows> {
-    let input_values = Deserializer::from_str(input).into_iter::<serde_json::Value>();
     let pipeline_data = input_values
         .into_iter()
-        .map(|v| PipelineValue::try_from(v.unwrap()).unwrap())
+        .map(|v| PipelineValue::try_from(v).unwrap())
         .collect::<Vec<_>>();
 
     let transformed_data = pipeline.exec(PipelineValue::Array(Array {
         values: pipeline_data,
     }));
+    transformed_data
+}
+
+fn processor_mut(
+    pipeline: &Pipeline<GreptimeTransformer>,
+    input_values: Vec<Value>,
+) -> impl IntoIterator<Item = Vec<greptime_proto::v1::Row>> {
+    let pipeline_data = input_values.into_iter().map(|v| pipeline.preprepase(v));
+
+    let transformed_data = pipeline_data
+        .map(|data| {
+            let mut v = data.unwrap();
+            pipeline.exec_mut(&mut v)
+        })
+        .collect::<Result<Vec<_>, String>>();
     transformed_data
 }
 
@@ -215,45 +230,48 @@ transform:
 
 fn criterion_benchmark(c: &mut Criterion) {
     let input_value_str = include_str!("./data.log");
+    let input_value = Deserializer::from_str(input_value_str)
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let pipeline = prepare_pipeline();
-    // println!(
-    //     "processor required_keys: {:?}",
-    //     pipeline.processors().required_keys()
-    // );
-    // println!(
-    //     "processor output_keys: {:?}",
-    //     pipeline.processors().output_keys()
-    // );
     // println!(
     //     "transform output_keys: {:?}",
     //     pipeline.transformer().transforms().output_keys()
     // );
 
+    pipeline
+        .transformer()
+        .transforms()
+        .transforms()
+        .iter()
+        .for_each(|t| {
+            println!("[transform]: {:?}", t);
+        });
+    // pipeline.processors().processors.iter().for_each(|p| {
+    //     println!("[processor fields]: {:?}", p.fields());
+    // });
+    // println!("[pipeline required_keys]: {:?}", pipeline.required_keys());
+    // println!("[pipeline output_keys]: {:?}", pipeline.output_keys());
     // println!(
-    //     "transform required_keys: {:?}",
-    //     pipeline.transformer().transforms().required_keys()
+    //     "[pipeline intermediate_keys]: {:?}",
+    //     pipeline.intermediate_keys()
     // );
-    pipeline.processors().processors.iter().for_each(|p| {
-        println!("processor fields : {:?}", p.fields());
-    });
-    println!("pipeline required_keys: {:?}", pipeline.required_keys());
-    println!("pipeline output_keys: {:?}", pipeline.output_keys());
-    println!(
-        "pipeline intermediate_keys: {:?}",
-        pipeline.intermediate_keys()
-    );
-    println!(
-        "pipeline schemas: {:?}",
-        pipeline
-            .schemas()
-            .iter()
-            .map(|s| &s.column_name)
-            .collect::<Vec<_>>()
-    );
+    // println!(
+    //     "[pipeline schemas]: {:?}",
+    //     pipeline
+    //         .schemas()
+    //         .iter()
+    //         .map(|s| &s.column_name)
+    //         .collect::<Vec<_>>()
+    // );
     let mut group = c.benchmark_group("pipeline");
     group.sample_size(50);
-    group.bench_function("processor 20", |b| {
-        b.iter(|| processor(black_box(&pipeline), black_box(input_value_str)))
+    group.bench_function("processor map", |b| {
+        b.iter(|| processor_map(black_box(&pipeline), black_box(input_value.clone())))
+    });
+    group.bench_function("processor mut", |b| {
+        b.iter(|| processor_mut(black_box(&pipeline), black_box(input_value.clone())))
     });
     group.finish();
 }

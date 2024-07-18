@@ -185,8 +185,8 @@ impl crate::etl::processor::Processor for GsubProcessor {
                 Some(v) => {
                     let mut map = self.exec_field(v, field)?;
                     field.output_fields.iter().for_each(|(k, output_index)| {
-                        if let Some(v) = map.get(k) {
-                            val.insert(*output_index, v.clone());
+                        if let Some(v) = map.remove(k) {
+                            val[*output_index] = v;
                         }
                     });
                 }

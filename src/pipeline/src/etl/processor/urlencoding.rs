@@ -168,19 +168,29 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
         for field in self.fields.iter() {
             let index = field.input_field.index;
             match val.get(index) {
-                Some(Value::String(v)) => {
-                    let mut map = self.process_field(v, field)?;
-                    field.output_fields.iter().for_each(|(k, output_index)| {
-                        if let Some(v) = map.remove(k) {
-                            val.insert(*output_index, v);
+                Some(v) => match v {
+                    Value::String(s) => {
+                        let mut map = self.process_field(s, field)?;
+                        field.output_fields.iter().for_each(|(k, output_index)| {
+                            if let Some(v) = map.remove(k) {
+                                val[*output_index] = v;
+                            }
+                        });
+                    }
+                    Value::Null => {
+                        if !self.ignore_missing {
+                            return Err(format!(
+                                "{PROCESSOR_URL_ENCODING} processor: missing field {}",
+                                field.get_field_name()
+                            ));
                         }
-                    });
-                }
-                Some(_) => {
-                    return Err(format!(
-                        "{PROCESSOR_URL_ENCODING} processor: expect string value, but got {val:?}",
-                    ));
-                }
+                    }
+                    _ => {
+                        return Err(format!(
+                                "{PROCESSOR_URL_ENCODING} processor: expect string value, but got {v:?}",
+                            ));
+                    }
+                },
                 None => {
                     if !self.ignore_missing {
                         return Err(format!(

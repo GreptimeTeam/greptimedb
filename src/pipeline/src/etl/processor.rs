@@ -66,9 +66,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String>;
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        todo!()
-    }
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String>;
 
     fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
         for ff @ Field {
@@ -203,6 +201,21 @@ impl Processor for ProcessorKind {
             ProcessorKind::Letter(p) => p.fields_mut(),
             ProcessorKind::Regex(p) => p.fields_mut(),
             ProcessorKind::UrlEncoding(p) => p.fields_mut(),
+        }
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        match self {
+            ProcessorKind::CMCD(p) => p.exec_mut(val),
+            ProcessorKind::Csv(p) => p.exec_mut(val),
+            ProcessorKind::Date(p) => p.exec_mut(val),
+            ProcessorKind::Dissect(p) => p.exec_mut(val),
+            ProcessorKind::Epoch(p) => p.exec_mut(val),
+            ProcessorKind::Gsub(p) => p.exec_mut(val),
+            ProcessorKind::Join(p) => p.exec_mut(val),
+            ProcessorKind::Letter(p) => p.exec_mut(val),
+            ProcessorKind::Regex(p) => p.exec_mut(val),
+            ProcessorKind::UrlEncoding(p) => p.exec_mut(val),
         }
     }
 }
