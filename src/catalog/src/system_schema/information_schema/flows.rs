@@ -244,18 +244,25 @@ impl InformationSchemaFlowsBuilder {
         self.comments.push(Some(flow_info.comment()));
         self.expire_afters.push(flow_info.expire_after());
         self.source_table_id_groups.push(Some(
-            &serde_json::to_string(flow_info.source_table_ids())
-                .map_err(|raw| JsonSnafu { raw }.build())?,
+            &serde_json::to_string(flow_info.source_table_ids()).context(JsonSnafu {
+                input: format!("{:?}", flow_info.source_table_ids()),
+            })?,
         ));
         self.sink_table_names
             .push(Some(&flow_info.sink_table_name().to_string()));
         self.flownode_id_groups.push(Some(
-            &serde_json::to_string(flow_info.flownode_ids())
-                .map_err(|raw| JsonSnafu { raw }.build())?,
+            &serde_json::to_string(flow_info.flownode_ids()).context({
+                JsonSnafu {
+                    input: format!("{:?}", flow_info.flownode_ids()),
+                }
+            })?,
         ));
-        self.option_groups.push(Some(
-            &serde_json::to_string(flow_info.options()).map_err(|raw| JsonSnafu { raw }.build())?,
-        ));
+        self.option_groups
+            .push(Some(&serde_json::to_string(flow_info.options()).context(
+                JsonSnafu {
+                    input: format!("{:?}", flow_info.options()),
+                },
+            )?));
 
         Ok(())
     }

@@ -73,9 +73,11 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Can't convert value to json: {raw:?}"))]
+    #[snafu(display("Can't convert value to json, input={input}, error={error:?}"))]
     Json {
-        raw: serde_json::error::Error,
+        input: String,
+        #[snafu(source)]
+        error: serde_json::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
