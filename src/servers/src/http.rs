@@ -957,7 +957,7 @@ mod test {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
     use query::parser::PromQuery;
-    use query::plan::LogicalPlan;
+    use datafusion_expr::LogicalPlan;
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;

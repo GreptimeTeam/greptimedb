@@ -34,7 +34,7 @@ use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
 use moka::sync::Cache;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -437,7 +437,7 @@ impl PipelineTable {
 
         let output = self
             .query_engine
-            .execute(LogicalPlan::DfPlan(plan), Self::query_ctx(&table_info))
+            .execute(LogicalPlan, Self::query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
         let stream = match output.data {

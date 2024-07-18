@@ -29,7 +29,7 @@ use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::api::Type;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use session::context::QueryContextRef;
 use session::session_config::PGByteaOutputValue;
 

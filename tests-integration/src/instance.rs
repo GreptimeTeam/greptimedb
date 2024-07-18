@@ -31,7 +31,7 @@ mod tests {
     use frontend::error::{self, Error, Result};
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
-    use query::plan::LogicalPlan;
+    use datafusion_expr::LogicalPlan;
     use query::query_engine::DefaultSerializer;
     use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
     use servers::query_handler::sql::SqlQueryHandler;
@@ -233,7 +233,7 @@ mod tests {
             &QueryContext::arc(),
         )
         .unwrap();
-        let LogicalPlan::DfPlan(plan) = instance
+        let LogicalPlan = instance
             .frontend()
             .statement_executor()
             .plan(stmt, QueryContext::arc())

@@ -22,7 +22,7 @@ use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};

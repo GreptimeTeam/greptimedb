@@ -32,7 +32,7 @@ use opensrv_mysql::{
     StatementMetaWriter, ValueInner,
 };
 use parking_lot::RwLock;
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use query::query_engine::DescribeResult;
 use rand::RngCore;
 use session::context::{Channel, QueryContextRef};

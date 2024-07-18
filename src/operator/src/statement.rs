@@ -39,7 +39,7 @@ use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;

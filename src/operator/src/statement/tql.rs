@@ -20,7 +20,7 @@ use query::parser::{
     PromQuery, QueryLanguageParser, ANALYZE_NODE_NAME, ANALYZE_VERBOSE_NODE_NAME,
     DEFAULT_LOOKBACK_STRING, EXPLAIN_NODE_NAME, EXPLAIN_VERBOSE_NODE_NAME,
 };
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::tql::Tql;

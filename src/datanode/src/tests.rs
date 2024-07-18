@@ -25,7 +25,7 @@ use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_runtime::Runtime;
 use query::dataframe::DataFrame;
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use query::planner::LogicalPlanner;
 use query::query_engine::DescribeResult;
 use query::{QueryEngine, QueryEngineContext};

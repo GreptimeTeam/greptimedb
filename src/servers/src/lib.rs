@@ -18,7 +18,7 @@
 #![feature(let_chains)]
 
 use datatypes::schema::Schema;
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 
 pub mod addrs;
 pub mod configurator;

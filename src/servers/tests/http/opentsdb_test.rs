@@ -20,7 +20,7 @@ use axum::Router;
 use common_query::Output;
 use common_test_util::ports;
 use query::parser::PromQuery;
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use query::query_engine::DescribeResult;
 use servers::error::{self, Result};
 use servers::http::test_helpers::TestClient;

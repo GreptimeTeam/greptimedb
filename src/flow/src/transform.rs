@@ -23,7 +23,7 @@ use datatypes::data_type::ConcreteDataType as CDT;
 use literal::{from_substrait_literal, from_substrait_type};
 use prost::Message;
 use query::parser::QueryLanguageParser;
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
@@ -134,7 +134,7 @@ pub async fn sql_to_flow_plan(
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-    let LogicalPlan::DfPlan(plan) = plan;
+    let LogicalPlan = plan;
     let sub_plan = DFLogicalSubstraitConvertor {}
         .to_sub_plan(&plan, DefaultSerializer)
         .map_err(BoxedError::new)
@@ -201,7 +201,7 @@ mod test {
     use itertools::Itertools;
     use prost::Message;
     use query::parser::QueryLanguageParser;
-    use query::plan::LogicalPlan;
+    use datafusion_expr::LogicalPlan;
     use query::QueryEngine;
     use session::context::QueryContext;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -309,7 +309,7 @@ mod test {
             .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
-        let LogicalPlan::DfPlan(plan) = plan;
+        let LogicalPlan = plan;
 
         // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
         let bytes = DFLogicalSubstraitConvertor {}

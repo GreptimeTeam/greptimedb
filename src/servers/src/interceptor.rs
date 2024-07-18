@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use query::parser::PromQuery;
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 

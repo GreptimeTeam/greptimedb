@@ -31,7 +31,7 @@ use datafusion_common::ScalarValue;
 use datatypes::prelude::{ConcreteDataType, Value};
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use query::dataframe::DataFrame;
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use snafu::{ensure, OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
 

@@ -50,7 +50,7 @@ use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
-use query::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
 use query::QueryEngineRef;
