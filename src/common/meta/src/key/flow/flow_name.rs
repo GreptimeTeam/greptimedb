@@ -46,6 +46,7 @@ lazy_static! {
 /// The layout: `__flow/name/{catalog_name}/{flow_name}`.
 pub struct FlowNameKey<'a>(FlowScoped<FlowNameKeyInner<'a>>);
 
+#[allow(dead_code)]
 impl<'a> FlowNameKey<'a> {
     /// Returns the [FlowNameKey]
     pub fn new(catalog: &'a str, flow_name: &'a str) -> FlowNameKey<'a> {
@@ -64,13 +65,11 @@ impl<'a> FlowNameKey<'a> {
         format!("{}/{}/", FLOW_NAME_KEY_PREFIX, catalog)
     }
 
-    #[cfg(test)]
     /// Returns the catalog.
     pub fn catalog(&self) -> &str {
         self.0.catalog_name
     }
 
-    #[cfg(test)]
     /// Return the `flow_name`
     pub fn flow_name(&self) -> &str {
         self.0.flow_name
