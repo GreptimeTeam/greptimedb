@@ -738,10 +738,14 @@ pub(crate) struct ScannerMetrics {
     prepare_scan_cost: Duration,
     /// Duration to build parts.
     build_parts_cost: Duration,
+    /// Duration to build the (merge) reader.
+    build_reader_cost: Duration,
     /// Duration to scan data.
     scan_cost: Duration,
     /// Duration to convert batches.
     convert_cost: Duration,
+    /// Duration while waiting for `yield`.
+    yield_cost: Duration,
     /// Duration of the scan.
     total_cost: Duration,
     /// Number of batches returned.
@@ -762,6 +766,12 @@ impl ScannerMetrics {
         READ_STAGE_ELAPSED
             .with_label_values(&["build_parts"])
             .observe(self.build_parts_cost.as_secs_f64());
+        if !self.build_reader_cost.is_zero() {
+            // Not all scanner has this cost.
+            READ_STAGE_ELAPSED
+                .with_label_values(&["build_reader"])
+                .observe(self.build_reader_cost.as_secs_f64());
+        }
     }
 
     /// Observes metrics on scanner finish.
@@ -775,6 +785,9 @@ impl ScannerMetrics {
         READ_STAGE_ELAPSED
             .with_label_values(&["total"])
             .observe(self.total_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["yield"])
+            .observe(self.yield_cost.as_secs_f64());
         READ_ROWS_RETURN.observe(self.num_rows as f64);
         READ_BATCHES_RETURN.observe(self.num_batches as f64);
     }

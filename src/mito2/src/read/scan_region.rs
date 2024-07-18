@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -607,7 +607,9 @@ impl ScanInput {
         &self,
         collector: &mut impl FileRangeCollector,
     ) -> Result<()> {
+        let mut file_prune_cost = Duration::ZERO;
         for file in &self.files {
+            let prune_start = Instant::now();
             let res = self
                 .access_layer
                 .read_sst(file.clone())
@@ -620,6 +622,7 @@ impl ScanInput {
                 .expected_metadata(Some(self.mapper.metadata().clone()))
                 .build_reader_input()
                 .await;
+            file_prune_cost += prune_start.elapsed();
             let (mut file_range_ctx, row_groups) = match res {
                 Ok(x) => x,
                 Err(e) => {
@@ -654,6 +657,13 @@ impl ScanInput {
         }
 
         READ_SST_COUNT.observe(self.files.len() as f64);
+
+        common_telemetry::debug!(
+            "Region {} prune {} files, cost is {:?}",
+            self.mapper.metadata().region_id,
+            self.files.len(),
+            file_prune_cost
+        );
 
         Ok(())
     }
