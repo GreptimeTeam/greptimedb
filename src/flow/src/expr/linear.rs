@@ -710,7 +710,7 @@ impl MfpPlan {
         }
 
         if Some(lower_bound) != upper_bound && !null_eval {
-            if self.mfp.mfp.projection.iter().any(|c| values.len() >= *c) {
+            if self.mfp.mfp.projection.iter().any(|c| values.len() <= *c) {
                 debug!("values={:?}, mfp={:?}", &values, &self.mfp.mfp);
                 let err = InternalSnafu {
                     reason: format!(
