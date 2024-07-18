@@ -45,16 +45,11 @@ pub enum LogicalPlan {
 
 impl LogicalPlan {
     /// Get the schema for this logical plan
-    pub fn schema(&self) -> Result<Schema> {
-        match self {
-            Self::DfPlan(plan) => {
-                let df_schema = plan.schema();
-                df_schema
-                    .clone()
-                    .try_into()
-                    .context(ConvertDatafusionSchemaSnafu)
-            }
-        }
+    fn schema(plan: &DfLogicalPlan) -> Result<Schema> {
+        let df_schema = plan.schema();
+        df_schema.clone()
+            .try_into()
+            .context(ConvertDatafusionSchemaSnafu)
     }
 
     /// Return a `format`able structure that produces a single line
@@ -65,15 +60,13 @@ impl LogicalPlan {
     ///    Filter: employee.state Eq Utf8(\"CO\")\
     ///       CsvScan: employee projection=Some([0, 3])
     /// ```
-    pub fn display_indent(&self) -> impl Display + '_ {
-        let LogicalPlan::DfPlan(plan) = self;
+    fn display_indent(plan: &DfLogicalPlan) -> impl Display + '_ {
         plan.display_indent()
     }
 
     /// Walk the logical plan, find any `PlaceHolder` tokens,
     /// and return a map of their IDs and ConcreteDataTypes
-    pub fn get_param_types(&self) -> Result<HashMap<String, Option<ConcreteDataType>>> {
-        let LogicalPlan::DfPlan(plan) = self;
+    fn get_param_types(plan: &DfLogicalPlan) -> Result<HashMap<String, Option<ConcreteDataType>>> {
         let types = plan.get_parameter_types().context(DataFusionSnafu)?;
 
         Ok(types
@@ -85,26 +78,33 @@ impl LogicalPlan {
     /// Return a logical plan with all placeholders/params (e.g $1 $2,
     /// ...) replaced with corresponding values provided in the
     /// params_values
-    pub fn replace_params_with_values(&self, values: &[ScalarValue]) -> Result<LogicalPlan> {
-        let LogicalPlan::DfPlan(plan) = self;
-
-        plan.clone()
+    fn replace_params_with_values(
+        plan: &DfLogicalPlan,
+        values: &[ScalarValue],
+    ) -> Result<LogicalPlan> {
+        let new_plan = plan
+            .clone()
             .replace_params_with_values(&ParamValues::List(values.to_vec()))
-            .context(DataFusionSnafu)
-            .map(LogicalPlan::DfPlan)
+            .context(DataFusionSnafu)?;
+
+        Ok(LogicalPlan::DfPlan(new_plan))
     }
 
     /// Unwrap the logical plan into a DataFusion logical plan
-    pub fn unwrap_df_plan(self) -> DfLogicalPlan {
-        match self {
-            LogicalPlan::DfPlan(plan) => plan,
+    fn unwrap_df_plan(plan: &LogicalPlan) -> DfLogicalPlan {
+        if let LogicalPlan::DfPlan(df_plan) = plan {
+            df_plan
+        } else {
+            panic!("Expected DfPlan variant, found {:?}", plan);
         }
     }
 
     /// Returns the DataFusion logical plan reference
-    pub fn df_plan(&self) -> &DfLogicalPlan {
-        match self {
-            LogicalPlan::DfPlan(plan) => plan,
+    fn df_plan(plan: &LogicalPlan) -> &DfLogicalPlan {
+        if let LogicalPlan::DfPlan(df_plan) = plan {
+            df_plan
+        } else {
+            panic!("Expected DfPlan variant, found {:?}", plan);
         }
     }
 }
@@ -203,7 +203,7 @@ impl TableNamesExtractAndRewriter {
 
 /// Extracts and rewrites the table names in the plan in the fully qualified style,
 /// return the table names and new plan.
-pub fn extract_and_rewrite_full_table_names(
+fn extract_and_rewrite_full_table_names(
     plan: DfLogicalPlan,
     query_ctx: QueryContextRef,
 ) -> Result<(HashSet<TableName>, DfLogicalPlan)> {
@@ -214,7 +214,6 @@ pub fn extract_and_rewrite_full_table_names(
 
 #[cfg(test)]
 pub(crate) mod tests {
-
     use std::sync::Arc;
 
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
