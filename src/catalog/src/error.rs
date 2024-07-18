@@ -284,7 +284,7 @@ impl ErrorExt for Error {
 
             Error::ViewInfoNotFound { .. } => StatusCode::TableNotFound,
 
-            Error::FlowInfoNotFound { .. } => StatusCode::TableNotFound,
+            Error::FlowInfoNotFound { .. } => StatusCode::FlowNotFound,
 
             Error::SystemCatalog { .. } => StatusCode::StorageUnavailable,
 

@@ -18,12 +18,14 @@ use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 
 use crate::error::{self, Result};
-use crate::key::flow::{FlowScoped, FLOW_PREFIX};
+use crate::key::flow::FlowScoped;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{DeserializedValueWithBytes, FlowId, MetaKey, TableMetaValue, NAME_PATTERN};
+use crate::key::{
+    BytesAdapter, DeserializedValueWithBytes, FlowId, MetaKey, TableMetaValue, NAME_PATTERN,
+};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -51,8 +53,15 @@ impl<'a> FlowNameKey<'a> {
         FlowNameKey(FlowScoped::new(inner))
     }
 
-    pub fn range_start_key(catalog: &str) -> String {
-        format!("{}/{}/{}/", FLOW_PREFIX, FLOW_NAME_KEY_PREFIX, catalog)
+    pub fn range_start_key(catalog: &str) -> Vec<u8> {
+        let inner = BytesAdapter::from(Self::prefix(catalog).into_bytes());
+
+        FlowScoped::new(inner).to_bytes()
+    }
+
+    /// Return `name/{catalog}/` as prefix
+    pub fn prefix(catalog: &str) -> String {
+        format!("{}/{}/", FLOW_NAME_KEY_PREFIX, catalog)
     }
 
     #[cfg(test)]
@@ -151,9 +160,9 @@ impl FlowNameValue {
 }
 
 pub fn flow_name_decoder(kv: KeyValue) -> Result<(String, FlowNameValue)> {
-    let flow_name = std::str::from_utf8(&kv.key).context(error::ConvertRawKeySnafu)?;
+    let flow_name = FlowNameKey::from_bytes(&kv.key)?;
     let flow_id = FlowNameValue::try_from_raw_value(&kv.value)?;
-    Ok((flow_name.to_string(), flow_id))
+    Ok((flow_name.flow_name().to_string(), flow_id))
 }
 
 /// The manager of [FlowNameKey].
@@ -185,7 +194,7 @@ impl FlowNameManager {
     ) -> BoxStream<'static, Result<(String, FlowNameValue)>> {
         let start_key = FlowNameKey::range_start_key(catalog);
         common_telemetry::debug!("flow_names: start_key: {:?}", start_key);
-        let req = RangeRequest::new().with_prefix(start_key.as_bytes());
+        let req = RangeRequest::new().with_prefix(start_key);
 
         let stream = PaginationStream::new(
             self.kv_backend.clone(),
@@ -246,5 +255,12 @@ mod tests {
         let key = FlowNameKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.flow_name(), "my_task");
+    }
+    #[test]
+    fn test_key_start_range() {
+        assert_eq!(
+            b"__flow/name/greptime/".to_vec(),
+            FlowNameKey::range_start_key("greptime")
+        );
     }
 }
