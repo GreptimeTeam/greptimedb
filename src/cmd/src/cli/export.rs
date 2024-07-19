@@ -299,8 +299,7 @@ impl Export {
                 tokio::fs::create_dir_all(&output_dir)
                     .await
                     .context(FileIoSnafu)?;
-                let output_file =
-                    Path::new(&output_dir).join(format!("{schema}_create_tables.sql"));
+                let output_file = Path::new(&output_dir).join("create_tables.sql");
                 let mut file = File::create(output_file).await.context(FileIoSnafu)?;
                 for (c, s, t) in metric_physical_tables.into_iter().chain(remaining_tables) {
                     match self.show_create_table(&c, &s, &t).await {
@@ -314,7 +313,12 @@ impl Export {
                         }
                     }
                 }
-                info!("finished exporting {catalog}.{schema} with {table_count} tables",);
+
+                info!(
+                    "Finished exporting {catalog}.{schema} with {table_count} table schemas to path: {}",
+                    output_dir.to_string_lossy()
+                );
+
                 Ok::<(), Error>(())
             });
         }
@@ -475,10 +479,13 @@ impl Export {
 
                 self.sql(&sql).await?;
 
-                info!("Finished exporting {catalog}.{schema} data");
+                info!(
+                    "Finished exporting {catalog}.{schema} data into path: {}",
+                    output_dir.to_string_lossy()
+                );
 
                 // The export copy from sql
-                let copy_from_file = output_dir.join(format!("{schema}_copy_from.sql"));
+                let copy_from_file = output_dir.join("copy_from.sql");
                 let mut writer =
                     BufWriter::new(File::create(copy_from_file).await.context(FileIoSnafu)?);
                 let copy_database_from_sql = format!(
@@ -605,7 +612,9 @@ mod tests {
 
         let output_file = output_dir
             .path()
-            .join("greptime-cli.export.create_table.sql");
+            .join("greptime")
+            .join("cli.export.create_table")
+            .join("create_tables.sql");
         let res = std::fs::read_to_string(output_file).unwrap();
         let expect = r#"CREATE TABLE IF NOT EXISTS "a.b.c" (
   "ts" TIMESTAMP(3) NOT NULL,
