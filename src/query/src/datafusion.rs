@@ -286,9 +286,7 @@ impl QueryEngine for DatafusionQueryEngine {
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         match plan {
-           DfLogicalPlan::Dml(dml) => {
-                self.exec_dml_statement(dml, query_ctx).await
-            }
+            DfLogicalPlan::Dml(dml) => self.exec_dml_statement(dml, query_ctx).await,
             _ => self.exec_query_plan(plan, query_ctx).await,
         }
     }

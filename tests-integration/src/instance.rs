@@ -28,10 +28,10 @@ mod tests {
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use common_telemetry::debug;
+    use datafusion_expr::LogicalPlan;
     use frontend::error::{self, Error, Result};
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
-    use datafusion_expr::LogicalPlan;
     use query::query_engine::DefaultSerializer;
     use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
     use servers::query_handler::sql::SqlQueryHandler;

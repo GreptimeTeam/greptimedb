@@ -63,17 +63,16 @@ async fn test_datafusion_query_engine() -> Result<()> {
 
     let limit = 10;
     let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
-    let plan =
-        LogicalPlan::builder::LogicalPlanBuilder::scan(
-            "numbers",
-            Arc::new(DefaultTableSource { table_provider }),
-            None,
-        )
-            .unwrap()
-            .limit(0, Some(limit))
-            .unwrap()
-            .build()
-            .unwrap();
+    let plan = LogicalPlan::builder::LogicalPlanBuilder::scan(
+        "numbers",
+        Arc::new(DefaultTableSource { table_provider }),
+        None,
+    )
+    .unwrap()
+    .limit(0, Some(limit))
+    .unwrap()
+    .build()
+    .unwrap();
 
     let output = engine.execute(plan, QueryContext::arc()).await?;
 
@@ -143,7 +142,7 @@ async fn test_query_validate() -> Result<()> {
         "select number from wrongschema.numbers",
         &QueryContext::arc(),
     )
-        .unwrap();
+    .unwrap();
     assert!(engine
         .planner()
         .plan(stmt, QueryContext::arc())

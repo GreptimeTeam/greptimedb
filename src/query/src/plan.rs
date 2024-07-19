@@ -39,11 +39,11 @@ use crate::error::{ConvertDatafusionSchemaSnafu, DataFusionSnafu, Result};
 /// schema. A plan represents a dataflow tree where data flows
 /// from leaves up to the root to produce the query result.
 
-
 /// Get the schema for this logical plan
 pub fn schema(plan: &LogicalPlan) -> Result<Schema> {
     let df_schema = plan.schema();
-    df_schema.clone()
+    df_schema
+        .clone()
         .try_into()
         .context(ConvertDatafusionSchemaSnafu)
 }

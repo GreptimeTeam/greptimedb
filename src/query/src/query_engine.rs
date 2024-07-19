@@ -28,6 +28,7 @@ use common_function::handlers::{ProcedureServiceHandlerRef, TableMutationHandler
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
+use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
 pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
 use session::context::QueryContextRef;
@@ -36,7 +37,6 @@ use table::TableRef;
 use crate::dataframe::DataFrame;
 use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
-use datafusion_expr::LogicalPlan;
 use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;

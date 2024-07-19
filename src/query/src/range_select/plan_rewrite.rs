@@ -547,7 +547,7 @@ mod test {
     use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datafusion_expr::{BinaryExpr, Operator};
+    use datafusion_expr::{BinaryExpr, LogicalPlan, Operator};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use session::context::QueryContext;
@@ -556,7 +556,6 @@ mod test {
 
     use super::*;
     use crate::parser::QueryLanguageParser;
-    use datafusion_expr::LogicalPlan;
     use crate::{QueryEngineFactory, QueryEngineRef};
 
     async fn create_test_engine() -> QueryEngineRef {
@@ -618,7 +617,7 @@ mod test {
     }
 
     async fn query_plan_compare(sql: &str, expected: String) {
-        let plan:LogicalPlan = do_query(sql).await.unwrap();
+        let plan: LogicalPlan = do_query(sql).await.unwrap();
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
 

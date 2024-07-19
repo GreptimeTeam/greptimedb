@@ -28,10 +28,10 @@ use common_telemetry::tracing;
 use common_time::timestamp::TimeUnit;
 use datafusion::prelude::{col, lit, regexp_match, Expr};
 use datafusion_common::ScalarValue;
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::{ConcreteDataType, Value};
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use query::dataframe::DataFrame;
-use datafusion_expr::LogicalPlan;
 use snafu::{ensure, OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
 

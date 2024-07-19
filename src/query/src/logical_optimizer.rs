@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::error::Result;
 use datafusion_expr::LogicalPlan;
+
+use crate::error::Result;
 use crate::QueryEngineContext;
 
 /// Logical plan optimizer, rewrite the [`LogicalPlan`] in some way.

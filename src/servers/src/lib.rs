@@ -18,8 +18,8 @@
 #![feature(let_chains)]
 #![feature(if_let_guard)]
 
-use datatypes::schema::Schema;
 use datafusion_expr::LogicalPlan;
+use datatypes::schema::Schema;
 
 pub mod addrs;
 pub mod configurator;

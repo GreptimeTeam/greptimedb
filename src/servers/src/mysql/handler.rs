@@ -25,6 +25,7 @@ use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_telemetry::{debug, error, tracing, warn};
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
 use opensrv_mysql::{
@@ -32,7 +33,6 @@ use opensrv_mysql::{
     StatementMetaWriter, ValueInner,
 };
 use parking_lot::RwLock;
-use datafusion_expr::LogicalPlan;
 use query::query_engine::DescribeResult;
 use rand::RngCore;
 use session::context::{Channel, QueryContextRef};

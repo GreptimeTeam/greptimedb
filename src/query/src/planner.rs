@@ -22,7 +22,7 @@ use common_telemetry::tracing;
 use datafusion::common::DFSchema;
 use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::PlannerContext;
-use datafusion_expr::Expr as DfExpr;
+use datafusion_expr::{Expr as DfExpr, LogicalPlan};
 use datafusion_sql::planner::{ParserOptions, SqlToRel};
 use promql_parser::parser::EvalStmt;
 use session::context::QueryContextRef;
@@ -32,7 +32,6 @@ use sql::statements::statement::Statement;
 
 use crate::error::{DataFusionSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
 use crate::parser::QueryStatement;
-use datafusion_expr::LogicalPlan;
 use crate::promql::planner::PromPlanner;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 use crate::range_select::plan_rewrite::RangePlanRewriter;

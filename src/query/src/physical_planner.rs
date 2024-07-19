@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_expr::LogicalPlan;
 
 use crate::error::Result;
-use datafusion_expr::LogicalPlan;
 use crate::query_engine::QueryEngineContext;
 
 /// Physical query planner that converts a `LogicalPlan` to an

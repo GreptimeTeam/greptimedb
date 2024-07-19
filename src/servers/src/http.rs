@@ -953,11 +953,11 @@ mod test {
     use axum::routing::get;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
+    use datafusion_expr::LogicalPlan;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
     use query::parser::PromQuery;
-    use datafusion_expr::LogicalPlan;
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
