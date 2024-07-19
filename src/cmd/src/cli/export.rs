@@ -293,11 +293,14 @@ impl Export {
                 let (metric_physical_tables, remaining_tables) =
                     self.get_table_list(&catalog, &schema).await?;
                 let table_count = metric_physical_tables.len() + remaining_tables.len();
-                tokio::fs::create_dir_all(&self.output_dir)
+                let output_dir = Path::new(&self.output_dir)
+                    .join(&catalog)
+                    .join(format!("{schema}/"));
+                tokio::fs::create_dir_all(&output_dir)
                     .await
                     .context(FileIoSnafu)?;
                 let output_file =
-                    Path::new(&self.output_dir).join(format!("{catalog}-{schema}.sql"));
+                    Path::new(&output_dir).join(format!("{schema}_create_tables.sql"));
                 let mut file = File::create(output_file).await.context(FileIoSnafu)?;
                 for (c, s, t) in metric_physical_tables.into_iter().chain(remaining_tables) {
                     match self.show_create_table(&c, &s, &t).await {
@@ -437,10 +440,12 @@ impl Export {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
-                tokio::fs::create_dir_all(&self.output_dir)
+                let output_dir = Path::new(&self.output_dir)
+                    .join(&catalog)
+                    .join(format!("{schema}/"));
+                tokio::fs::create_dir_all(&output_dir)
                     .await
                     .context(FileIoSnafu)?;
-                let output_dir = Path::new(&self.output_dir).join(format!("{catalog}-{schema}/"));
 
                 let with_options = match (&self.start_time, &self.end_time) {
                     (Some(start_time), Some(end_time)) => {
@@ -472,9 +477,8 @@ impl Export {
 
                 info!("Finished exporting {catalog}.{schema} data");
 
-                // export copy from sql
-                let copy_from_file = Path::new(&self.output_dir)
-                    .join(format!("{catalog}-{schema}_copy_database_from.sql"));
+                // The export copy from sql
+                let copy_from_file = output_dir.join(format!("{schema}_copy_from.sql"));
                 let mut writer =
                     BufWriter::new(File::create(copy_from_file).await.context(FileIoSnafu)?);
                 let copy_database_from_sql = format!(
@@ -489,7 +493,7 @@ impl Export {
                     .context(FileIoSnafu)?;
                 writer.flush().await.context(FileIoSnafu)?;
 
-                info!("Finished exporting {catalog}.{schema} copy_database_from.sql");
+                info!("Finished exporting {catalog}.{schema} copy_from.sql");
 
                 Ok::<(), Error>(())
             })
