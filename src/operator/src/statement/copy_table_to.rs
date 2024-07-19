@@ -29,7 +29,6 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion_common::TableReference as DfTableReference;
 use datafusion_expr::LogicalPlanBuilder;
 use object_store::ObjectStore;
-use datafusion_expr::LogicalPlan;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::requests::CopyTableRequest;

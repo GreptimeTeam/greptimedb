@@ -36,7 +36,7 @@ use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
-use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
+use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp};
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
@@ -60,7 +60,6 @@ use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
 use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
-use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
 use crate::{metrics, QueryEngine};
@@ -122,7 +121,7 @@ impl DatafusionQueryEngine {
         let table = self.find_table(&table_name).await?;
 
         let output = self
-            .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()), query_ctx.clone())
+            .exec_query_plan((*dml.input).clone(), query_ctx.clone())
             .await?;
         let mut stream = match output.data {
             OutputData::RecordBatches(batches) => batches.as_stream(),
@@ -287,7 +286,7 @@ impl QueryEngine for DatafusionQueryEngine {
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         match plan {
-            LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => {
+           DfLogicalPlan::Dml(dml) => {
                 self.exec_dml_statement(dml, query_ctx).await
             }
             _ => self.exec_query_plan(plan, query_ctx).await,
@@ -338,7 +337,7 @@ impl LogicalOptimizer for DatafusionQueryEngine {
     fn optimize(&self, context: &QueryEngineContext, plan: &LogicalPlan) -> Result<LogicalPlan> {
         let _timer = metrics::OPTIMIZE_LOGICAL_ELAPSED.start_timer();
         match plan {
-            LogicalPlan::DfPlan(df_plan) => {
+            df_plan => {
                 // Optimized by extension rules
                 let optimized_plan = self
                     .state
@@ -356,7 +355,7 @@ impl LogicalOptimizer for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
 
-                Ok(LogicalPlan::DfPlan(optimized_plan))
+                Ok(optimized_plan)
             }
         }
     }
@@ -372,7 +371,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
         match logical_plan {
-            LogicalPlan::DfPlan(df_plan) => {
+            df_plan => {
                 let state = ctx.state();
 
                 // special handle EXPLAIN plan

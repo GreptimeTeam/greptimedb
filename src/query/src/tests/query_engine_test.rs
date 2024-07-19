@@ -23,7 +23,7 @@ use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_query::OutputData;
 use common_recordbatch::{util, RecordBatch};
 use datafusion::datasource::DefaultTableSource;
-use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::UInt32Vector;
@@ -35,7 +35,6 @@ use table::test_util::MemTable;
 
 use crate::error::{QueryExecutionSnafu, Result};
 use crate::parser::QueryLanguageParser;
-use crate::plan::LogicalPlan;
 use crate::query_engine::options::QueryOptions;
 use crate::query_engine::QueryEngineFactory;
 use crate::tests::exec_selection;
@@ -64,18 +63,17 @@ async fn test_datafusion_query_engine() -> Result<()> {
 
     let limit = 10;
     let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
-    let plan = LogicalPlan::DfPlan(
-        LogicalPlanBuilder::scan(
+    let plan =
+        LogicalPlan::builder::LogicalPlanBuilder::scan(
             "numbers",
             Arc::new(DefaultTableSource { table_provider }),
             None,
         )
-        .unwrap()
-        .limit(0, Some(limit))
-        .unwrap()
-        .build()
-        .unwrap(),
-    );
+            .unwrap()
+            .limit(0, Some(limit))
+            .unwrap()
+            .build()
+            .unwrap();
 
     let output = engine.execute(plan, QueryContext::arc()).await?;
 
@@ -145,7 +143,7 @@ async fn test_query_validate() -> Result<()> {
         "select number from wrongschema.numbers",
         &QueryContext::arc(),
     )
-    .unwrap();
+        .unwrap();
     assert!(engine
         .planner()
         .plan(stmt, QueryContext::arc())

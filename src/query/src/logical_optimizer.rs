@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::error::Result;
-use crate::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use crate::QueryEngineContext;
 
 /// Logical plan optimizer, rewrite the [`LogicalPlan`] in some way.

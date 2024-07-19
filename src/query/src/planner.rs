@@ -32,7 +32,7 @@ use sql::statements::statement::Statement;
 
 use crate::error::{DataFusionSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
 use crate::parser::QueryStatement;
-use crate::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use crate::promql::planner::PromPlanner;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 use crate::range_select::plan_rewrite::RangePlanRewriter;
@@ -109,7 +109,7 @@ impl DfLogicalPlanner {
             .optimize_by_extension_rules(plan, &context)
             .context(DataFusionSnafu)?;
 
-        Ok(LogicalPlan::DfPlan(plan))
+        Ok(plan)
     }
 
     /// Generate a relational expression from a SQL expression
@@ -159,7 +159,6 @@ impl DfLogicalPlanner {
         );
         PromPlanner::stmt_to_plan(table_provider, stmt, &self.session_state)
             .await
-            .map(LogicalPlan::DfPlan)
             .map_err(BoxedError::new)
             .context(QueryPlanSnafu)
     }

@@ -36,7 +36,7 @@ use table::TableRef;
 use crate::dataframe::DataFrame;
 use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
-use crate::plan::LogicalPlan;
+use datafusion_expr::LogicalPlan;
 use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
