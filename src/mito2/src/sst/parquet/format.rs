@@ -50,6 +50,9 @@ use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 use crate::sst::to_sst_arrow_schema;
 
+/// Arrow array type for the primary key dictionary.
+pub(crate) type PrimaryKeyArray = DictionaryArray<UInt32Type>;
+
 /// Number of columns that have fixed positions.
 ///
 /// Contains: time index and internal columns.
@@ -230,7 +233,7 @@ impl ReadFormat {
         // Compute primary key offsets.
         let pk_dict_array = pk_array
             .as_any()
-            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .downcast_ref::<PrimaryKeyArray>()
             .with_context(|| InvalidRecordBatchSnafu {
                 reason: format!("primary key array should not be {:?}", pk_array.data_type()),
             })?;
@@ -524,7 +527,7 @@ impl ReadFormat {
 }
 
 /// Compute offsets of different primary keys in the array.
-fn primary_key_offsets(pk_dict_array: &DictionaryArray<UInt32Type>) -> Result<Vec<usize>> {
+fn primary_key_offsets(pk_dict_array: &PrimaryKeyArray) -> Result<Vec<usize>> {
     if pk_dict_array.is_empty() {
         return Ok(Vec::new());
     }
@@ -674,7 +677,7 @@ mod tests {
         assert_eq!(&expect, &array);
     }
 
-    fn build_test_pk_array(pk_row_nums: &[(Vec<u8>, usize)]) -> Arc<DictionaryArray<UInt32Type>> {
+    fn build_test_pk_array(pk_row_nums: &[(Vec<u8>, usize)]) -> Arc<PrimaryKeyArray> {
         let values = Arc::new(BinaryArray::from_iter_values(
             pk_row_nums.iter().map(|v| &v.0),
         ));
