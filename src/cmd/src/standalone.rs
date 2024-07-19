@@ -182,7 +182,6 @@ impl StandaloneOptions {
     pub fn frontend_options(&self) -> FrontendOptions {
         let cloned_opts = self.clone();
         FrontendOptions {
-            mode: cloned_opts.mode,
             default_timezone: cloned_opts.default_timezone,
             http: cloned_opts.http,
             grpc: cloned_opts.grpc,
@@ -636,7 +635,6 @@ mod tests {
     use common_test_util::temp_dir::create_named_temp_file;
     use common_wal::config::DatanodeWalConfig;
     use datanode::config::{FileConfig, GcsConfig};
-    use servers::Mode;
 
     use super::*;
     use crate::options::GlobalOptions;
@@ -736,7 +734,6 @@ mod tests {
         let fe_opts = options.frontend_options();
         let dn_opts = options.datanode_options();
         let logging_opts = options.logging;
-        assert_eq!(Mode::Standalone, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(33), fe_opts.http.timeout);
         assert_eq!(ReadableSize::mb(128), fe_opts.http.body_limit);
