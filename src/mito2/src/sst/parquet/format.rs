@@ -15,7 +15,7 @@
 //! Format to store in parquet.
 //!
 //! We store three internal columns in parquet:
-//! - `__primary_key`, the primary key of the row (tags). Type: dictionary(uint16, binary)
+//! - `__primary_key`, the primary key of the row (tags). Type: dictionary(uint32, binary)
 //! - `__sequence`, the sequence number of a row. Type: uint64
 //! - `__op_type`, the op type of the row. Type: uint8
 //!
@@ -627,7 +627,7 @@ mod tests {
             Field::new(
                 "__primary_key",
                 ArrowDataType::Dictionary(
-                    Box::new(ArrowDataType::UInt16),
+                    Box::new(ArrowDataType::UInt32),
                     Box::new(ArrowDataType::Binary),
                 ),
                 false,
