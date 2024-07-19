@@ -57,7 +57,7 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to list flows in catalog {catalog}: {source}"))]
+    #[snafu(display("Failed to list flows in catalog {catalog}"))]
     ListFlows {
         #[snafu(implicit)]
         location: Location,

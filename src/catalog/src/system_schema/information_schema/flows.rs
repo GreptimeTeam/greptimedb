@@ -45,8 +45,8 @@ const INIT_CAPACITY: usize = 42;
 // pk is (flow_name, flow_id, catalog_name)
 pub const FLOW_NAME: &str = "flow_name";
 pub const FLOW_ID: &str = "flow_id";
-pub const CATALOG_NAME: &str = "catalog_name";
-pub const RAW_SQL: &str = "raw_sql";
+pub const TABLE_CATALOG: &str = "table_catalog";
+pub const FLOW_DEFINITION: &str = "flow_definition";
 pub const COMMENT: &str = "comment";
 pub const EXPIRE_AFTER: &str = "expire_after";
 pub const SOURCE_TABLE_IDS: &str = "source_table_ids";
@@ -54,6 +54,7 @@ pub const SINK_TABLE_NAME: &str = "sink_table_name";
 pub const FLOWNODE_IDS: &str = "flownode_ids";
 pub const OPTIONS: &str = "options";
 
+/// The `information_schema.flows` to provides information about flows in databases.
 pub(super) struct InformationSchemaFlows {
     schema: SchemaRef,
     catalog_name: String,
@@ -72,15 +73,15 @@ impl InformationSchemaFlows {
         }
     }
 
-    /// for complex fields, it will be serialized to json string for now
+    /// for complex fields(including [`SOURCE_TABLE_IDS`], [`FLOWNODE_IDS`] and [`OPTIONS`]), it will be serialized to json string for now
     /// TODO(discord9): use a better way to store complex fields like json type
     pub(crate) fn schema() -> SchemaRef {
         Arc::new(Schema::new(
             vec![
                 (FLOW_NAME, CDT::string_datatype(), false),
                 (FLOW_ID, CDT::uint32_datatype(), false),
-                (CATALOG_NAME, CDT::string_datatype(), false),
-                (RAW_SQL, CDT::string_datatype(), false),
+                (TABLE_CATALOG, CDT::string_datatype(), false),
+                (FLOW_DEFINITION, CDT::string_datatype(), false),
                 (COMMENT, CDT::string_datatype(), true),
                 (EXPIRE_AFTER, CDT::int64_datatype(), true),
                 (SOURCE_TABLE_IDS, CDT::string_datatype(), true),
@@ -123,12 +124,10 @@ impl InformationTable for InformationSchemaFlows {
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_views(Some(request))
+                    .make_flows(Some(request))
                     .await
                     .map(|x| x.into_df_record_batch())
-                    .map_err(|err| {
-                        datafusion::error::DataFusionError::External(format!("{err:?}").into())
-                    })
+                    .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))
             }),
         ));
         Ok(Box::pin(
@@ -139,7 +138,7 @@ impl InformationTable for InformationSchemaFlows {
     }
 }
 
-/// Builds the `information_schema.VIEWS` table row by row
+/// Builds the `information_schema.FLOWS` table row by row
 ///
 /// columns are based on [`FlowInfoValue`]
 struct InformationSchemaFlowsBuilder {
@@ -149,7 +148,7 @@ struct InformationSchemaFlowsBuilder {
 
     flow_names: StringVectorBuilder,
     flow_ids: UInt32VectorBuilder,
-    catalog_names: StringVectorBuilder,
+    table_catalogs: StringVectorBuilder,
     raw_sqls: StringVectorBuilder,
     comments: StringVectorBuilder,
     expire_afters: Int64VectorBuilder,
@@ -172,7 +171,7 @@ impl InformationSchemaFlowsBuilder {
 
             flow_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             flow_ids: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
-            catalog_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_catalogs: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             raw_sqls: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             comments: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             expire_afters: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
@@ -183,8 +182,8 @@ impl InformationSchemaFlowsBuilder {
         }
     }
 
-    /// Construct the `information_schema.views` virtual table
-    async fn make_views(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
+    /// Construct the `information_schema.flows` virtual table
+    async fn make_flows(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
         let predicates = Predicates::from_scan_request(&request);
 
@@ -201,7 +200,7 @@ impl InformationSchemaFlowsBuilder {
             .await
             .map_err(BoxedError::new)
             .context(ListFlowsSnafu {
-                catalog: catalog_name.to_string(),
+                catalog: &catalog_name,
             })?
         {
             let flow_info = flow_info_manager
@@ -214,13 +213,13 @@ impl InformationSchemaFlowsBuilder {
                     catalog_name: catalog_name.to_string(),
                     flow_name: flow_name.to_string(),
                 })?;
-            self.add_view(&predicates, flow_id.flow_id(), flow_info)?;
+            self.add_flow(&predicates, flow_id.flow_id(), flow_info)?;
         }
 
         self.finish()
     }
 
-    fn add_view(
+    fn add_flow(
         &mut self,
         predicates: &Predicates,
         flow_id: FlowId,
@@ -230,7 +229,7 @@ impl InformationSchemaFlowsBuilder {
             (FLOW_NAME, &Value::from(flow_info.flow_name().to_string())),
             (FLOW_ID, &Value::from(flow_id)),
             (
-                CATALOG_NAME,
+                TABLE_CATALOG,
                 &Value::from(flow_info.catalog_name().to_string()),
             ),
         ];
@@ -239,7 +238,7 @@ impl InformationSchemaFlowsBuilder {
         }
         self.flow_names.push(Some(flow_info.flow_name()));
         self.flow_ids.push(Some(flow_id));
-        self.catalog_names.push(Some(flow_info.catalog_name()));
+        self.table_catalogs.push(Some(flow_info.catalog_name()));
         self.raw_sqls.push(Some(flow_info.raw_sql()));
         self.comments.push(Some(flow_info.comment()));
         self.expire_afters.push(flow_info.expire_after());
@@ -271,7 +270,7 @@ impl InformationSchemaFlowsBuilder {
         let columns: Vec<VectorRef> = vec![
             Arc::new(self.flow_names.finish()),
             Arc::new(self.flow_ids.finish()),
-            Arc::new(self.catalog_names.finish()),
+            Arc::new(self.table_catalogs.finish()),
             Arc::new(self.raw_sqls.finish()),
             Arc::new(self.comments.finish()),
             Arc::new(self.expire_afters.finish()),
@@ -296,7 +295,7 @@ impl DfPartitionStream for InformationSchemaFlows {
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_views(None)
+                    .make_flows(None)
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)

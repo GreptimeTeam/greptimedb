@@ -444,7 +444,7 @@ impl<'a> ParserContext<'a> {
                 }));
             }
 
-            // SHOW VIEWS [in | FROM] [DATABASE]
+            // SHOW FLOWS [in | FROM] [DATABASE]
             Token::Word(w) => match w.keyword {
                 Keyword::IN | Keyword::FROM => self.parse_db_name()?,
                 _ => None,

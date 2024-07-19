@@ -772,7 +772,7 @@ pub async fn show_flows(
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
     let projects = vec![(flows::FLOW_NAME, FLOWS_COLUMN)];
-    let filters = vec![col(flows::CATALOG_NAME).eq(lit(query_ctx.current_catalog()))];
+    let filters = vec![col(flows::TABLE_CATALOG).eq(lit(query_ctx.current_catalog()))];
     let like_field = Some(flows::FLOW_NAME);
     let sort = vec![col(flows::FLOW_NAME).sort(true, true)];
 
