@@ -129,7 +129,7 @@ impl StatementExecutor {
 
         let output = self
             .query_engine
-            .execute(LogicalPlan, query_ctx)
+            .execute(plan, query_ctx)
             .await
             .context(ExecLogicalPlanSnafu)?;
         let stream = match output.data {

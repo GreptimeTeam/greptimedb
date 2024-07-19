@@ -180,7 +180,7 @@ impl Repl {
                 .await
                 .context(PlanStatementSnafu)?;
 
-            let LogicalPlan = query_engine
+            let plan:LogicalPlan = query_engine
                 .optimize(&query_engine.engine_context(query_ctx), &plan)
                 .context(PlanStatementSnafu)?;
 

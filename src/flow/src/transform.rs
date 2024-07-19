@@ -134,7 +134,7 @@ pub async fn sql_to_flow_plan(
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-    let LogicalPlan = plan;
+    let plan: LogicalPlan;
     let sub_plan = DFLogicalSubstraitConvertor {}
         .to_sub_plan(&plan, DefaultSerializer)
         .map_err(BoxedError::new)
@@ -309,7 +309,7 @@ mod test {
             .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
-        let LogicalPlan = plan;
+        let plan: LogicalPlan;
 
         // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
         let bytes = DFLogicalSubstraitConvertor {}
