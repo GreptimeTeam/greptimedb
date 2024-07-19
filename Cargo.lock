@@ -10899,6 +10899,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
+ "common-meta",
  "common-recordbatch",
  "common-time",
  "common-wal",
