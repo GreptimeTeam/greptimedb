@@ -41,6 +41,7 @@ SHOW TABLES;
 | engines                               |
 | events                                |
 | files                                 |
+| flows                                 |
 | global_status                         |
 | key_column_usage                      |
 | optimizer_trace                       |
@@ -86,6 +87,7 @@ SHOW FULL TABLES;
 | engines                               | LOCAL TEMPORARY |
 | events                                | LOCAL TEMPORARY |
 | files                                 | LOCAL TEMPORARY |
+| flows                                 | LOCAL TEMPORARY |
 | global_status                         | LOCAL TEMPORARY |
 | key_column_usage                      | LOCAL TEMPORARY |
 | optimizer_trace                       | LOCAL TEMPORARY |
@@ -125,6 +127,7 @@ SHOW TABLE STATUS;
 |engines||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
 |events||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
 |files||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
+|flows||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
 |global_status||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
 |key_column_usage||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
 |optimizer_trace||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||

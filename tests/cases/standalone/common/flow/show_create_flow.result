@@ -13,6 +13,18 @@ create table out_num_cnt (
 
 Affected Rows: 0
 
+SELECT flow_name, table_catalog, flow_definition FROM INFORMATION_SCHEMA.FLOWS;
+
++-----------+---------------+-----------------+
+| flow_name | table_catalog | flow_definition |
++-----------+---------------+-----------------+
++-----------+---------------+-----------------+
+
+SHOW FLOWS;
+
+++
+++
+
 CREATE FLOW filter_numbers SINK TO out_num_cnt AS SELECT number FROM numbers_input where number > 10;
 
 Affected Rows: 0
@@ -27,9 +39,37 @@ SHOW CREATE FLOW filter_numbers;
 |                | AS SELECT number FROM numbers_input WHERE number > 10 |
 +----------------+-------------------------------------------------------+
 
+SELECT flow_name, table_catalog, flow_definition FROM INFORMATION_SCHEMA.FLOWS;
+
++----------------+---------------+----------------------------------------------------+
+| flow_name      | table_catalog | flow_definition                                    |
++----------------+---------------+----------------------------------------------------+
+| filter_numbers | greptime      | SELECT number FROM numbers_input WHERE number > 10 |
++----------------+---------------+----------------------------------------------------+
+
+SHOW FLOWS;
+
++----------------+
+| Flows          |
++----------------+
+| filter_numbers |
++----------------+
+
 drop flow filter_numbers;
 
 Affected Rows: 0
+
+SELECT flow_name, table_catalog, flow_definition FROM INFORMATION_SCHEMA.FLOWS;
+
++-----------+---------------+-----------------+
+| flow_name | table_catalog | flow_definition |
++-----------+---------------+-----------------+
++-----------+---------------+-----------------+
+
+SHOW FLOWS;
+
+++
+++
 
 drop table out_num_cnt;
 

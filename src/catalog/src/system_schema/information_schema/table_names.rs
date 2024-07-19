@@ -44,3 +44,4 @@ pub const REGION_PEERS: &str = "region_peers";
 pub const TABLE_CONSTRAINTS: &str = "table_constraints";
 pub const CLUSTER_INFO: &str = "cluster_info";
 pub const VIEWS: &str = "views";
+pub const FLOWS: &str = "flows";
