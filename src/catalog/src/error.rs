@@ -73,7 +73,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Can't convert value to json, input={input}, error={error:?}"))]
+    #[snafu(display("Can't convert value to json, input={input}"))]
     Json {
         input: String,
         #[snafu(source)]
