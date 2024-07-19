@@ -245,7 +245,9 @@ impl StartCommand {
             opts.mode = Mode::Distributed;
         }
 
-        opts.user_provider.clone_from(&self.user_provider);
+        if let Some(user_provider) = &self.user_provider {
+            opts.user_provider = Some(user_provider.clone());
+        }
 
         Ok(())
     }
