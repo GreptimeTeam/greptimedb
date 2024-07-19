@@ -42,7 +42,7 @@ use crate::system_schema::information_schema::InformationTable;
 const INIT_CAPACITY: usize = 42;
 
 // rows of information_schema.flows
-// pk is (flow_name, flow_id, catalog_name)
+// pk is (flow_name, flow_id, table_catalog)
 pub const FLOW_NAME: &str = "flow_name";
 pub const FLOW_ID: &str = "flow_id";
 pub const TABLE_CATALOG: &str = "table_catalog";
