@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
+use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
@@ -238,8 +239,9 @@ impl StartCommand {
         info!("Metasrv start command: {:#?}", self);
         info!("Metasrv options: {:#?}", opts);
 
-        let mut opts = opts.component;
-        let plugins = plugins::setup_metasrv_plugins(&mut opts)
+        let opts = opts.component;
+        let mut plugins = Plugins::new();
+        plugins::setup_metasrv_plugins(&mut plugins, &opts)
             .await
             .context(StartMetaServerSnafu)?;
 

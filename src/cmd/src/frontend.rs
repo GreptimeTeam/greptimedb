@@ -20,6 +20,7 @@ use cache::{build_fundamental_cache_registry, with_default_composite_cache_regis
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::NodeClients;
+use common_base::Plugins;
 use common_config::Configurable;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -264,9 +265,9 @@ impl StartCommand {
         info!("Frontend start command: {:#?}", self);
         info!("Frontend options: {:#?}", opts);
 
-        let mut opts = opts.component;
-        #[allow(clippy::unnecessary_mut_passed)]
-        let plugins = plugins::setup_frontend_plugins(&mut opts)
+        let opts = opts.component;
+        let mut plugins = Plugins::new();
+        plugins::setup_frontend_plugins(&mut plugins, &opts)
             .await
             .context(StartFrontendSnafu)?;
 
@@ -458,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let mut fe_opts = frontend::frontend::FrontendOptions {
+        let fe_opts = frontend::frontend::FrontendOptions {
             http: HttpOptions {
                 disable_dashboard: false,
                 ..Default::default()
@@ -467,8 +468,10 @@ mod tests {
             ..Default::default()
         };
 
-        #[allow(clippy::unnecessary_mut_passed)]
-        let plugins = plugins::setup_frontend_plugins(&mut fe_opts).await.unwrap();
+        let mut plugins = Plugins::new();
+        plugins::setup_frontend_plugins(&mut plugins, &fe_opts)
+            .await
+            .unwrap();
 
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider
