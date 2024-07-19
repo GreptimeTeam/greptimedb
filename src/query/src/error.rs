@@ -18,6 +18,7 @@ use std::time::Duration;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_query::error::datafusion_status_code;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
@@ -333,7 +334,6 @@ impl ErrorExt for Error {
             }
             UnsupportedExpr { .. }
             | Unimplemented { .. }
-            | TableNotFound { .. }
             | UnknownTable { .. }
             | TimeIndexNotFound { .. }
             | ParseTimestamp { .. }
@@ -348,6 +348,8 @@ impl ErrorExt for Error {
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
 
+            TableNotFound { .. } => StatusCode::TableNotFound,
+
             ParseFileFormat { source, .. } | InferSchema { source, .. } => source.status_code(),
 
             QueryAccessDenied { .. } => StatusCode::AccessDenied,
@@ -355,21 +357,21 @@ impl ErrorExt for Error {
             ConvertDatafusionSchema { source, .. } => source.status_code(),
             CreateRecordBatch { source, .. } => source.status_code(),
             QueryExecution { source, .. } | QueryPlan { source, .. } => source.status_code(),
-            DataFusion { error, .. } => match error {
-                DataFusionError::Internal(_) => StatusCode::Internal,
-                DataFusionError::NotImplemented(_) => StatusCode::Unsupported,
-                DataFusionError::Plan(_) => StatusCode::PlanQuery,
-                _ => StatusCode::EngineExecuteQuery,
-            },
+            PlanSql { error, .. } => {
+                datafusion_status_code::<Self>(error, Some(StatusCode::PlanQuery))
+            }
+
+            DataFusion { error, .. } => datafusion_status_code::<Self>(error, None),
+
             MissingTimestampColumn { .. } => StatusCode::EngineExecuteQuery,
             Sql { source, .. } => source.status_code(),
-            PlanSql { .. } => StatusCode::PlanQuery,
+
             ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.status_code(),
 
             RegionQuery { source, .. } => source.status_code(),
             TableMutation { source, .. } => source.status_code(),
             MissingTableMutationHandler { .. } => StatusCode::Unexpected,
-            GetRegionMetadata { .. } => StatusCode::Internal,
+            GetRegionMetadata { .. } => StatusCode::RegionNotReady,
             TableReadOnly { .. } => StatusCode::Unsupported,
             GetFulltextOptions { source, .. } => source.status_code(),
         }

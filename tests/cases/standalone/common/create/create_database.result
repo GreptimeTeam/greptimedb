@@ -18,6 +18,7 @@ show databases;
 | greptime_private   |
 | illegal-database   |
 | information_schema |
+| pg_catalog         |
 | public             |
 +--------------------+
 

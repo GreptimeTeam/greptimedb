@@ -17,9 +17,9 @@ use index::inverted_index::search::predicate::{Bound, Predicate, Range, RangePre
 use index::inverted_index::Bytes;
 
 use crate::error::Result;
-use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> SstIndexApplierBuilder<'a> {
+impl<'a> InvertedIndexApplierBuilder<'a> {
     /// Collects a comparison expression in the form of
     /// `column < lit`, `column > lit`, `column <= lit`, `column >= lit`,
     /// `lit < column`, `lit > column`, `lit <= column`, `lit >= column`.
@@ -228,7 +228,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_comparison_basic_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -257,7 +257,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_comparison_type_mismatch_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -277,7 +277,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_comparison_field_column_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -298,7 +298,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_comparison_nonexistent_column_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,

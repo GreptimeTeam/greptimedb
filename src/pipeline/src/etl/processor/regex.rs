@@ -23,8 +23,8 @@ use regex::Regex;
 
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_field, yaml_fields, yaml_strings, Field, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME,
+    yaml_bool, yaml_field, yaml_fields, yaml_string, yaml_strings, Field, Processor, FIELDS_NAME,
+    FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::{Map, Value};
 
@@ -157,6 +157,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessor {
                 FIELDS_NAME => {
                     processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
                 }
+                PATTERN_NAME => {
+                    processor.try_with_patterns(vec![yaml_string(v, PATTERN_NAME)?])?;
+                }
                 PATTERNS_NAME => {
                     processor.try_with_patterns(yaml_strings(v, PATTERNS_NAME)?)?;
                 }
@@ -209,6 +212,35 @@ mod tests {
     use crate::etl::field::Fields;
     use crate::etl::processor::Processor;
     use crate::etl::value::{Map, Value};
+
+    #[test]
+    fn test_simple_parse() {
+        let mut processor = RegexProcessor::default();
+
+        // single field (with prefix), multiple patterns
+        let f = ["a"].iter().map(|f| f.parse().unwrap()).collect();
+        processor.with_fields(Fields::new(f).unwrap());
+
+        let ar = "(?<ar>\\d)";
+
+        let patterns = [ar].iter().map(|p| p.to_string()).collect();
+        processor.try_with_patterns(patterns).unwrap();
+
+        let mut map = Map::default();
+        map.insert("a", Value::String("123".to_string()));
+        let processed_val = processor.exec_map(map).unwrap();
+
+        let v = Value::Map(Map {
+            values: vec![
+                ("a_ar".to_string(), Value::String("1".to_string())),
+                ("a".to_string(), Value::String("123".to_string())),
+            ]
+            .into_iter()
+            .collect(),
+        });
+
+        assert_eq!(v, processed_val);
+    }
 
     #[test]
     fn test_process() {

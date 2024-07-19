@@ -62,14 +62,30 @@ async fn test_put_get_file() {
             writer.finish().await.unwrap();
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
-            check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
+            check_blob(
+                puffin_file_name,
+                key,
+                raw_data,
+                &stager,
+                &reader,
+                compression_codec.is_some(),
+            )
+            .await;
 
             // renew cache manager
             let (_staging_dir, stager) = new_bounded_stager("test_put_get_file_", capacity).await;
             let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor);
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
-            check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
+            check_blob(
+                puffin_file_name,
+                key,
+                raw_data,
+                &stager,
+                &reader,
+                compression_codec.is_some(),
+            )
+            .await;
         }
     }
 }
@@ -106,7 +122,15 @@ async fn test_put_get_files() {
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
-                check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
+                check_blob(
+                    puffin_file_name,
+                    key,
+                    raw_data,
+                    &stager,
+                    &reader,
+                    compression_codec.is_some(),
+                )
+                .await;
             }
 
             // renew cache manager
@@ -114,7 +138,15 @@ async fn test_put_get_files() {
             let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor);
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
-                check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
+                check_blob(
+                    puffin_file_name,
+                    key,
+                    raw_data,
+                    &stager,
+                    &reader,
+                    compression_codec.is_some(),
+                )
+                .await;
             }
         }
     }
@@ -205,7 +237,15 @@ async fn test_put_get_mix_file_dir() {
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
-                check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
+                check_blob(
+                    puffin_file_name,
+                    key,
+                    raw_data,
+                    &stager,
+                    &reader,
+                    compression_codec.is_some(),
+                )
+                .await;
             }
             check_dir(puffin_file_name, dir_key, &files_in_dir, &stager, &reader).await;
 
@@ -216,7 +256,15 @@ async fn test_put_get_mix_file_dir() {
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
-                check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
+                check_blob(
+                    puffin_file_name,
+                    key,
+                    raw_data,
+                    &stager,
+                    &reader,
+                    compression_codec.is_some(),
+                )
+                .await;
             }
             check_dir(puffin_file_name, dir_key, &files_in_dir, &stager, &reader).await;
         }
@@ -241,24 +289,28 @@ async fn put_blob(
         .unwrap();
 }
 
-async fn check_blob<R>(
+async fn check_blob(
     puffin_file_name: &str,
     key: &str,
     raw_data: &[u8],
     stager: &BoundedStager,
-    puffin_reader: &R,
-) where
-    R: PuffinReader,
-{
+    puffin_reader: &impl PuffinReader,
+    compressed: bool,
+) {
     let blob = puffin_reader.blob(key).await.unwrap();
     let mut reader = blob.reader().await.unwrap();
     let mut buf = Vec::new();
     reader.read_to_end(&mut buf).await.unwrap();
     assert_eq!(buf, raw_data);
 
-    let mut cached_file = stager.must_get_file(puffin_file_name, key).await;
+    if !compressed {
+        // If the blob is not compressed, it won't be exist in the stager.
+        return;
+    }
+
+    let mut staged_file = stager.must_get_file(puffin_file_name, key).await;
     let mut buf = Vec::new();
-    cached_file.read_to_end(&mut buf).await.unwrap();
+    staged_file.read_to_end(&mut buf).await.unwrap();
     assert_eq!(buf, raw_data);
 }
 
@@ -291,15 +343,13 @@ async fn put_dir(
         .unwrap();
 }
 
-async fn check_dir<R>(
+async fn check_dir(
     puffin_file_name: &str,
     key: &str,
     files_in_dir: &[(&str, &[u8])],
     stager: &BoundedStager,
-    puffin_reader: &R,
-) where
-    R: PuffinReader,
-{
+    puffin_reader: &impl PuffinReader,
+) {
     let res_dir = puffin_reader.dir(key).await.unwrap();
     for (file_name, raw_data) in files_in_dir {
         let file_path = if cfg!(windows) {
@@ -311,12 +361,12 @@ async fn check_dir<R>(
         assert_eq!(buf, *raw_data);
     }
 
-    let cached_dir = stager.must_get_dir(puffin_file_name, key).await;
+    let staged_dir = stager.must_get_dir(puffin_file_name, key).await;
     for (file_name, raw_data) in files_in_dir {
         let file_path = if cfg!(windows) {
-            cached_dir.as_path().join(file_name.replace('/', "\\"))
+            staged_dir.as_path().join(file_name.replace('/', "\\"))
         } else {
-            cached_dir.as_path().join(file_name)
+            staged_dir.as_path().join(file_name)
         };
         let buf = std::fs::read(file_path).unwrap();
         assert_eq!(buf, *raw_data);

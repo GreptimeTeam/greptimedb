@@ -84,7 +84,7 @@ SELECT date_format('2023-12-06 07:39:46.222'::TIMESTAMP_S, '%Y-%m-%d %H:%M:%S:%3
 --- datetime not supported yet ---
 SELECT date_format('2023-12-06 07:39:46.222'::DATETIME, '%Y-%m-%d %H:%M:%S:%3f');
 
-Error: 3000(PlanQuery), Failed to plan SQL: This feature is not implemented: Unsupported SQL type Datetime(None)
+Error: 1001(Unsupported), Failed to plan SQL: This feature is not implemented: Unsupported SQL type Datetime(None)
 
 SELECT date_format('2023-12-06'::DATE, '%m-%d');
 

@@ -658,15 +658,17 @@ impl ErrorExt for Error {
             | EtcdTxnFailed { .. }
             | ConnectEtcd { .. }
             | MoveValues { .. }
-            | ValueNotExist { .. }
             | GetCache { .. } => StatusCode::Internal,
+
+            ValueNotExist { .. } => StatusCode::Unexpected,
+
+            Unsupported { .. } => StatusCode::Unsupported,
 
             SerdeJson { .. }
             | ParseOption { .. }
             | RouteInfoCorrupted { .. }
             | InvalidProtoMsg { .. }
             | InvalidTableMetadata { .. }
-            | InvalidViewInfo { .. }
             | MoveRegion { .. }
             | Unexpected { .. }
             | TableInfoNotFound { .. }
@@ -697,16 +699,16 @@ impl ErrorExt for Error {
             | FromUtf8 { .. }
             | MetadataCorruption { .. } => StatusCode::Unexpected,
 
-            SendMessage { .. }
-            | GetKvCache { .. }
-            | CacheNotGet { .. }
-            | CatalogAlreadyExists { .. }
-            | SchemaAlreadyExists { .. }
-            | RenameTable { .. }
-            | Unsupported { .. } => StatusCode::Internal,
+            SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } | RenameTable { .. } => {
+                StatusCode::Internal
+            }
+
+            SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
 
             ProcedureNotFound { .. }
+            | InvalidViewInfo { .. }
             | PrimaryKeyNotFound { .. }
+            | CatalogAlreadyExists { .. }
             | EmptyKey { .. }
             | InvalidEngineType { .. }
             | AlterLogicalTablesInvalidArguments { .. }

@@ -84,7 +84,15 @@ fn increment_errors_total(op: Operation, kind: ErrorKind) {
 ///
 /// The metric buckets for these histograms are automatically generated based on the `exponential_buckets(0.01, 2.0, 16)` configuration.
 #[derive(Default, Debug, Clone)]
-pub struct PrometheusMetricsLayer;
+pub struct PrometheusMetricsLayer {
+    pub path_label: bool,
+}
+
+impl PrometheusMetricsLayer {
+    pub fn new(path_label: bool) -> Self {
+        Self { path_label }
+    }
+}
 
 impl<A: Access> Layer<A> for PrometheusMetricsLayer {
     type LayeredAccess = PrometheusAccess<A>;
@@ -96,6 +104,7 @@ impl<A: Access> Layer<A> for PrometheusMetricsLayer {
         PrometheusAccess {
             inner,
             scheme: scheme.to_string(),
+            path_label: self.path_label,
         }
     }
 }
@@ -104,6 +113,17 @@ impl<A: Access> Layer<A> for PrometheusMetricsLayer {
 pub struct PrometheusAccess<A: Access> {
     inner: A,
     scheme: String,
+    path_label: bool,
+}
+
+impl<A: Access> PrometheusAccess<A> {
+    fn get_path_label<'a>(&self, path: &'a str) -> &'a str {
+        if self.path_label {
+            extract_parent_path(path)
+        } else {
+            ""
+        }
+    }
 }
 
 impl<A: Access> Debug for PrometheusAccess<A> {
@@ -128,7 +148,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn create_dir(&self, path: &str, args: OpCreateDir) -> Result<RpCreateDir> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[&self.scheme, Operation::CreateDir.into_static(), path_label])
             .inc();
@@ -146,7 +166,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[&self.scheme, Operation::Read.into_static(), path_label])
             .inc();
@@ -176,7 +196,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[&self.scheme, Operation::Write.into_static(), path_label])
             .inc();
@@ -206,7 +226,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[&self.scheme, Operation::Stat.into_static(), path_label])
             .inc();
@@ -223,7 +243,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[&self.scheme, Operation::Delete.into_static(), path_label])
             .inc();
@@ -241,7 +261,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[&self.scheme, Operation::List.into_static(), path_label])
             .inc();
@@ -277,7 +297,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn presign(&self, path: &str, args: OpPresign) -> Result<RpPresign> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[&self.scheme, Operation::Presign.into_static(), path_label])
             .inc();
@@ -295,7 +315,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_create_dir(&self, path: &str, args: OpCreateDir) -> Result<RpCreateDir> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[
                 &self.scheme,
@@ -322,7 +342,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::BlockingReader)> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[
                 &self.scheme,
@@ -363,7 +383,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::BlockingWriter)> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[
                 &self.scheme,
@@ -404,7 +424,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[
                 &self.scheme,
@@ -429,7 +449,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[
                 &self.scheme,
@@ -455,7 +475,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingLister)> {
-        let path_label = extract_parent_path(path);
+        let path_label = self.get_path_label(path);
         REQUESTS_TOTAL
             .with_label_values(&[
                 &self.scheme,

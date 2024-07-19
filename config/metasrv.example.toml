@@ -25,6 +25,12 @@ enable_telemetry = true
 ## If it's not empty, the metasrv will store all data with this key prefix.
 store_key_prefix = ""
 
+## Whether to enable region failover.
+## This feature is only available on GreptimeDB running on cluster mode and
+## - Using Remote WAL
+## - Using shared storage (e.g., s3).
+enable_region_failover = false
+
 ## The runtime options.
 [runtime]
 ## The number of threads to execute the runtime for global read operations.

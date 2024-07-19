@@ -112,7 +112,11 @@ async fn test_compaction_region() {
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.max_active_window_runs", "1")
+        .insert_option("compaction.twcs.max_inactive_window_runs", "1")
+        .build();
 
     let column_schemas = request
         .column_metadatas

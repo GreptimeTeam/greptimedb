@@ -30,7 +30,7 @@ use datatypes::arrow::datatypes::SchemaRef;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, TimeSeriesRowSelector};
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
@@ -192,9 +192,18 @@ impl DummyTableProvider {
         }
     }
 
+    pub fn region_metadata(&self) -> RegionMetadataRef {
+        self.metadata.clone()
+    }
+
     /// Sets the ordering hint of the query to the provider.
     pub fn with_ordering_hint(&self, order_opts: &[OrderOption]) {
         self.scan_request.lock().unwrap().output_ordering = Some(order_opts.to_vec());
+    }
+
+    /// Sets the time series selector hint of the query to the provider.
+    pub fn with_time_series_selector_hint(&self, selector: TimeSeriesRowSelector) {
+        self.scan_request.lock().unwrap().series_row_selector = Some(selector);
     }
 
     /// Gets the scan request of the provider.

@@ -450,7 +450,7 @@ impl Metasrv {
             {
                 let election = election.clone();
                 let started = self.started.clone();
-                let _handle = common_runtime::spawn_bg(async move {
+                let _handle = common_runtime::spawn_write(async move {
                     while started.load(Ordering::Relaxed) {
                         let res = election.campaign().await;
                         if let Err(e) = res {

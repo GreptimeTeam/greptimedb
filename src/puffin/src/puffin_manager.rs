@@ -22,7 +22,6 @@ mod tests;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use futures::future::BoxFuture;
 use futures::{AsyncRead, AsyncSeek};
 
 use crate::blob_metadata::CompressionCodec;
@@ -92,10 +91,11 @@ pub trait PuffinReader {
 
 /// `BlobGuard` is provided by the `PuffinReader` to access the blob data.
 /// Users should hold the `BlobGuard` until they are done with the blob data.
+#[async_trait]
 #[auto_impl::auto_impl(Arc)]
 pub trait BlobGuard {
     type Reader: AsyncRead + AsyncSeek + Unpin;
-    fn reader(&self) -> BoxFuture<'static, Result<Self::Reader>>;
+    async fn reader(&self) -> Result<Self::Reader>;
 }
 
 /// `DirGuard` is provided by the `PuffinReader` to access the directory in the filesystem.

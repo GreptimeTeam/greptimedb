@@ -30,23 +30,26 @@ use datatypes::vectors::VectorRef;
 use moka::sync::Cache;
 use parquet::column::page::Page;
 use parquet::file::metadata::ParquetMetaData;
-use store_api::storage::{ConcreteDataType, RegionId};
+use store_api::storage::{ConcreteDataType, RegionId, TimeSeriesRowSelector};
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
+use crate::read::Batch;
 use crate::sst::file::FileId;
 
-// Metrics type key for sst meta.
+/// Metrics type key for sst meta.
 const SST_META_TYPE: &str = "sst_meta";
-// Metrics type key for vector.
+/// Metrics type key for vector.
 const VECTOR_TYPE: &str = "vector";
-// Metrics type key for pages.
+/// Metrics type key for pages.
 const PAGE_TYPE: &str = "page";
-// Metrics type key for files on the local store.
+/// Metrics type key for files on the local store.
 const FILE_TYPE: &str = "file";
+/// Metrics type key for selector result cache.
+const SELECTOR_RESULT_TYPE: &str = "selector_result";
 
 /// Manages cached data for the engine.
 ///
@@ -63,6 +66,8 @@ pub struct CacheManager {
     write_cache: Option<WriteCacheRef>,
     /// Cache for inverted index.
     index_cache: Option<InvertedIndexCacheRef>,
+    /// Cache for time series selectors.
+    selector_result_cache: Option<SelectorResultCache>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
@@ -167,6 +172,33 @@ impl CacheManager {
         }
     }
 
+    /// Gets result of for the selector.
+    pub fn get_selector_result(
+        &self,
+        selector_key: &SelectorResultKey,
+    ) -> Option<Arc<SelectorResultValue>> {
+        self.selector_result_cache
+            .as_ref()
+            .and_then(|selector_result_cache| {
+                let value = selector_result_cache.get(selector_key);
+                update_hit_miss(value, SELECTOR_RESULT_TYPE)
+            })
+    }
+
+    /// Puts result of the selector into the cache.
+    pub fn put_selector_result(
+        &self,
+        selector_key: SelectorResultKey,
+        result: Arc<SelectorResultValue>,
+    ) {
+        if let Some(cache) = &self.selector_result_cache {
+            CACHE_BYTES
+                .with_label_values(&[SELECTOR_RESULT_TYPE])
+                .add(selector_result_cache_weight(&selector_key, &result).into());
+            cache.insert(selector_key, result);
+        }
+    }
+
     /// Gets the write cache.
     pub(crate) fn write_cache(&self) -> Option<&WriteCacheRef> {
         self.write_cache.as_ref()
@@ -186,6 +218,7 @@ pub struct CacheManagerBuilder {
     index_metadata_size: u64,
     index_content_size: u64,
     write_cache: Option<WriteCacheRef>,
+    selector_result_cache_size: u64,
 }
 
 impl CacheManagerBuilder {
@@ -225,6 +258,12 @@ impl CacheManagerBuilder {
         self
     }
 
+    /// Sets selector result cache size.
+    pub fn selector_result_cache_size(mut self, bytes: u64) -> Self {
+        self.selector_result_cache_size = bytes;
+        self
+    }
+
     /// Builds the [CacheManager].
     pub fn build(self) -> CacheManager {
         let sst_meta_cache = (self.sst_meta_cache_size != 0).then(|| {
@@ -261,15 +300,27 @@ impl CacheManagerBuilder {
                 })
                 .build()
         });
-
         let inverted_index_cache =
             InvertedIndexCache::new(self.index_metadata_size, self.index_content_size);
+        let selector_result_cache = (self.selector_result_cache_size != 0).then(|| {
+            Cache::builder()
+                .max_capacity(self.selector_result_cache_size)
+                .weigher(selector_result_cache_weight)
+                .eviction_listener(|k, v, _cause| {
+                    let size = selector_result_cache_weight(&k, &v);
+                    CACHE_BYTES
+                        .with_label_values(&[SELECTOR_RESULT_TYPE])
+                        .sub(size.into());
+                })
+                .build()
+        });
         CacheManager {
             sst_meta_cache,
             vector_cache,
             page_cache,
             write_cache: self.write_cache,
             index_cache: Some(Arc::new(inverted_index_cache)),
+            selector_result_cache,
         }
     }
 }
@@ -286,6 +337,10 @@ fn vector_cache_weight(_k: &(ConcreteDataType, Value), v: &VectorRef) -> u32 {
 
 fn page_cache_weight(k: &PageKey, v: &Arc<PageValue>) -> u32 {
     (k.estimated_size() + v.estimated_size()) as u32
+}
+
+fn selector_result_cache_weight(k: &SelectorResultKey, v: &Arc<SelectorResultValue>) -> u32 {
+    (mem::size_of_val(k) + v.estimated_size()) as u32
 }
 
 /// Updates cache hit/miss metrics.
@@ -348,6 +403,38 @@ impl PageValue {
     }
 }
 
+/// Cache key for time series row selector result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SelectorResultKey {
+    /// Id of the SST file.
+    pub file_id: FileId,
+    /// Index of the row group.
+    pub row_group_idx: usize,
+    /// Time series row selector.
+    pub selector: TimeSeriesRowSelector,
+}
+
+/// Cached result for time series row selector.
+pub struct SelectorResultValue {
+    /// Batches of rows selected by the selector.
+    pub result: Vec<Batch>,
+    /// Projection of rows.
+    pub projection: Vec<usize>,
+}
+
+impl SelectorResultValue {
+    /// Creates a new selector result value.
+    pub fn new(result: Vec<Batch>, projection: Vec<usize>) -> SelectorResultValue {
+        SelectorResultValue { result, projection }
+    }
+
+    /// Returns memory used by the value (estimated).
+    fn estimated_size(&self) -> usize {
+        // We only consider heap size of all batches.
+        self.result.iter().map(|batch| batch.memory_size()).sum()
+    }
+}
+
 /// Maps (region id, file id) to [ParquetMetaData].
 type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
 /// Maps [Value] to a vector that holds this value repeatedly.
@@ -356,9 +443,13 @@ type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
 type VectorCache = Cache<(ConcreteDataType, Value), VectorRef>;
 /// Maps (region, file, row group, column) to [PageValue].
 type PageCache = Cache<PageKey, Arc<PageValue>>;
+/// Maps (file id, row group id, time series row selector) to [SelectorResultValue].
+type SelectorResultCache = Cache<SelectorResultKey, Arc<SelectorResultValue>>;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use datatypes::vectors::Int64Vector;
 
     use super::*;
@@ -452,5 +543,22 @@ mod tests {
         let pages = Arc::new(PageValue::new(Vec::new()));
         cache.put_pages(key.clone(), pages);
         assert!(cache.get_pages(&key).is_some());
+    }
+
+    #[test]
+    fn test_selector_result_cache() {
+        let cache = CacheManager::builder()
+            .selector_result_cache_size(1000)
+            .build();
+        let file_id = FileId::random();
+        let key = SelectorResultKey {
+            file_id,
+            row_group_idx: 0,
+            selector: TimeSeriesRowSelector::LastRow,
+        };
+        assert!(cache.get_selector_result(&key).is_none());
+        let result = Arc::new(SelectorResultValue::new(Vec::new(), Vec::new()));
+        cache.put_selector_result(key, result);
+        assert!(cache.get_selector_result(&key).is_some());
     }
 }

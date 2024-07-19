@@ -266,7 +266,7 @@ impl StartCommand {
             &opts.component.tracing,
             opts.component.node_id.map(|x| x.to_string()),
         );
-        log_versions(version!(), short_version!());
+        log_versions(version(), short_version());
 
         info!("Datanode start command: {:#?}", self);
         info!("Datanode options: {:#?}", opts);
@@ -338,7 +338,7 @@ mod tests {
             mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
-            
+
             rpc_addr = "127.0.0.1:4001"
             rpc_hostname = "192.168.0.1"
             [grpc]
@@ -365,7 +365,7 @@ mod tests {
             mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
-            
+
             [grpc]
             addr = "127.0.0.1:3001"
             hostname = "127.0.0.1"

@@ -33,7 +33,7 @@ pub const DATANODE_LEASE_SECS: u64 = REGION_LEASE_SECS;
 pub const FLOWNODE_LEASE_SECS: u64 = DATANODE_LEASE_SECS;
 
 /// The lease seconds of metasrv leader.
-pub const META_LEASE_SECS: u64 = 3;
+pub const META_LEASE_SECS: u64 = 5;
 
 /// In a lease, there are two opportunities for renewal.
 pub const META_KEEP_ALIVE_INTERVAL_SECS: u64 = META_LEASE_SECS / 2;

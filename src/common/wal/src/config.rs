@@ -17,7 +17,7 @@ pub mod raft_engine;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig, StandaloneKafkaConfig};
+use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use crate::config::raft_engine::RaftEngineConfig;
 
 /// Wal configurations for metasrv.
@@ -43,67 +43,28 @@ impl Default for DatanodeWalConfig {
     }
 }
 
-/// Wal configurations for standalone.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-#[serde(tag = "provider", rename_all = "snake_case")]
-pub enum StandaloneWalConfig {
-    RaftEngine(RaftEngineConfig),
-    Kafka(StandaloneKafkaConfig),
-}
-
-impl Default for StandaloneWalConfig {
-    fn default() -> Self {
-        Self::RaftEngine(RaftEngineConfig::default())
-    }
-}
-
-impl From<StandaloneWalConfig> for MetasrvWalConfig {
-    fn from(config: StandaloneWalConfig) -> Self {
+impl From<DatanodeWalConfig> for MetasrvWalConfig {
+    fn from(config: DatanodeWalConfig) -> Self {
         match config {
-            StandaloneWalConfig::RaftEngine(_) => Self::RaftEngine,
-            StandaloneWalConfig::Kafka(config) => Self::Kafka(MetasrvKafkaConfig {
+            DatanodeWalConfig::RaftEngine(_) => Self::RaftEngine,
+            DatanodeWalConfig::Kafka(config) => Self::Kafka(MetasrvKafkaConfig {
                 broker_endpoints: config.broker_endpoints,
-                num_topics: config.num_topics,
-                selector_type: config.selector_type,
-                topic_name_prefix: config.topic_name_prefix,
-                num_partitions: config.num_partitions,
-                replication_factor: config.replication_factor,
-                create_topic_timeout: config.create_topic_timeout,
                 backoff: config.backoff,
+                kafka_topic: config.kafka_topic,
             }),
         }
     }
 }
 
-impl From<MetasrvWalConfig> for StandaloneWalConfig {
+impl From<MetasrvWalConfig> for DatanodeWalConfig {
     fn from(config: MetasrvWalConfig) -> Self {
         match config {
             MetasrvWalConfig::RaftEngine => Self::RaftEngine(RaftEngineConfig::default()),
-            MetasrvWalConfig::Kafka(config) => Self::Kafka(StandaloneKafkaConfig {
+            MetasrvWalConfig::Kafka(config) => Self::Kafka(DatanodeKafkaConfig {
                 broker_endpoints: config.broker_endpoints,
-                num_topics: config.num_topics,
-                selector_type: config.selector_type,
-                topic_name_prefix: config.topic_name_prefix,
-                num_partitions: config.num_partitions,
-                replication_factor: config.replication_factor,
-                create_topic_timeout: config.create_topic_timeout,
                 backoff: config.backoff,
+                kafka_topic: config.kafka_topic,
                 ..Default::default()
-            }),
-        }
-    }
-}
-
-impl From<StandaloneWalConfig> for DatanodeWalConfig {
-    fn from(config: StandaloneWalConfig) -> Self {
-        match config {
-            StandaloneWalConfig::RaftEngine(config) => Self::RaftEngine(config),
-            StandaloneWalConfig::Kafka(config) => Self::Kafka(DatanodeKafkaConfig {
-                broker_endpoints: config.broker_endpoints,
-                compression: config.compression,
-                max_batch_bytes: config.max_batch_bytes,
-                consumer_wait_timeout: config.consumer_wait_timeout,
-                backoff: config.backoff,
             }),
         }
     }
@@ -114,11 +75,11 @@ mod tests {
     use std::time::Duration;
 
     use common_base::readable_size::ReadableSize;
-    use rskafka::client::partition::Compression;
+    use tests::kafka::common::KafkaTopicConfig;
 
     use super::*;
     use crate::config::kafka::common::BackoffConfig;
-    use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig, StandaloneKafkaConfig};
+    use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig};
     use crate::TopicSelectorType;
 
     #[test]
@@ -170,11 +131,6 @@ mod tests {
         let toml_str = r#"
             provider = "kafka"
             broker_endpoints = ["127.0.0.1:9092"]
-            num_topics = 32
-            selector_type = "round_robin"
-            topic_name_prefix = "greptimedb_wal_topic"
-            replication_factor = 1
-            create_topic_timeout = "30s"
             max_batch_bytes = "1MB"
             linger = "200ms"
             consumer_wait_timeout = "100ms"
@@ -182,23 +138,31 @@ mod tests {
             backoff_max = "10s"
             backoff_base = 2
             backoff_deadline = "5mins"
+            num_topics = 32
+            num_partitions = 1
+            selector_type = "round_robin"
+            replication_factor = 1
+            create_topic_timeout = "30s"
+            topic_name_prefix = "greptimedb_wal_topic"
         "#;
 
         // Deserialized to MetasrvWalConfig.
         let metasrv_wal_config: MetasrvWalConfig = toml::from_str(toml_str).unwrap();
         let expected = MetasrvKafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
-            num_topics: 32,
-            selector_type: TopicSelectorType::RoundRobin,
-            topic_name_prefix: "greptimedb_wal_topic".to_string(),
-            num_partitions: 1,
-            replication_factor: 1,
-            create_topic_timeout: Duration::from_secs(30),
             backoff: BackoffConfig {
                 init: Duration::from_millis(500),
                 max: Duration::from_secs(10),
                 base: 2,
                 deadline: Some(Duration::from_secs(60 * 5)),
+            },
+            kafka_topic: KafkaTopicConfig {
+                num_topics: 32,
+                selector_type: TopicSelectorType::RoundRobin,
+                topic_name_prefix: "greptimedb_wal_topic".to_string(),
+                num_partitions: 1,
+                replication_factor: 1,
+                create_topic_timeout: Duration::from_secs(30),
             },
         };
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
@@ -207,7 +171,6 @@ mod tests {
         let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
         let expected = DatanodeKafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
-            compression: Compression::NoCompression,
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig {
@@ -215,30 +178,16 @@ mod tests {
                 max: Duration::from_secs(10),
                 base: 2,
                 deadline: Some(Duration::from_secs(60 * 5)),
+            },
+            kafka_topic: KafkaTopicConfig {
+                num_topics: 32,
+                selector_type: TopicSelectorType::RoundRobin,
+                topic_name_prefix: "greptimedb_wal_topic".to_string(),
+                num_partitions: 1,
+                replication_factor: 1,
+                create_topic_timeout: Duration::from_secs(30),
             },
         };
         assert_eq!(datanode_wal_config, DatanodeWalConfig::Kafka(expected));
-
-        // Deserialized to StandaloneWalConfig.
-        let standalone_wal_config: StandaloneWalConfig = toml::from_str(toml_str).unwrap();
-        let expected = StandaloneKafkaConfig {
-            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
-            num_topics: 32,
-            selector_type: TopicSelectorType::RoundRobin,
-            topic_name_prefix: "greptimedb_wal_topic".to_string(),
-            num_partitions: 1,
-            replication_factor: 1,
-            create_topic_timeout: Duration::from_secs(30),
-            compression: Compression::NoCompression,
-            max_batch_bytes: ReadableSize::mb(1),
-            consumer_wait_timeout: Duration::from_millis(100),
-            backoff: BackoffConfig {
-                init: Duration::from_millis(500),
-                max: Duration::from_secs(10),
-                base: 2,
-                deadline: Some(Duration::from_secs(60 * 5)),
-            },
-        };
-        assert_eq!(standalone_wal_config, StandaloneWalConfig::Kafka(expected));
     }
 }

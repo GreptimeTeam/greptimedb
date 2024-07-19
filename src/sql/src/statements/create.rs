@@ -385,6 +385,8 @@ impl Display for CreateFlow {
 pub struct CreateView {
     /// View name
     pub name: ObjectName,
+    /// An optional list of names to be used for columns of the view
+    pub columns: Vec<Ident>,
     /// The clause after `As` that defines the VIEW.
     /// Can only be either [Statement::Query] or [Statement::Tql].
     pub query: Box<Statement>,
@@ -405,6 +407,9 @@ impl Display for CreateView {
             write!(f, "IF NOT EXISTS ")?;
         }
         write!(f, "{} ", &self.name)?;
+        if !self.columns.is_empty() {
+            write!(f, "({}) ", format_list_comma!(self.columns))?;
+        }
         write!(f, "AS {}", &self.query)
     }
 }

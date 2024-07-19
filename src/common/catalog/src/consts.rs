@@ -14,6 +14,7 @@
 
 pub const SYSTEM_CATALOG_NAME: &str = "system";
 pub const INFORMATION_SCHEMA_NAME: &str = "information_schema";
+pub const PG_CATALOG_NAME: &str = "pg_catalog";
 pub const SYSTEM_CATALOG_TABLE_NAME: &str = "system_catalog";
 pub const DEFAULT_CATALOG_NAME: &str = "greptime";
 pub const DEFAULT_SCHEMA_NAME: &str = "public";
@@ -93,8 +94,15 @@ pub const INFORMATION_SCHEMA_REGION_PEERS_TABLE_ID: u32 = 29;
 pub const INFORMATION_SCHEMA_TABLE_CONSTRAINTS_TABLE_ID: u32 = 30;
 /// id for information_schema.cluster_info
 pub const INFORMATION_SCHEMA_CLUSTER_INFO_TABLE_ID: u32 = 31;
+/// id for information_schema.VIEWS
+pub const INFORMATION_SCHEMA_VIEW_TABLE_ID: u32 = 32;
 /// ----- End of information_schema tables -----
 
+/// ----- Begin of pg_catalog tables -----
+pub const PG_CATALOG_PG_CLASS_TABLE_ID: u32 = 256;
+pub const PG_CATALOG_PG_TYPE_TABLE_ID: u32 = 257;
+
+/// ----- End of pg_catalog tables -----
 pub const MITO_ENGINE: &str = "mito";
 pub const MITO2_ENGINE: &str = "mito2";
 pub const METRIC_ENGINE: &str = "metric";

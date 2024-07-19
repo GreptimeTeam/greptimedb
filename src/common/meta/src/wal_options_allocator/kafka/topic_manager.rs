@@ -56,11 +56,11 @@ impl TopicManager {
     /// Creates a new topic manager.
     pub fn new(config: MetasrvKafkaConfig, kv_backend: KvBackendRef) -> Self {
         // Topics should be created.
-        let topics = (0..config.num_topics)
-            .map(|topic_id| format!("{}_{topic_id}", config.topic_name_prefix))
+        let topics = (0..config.kafka_topic.num_topics)
+            .map(|topic_id| format!("{}_{topic_id}", config.kafka_topic.topic_name_prefix))
             .collect::<Vec<_>>();
 
-        let selector = match config.selector_type {
+        let selector = match config.kafka_topic.selector_type {
             TopicSelectorType::RoundRobin => RoundRobinTopicSelector::with_shuffle(),
         };
 
@@ -76,7 +76,7 @@ impl TopicManager {
     /// The initializer first tries to restore persisted topics from the kv backend.
     /// If not enough topics retrieved, the initializer will try to contact the Kafka cluster and request creating more topics.
     pub async fn start(&self) -> Result<()> {
-        let num_topics = self.config.num_topics;
+        let num_topics = self.config.kafka_topic.num_topics;
         ensure!(num_topics > 0, InvalidNumTopicsSnafu { num_topics });
 
         // Topics should be created.
@@ -185,9 +185,9 @@ impl TopicManager {
         match client
             .create_topic(
                 topic.clone(),
-                self.config.num_partitions,
-                self.config.replication_factor,
-                self.config.create_topic_timeout.as_millis() as i32,
+                self.config.kafka_topic.num_partitions,
+                self.config.kafka_topic.replication_factor,
+                self.config.kafka_topic.create_topic_timeout.as_millis() as i32,
             )
             .await
         {
@@ -242,6 +242,7 @@ impl TopicManager {
 
 #[cfg(test)]
 mod tests {
+    use common_wal::config::kafka::common::KafkaTopicConfig;
     use common_wal::test_util::run_test_with_kafka_wal;
 
     use super::*;
@@ -283,9 +284,13 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 // Creates a topic manager.
-                let config = MetasrvKafkaConfig {
+                let kafka_topic = KafkaTopicConfig {
                     replication_factor: broker_endpoints.len() as i16,
+                    ..Default::default()
+                };
+                let config = MetasrvKafkaConfig {
                     broker_endpoints,
+                    kafka_topic,
                     ..Default::default()
                 };
                 let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;

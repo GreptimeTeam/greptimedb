@@ -10,16 +10,20 @@ SHOW TABLES LIKE 'tables';
 
 SHOW FULL TABLES;
 
--- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
+-- SQLNESS REPLACE [\u0020\-]+
 SHOW TABLE STATUS;
 
--- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
+-- SQLNESS REPLACE [\u0020\-]+
 SHOW TABLE STATUS LIKE 'tables';
 
--- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
+-- SQLNESS REPLACE [\u0020\-]+
 SHOW TABLE STATUS WHERE Name = 'tables';
 
--- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
+-- SQLNESS REPLACE [\u0020\-]+
 SHOW TABLE STATUS from public;
 
 USE public;

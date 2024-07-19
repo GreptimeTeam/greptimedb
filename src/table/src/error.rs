@@ -17,11 +17,10 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_query::error::datafusion_status_code;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
-
-use crate::metadata::TableId;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -84,13 +83,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Duplicated call to plan execute method. table: {}", table))]
-    DuplicatedExecuteCall {
-        #[snafu(implicit)]
-        location: Location,
-        table: String,
-    },
-
     #[snafu(display(
         "Not allowed to remove index column {} from table {}",
         column_name,
@@ -117,13 +109,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Regions schemas mismatch in table: {}", table))]
-    RegionSchemaMismatch {
-        table: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to operate table"))]
     TableOperation { source: BoxedError },
 
@@ -146,13 +131,6 @@ pub enum Error {
         err: String,
     },
 
-    #[snafu(display("Invalid table state: {}", table_id))]
-    InvalidTable {
-        table_id: TableId,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Missing time index column in table: {}", table_name))]
     MissingTimeIndexColumn {
         table_name: String,
@@ -164,26 +142,21 @@ pub enum Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::Datafusion { .. }
-            | Error::SchemaConversion { .. }
-            | Error::TableProjection { .. } => StatusCode::EngineExecuteQuery,
+            Error::Datafusion { error, .. } => datafusion_status_code::<Self>(error, None),
+            Error::SchemaConversion { .. } | Error::TableProjection { .. } => {
+                StatusCode::EngineExecuteQuery
+            }
             Error::RemoveColumnInIndex { .. }
             | Error::BuildColumnDescriptor { .. }
             | Error::InvalidAlterRequest { .. } => StatusCode::InvalidArguments,
-            Error::TablesRecordBatch { .. } | Error::DuplicatedExecuteCall { .. } => {
-                StatusCode::Unexpected
-            }
+            Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
             Error::SchemaBuild { source, .. } => source.status_code(),
             Error::TableOperation { source } => source.status_code(),
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
-            Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
             Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
-
-            Error::InvalidTable { .. } | Error::MissingTimeIndexColumn { .. } => {
-                StatusCode::Internal
-            }
+            Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
         }
     }
 

@@ -213,15 +213,14 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .fetch_all(&pool)
         .await;
     assert!(query_re.is_err());
+    let err = query_re.unwrap_err();
+    common_telemetry::info!("Error is {}", err);
     assert_eq!(
-        query_re
-            .err()
-            .unwrap()
-            .into_database_error()
+        err.into_database_error()
             .unwrap()
             .downcast::<MySqlDatabaseError>()
-            .code(),
-        Some("22007")
+            .number(),
+        1210,
     );
 
     let _ = sqlx::query("delete from demo")
@@ -240,18 +239,23 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("insert into demo(i) values(?)")
+        .bind(-99)
+        .execute(&pool)
+        .await
+        .unwrap();
     let rows = sqlx::query("select * from demo")
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
 
     for row in rows {
         let i: i64 = row.get("i");
         let ts: DateTime<Utc> = row.get("ts");
         let now = common_time::util::current_time_millis();
         assert!(now - ts.timestamp_millis() < 1000);
-        assert_eq!(i, 99);
+        assert_eq!(i.abs(), 99);
     }
 
     let _ = fe_mysql_server.shutdown().await;

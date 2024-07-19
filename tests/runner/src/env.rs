@@ -327,7 +327,6 @@ impl Env {
         args.push(format!("--rpc-addr=127.0.0.1:680{id}"));
         args.push(format!("--node-id={id}"));
         args.push("--metasrv-addrs=127.0.0.1:3002".to_string());
-        args.push("--frontend-addr=http://127.0.0.1:4001".to_string());
         (args, format!("127.0.0.1:680{id}"))
     }
 

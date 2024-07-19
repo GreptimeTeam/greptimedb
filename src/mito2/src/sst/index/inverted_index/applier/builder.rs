@@ -37,19 +37,19 @@ use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::InvertedIndexCacheRef;
 use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
-use crate::sst::index::inverted_index::applier::SstIndexApplier;
+use crate::sst::index::inverted_index::applier::InvertedIndexApplier;
 use crate::sst::index::inverted_index::codec::IndexValueCodec;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
-/// Constructs an [`SstIndexApplier`] which applies predicates to SST files during scan.
-pub(crate) struct SstIndexApplierBuilder<'a> {
-    /// Directory of the region, required argument for constructing [`SstIndexApplier`].
+/// Constructs an [`InvertedIndexApplier`] which applies predicates to SST files during scan.
+pub(crate) struct InvertedIndexApplierBuilder<'a> {
+    /// Directory of the region, required argument for constructing [`InvertedIndexApplier`].
     region_dir: String,
 
-    /// Object store, required argument for constructing [`SstIndexApplier`].
+    /// Object store, required argument for constructing [`InvertedIndexApplier`].
     object_store: ObjectStore,
 
-    /// File cache, required argument for constructing [`SstIndexApplier`].
+    /// File cache, required argument for constructing [`InvertedIndexApplier`].
     file_cache: Option<FileCacheRef>,
 
     /// Metadata of the region, used to get metadata like column type.
@@ -68,8 +68,8 @@ pub(crate) struct SstIndexApplierBuilder<'a> {
     index_cache: Option<InvertedIndexCacheRef>,
 }
 
-impl<'a> SstIndexApplierBuilder<'a> {
-    /// Creates a new [`SstIndexApplierBuilder`].
+impl<'a> InvertedIndexApplierBuilder<'a> {
+    /// Creates a new [`InvertedIndexApplierBuilder`].
     pub fn new(
         region_dir: String,
         object_store: ObjectStore,
@@ -91,9 +91,9 @@ impl<'a> SstIndexApplierBuilder<'a> {
         }
     }
 
-    /// Consumes the builder to construct an [`SstIndexApplier`], optionally returned based on
+    /// Consumes the builder to construct an [`InvertedIndexApplier`], optionally returned based on
     /// the expressions provided. If no predicates match, returns `None`.
-    pub fn build(mut self, exprs: &[Expr]) -> Result<Option<SstIndexApplier>> {
+    pub fn build(mut self, exprs: &[Expr]) -> Result<Option<InvertedIndexApplier>> {
         for expr in exprs {
             self.traverse_and_collect(expr);
         }
@@ -109,7 +109,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
             .collect();
         let applier = PredicatesIndexApplier::try_from(predicates);
 
-        Ok(Some(SstIndexApplier::new(
+        Ok(Some(InvertedIndexApplier::new(
             self.region_dir,
             self.metadata.region_id,
             self.object_store,
@@ -324,7 +324,7 @@ mod tests {
         let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_and_basic_");
 
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,

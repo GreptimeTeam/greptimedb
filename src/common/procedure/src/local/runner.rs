@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::{debug, error, info};
+use rand::Rng;
 use tokio::time;
 
 use super::rwlock::OwnedKeyRwLockGuard;
@@ -198,6 +200,11 @@ impl Runner {
                 ProcedureState::Retrying { error } => {
                     retry_times += 1;
                     if let Some(d) = retry.next() {
+                        let millis = d.as_millis() as u64;
+                        // Add random noise to the retry delay to avoid retry storms.
+                        let noise = rand::thread_rng().gen_range(0..(millis / 4) + 1);
+                        let d = d.add(Duration::from_millis(noise));
+
                         self.wait_on_err(d, retry_times).await;
                     } else {
                         self.meta

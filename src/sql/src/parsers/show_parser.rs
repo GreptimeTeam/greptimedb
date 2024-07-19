@@ -21,8 +21,8 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowDatabases, ShowIndex, ShowKind, ShowStatus,
-    ShowTableStatus, ShowTables, ShowVariables,
+    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowCreateView, ShowDatabases, ShowIndex,
+    ShowKind, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::statement::Statement;
 
@@ -44,6 +44,8 @@ impl<'a> ParserContext<'a> {
             } else {
                 self.unsupported(self.peek_token_as_string())
             }
+        } else if self.consume_token("VIEWS") {
+            self.parse_show_views()
         } else if self.matches_keyword(Keyword::CHARSET) {
             self.parser.next_token();
             Ok(Statement::ShowCharset(self.parse_show_kind()?))
@@ -74,6 +76,8 @@ impl<'a> ParserContext<'a> {
                 self.parse_show_create_table()
             } else if self.consume_token("FLOW") {
                 self.parse_show_create_flow()
+            } else if self.consume_token("VIEW") {
+                self.parse_show_create_view()
             } else {
                 self.unsupported(self.peek_token_as_string())
             }
@@ -139,6 +143,24 @@ impl<'a> ParserContext<'a> {
             }
         );
         Ok(Statement::ShowCreateFlow(ShowCreateFlow { flow_name }))
+    }
+
+    fn parse_show_create_view(&mut self) -> Result<Statement> {
+        let raw_view_name = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a view name",
+                actual: self.peek_token_as_string(),
+            })?;
+        let view_name = Self::canonicalize_object_name(raw_view_name);
+        ensure!(
+            !view_name.0.is_empty(),
+            InvalidTableNameSnafu {
+                name: view_name.to_string(),
+            }
+        );
+        Ok(Statement::ShowCreateView(ShowCreateView { view_name }))
     }
 
     fn parse_show_table_name(&mut self) -> Result<String> {
@@ -409,6 +431,28 @@ impl<'a> ParserContext<'a> {
             },
             _ => self.unsupported(self.peek_token_as_string()),
         }
+    }
+
+    fn parse_show_views(&mut self) -> Result<Statement> {
+        let database = match self.parser.peek_token().token {
+            Token::EOF | Token::SemiColon => {
+                return Ok(Statement::ShowViews(ShowViews {
+                    kind: ShowKind::All,
+                    database: None,
+                }));
+            }
+
+            // SHOW VIEWS [in | FROM] [DATABASE]
+            Token::Word(w) => match w.keyword {
+                Keyword::IN | Keyword::FROM => self.parse_db_name()?,
+                _ => None,
+            },
+            _ => None,
+        };
+
+        let kind = self.parse_show_kind()?;
+
+        Ok(Statement::ShowViews(ShowViews { kind, database }))
     }
 }
 
@@ -905,5 +949,55 @@ mod tests {
         assert_eq!("test", stmt.database.as_ref().unwrap());
         assert!(matches!(stmt.kind, ShowKind::Where(_)));
         assert_eq!(sql, stmt.to_string());
+    }
+
+    #[test]
+    pub fn test_show_create_view() {
+        let sql = "SHOW CREATE VIEW test";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowCreateView(ShowCreateView {
+                view_name: ObjectName(vec![Ident::new("test")]),
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[test]
+    pub fn test_show_views() {
+        let sql = "SHOW VIEWS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowViews(ShowViews {
+                kind: ShowKind::All,
+                database: None,
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[test]
+    pub fn test_show_views_in_db() {
+        let sql = "SHOW VIEWS IN d1";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowViews(ShowViews {
+                kind: ShowKind::All,
+                database: Some("d1".to_string()),
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
     }
 }

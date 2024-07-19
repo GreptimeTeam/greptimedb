@@ -20,9 +20,9 @@ use index::inverted_index::search::predicate::{InListPredicate, Predicate};
 use index::inverted_index::Bytes;
 
 use crate::error::Result;
-use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> SstIndexApplierBuilder<'a> {
+impl<'a> InvertedIndexApplierBuilder<'a> {
     /// Collects an eq expression in the form of `column = lit`.
     pub(crate) fn collect_eq(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
         let Some(column_name) = Self::column_name(left).or_else(|| Self::column_name(right)) else {
@@ -134,7 +134,7 @@ mod tests {
     fn test_collect_eq_basic() {
         let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_eq_basic_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -172,7 +172,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_eq_field_column_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -193,7 +193,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_eq_nonexistent_column_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -213,7 +213,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_eq_type_mismatch_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -233,7 +233,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_or_eq_list_basic_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -292,7 +292,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_or_eq_list_invalid_op_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,
@@ -330,7 +330,7 @@ mod tests {
         let (_d, facotry) =
             PuffinManagerFactory::new_for_test_block("test_collect_or_eq_list_multiple_columns_");
         let metadata = test_region_metadata();
-        let mut builder = SstIndexApplierBuilder::new(
+        let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             None,

@@ -16,6 +16,7 @@
 #![feature(try_blocks)]
 #![feature(exclusive_wrapper)]
 #![feature(let_chains)]
+#![feature(if_let_guard)]
 
 use datatypes::schema::Schema;
 use datafusion_expr::LogicalPlan;

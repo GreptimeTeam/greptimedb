@@ -441,6 +441,11 @@ impl Timestamp {
 
         ParseTimestampSnafu { raw: s }.fail()
     }
+
+    pub fn negative(mut self) -> Self {
+        self.value = -self.value;
+        self
+    }
 }
 
 impl Timestamp {

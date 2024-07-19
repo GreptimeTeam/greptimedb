@@ -31,6 +31,7 @@ use common_meta::cache::TableRouteCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
+use common_meta::key::view_info::{ViewInfoManager, ViewInfoManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_query::Output;
@@ -45,6 +46,7 @@ use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
+use sql::statements::set_variables::SetVariables;
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
@@ -69,6 +71,7 @@ pub struct StatementExecutor {
     procedure_executor: ProcedureExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
     flow_metadata_manager: FlowMetadataManagerRef,
+    view_info_manager: ViewInfoManagerRef,
     partition_manager: PartitionRuleManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
@@ -92,6 +95,7 @@ impl StatementExecutor {
             procedure_executor,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
             flow_metadata_manager: Arc::new(FlowMetadataManager::new(kv_backend.clone())),
+            view_info_manager: Arc::new(ViewInfoManager::new(kv_backend.clone())),
             partition_manager: Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache)),
             cache_invalidator,
             inserter,
@@ -131,6 +135,8 @@ impl StatementExecutor {
             Statement::ShowCollation(kind) => self.show_collation(kind, query_ctx).await,
 
             Statement::ShowCharset(kind) => self.show_charset(kind, query_ctx).await,
+
+            Statement::ShowViews(stmt) => self.show_views(stmt, query_ctx).await,
 
             Statement::Copy(sql::statements::copy::Copy::CopyTable(stmt)) => {
                 let req = to_copy_table_request(stmt, query_ctx.clone())?;
@@ -188,6 +194,21 @@ impl StatementExecutor {
                 let _ = self.create_view(stmt, query_ctx).await?;
                 Ok(Output::new_with_affected_rows(0))
             }
+            Statement::DropView(stmt) => {
+                let (catalog_name, schema_name, view_name) =
+                    table_idents_to_full_name(&stmt.view_name, &query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+
+                self.drop_view(
+                    catalog_name,
+                    schema_name,
+                    view_name,
+                    stmt.drop_if_exists,
+                    query_ctx,
+                )
+                .await
+            }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
                 let mut table_names = Vec::with_capacity(stmt.table_names().len());
@@ -244,66 +265,9 @@ impl StatementExecutor {
                 self.show_create_table(table_name, table_ref, query_ctx)
                     .await
             }
-            Statement::ShowCreateFlow(show) => {
-                let obj_name = &show.flow_name;
-                let (catalog_name, flow_name) = match &obj_name.0[..] {
-                    [table] => (query_ctx.current_catalog().to_string(), table.value.clone()),
-                    [catalog, table] => (catalog.value.clone(), table.value.clone()),
-                    _ => {
-                        return InvalidSqlSnafu {
-                            err_msg: format!(
-                "expect flow name to be <catalog>.<flow_name> or <flow_name>, actual: {obj_name}",
-            ),
-                        }
-                        .fail()
-                    }
-                };
-
-                let flow_name_val = self
-                    .flow_metadata_manager
-                    .flow_name_manager()
-                    .get(&catalog_name, &flow_name)
-                    .await
-                    .context(error::TableMetadataManagerSnafu)?
-                    .context(error::FlowNotFoundSnafu {
-                        flow_name: &flow_name,
-                    })?;
-
-                let flow_val = self
-                    .flow_metadata_manager
-                    .flow_info_manager()
-                    .get(flow_name_val.flow_id())
-                    .await
-                    .context(error::TableMetadataManagerSnafu)?
-                    .context(error::FlowNotFoundSnafu {
-                        flow_name: &flow_name,
-                    })?;
-
-                self.show_create_flow(obj_name.clone(), flow_val, query_ctx)
-                    .await
-            }
-            Statement::SetVariables(set_var) => {
-                let var_name = set_var.variable.to_string().to_uppercase();
-                match var_name.as_str() {
-                    "TIMEZONE" | "TIME_ZONE" => set_timezone(set_var.value, query_ctx)?,
-
-                    "BYTEA_OUTPUT" => set_bytea_output(set_var.value, query_ctx)?,
-
-                    // Same as "bytea_output", we just ignore it here.
-                    // Not harmful since it only relates to how date is viewed in client app's output.
-                    // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
-                    "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
-
-                    "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
-                    _ => {
-                        return NotSupportedSnafu {
-                            feat: format!("Unsupported set variable {}", var_name),
-                        }
-                        .fail()
-                    }
-                }
-                Ok(Output::new_with_affected_rows(0))
-            }
+            Statement::ShowCreateFlow(show) => self.show_create_flow(show, query_ctx).await,
+            Statement::ShowCreateView(show) => self.show_create_view(show, query_ctx).await,
+            Statement::SetVariables(set_var) => self.set_variables(set_var, query_ctx),
             Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
             Statement::ShowColumns(show_columns) => {
                 self.show_columns(show_columns, query_ctx).await
@@ -327,6 +291,29 @@ impl StatementExecutor {
         query_ctx.set_current_schema(&db);
 
         Ok(Output::new_with_record_batches(RecordBatches::empty()))
+    }
+
+    fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
+        let var_name = set_var.variable.to_string().to_uppercase();
+        match var_name.as_str() {
+            "TIMEZONE" | "TIME_ZONE" => set_timezone(set_var.value, query_ctx)?,
+
+            "BYTEA_OUTPUT" => set_bytea_output(set_var.value, query_ctx)?,
+
+            // Same as "bytea_output", we just ignore it here.
+            // Not harmful since it only relates to how date is viewed in client app's output.
+            // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
+            "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
+
+            "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
+            _ => {
+                return NotSupportedSnafu {
+                    feat: format!("Unsupported set variable {}", var_name),
+                }
+                .fail()
+            }
+        }
+        Ok(Output::new_with_affected_rows(0))
     }
 
     pub async fn plan(

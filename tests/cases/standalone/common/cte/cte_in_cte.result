@@ -69,7 +69,7 @@ Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: WITH query na
 -- self-refer to non-existent cte-
 with cte as (select * from cte) select * from cte;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.public.cte
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.cte
 
 drop table a;
 

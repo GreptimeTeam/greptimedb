@@ -49,6 +49,8 @@ mod projection_test;
 #[cfg(test)]
 mod prune_test;
 #[cfg(test)]
+mod row_selector_test;
+#[cfg(test)]
 mod set_readonly_test;
 #[cfg(test)]
 mod truncate_test;
@@ -429,6 +431,7 @@ impl EngineInner {
         )
         .with_parallelism(scan_parallelism)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
+        .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_start_time(query_start);
 
         Ok(scan_region)

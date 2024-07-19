@@ -24,10 +24,9 @@ use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::{debug, info};
 use common_time::timestamp::{TimeUnit, Timestamp};
-use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::col;
 use datafusion_common::{TableReference, ToDFSchema};
-use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlanBuilder};
+use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan};
 use datatypes::prelude::ScalarVector;
 use datatypes::timestamp::TimestampNanosecond;
 use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
@@ -35,22 +34,22 @@ use moka::sync::Cache;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use datafusion_expr::LogicalPlan;
+use query::dataframe::DataFrame;
 use query::QueryEngineRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableInfo;
-use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::error::{
     BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, CompilePipelineSnafu,
-    ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
-    PipelineNotFoundSnafu, Result,
+    DataFrameSnafu, ExecuteInternalStatementSnafu, InsertPipelineSnafu,
+    InvalidPipelineVersionSnafu, PipelineNotFoundSnafu, Result,
 };
 use crate::etl::transform::GreptimeTransformer;
 use crate::etl::{parse, Content, Pipeline};
 use crate::manager::{PipelineInfo, PipelineVersion};
-use crate::util::{build_plan_filter, generate_pipeline_cache_key};
+use crate::util::{generate_pipeline_cache_key, prepare_dataframe_conditions};
 
 pub(crate) const PIPELINE_TABLE_NAME: &str = "pipelines";
 pub(crate) const PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME: &str = "name";
@@ -337,15 +336,24 @@ impl PipelineTable {
             return Ok(None);
         }
 
-        // 2. do delete
+        // 2. prepare dataframe
+        let dataframe = self
+            .query_engine
+            .read_table(self.table.clone())
+            .context(DataFrameSnafu)?;
+        let DataFrame::DataFusion(dataframe) = dataframe;
+
+        let dataframe = dataframe
+            .filter(prepare_dataframe_conditions(schema, name, version))
+            .context(BuildDfLogicalPlanSnafu)?;
+
+        // 3. prepare dml stmt
         let table_info = self.table.table_info();
         let table_name = TableReference::full(
             table_info.catalog_name.clone(),
             table_info.schema_name.clone(),
             table_info.name.clone(),
         );
-        let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
-        let table_source = Arc::new(DefaultTableSource::new(table_provider));
 
         let df_schema = Arc::new(
             table_info
@@ -357,24 +365,17 @@ impl PipelineTable {
                 .context(BuildDfLogicalPlanSnafu)?,
         );
 
-        // create scan plan
-        let logical_plan = LogicalPlanBuilder::scan(table_name.clone(), table_source, None)
-            .context(BuildDfLogicalPlanSnafu)?
-            .filter(build_plan_filter(schema, name, version))
-            .context(BuildDfLogicalPlanSnafu)?
-            .build()
-            .context(BuildDfLogicalPlanSnafu)?;
-
         // create dml stmt
         let stmt = DmlStatement::new(
             table_name,
             df_schema,
             datafusion_expr::WriteOp::Delete,
-            Arc::new(logical_plan),
+            Arc::new(dataframe.into_parts().1),
         );
 
         let plan = LogicalPlan::DfPlan(DfLogicalPlan::Dml(stmt));
 
+        // 4. execute dml stmt
         let output = self
             .query_engine
             .execute(plan, Self::query_ctx(&table_info))
@@ -404,24 +405,19 @@ impl PipelineTable {
         name: &str,
         version: PipelineVersion,
     ) -> Result<Option<(String, TimestampNanosecond)>> {
-        let table_info = self.table.table_info();
+        // 1. prepare dataframe
+        let dataframe = self
+            .query_engine
+            .read_table(self.table.clone())
+            .context(DataFrameSnafu)?;
+        let DataFrame::DataFusion(dataframe) = dataframe;
 
-        let table_name = TableReference::full(
-            table_info.catalog_name.clone(),
-            table_info.schema_name.clone(),
-            table_info.name.clone(),
-        );
-
-        let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
-        let table_source = Arc::new(DefaultTableSource::new(table_provider));
-
-        let plan = LogicalPlanBuilder::scan(table_name, table_source, None)
+        let dataframe = dataframe
+            .filter(prepare_dataframe_conditions(schema, name, version))
             .context(BuildDfLogicalPlanSnafu)?
-            .filter(build_plan_filter(schema, name, version))
-            .context(BuildDfLogicalPlanSnafu)?
-            .project(vec![
-                col(PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME),
-                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME),
+            .select_columns(&[
+                PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME,
+                PIPELINE_TABLE_CREATED_AT_COLUMN_NAME,
             ])
             .context(BuildDfLogicalPlanSnafu)?
             .sort(vec![
@@ -429,15 +425,18 @@ impl PipelineTable {
             ])
             .context(BuildDfLogicalPlanSnafu)?
             .limit(0, Some(1))
-            .context(BuildDfLogicalPlanSnafu)?
-            .build()
             .context(BuildDfLogicalPlanSnafu)?;
+
+        let plan = LogicalPlan::DfPlan(dataframe.into_parts().1);
+
+        let table_info = self.table.table_info();
 
         debug!("find_pipeline_by_name: plan: {:?}", plan);
 
+        // 2. execute plan
         let output = self
             .query_engine
-            .execute(LogicalPlan, Self::query_ctx(&table_info))
+            .execute(plan, Self::query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
         let stream = match output.data {
@@ -446,6 +445,7 @@ impl PipelineTable {
             _ => unreachable!(),
         };
 
+        // 3. construct result
         let records = record_util::collect(stream)
             .await
             .context(CollectRecordsSnafu)?;

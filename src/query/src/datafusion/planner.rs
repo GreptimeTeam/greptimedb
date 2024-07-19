@@ -26,12 +26,11 @@ use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::variable::VarType;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::DataFusionError;
 use datafusion_expr::var_provider::is_system_variables;
 use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::parser::Statement as DfStatement;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{Location, ResultExt};
 
 use crate::error::{CatalogSnafu, DataFusionSnafu, Result};
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
@@ -64,6 +63,10 @@ impl DfContextProviderAdapter {
             engine_state.disallow_cross_catalog_query(),
             query_ctx.as_ref(),
             Arc::new(DefaultPlanDecoder::new(session_state.clone(), &query_ctx)?),
+            session_state
+                .config_options()
+                .sql_parser
+                .enable_ident_normalization,
         );
 
         let tables = resolve_tables(table_names, &mut table_provider).await?;
@@ -91,10 +94,18 @@ async fn resolve_tables(
 
         if let Entry::Vacant(v) = tables.entry(resolved_name.to_string()) {
             // Try our best to resolve the tables here, but we don't return an error if table is not found,
-            // because the table name may be a temporary name of CTE or view, they can't be found until plan
+            // because the table name may be a temporary name of CTE, they can't be found until plan
             // execution.
-            if let Ok(table) = table_provider.resolve_table(table_name).await {
-                let _ = v.insert(table);
+            match table_provider.resolve_table(table_name).await {
+                Ok(table) => {
+                    let _ = v.insert(table);
+                }
+                Err(e) if e.should_fail() => {
+                    return Err(e).context(CatalogSnafu);
+                }
+                _ => {
+                    // ignore
+                }
             }
         }
     }
@@ -107,7 +118,13 @@ impl ContextProvider for DfContextProviderAdapter {
         self.tables
             .get(&table_ref.to_string())
             .cloned()
-            .ok_or_else(|| DataFusionError::Plan(format!("Table not found: {}", table_ref)))
+            .ok_or_else(|| {
+                crate::error::Error::TableNotFound {
+                    table: table_ref.to_string(),
+                    location: Location::default(),
+                }
+                .into()
+            })
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {

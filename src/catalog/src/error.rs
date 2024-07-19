@@ -18,6 +18,7 @@ use std::fmt::Debug;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_query::error::datafusion_status_code;
 use datafusion::error::DataFusionError;
 use snafu::{Location, Snafu};
 
@@ -114,6 +115,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "View plan columns changed from: {} to: {}",
+        origin_names,
+        actual_names
+    ))]
+    ViewPlanColumnsChanged {
+        origin_names: String,
+        actual_names: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to find table partitions"))]
     FindPartitions { source: partition::error::Error },
 
@@ -173,6 +186,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to project view columns"))]
+    ProjectViewColumns {
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
         source: common_meta::error::Error,
@@ -208,6 +229,21 @@ pub enum Error {
     },
 }
 
+impl Error {
+    pub fn should_fail(&self) -> bool {
+        use Error::*;
+
+        matches!(
+            self,
+            GetViewCache { .. }
+                | ViewInfoNotFound { .. }
+                | DecodePlan { .. }
+                | ViewPlanColumnsChanged { .. }
+                | ProjectViewColumns { .. }
+        )
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
@@ -219,6 +255,8 @@ impl ErrorExt for Error {
             | Error::FindRegionRoutes { .. }
             | Error::CacheNotFound { .. }
             | Error::CastManager { .. } => StatusCode::Unexpected,
+
+            Error::ViewPlanColumnsChanged { .. } => StatusCode::InvalidArguments,
 
             Error::ViewInfoNotFound { .. } => StatusCode::TableNotFound,
 
@@ -245,7 +283,8 @@ impl ErrorExt for Error {
             }
 
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
-            Error::Datafusion { .. } => StatusCode::EngineExecuteQuery,
+            Error::Datafusion { error, .. } => datafusion_status_code::<Self>(error, None),
+            Error::ProjectViewColumns { .. } => StatusCode::EngineExecuteQuery,
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::GetViewCache { source, .. } | Error::GetTableCache { source, .. } => {
                 source.status_code()
@@ -260,7 +299,7 @@ impl ErrorExt for Error {
 
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> Self {
-        DataFusionError::Internal(e.to_string())
+        DataFusionError::External(Box::new(e))
     }
 }
 
@@ -299,7 +338,7 @@ mod tests {
         }
         .into();
         match e {
-            DataFusionError::Internal(_) => {}
+            DataFusionError::External(_) => {}
             _ => {
                 panic!("catalog error should be converted to DataFusionError::Internal")
             }
