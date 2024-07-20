@@ -286,7 +286,7 @@ impl QueryEngine for DatafusionQueryEngine {
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         match plan {
-            DfLogicalPlan::Dml(dml) => self.exec_dml_statement(dml, query_ctx).await,
+            LogicalPlan::Dml(dml) => self.exec_dml_statement(dml, query_ctx).await,
             _ => self.exec_query_plan(plan, query_ctx).await,
         }
     }
@@ -332,7 +332,11 @@ impl QueryEngine for DatafusionQueryEngine {
 
 impl LogicalOptimizer for DatafusionQueryEngine {
     #[tracing::instrument(skip_all)]
-    fn optimize(&self, context: &QueryEngineContext, plan: &LogicalPlan) -> Result<LogicalPlan> {
+    fn optimize(
+        &self,
+        context: &QueryEngineContext,
+        plan: &LogicalPlan,
+    ) -> Result<Arc<DFSchema>, DataFusionError> {
         let _timer = metrics::OPTIMIZE_LOGICAL_ELAPSED.start_timer();
         match plan {
             df_plan => {
@@ -373,7 +377,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                 let state = ctx.state();
 
                 // special handle EXPLAIN plan
-                if matches!(df_plan, DfLogicalPlan::Explain(_)) {
+                if matches!(df_plan, LogicalPlan::Explain(_)) {
                     return state
                         .create_physical_plan(df_plan)
                         .await
@@ -390,7 +394,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 // skip optimize for MergeScan
-                let optimized_plan = if let DfLogicalPlan::Extension(ext) = &analyzed_plan
+                let optimized_plan = if let LogicalPlan::Extension(ext) = &analyzed_plan
                     && ext.node.name() == MergeScanLogicalPlan::name()
                 {
                     analyzed_plan.clone()

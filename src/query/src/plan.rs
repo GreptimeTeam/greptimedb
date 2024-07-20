@@ -83,7 +83,7 @@ pub fn replace_params_with_values(
         .replace_params_with_values(&ParamValues::List(values.to_vec()))
         .context(DataFusionSnafu)?;
 
-    Ok(LogicalPlan::DfPlan(new_plan))
+    Ok(new_plan)
 }
 
 struct TableNamesExtractAndRewriter {

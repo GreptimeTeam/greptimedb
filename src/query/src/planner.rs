@@ -165,7 +165,7 @@ impl DfLogicalPlanner {
     #[tracing::instrument(skip_all)]
     fn optimize_logical_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         self.engine_state
-            .optimize_logical_plan(plan.unwrap_df_plan())
+            .optimize_logical_plan(plan)
             .context(DataFusionSnafu)
             .map(Into::into)
     }
