@@ -87,11 +87,16 @@ pub struct Consumer {
 impl Consumer {
     pub fn new(
         client: Arc<dyn FetchClient>,
-        start_offset: u64,
+        mut start_offset: u64,
         end_offset: u64,
         mut index: BTreeSet<u64>,
     ) -> Self {
         let index = index.split_off(&start_offset);
+        info!("Start offset: {start_offset}, end offset: {end_offset}, index: {index:?}");
+        if let Some(first_index) = index.first() {
+            info!("Using first index: {first_index}, original start offset: {start_offset}");
+            start_offset = start_offset.max(*first_index);
+        }
         Self {
             pruner: RecordPruner {
                 index: index.into_iter().collect::<VecDeque<_>>(),
@@ -140,7 +145,11 @@ impl RecordPruner {
 
     pub fn extend(&mut self, records: Vec<RecordAndOffset>) {
         if let (Some(first), Some(index)) = (records.first(), self.index.front()) {
-            assert!(*index <= first.offset as u64);
+            assert!(
+                *index <= first.offset as u64,
+                "index: {index}, first offset: {}",
+                first.offset
+            );
         }
         self.buffer.extend(records);
     }
@@ -220,7 +229,7 @@ impl Stream for Consumer {
                     if let Some(x) = records_and_offsets.last() {
                         *this.next_offset = x.offset + 1;
                         info!(
-                            "Fetch result: {:?}",
+                            "Fetch result: {:?}, used_offset: {used_offset}",
                             records_and_offsets
                                 .iter()
                                 .map(|record| record.offset)

@@ -28,6 +28,7 @@ use common_telemetry::{error, info};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::table_name::TableName;
+use tokio::time::Instant;
 
 use crate::error::{self, Result};
 use crate::procedure::region_migration::{
@@ -348,6 +349,7 @@ impl RegionMigrationManager {
         info!("Starting region migration procedure {procedure_id} for {task}");
         let procedure_manager = self.procedure_manager.clone();
         common_runtime::spawn_bg(async move {
+            let now = Instant::now();
             let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
                 Ok(watcher) => watcher,
                 Err(e) => {
@@ -361,7 +363,8 @@ impl RegionMigrationManager {
                 return;
             }
 
-            info!("Region migration procedure {procedure_id} for {task} is finished successfully!");
+            let elapsed = now.elapsed();
+            info!("Region migration procedure {procedure_id} for {task} is finished successfully! Elapsed: {elapsed:?}");
         });
 
         Ok(Some(procedure_id))

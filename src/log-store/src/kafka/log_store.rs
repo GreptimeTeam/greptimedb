@@ -288,8 +288,12 @@ impl LogStore for KafkaLogStore {
             return Ok(futures_util::stream::empty().boxed());
         }
 
-        let mut stream_consumer =
-            Consumer::new(client, start_offset as u64, end_offset as u64, index);
+        let mut stream_consumer = Consumer::new(
+            client,
+            start_offset as u64,
+            end_offset as u64,
+            index.clone(),
+        );
 
         // A buffer is used to collect records to construct a complete entry.
         let mut entry_records: HashMap<RegionId, Vec<Record>> = HashMap::new();
@@ -346,8 +350,8 @@ impl LogStore for KafkaLogStore {
             }
 
             info!(
-                "Reading entries(with index) in range [{}, {}] for ns {}, total bytes: {}",
-                start_offset, end_offset, provider, total_bytes
+                "Reading WAL of {} [{}, {}), total bytes: {}, index: {:?}",
+                provider, start_offset, end_offset, total_bytes, index
             )
         });
         Ok(Box::pin(stream))
