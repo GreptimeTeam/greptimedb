@@ -36,7 +36,7 @@ use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
-use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
+use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
 use crate::sst::file::FileId;
 
@@ -270,11 +270,14 @@ impl CacheManagerBuilder {
             Cache::builder()
                 .max_capacity(self.sst_meta_cache_size)
                 .weigher(meta_cache_weight)
-                .eviction_listener(|k, v, _cause| {
+                .eviction_listener(|k, v, cause| {
                     let size = meta_cache_weight(&k, &v);
                     CACHE_BYTES
                         .with_label_values(&[SST_META_TYPE])
                         .sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[SST_META_TYPE, &format!("{:?}", cause)])
+                        .inc();
                 })
                 .build()
         });
@@ -282,11 +285,14 @@ impl CacheManagerBuilder {
             Cache::builder()
                 .max_capacity(self.vector_cache_size)
                 .weigher(vector_cache_weight)
-                .eviction_listener(|k, v, _cause| {
+                .eviction_listener(|k, v, cause| {
                     let size = vector_cache_weight(&k, &v);
                     CACHE_BYTES
                         .with_label_values(&[VECTOR_TYPE])
                         .sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[VECTOR_TYPE, &format!("{:?}", cause)])
+                        .inc();
                 })
                 .build()
         });
@@ -294,9 +300,12 @@ impl CacheManagerBuilder {
             Cache::builder()
                 .max_capacity(self.page_cache_size)
                 .weigher(page_cache_weight)
-                .eviction_listener(|k, v, _cause| {
+                .eviction_listener(|k, v, cause| {
                     let size = page_cache_weight(&k, &v);
                     CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[PAGE_TYPE, &format!("{:?}", cause)])
+                        .inc();
                 })
                 .build()
         });

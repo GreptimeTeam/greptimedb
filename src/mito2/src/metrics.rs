@@ -190,6 +190,12 @@ lazy_static! {
         "mito upload bytes total",
     )
     .unwrap();
+    /// Cache eviction counter, labeled with cache type and eviction reason.
+    pub static ref CACHE_EVICTION: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_cache_eviction",
+        "mito cache eviction",
+        &[TYPE_LABEL, "cause"]
+    ).unwrap();
     // ------- End of cache metrics.
 
     // Index metrics.
@@ -315,5 +321,13 @@ lazy_static! {
         "greptime_manifest_op_elapsed",
         "mito manifest operation elapsed",
         &["op"]
+    ).unwrap();
+
+    // Parquet related metrics:
+
+    /// Elapsed time of loading parquet metadata.
+    pub static ref PARQUET_METADATA_LOAD_ELAPSED: Histogram = register_histogram!(
+        "greptime_parquet_metadata_load_elapsed",
+        "parquet metadata load elapsed",
     ).unwrap();
 }
