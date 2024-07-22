@@ -12,17 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(let_chains)]
-#![feature(try_blocks)]
+use common_query::prelude::Signature;
+use datafusion::logical_expr::Volatility;
+use store_api::storage::ConcreteDataType;
 
-mod flush_flow;
-mod macros;
-pub mod scalars;
-mod system;
-mod table;
-
-pub mod function;
-pub mod function_registry;
-pub mod handlers;
-pub mod helper;
-pub mod state;
+fn flush_signature() -> Signature {
+    Signature::uniform(
+        1,
+        vec![ConcreteDataType::string_datatype()],
+        Volatility::Immutable,
+    )
+}
