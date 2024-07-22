@@ -213,7 +213,7 @@ datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
 file-engine = { path = "src/file-engine" }
 flow = { path = "src/flow" }
-frontend = { path = "src/frontend" }
+frontend = { path = "src/frontend", default-features = false }
 index = { path = "src/index" }
 log-store = { path = "src/log-store" }
 meta-client = { path = "src/meta-client" }
