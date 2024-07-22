@@ -23,6 +23,7 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContextRef;
 
 use crate::error::{Error, Result};
+use crate::instance::Instance;
 
 type FrontendGrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler<Error = Error> + Send + Sync>;
 
@@ -81,7 +82,6 @@ mod python {
 
     use super::*;
     use crate::error::{CatalogSnafu, TableNotFoundSnafu};
-    use crate::instance::Instance;
 
     /// A placeholder for the real gRPC handler.
     /// It is temporary and will be replaced soon.

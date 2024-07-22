@@ -183,7 +183,7 @@ auth = { path = "src/auth" }
 cache = { path = "src/cache" }
 catalog = { path = "src/catalog" }
 client = { path = "src/client" }
-cmd = { path = "src/cmd" }
+cmd = { path = "src/cmd", default-features = false }
 common-base = { path = "src/common/base" }
 common-catalog = { path = "src/common/catalog" }
 common-config = { path = "src/common/config" }
