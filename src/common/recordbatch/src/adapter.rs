@@ -22,13 +22,20 @@ use std::task::{Context, Poll};
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
+use datafusion::execution::context::ExecutionProps;
+use datafusion::logical_expr::utils::conjunction;
+use datafusion::logical_expr::Expr;
+use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
 use datafusion::physical_plan::{
-    accept, displayable, ExecutionPlan, ExecutionPlanVisitor,
+    accept, displayable, ExecutionPlan, ExecutionPlanVisitor, PhysicalExpr,
     RecordBatchStream as DfRecordBatchStream,
 };
 use datafusion_common::arrow::error::ArrowError;
-use datafusion_common::DataFusionError;
+use datafusion_common::cast::{as_boolean_array, as_null_array};
+use datafusion_common::{internal_err, DataFusionError, ToDFSchema};
+use datatypes::arrow::array::{Array, BooleanArray};
+use datatypes::arrow::compute::filter_record_batch;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::ready;
 use pin_project::pin_project;
@@ -43,6 +50,32 @@ use crate::{
 type FutureStream =
     Pin<Box<dyn std::future::Future<Output = Result<SendableRecordBatchStream>> + Send>>;
 
+// copy from datafusion::physical_plan::src::filter.rs
+pub fn batch_filter(
+    batch: &DfRecordBatch,
+    predicate: &Arc<dyn PhysicalExpr>,
+) -> DfResult<DfRecordBatch> {
+    predicate
+        .evaluate(batch)
+        .and_then(|v| v.into_array(batch.num_rows()))
+        .and_then(|array| {
+            let filter_array = match as_boolean_array(&array) {
+                Ok(boolean_array) => Ok(boolean_array.to_owned()),
+                Err(_) => {
+                    let Ok(null_array) = as_null_array(&array) else {
+                        return internal_err!(
+                            "Cannot create filter_array from non-boolean predicates"
+                        );
+                    };
+
+                    // if the predicate is null, then the result is also null
+                    Ok::<BooleanArray, DataFusionError>(BooleanArray::new_null(null_array.len()))
+                }
+            }?;
+            Ok(filter_record_batch(batch, &filter_array)?)
+        })
+}
+
 /// Casts the `RecordBatch`es of `stream` against the `output_schema`.
 #[pin_project]
 pub struct RecordBatchStreamTypeAdapter<T, E> {
@@ -50,6 +83,7 @@ pub struct RecordBatchStreamTypeAdapter<T, E> {
     stream: T,
     projected_schema: DfSchemaRef,
     projection: Vec<usize>,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
     phantom: PhantomData<E>,
 }
 
@@ -69,8 +103,27 @@ where
             stream,
             projected_schema,
             projection,
+            predicate: None,
             phantom: Default::default(),
         }
+    }
+
+    pub fn with_filter(mut self, filters: Vec<Expr>) -> Result<Self> {
+        let filters = if let Some(expr) = conjunction(filters) {
+            let df_schema = self
+                .projected_schema
+                .clone()
+                .to_dfschema_ref()
+                .context(error::PhysicalExprSnafu)?;
+
+            let filters = create_physical_expr(&expr, &df_schema, &ExecutionProps::new())
+                .context(error::PhysicalExprSnafu)?;
+            Some(filters)
+        } else {
+            None
+        };
+        self.predicate = filters;
+        Ok(self)
     }
 }
 
@@ -99,6 +152,8 @@ where
 
         let projected_schema = this.projected_schema.clone();
         let projection = this.projection.clone();
+        let predicate = this.predicate.clone();
+
         let batch = batch.map(|b| {
             b.and_then(|b| {
                 let projected_column = b.project(&projection)?;
@@ -121,6 +176,11 @@ where
                     }
                 }
                 let record_batch = DfRecordBatch::try_new(projected_schema, columns)?;
+                let record_batch = if let Some(predicate) = predicate {
+                    batch_filter(&record_batch, &predicate)?
+                } else {
+                    record_batch
+                };
                 Ok(record_batch)
             })
         });
