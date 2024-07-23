@@ -58,7 +58,6 @@ use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
 use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
 use crate::physical_optimizer::PhysicalOptimizer;
-use crate::physical_planner::PhysicalPlanner;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
@@ -256,6 +255,61 @@ impl DatafusionQueryEngine {
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu { table: table_name })
     }
+
+    #[tracing::instrument(skip_all)]
+    async fn create_physical_plan(
+        &self,
+        ctx: &mut QueryEngineContext,
+        logical_plan: &LogicalPlan,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
+        match logical_plan {
+            LogicalPlan::DfPlan(df_plan) => {
+                let state = ctx.state();
+
+                // special handle EXPLAIN plan
+                if matches!(df_plan, DfLogicalPlan::Explain(_)) {
+                    return state
+                        .create_physical_plan(df_plan)
+                        .await
+                        .context(error::DatafusionSnafu)
+                        .map_err(BoxedError::new)
+                        .context(QueryExecutionSnafu);
+                }
+
+                // analyze first
+                let analyzed_plan = state
+                    .analyzer()
+                    .execute_and_check(df_plan.clone(), state.config_options(), |_, _| {})
+                    .context(error::DatafusionSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
+                // skip optimize for MergeScan
+                let optimized_plan = if let DfLogicalPlan::Extension(ext) = &analyzed_plan
+                    && ext.node.name() == MergeScanLogicalPlan::name()
+                {
+                    analyzed_plan.clone()
+                } else {
+                    state
+                        .optimizer()
+                        .optimize(analyzed_plan, state, |_, _| {})
+                        .context(error::DatafusionSnafu)
+                        .map_err(BoxedError::new)
+                        .context(QueryExecutionSnafu)?
+                };
+
+                let physical_plan = state
+                    .query_planner()
+                    .create_physical_plan(&optimized_plan, state)
+                    .await
+                    .context(error::DatafusionSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
+
+                Ok(physical_plan)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -357,64 +411,6 @@ impl LogicalOptimizer for DatafusionQueryEngine {
                     .context(QueryExecutionSnafu)?;
 
                 Ok(LogicalPlan::DfPlan(optimized_plan))
-            }
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl PhysicalPlanner for DatafusionQueryEngine {
-    #[tracing::instrument(skip_all)]
-    async fn create_physical_plan(
-        &self,
-        ctx: &mut QueryEngineContext,
-        logical_plan: &LogicalPlan,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
-        match logical_plan {
-            LogicalPlan::DfPlan(df_plan) => {
-                let state = ctx.state();
-
-                // special handle EXPLAIN plan
-                if matches!(df_plan, DfLogicalPlan::Explain(_)) {
-                    return state
-                        .create_physical_plan(df_plan)
-                        .await
-                        .context(error::DatafusionSnafu)
-                        .map_err(BoxedError::new)
-                        .context(QueryExecutionSnafu);
-                }
-
-                // analyze first
-                let analyzed_plan = state
-                    .analyzer()
-                    .execute_and_check(df_plan.clone(), state.config_options(), |_, _| {})
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
-                // skip optimize for MergeScan
-                let optimized_plan = if let DfLogicalPlan::Extension(ext) = &analyzed_plan
-                    && ext.node.name() == MergeScanLogicalPlan::name()
-                {
-                    analyzed_plan.clone()
-                } else {
-                    state
-                        .optimizer()
-                        .optimize(analyzed_plan, state, |_, _| {})
-                        .context(error::DatafusionSnafu)
-                        .map_err(BoxedError::new)
-                        .context(QueryExecutionSnafu)?
-                };
-
-                let physical_plan = state
-                    .query_planner()
-                    .create_physical_plan(&optimized_plan, state)
-                    .await
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
-
-                Ok(physical_plan)
             }
         }
     }
