@@ -24,7 +24,6 @@ pub mod dist_plan;
 pub mod dummy_catalog;
 pub mod error;
 pub mod executor;
-pub mod logical_optimizer;
 pub mod metrics;
 mod optimizer;
 pub mod parser;
