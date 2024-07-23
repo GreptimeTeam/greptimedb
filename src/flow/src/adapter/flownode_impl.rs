@@ -94,12 +94,18 @@ impl Flownode for FlowWorkerManager {
                     .map_err(to_meta_err)?;
                 Ok(Default::default())
             }
-            Some(flow_request::Body::Flush(FlushFlow { flow_id: _ })) => {
+            Some(flow_request::Body::Flush(FlushFlow {
+                flow_id: Some(flow_id),
+            })) => {
                 // TODO(discord9): impl individual flush
                 self.run_available(true).await.map_err(to_meta_err)?;
-                self.send_writeback_requests().await.map_err(to_meta_err)?;
+                let row = self.send_writeback_requests().await.map_err(to_meta_err)?;
 
-                Ok(Default::default())
+                Ok(FlowResponse {
+                    affected_flows: vec![flow_id],
+                    affected_rows: row as u64,
+                    ..Default::default()
+                })
             }
             None => UnexpectedSnafu {
                 err_msg: "Missing request body",
