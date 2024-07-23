@@ -28,7 +28,7 @@ use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
 use pipeline::util::to_pipeline_version;
-use pipeline::{PipelineVersion, Value as PipelineValue};
+use pipeline::{GreptimeTransformer, Pipeline, PipelineVersion, Value as PipelineValue};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Value};
@@ -194,6 +194,7 @@ pub async fn delete_pipeline(
 }
 
 /// Transform NDJSON array into a single array
+/// allways return an array
 fn transform_ndjson_array_factory(
     values: impl IntoIterator<Item = StdResult<Value, serde_json::Error>>,
     ignore_error: bool,
@@ -284,7 +285,7 @@ fn extract_pipeline_value_by_content_type(
     content_type: ContentType,
     payload: String,
     ignore_errors: bool,
-) -> Result<PipelineValue> {
+) -> Result<Vec<Value>> {
     Ok(match content_type {
         ct if ct == ContentType::json() => {
             let json_value = transform_ndjson_array_factory(
@@ -292,18 +293,19 @@ fn extract_pipeline_value_by_content_type(
                 ignore_errors,
             )?;
 
-            PipelineValue::try_from(json_value)
-                .map_err(|reason| CastTypeSnafu { msg: reason }.build())
-                .context(PipelineSnafu)?
+            match json_value {
+                Value::Array(arr) => arr,
+
+                _ => {
+                    unreachable!();
+                }
+            }
         }
-        ct if ct == ContentType::text() || ct == ContentType::text_utf8() => {
-            let arr = payload
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(|line| PipelineValue::String(line.to_string()))
-                .collect::<Vec<PipelineValue>>();
-            PipelineValue::Array(arr.into())
-        }
+        ct if ct == ContentType::text() || ct == ContentType::text_utf8() => payload
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| Value::String(line.to_string()))
+            .collect(),
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
     })
 }
@@ -313,7 +315,7 @@ async fn ingest_logs_inner(
     pipeline_name: String,
     version: PipelineVersion,
     table_name: String,
-    pipeline_data: PipelineValue,
+    pipeline_data: Vec<Value>,
     query_ctx: QueryContextRef,
 ) -> Result<HttpResponse> {
     let db = query_ctx.get_db_string();
@@ -324,8 +326,15 @@ async fn ingest_logs_inner(
         .await?;
 
     let transform_timer = std::time::Instant::now();
-    let transformed_data: Rows = pipeline
-        .exec(pipeline_data)
+    let mut im = Vec::with_capacity(100);
+
+    let result = pipeline_data
+        .into_iter()
+        .map(|v| {
+            pipeline.preprepase(v, &mut im);
+            pipeline.exec_mut(&mut im)
+        })
+        .collect::<StdResult<Vec<_>, String>>()
         .inspect(|_| {
             METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                 .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
@@ -338,6 +347,11 @@ async fn ingest_logs_inner(
             PipelineTransformSnafu { reason }.build()
         })
         .context(PipelineSnafu)?;
+
+    let transformed_data: Rows = Rows {
+        rows: result,
+        schema: pipeline.schemas().clone(),
+    };
 
     let insert_request = RowInsertRequest {
         rows: Some(transformed_data),

@@ -76,21 +76,21 @@ impl std::ops::DerefMut for Fields {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct FieldInfo {
+pub struct InputFieldInfo {
     pub(crate) name: String,
     pub(crate) index: usize,
 }
 
-impl FieldInfo {
+impl InputFieldInfo {
     pub(crate) fn new(field: impl Into<String>, index: usize) -> Self {
-        FieldInfo {
+        InputFieldInfo {
             name: field.into(),
             index,
         }
     }
 
     pub(crate) fn name(field: impl Into<String>) -> Self {
-        FieldInfo {
+        InputFieldInfo {
             name: field.into(),
             index: 0,
         }
@@ -99,7 +99,7 @@ impl FieldInfo {
 
 #[derive(Debug, Default, Clone)]
 pub struct Field {
-    pub input_field: FieldInfo,
+    pub input_field: InputFieldInfo,
 
     pub output_fields: BTreeMap<String, usize>,
 
@@ -115,7 +115,7 @@ pub struct Field {
 impl Field {
     pub(crate) fn new(field: impl Into<String>) -> Self {
         Field {
-            input_field: FieldInfo::name(field.into()),
+            input_field: InputFieldInfo::name(field.into()),
             output_fields: BTreeMap::new(),
             renamed_field: None,
             target_fields: None,
@@ -170,7 +170,7 @@ impl std::str::FromStr for Field {
         };
 
         Ok(Field {
-            input_field: FieldInfo::name(field),
+            input_field: InputFieldInfo::name(field),
             output_fields: BTreeMap::new(),
             renamed_field,
             target_fields,

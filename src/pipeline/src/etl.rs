@@ -24,7 +24,7 @@ use common_telemetry::debug;
 use itertools::{merge, Itertools};
 use processor::Processor;
 use transform::{Transformer, Transforms};
-use value::Map;
+use value::{Map, Value};
 use yaml_rust::YamlLoader;
 
 const DESCRIPTION: &str = "description";
@@ -34,6 +34,60 @@ const TRANSFORM: &str = "transform";
 pub enum Content {
     Json(String),
     Yaml(String),
+}
+
+fn set_processor_keys_index(
+    processors: &mut processor::Processors,
+    final_intermediate_keys: &Vec<String>,
+) -> Result<(), String> {
+    for processor in processors.iter_mut() {
+        for field in processor.fields_mut().iter_mut() {
+            let index = final_intermediate_keys
+                .iter()
+                .position(|r| *r == field.input_field.name)
+                .ok_or(format!(
+                    "input field {} is not found in required keys: {final_intermediate_keys:?}",
+                    field.input_field.name
+                ))?;
+            field.set_input_index(index);
+            for (k, v) in field.output_fields.iter_mut() {
+                let index = final_intermediate_keys
+                    .iter()
+                    .position(|r| *r == *k)
+                    .ok_or(format!(
+                    "output field {k} is not found in required keys: {final_intermediate_keys:?}"
+                ))?;
+                *v = index;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_transform_keys_index(
+    transforms: &mut Transforms,
+    final_intermediate_keys: &Vec<String>,
+    output_keys: &Vec<String>,
+) -> Result<(), String> {
+    for transform in transforms.iter_mut() {
+        for field in transform.fields.iter_mut() {
+            let index = final_intermediate_keys
+                .iter()
+                .position(|r| *r == field.input_field.name)
+                .ok_or(format!(
+                    "input field {} is not found in required keys: {final_intermediate_keys:?}",
+                    field.input_field.name
+                ))?;
+            field.set_input_index(index);
+            for (k, v) in field.output_fields.iter_mut() {
+                let index = output_keys.iter().position(|r| *r == *k).ok_or(format!(
+                    "output field {k} is not found in required keys: {final_intermediate_keys:?}"
+                ))?;
+                *v = index;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn parse<T>(input: &Content) -> Result<Pipeline<T>, String>
@@ -109,83 +163,12 @@ where
                 }
             }
 
-            println!(
-                "-------------------- final_intermediate_keys: {:?}",
-                final_intermediate_keys
-            );
-
             final_intermediate_keys.extend(intermediate_keys_exclude_original);
 
-            println!(
-                "-------------------- final_intermediate_keys: {:?}",
-                final_intermediate_keys
-            );
-
             let output_keys = transforms.output_keys().clone();
-            processors
-                .iter_mut()
-                .map(|processor| {
-                    processor
-                        .fields_mut()
-                        .iter_mut()
-                        .map(|field| {
-                            let index = final_intermediate_keys
-                                .iter()
-                                .position(|r| *r == field.input_field.name)
-                                .ok_or(format!(
-                                    "input field {} is not found in required keys: {final_intermediate_keys:?}:{ordered_intermediate_keys:?}",
-                                    field.input_field.name
-                                ))?;
-                            field.set_input_index(index);
-                            field
-                                .output_fields
-                                .iter_mut()
-                                .map(|(k, v)| {
-                                    let index = final_intermediate_keys
-                                        .iter()
-                                        .position(|r| r == k)
-                                        .ok_or(format!(
-                                        "output field {k} is not found in required keys: {final_intermediate_keys:?}:{ordered_intermediate_keys:?}"
-                                    ))?;
-                                    *v = index;
-                                    Ok::<(), String>(())
-                                })
-                                .collect::<Result<Vec<_>, String>>()?;
-                            Ok::<(), String>(())
-                        })
-                        .collect::<Result<Vec<()>, String>>()
-                })
-                .collect::<Result<Vec<Vec<()>>, String>>()?;
-
-            transforms.iter_mut()
-            .map(|transform| {
-                transform.fields.iter_mut()
-                .map(|field| {
-                    let index = final_intermediate_keys.iter()
-                    .position(|r| *r == field.input_field.name)
-                    .ok_or(format!(
-                        "input field {} is not found in required keys: {final_intermediate_keys:?}:{ordered_intermediate_keys:?}",
-                        field.input_field.name
-                    ))?;
-                    field.set_input_index(index);
-                    field
-                    .output_fields
-                    .iter_mut()
-                    .map(|(k, v)| {
-                        let index = output_keys
-                        .iter()
-                        .position(|r| r == k)
-                        .ok_or(format!(
-                            "output field {k} is not found in required keys: {final_intermediate_keys:?}:{ordered_intermediate_keys:?}"
-                        ))?;
-                        *v = index;
-                        Ok::<(), String>(())
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                    Ok::<(), String>(())
-                })
-                .collect::<Result<Vec<()>, String>>()
-            }).collect::<Result<Vec<_>,String>>()?;
+            set_processor_keys_index(&mut processors, &final_intermediate_keys)?;
+            set_transform_keys_index(&mut transforms, &final_intermediate_keys, &output_keys)?;
+            let intermediate_size = final_intermediate_keys.len();
 
             Ok(Pipeline {
                 description,
@@ -194,6 +177,7 @@ where
                 required_keys,
                 output_keys,
                 intermediate_keys: final_intermediate_keys,
+                intermediate_payload: vec![Value::Null; intermediate_size],
             })
         }
         Content::Json(_) => unimplemented!(),
@@ -216,6 +200,7 @@ where
     /// intermediate keys from the processors
     intermediate_keys: Vec<String>,
     // pub on_failure: processor::Processors,
+    intermediate_payload: Vec<Value>,
 }
 
 impl<T> std::fmt::Display for Pipeline<T>
@@ -278,33 +263,44 @@ where
         self.transformer.transform_mut(val)
     }
 
-    pub fn preprepase(&self, val: serde_json::Value) -> Result<Vec<value::Value>, String> {
-        let mut result = Vec::with_capacity(self.intermediate_keys.len());
+    pub fn preprepase<'s, 'payload>(
+        &'s self,
+        val: serde_json::Value,
+        result: &'payload mut Vec<Value>,
+    ) -> Result<(), String> {
         match val {
-            serde_json::Value::Object(mut map) => {
-                for required_key in self.required_keys.iter() {
-                    match map.remove(required_key) {
-                        Some(value) => {
-                            result.push(value.try_into()?);
-                        }
-                        None => {
-                            result.push(crate::Value::Null);
+            serde_json::Value::Object(map) => {
+                let mut index = 0;
+
+                // because of the key in the required_keys is ordered
+                for (payload_key, payload_value) in map.into_iter() {
+                    // find the key in the required_keys
+                    let mut current_index = index;
+                    while current_index < self.required_keys.len() {
+                        if self.required_keys[current_index] == payload_key {
+                            result[current_index] = payload_value.try_into()?;
+                            index += 1;
+                            break;
+                            // can not find the key in the required_keys
+                        } else {
+                            // find the key in the required_keys
+                            current_index += 1;
                         }
                     }
                 }
-                if result.len() != self.required_keys.len() {
-                    return Err("missing required keys".to_string());
-                } else {
-                    for _ in 0..(self.intermediate_keys.len() - self.required_keys.len()) {
-                        result.push(value::Value::Null);
-                    }
-                }
+            }
+            serde_json::Value::String(_) => {
+                result[0] = val.try_into()?;
             }
             _ => {
                 return Err("expect object".to_string());
             }
         }
-        Ok(result)
+        Ok(())
+    }
+
+    pub fn init_vec(&self) -> Vec<Value> {
+        vec![Value::Null; self.intermediate_keys.len()]
     }
 
     pub fn processors(&self) -> &processor::Processors {

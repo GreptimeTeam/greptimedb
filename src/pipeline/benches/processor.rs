@@ -1,3 +1,5 @@
+use std::ptr;
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pipeline::{
     parse, Array, Content, GreptimeTransformer, Pipeline, Processor, Transformer,
@@ -24,15 +26,19 @@ fn processor_mut(
     pipeline: &Pipeline<GreptimeTransformer>,
     input_values: Vec<Value>,
 ) -> impl IntoIterator<Item = Vec<greptime_proto::v1::Row>> {
-    let pipeline_data = input_values.into_iter().map(|v| pipeline.preprepase(v));
+    let mut payload = pipeline.init_vec();
+    let mut result = Vec::with_capacity(input_values.len());
 
-    let transformed_data = pipeline_data
-        .map(|data| {
-            let mut v = data.unwrap();
-            pipeline.exec_mut(&mut v)
-        })
-        .collect::<Result<Vec<_>, String>>();
-    transformed_data
+    for v in input_values {
+        pipeline.preprepase(v, &mut payload)?;
+        let r = pipeline.exec_mut(&mut payload)?;
+        result.push(r);
+        for i in payload.iter_mut() {
+            *i = PipelineValue::Null;
+        }
+    }
+
+    Ok::<Vec<greptime_proto::v1::Row>, String>(result)
 }
 
 fn prepare_pipeline() -> Pipeline<GreptimeTransformer> {

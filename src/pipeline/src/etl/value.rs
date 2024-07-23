@@ -24,6 +24,7 @@ pub use time::{Epoch, Time};
 /// Value can be used as type
 /// acts as value: the enclosed value is the actual value
 /// acts as type: the enclosed value is the default value
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     // as value: null
@@ -56,6 +57,10 @@ pub enum Value {
 impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
+    }
+
+    pub fn discriminant(&self) -> u8 {
+        unsafe { *(self as *const Self as *const u8) }
     }
 
     pub fn parse_str_type(t: &str) -> Result<Self, String> {

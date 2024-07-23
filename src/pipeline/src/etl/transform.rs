@@ -30,7 +30,6 @@ const TRANSFORM_DEFAULT: &str = "default";
 const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
 pub use transformer::greptime::GreptimeTransformer;
-// pub use transformer::noop::NoopTransformer;
 
 pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     type Output;

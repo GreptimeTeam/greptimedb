@@ -312,18 +312,18 @@ mod tests {
 
         let mut map = Map::default();
         map.insert("a", Value::String("123".to_string()));
-        let processed_val = processor.exec_map(map).unwrap();
+        let processed_val = processor.exec_map(&mut map).unwrap();
 
-        let v = Value::Map(Map {
+        let v = Map {
             values: vec![
                 ("a_ar".to_string(), Value::String("1".to_string())),
                 ("a".to_string(), Value::String("123".to_string())),
             ]
             .into_iter()
             .collect(),
-        });
+        };
 
-        assert_eq!(v, processed_val);
+        assert_eq!(v, *processed_val);
     }
 
     #[test]
