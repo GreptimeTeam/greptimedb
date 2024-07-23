@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_base::AffectedRows;
-use common_meta::key::FlowId;
 use common_meta::rpc::procedure::{MigrateRegionRequest, ProcedureStateResponse};
 use common_query::error::Result;
 use common_query::Output;
@@ -69,7 +68,12 @@ pub trait ProcedureServiceHandler: Send + Sync {
 /// This flow service handler is only use for flush flow for now.
 #[async_trait]
 pub trait FlowServiceHandler: Send + Sync {
-    async fn flush(&self, id: FlowId, ctx: QueryContextRef) -> Result<api::v1::flow::FlowResponse>;
+    async fn flush(
+        &self,
+        catalog: &str,
+        flow: &str,
+        ctx: QueryContextRef,
+    ) -> Result<api::v1::flow::FlowResponse>;
 }
 
 pub type TableMutationHandlerRef = Arc<dyn TableMutationHandler>;

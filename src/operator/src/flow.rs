@@ -17,7 +17,6 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_function::handlers::FlowServiceHandler;
 use common_meta::key::flow::FlowMetadataManagerRef;
-use common_meta::key::FlowId;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::error::Result;
 use common_telemetry::tracing_context::TracingContext;
@@ -46,8 +45,13 @@ impl FlowServiceOperator {
 
 #[async_trait]
 impl FlowServiceHandler for FlowServiceOperator {
-    async fn flush(&self, id: FlowId, ctx: QueryContextRef) -> Result<api::v1::flow::FlowResponse> {
-        self.flush_inner(id, ctx).await
+    async fn flush(
+        &self,
+        catalog: &str,
+        flow: &str,
+        ctx: QueryContextRef,
+    ) -> Result<api::v1::flow::FlowResponse> {
+        self.flush_inner(catalog, flow, ctx).await
     }
 }
 
@@ -55,9 +59,24 @@ impl FlowServiceOperator {
     /// Flush the flownodes according to the flow id.
     async fn flush_inner(
         &self,
-        id: FlowId,
+        catalog: &str,
+        flow: &str,
         ctx: QueryContextRef,
     ) -> Result<api::v1::flow::FlowResponse> {
+        let id = self
+            .flow_metadata_manager
+            .flow_name_manager()
+            .get(catalog, flow)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_query::error::ExecuteSnafu)?
+            .context(common_meta::error::FlowNotFoundSnafu {
+                flow_name: format!("{}.{}", catalog, flow),
+            })
+            .map_err(BoxedError::new)
+            .context(common_query::error::ExecuteSnafu)?
+            .flow_id();
+
         let all_flownode_peers = self
             .flow_metadata_manager
             .flow_route_manager()
@@ -66,6 +85,7 @@ impl FlowServiceOperator {
             .await
             .map_err(BoxedError::new)
             .context(common_query::error::ExecuteSnafu)?;
+
         // order of flownodes doesn't matter here
         let all_flow_nodes = FuturesUnordered::from_iter(
             all_flownode_peers
@@ -74,6 +94,7 @@ impl FlowServiceOperator {
         )
         .collect::<Vec<_>>()
         .await;
+
         let mut final_result: Option<api::v1::flow::FlowResponse> = None;
         for node in all_flow_nodes {
             let res = {
@@ -94,6 +115,7 @@ impl FlowServiceOperator {
                     .map_err(BoxedError::new)
                     .context(common_query::error::ExecuteSnafu)?
             };
+
             if let Some(prev) = &mut final_result {
                 prev.affected_rows = res.affected_rows;
                 prev.affected_flows.extend(res.affected_flows);

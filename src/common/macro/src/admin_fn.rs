@@ -153,6 +153,7 @@ fn build_struct(
     let ret = Ident::new(&format!("{ret}_datatype"), ret.span());
     let uppcase_display_name = display_name.to_uppercase();
     // Get the handler name in function state by the argument ident
+    // TODO(discord9): consider simple depend injection if more handlers are needed
     let (handler, snafu_type) = match handler_type.to_string().as_str() {
         "ProcedureServiceHandlerRef" => (
             Ident::new("procedure_service_handler", handler_type.span()),
@@ -162,6 +163,11 @@ fn build_struct(
         "TableMutationHandlerRef" => (
             Ident::new("table_mutation_handler", handler_type.span()),
             Ident::new("MissingTableMutationHandlerSnafu", handler_type.span()),
+        ),
+
+        "FlowServiceHandlerRef" => (
+            Ident::new("flow_service_handler", handler_type.span()),
+            Ident::new("MissingFlowServiceHandlerSnafu", handler_type.span()),
         ),
         handler => ok!(error!(
             handler_type.span(),

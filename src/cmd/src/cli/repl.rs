@@ -289,6 +289,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         None,
         None,
         None,
+        None,
         false,
         plugins.clone(),
     ));

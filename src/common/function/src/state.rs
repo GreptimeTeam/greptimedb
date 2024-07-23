@@ -123,7 +123,8 @@ impl FunctionState {
         impl FlowServiceHandler for MockFlowServiceHandler {
             async fn flush(
                 &self,
-                _id: common_meta::key::FlowId,
+                _catalog: &str,
+                _flow: &str,
                 _ctx: QueryContextRef,
             ) -> Result<api::v1::flow::FlowResponse> {
                 todo!()

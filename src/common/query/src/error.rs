@@ -239,6 +239,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Missing FlowServiceHandler, not expected"))]
+    MissingFlowServiceHandler {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid function args: {}", err_msg))]
     InvalidFuncArgs {
         err_msg: String,
@@ -290,6 +296,7 @@ impl ErrorExt for Error {
 
             Error::MissingTableMutationHandler { .. }
             | Error::MissingProcedureServiceHandler { .. }
+            | Error::MissingFlowServiceHandler { .. }
             | Error::ExecuteRepeatedly { .. }
             | Error::ThreadJoin { .. } => StatusCode::Unexpected,
 
