@@ -19,6 +19,7 @@ use prometheus::*;
 pub const STAGE_LABEL: &str = "stage";
 /// Type label.
 pub const TYPE_LABEL: &str = "type";
+const CACHE_EVICTION_CAUSE: &str = "cause";
 /// Reason to flush.
 pub const FLUSH_REASON: &str = "reason";
 /// File type label.
@@ -194,7 +195,7 @@ lazy_static! {
     pub static ref CACHE_EVICTION: IntGaugeVec = register_int_gauge_vec!(
         "greptime_mito_cache_eviction",
         "mito cache eviction",
-        &[TYPE_LABEL, "cause"]
+        &[TYPE_LABEL, CACHE_EVICTION_CAUSE]
     ).unwrap();
     // ------- End of cache metrics.
 
