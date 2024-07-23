@@ -130,6 +130,13 @@ lazy_static! {
             &[METRIC_DB_LABEL]
         )
         .unwrap();
+    pub static ref METRIC_HTTP_LOGS_INGESTION_ELAPSED: HistogramVec =
+        register_histogram_vec!(
+            "greptime_servers_http_logs_ingestion_elapsed",
+            "servers http logs ingestion elapsed",
+            &[METRIC_DB_LABEL]
+        )
+        .unwrap();
     pub static ref METRIC_MYSQL_CONNECTIONS: IntGauge = register_int_gauge!(
         "greptime_servers_mysql_connection_count",
         "servers mysql connection count"

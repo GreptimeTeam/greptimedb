@@ -40,6 +40,7 @@ use crate::error::{
 use crate::http::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
+use crate::metrics::METRIC_HTTP_LOGS_INGESTION_ELAPSED;
 use crate::query_handler::LogHandlerRef;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -298,6 +299,11 @@ async fn ingest_logs_inner(
     pipeline_data: PipelineValue,
     query_ctx: QueryContextRef,
 ) -> Result<HttpResponse> {
+    let db = query_ctx.get_db_string();
+    let _timer = METRIC_HTTP_LOGS_INGESTION_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
+
     let start = std::time::Instant::now();
 
     let pipeline = state
