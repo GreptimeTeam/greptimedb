@@ -252,6 +252,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Can't found alive flownode"))]
+    FlownodeNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -269,7 +275,8 @@ impl ErrorExt for Error {
             | Error::BadAccumulatorImpl { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }
-            | Error::ArrowCompute { .. } => StatusCode::EngineExecuteQuery,
+            | Error::ArrowCompute { .. }
+            | Error::FlownodeNotFound { .. } => StatusCode::EngineExecuteQuery,
 
             Error::ExecuteFunction { error, .. } | Error::GeneralDataFusion { error, .. } => {
                 datafusion_status_code::<Self>(error, None)

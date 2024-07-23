@@ -52,5 +52,5 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
 pub fn new_query_engine_with_table(table: TableRef) -> QueryEngineRef {
     let catalog_manager = MemoryCatalogManager::new_with_table(table);
 
-    QueryEngineFactory::new(catalog_manager, None, None, None, false).query_engine()
+    QueryEngineFactory::new(catalog_manager, None, None, None, None, false).query_engine()
 }

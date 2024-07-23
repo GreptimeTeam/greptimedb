@@ -300,7 +300,7 @@ mod test {
         };
         catalog_list.register_table_sync(req_with_ts).unwrap();
 
-        let factory = query::QueryEngineFactory::new(catalog_list, None, None, None, false);
+        let factory = query::QueryEngineFactory::new(catalog_list, None, None, None, None, false);
 
         let engine = factory.query_engine();
         engine.register_function(Arc::new(TumbleFunction {}));

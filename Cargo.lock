@@ -1940,6 +1940,8 @@ dependencies = [
  "common-version",
  "datafusion",
  "datatypes",
+ "futures",
+ "futures-util",
  "num",
  "num-traits",
  "once_cell",
