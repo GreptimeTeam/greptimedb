@@ -180,29 +180,29 @@ fn build_struct(
         #[derive(Debug)]
         #vis struct #name;
 
-        impl fmt::Display for #name {
-            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        impl std::fmt::Display for #name {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, #uppcase_display_name)
             }
         }
 
 
-        impl Function for #name {
+        impl crate::function::Function for #name {
             fn name(&self) -> &'static str {
                 #display_name
             }
 
-            fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-                Ok(ConcreteDataType::#ret())
+            fn return_type(&self, _input_types: &[store_api::storage::ConcreteDataType]) -> common_query::error::Result<store_api::storage::ConcreteDataType> {
+                Ok(store_api::storage::ConcreteDataType::#ret())
             }
 
             fn signature(&self) -> Signature {
                 #sig_fn()
             }
 
-            fn eval(&self, func_ctx: FunctionContext, columns: &[VectorRef]) ->  Result<VectorRef> {
+            fn eval(&self, func_ctx: crate::function::FunctionContext, columns: &[datatypes::vectors::VectorRef]) ->  common_query::error::Result<datatypes::vectors::VectorRef> {
                 // Ensure under the `greptime` catalog for security
-                ensure_greptime!(func_ctx);
+                crate::ensure_greptime!(func_ctx);
 
                 let columns_num = columns.len();
                 let rows_num = if columns.is_empty() {
@@ -214,6 +214,9 @@ fn build_struct(
 
                 // TODO(dennis): DataFusion doesn't support async UDF currently
                 std::thread::spawn(move || {
+                    use snafu::OptionExt;
+                    use datatypes::data_type::DataType;
+
                     let query_ctx = &func_ctx.query_ctx;
                     let handler = func_ctx
                         .state
@@ -221,7 +224,7 @@ fn build_struct(
                         .as_ref()
                         .context(#snafu_type)?;
 
-                    let mut builder = ConcreteDataType::#ret()
+                    let mut builder = store_api::storage::ConcreteDataType::#ret()
                         .create_mutable_vector(rows_num);
 
                     if columns_num == 0 {
@@ -248,9 +251,9 @@ fn build_struct(
                 })
                     .join()
                     .map_err(|e| {
-                        error!(e; "Join thread error");
-                        ThreadJoin {
-                            location: Location::default(),
+                        common_telemetry::error!(e; "Join thread error");
+                        common_query::error::Error::ThreadJoin {
+                            location: snafu::Location::default(),
                         }
                     })?
 
