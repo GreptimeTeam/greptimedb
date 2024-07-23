@@ -302,6 +302,10 @@ impl ParquetReaderBuilder {
         file_path: &str,
         file_size: u64,
     ) -> Result<Arc<ParquetMetaData>> {
+        let _t = READ_STAGE_ELAPSED
+            .with_label_values(&["read_parquet_metadata"])
+            .start_timer();
+
         let region_id = self.file_handle.region_id();
         let file_id = self.file_handle.file_id();
         // Tries to get from global cache.

@@ -19,7 +19,6 @@ use parquet::file::FOOTER_SIZE;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
-use crate::metrics::PARQUET_METADATA_LOAD_ELAPSED;
 
 /// The estimated size of the footer and metadata need to read from the end of parquet file.
 const DEFAULT_PREFETCH_SIZE: u64 = 64 * 1024;
@@ -68,8 +67,6 @@ impl<'a> MetadataLoader<'a> {
     ///
     /// Refer to https://github.com/apache/arrow-rs/blob/093a10e46203be1a0e94ae117854701bf58d4c79/parquet/src/arrow/async_reader/metadata.rs#L55-L106
     pub async fn load(&self) -> Result<ParquetMetaData> {
-        let _t = PARQUET_METADATA_LOAD_ELAPSED.start_timer();
-
         let object_store = &self.object_store;
         let path = self.file_path;
         let file_size = self.get_file_size().await?;

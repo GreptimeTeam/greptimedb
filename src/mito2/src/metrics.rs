@@ -323,12 +323,4 @@ lazy_static! {
         "mito manifest operation elapsed",
         &["op"]
     ).unwrap();
-
-    // Parquet related metrics:
-
-    /// Elapsed time of loading parquet metadata.
-    pub static ref PARQUET_METADATA_LOAD_ELAPSED: Histogram = register_histogram!(
-        "greptime_parquet_metadata_load_elapsed",
-        "parquet metadata load elapsed",
-    ).unwrap();
 }
