@@ -226,6 +226,14 @@ impl Stream for Consumer {
                     // Sort records by offset in case they aren't in order
                     records_and_offsets.sort_by_key(|x| x.offset);
                     *this.last_high_watermark = watermark;
+                    if !records_and_offsets.is_empty() {
+                        *this.record_bytes = records_and_offsets
+                            .iter()
+                            .map(|r| r.record.approximate_size())
+                            .sum::<usize>()
+                            / records_and_offsets.len();
+                    }
+
                     if let Some(x) = records_and_offsets.last() {
                         *this.next_offset = x.offset + 1;
                         info!(

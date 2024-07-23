@@ -518,19 +518,19 @@ impl LogStore for KafkaLogStore {
     /// that the obsolete entries are deleted immediately.
     async fn obsolete(
         &self,
-        provider: &Provider,
-        region_id: RegionId,
-        entry_id: EntryId,
+        _provider: &Provider,
+        _region_id: RegionId,
+        _entry_id: EntryId,
     ) -> Result<()> {
-        let provider = provider
-            .as_kafka_provider()
-            .with_context(|| InvalidProviderSnafu {
-                expected: KafkaProvider::type_name(),
-                actual: provider.type_name(),
-            })?;
+        // let provider = provider
+        //     .as_kafka_provider()
+        //     .with_context(|| InvalidProviderSnafu {
+        //         expected: KafkaProvider::type_name(),
+        //         actual: provider.type_name(),
+        //     })?;
 
-        let client = self.client_manager.get_or_insert(provider).await?;
-        client.obsolete(region_id, entry_id + 1).await;
+        // let client = self.client_manager.get_or_insert(provider).await?;
+        // client.obsolete(region_id, entry_id + 1).await;
 
         Ok(())
     }
