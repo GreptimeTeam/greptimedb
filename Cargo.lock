@@ -3898,6 +3898,7 @@ dependencies = [
  "common-datasource",
  "common-error",
  "common-frontend",
+ "common-function",
  "common-grpc",
  "common-macro",
  "common-meta",
