@@ -44,6 +44,10 @@ pub(crate) const METRIC_POSTGRES_SIMPLE_QUERY: &str = "simple";
 pub(crate) const METRIC_POSTGRES_EXTENDED_QUERY: &str = "extended";
 pub(crate) const METRIC_METHOD_LABEL: &str = "method";
 pub(crate) const METRIC_PATH_LABEL: &str = "path";
+pub(crate) const METRIC_RESULT_LABEL: &str = "result";
+
+pub(crate) const METRIC_SUCCESS_VALUE: &str = "success";
+pub(crate) const METRIC_FAILURE_VALUE: &str = "failure";
 
 lazy_static! {
     pub static ref METRIC_ERROR_COUNTER: IntCounterVec = register_int_counter_vec!(
@@ -130,11 +134,24 @@ lazy_static! {
             &[METRIC_DB_LABEL]
         )
         .unwrap();
+    pub static ref METRIC_HTTP_LOGS_INGESTION_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_http_logs_ingestion_counter",
+        "servers http logs ingestion counter",
+        &[METRIC_DB_LABEL]
+    )
+    .unwrap();
     pub static ref METRIC_HTTP_LOGS_INGESTION_ELAPSED: HistogramVec =
         register_histogram_vec!(
             "greptime_servers_http_logs_ingestion_elapsed",
             "servers http logs ingestion elapsed",
-            &[METRIC_DB_LABEL]
+            &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
+        )
+        .unwrap();
+    pub static ref METRIC_HTTP_LOGS_TRANSFORM_ELAPSED: HistogramVec =
+        register_histogram_vec!(
+            "greptime_servers_http_logs_transform_elapsed",
+            "servers http logs transform elapsed",
+            &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
         )
         .unwrap();
     pub static ref METRIC_MYSQL_CONNECTIONS: IntGauge = register_int_gauge!(
