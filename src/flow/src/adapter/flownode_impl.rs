@@ -94,10 +94,8 @@ impl Flownode for FlowWorkerManager {
                     .map_err(to_meta_err)?;
                 Ok(Default::default())
             }
-            Some(flow_request::Body::Flush(FlushFlow {
-                flow_id: Some(_flow_id),
-            })) => {
-                // TODO: impl individual flush
+            Some(flow_request::Body::Flush(FlushFlow { flow_id: _ })) => {
+                // TODO(discord9): impl individual flush
                 self.run_available(true).await.map_err(to_meta_err)?;
                 self.send_writeback_requests().await.map_err(to_meta_err)?;
 
