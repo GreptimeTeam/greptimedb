@@ -16,7 +16,9 @@
 
 use std::collections::HashMap;
 
-use api::v1::flow::{flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse};
+use api::v1::flow::{
+    flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse, FlushFlow,
+};
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
 use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
@@ -90,6 +92,15 @@ impl Flownode for FlowWorkerManager {
                 self.remove_flow(flow_id.id as u64)
                     .await
                     .map_err(to_meta_err)?;
+                Ok(Default::default())
+            }
+            Some(flow_request::Body::Flush(FlushFlow {
+                flow_id: Some(_flow_id),
+            })) => {
+                // TODO: impl individual flush
+                self.run_available(true).await.map_err(to_meta_err)?;
+                self.send_writeback_requests().await.map_err(to_meta_err)?;
+
                 Ok(Default::default())
             }
             None => UnexpectedSnafu {
