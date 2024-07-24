@@ -215,7 +215,6 @@ mod tests {
     use std::ops::Range;
     use std::sync::Arc;
 
-
     use chrono::{TimeZone, Utc};
     use futures::future::Fuse;
     use futures::TryStreamExt;
