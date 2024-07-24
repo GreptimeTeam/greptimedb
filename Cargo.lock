@@ -5781,6 +5781,7 @@ dependencies = [
  "futures-util",
  "itertools 0.10.5",
  "lazy_static",
+ "pin-project",
  "prometheus",
  "protobuf",
  "protobuf-build",
