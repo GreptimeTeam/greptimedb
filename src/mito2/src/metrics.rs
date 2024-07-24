@@ -192,7 +192,7 @@ lazy_static! {
     )
     .unwrap();
     /// Cache eviction counter, labeled with cache type and eviction reason.
-    pub static ref CACHE_EVICTION: IntGaugeVec = register_int_gauge_vec!(
+    pub static ref CACHE_EVICTION: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_eviction",
         "mito cache eviction",
         &[TYPE_LABEL, CACHE_EVICTION_CAUSE]
