@@ -347,6 +347,57 @@ impl UnaryFunc {
         }
     }
 
+    pub fn from_tumble_func(name: &str, args: &[TypedExpr]) -> Result<(Self, TypedExpr), Error> {
+        match name {
+            "tumble_start" | "tumble_end" => {
+                let ts = args.first().context(InvalidQuerySnafu {
+                    reason: "Tumble window function requires a timestamp argument",
+                })?;
+                let window_size = args
+                .get(1)
+                .and_then(|expr| expr.expr.as_literal())
+                .context(InvalidQuerySnafu {
+                    reason: "Tumble window function requires a window size argument"
+                })?.as_string() // TODO(discord9): since df to substrait convertor does not support interval type yet, we need to take a string and cast it to interval instead
+                .map(|s|cast(Value::from(s), &ConcreteDataType::interval_month_day_nano_datatype())).transpose().map_err(BoxedError::new).context(
+                    ExternalSnafu
+                )?.and_then(|v|v.as_interval())
+                .with_context(||InvalidQuerySnafu {
+                    reason: format!("Tumble window function requires window size argument to be a string describe a interval, found {:?}", args.get(1))
+                })?;
+                let start_time = match args.get(2) {
+                Some(start_time) => start_time.expr.as_literal(),
+                None => None,
+            }
+            .map(|s| cast(s.clone(), &ConcreteDataType::datetime_datatype())).transpose().map_err(BoxedError::new).context(ExternalSnafu)?.map(|v|v.as_datetime().with_context(
+                ||InvalidQuerySnafu {
+                    reason: format!("Tumble window function requires start time argument to be a datetime describe in string, found {:?}", args.get(2))
+                }
+            )).transpose()?;
+                if name == "tumble_start" {
+                    Ok((
+                        Self::TumbleWindowFloor {
+                            window_size,
+                            start_time,
+                        },
+                        ts.clone(),
+                    ))
+                } else if name == "tumble_end" {
+                    Ok((
+                        Self::TumbleWindowCeiling {
+                            window_size,
+                            start_time,
+                        },
+                        ts.clone(),
+                    ))
+                } else {
+                    unreachable!()
+                }
+            }
+            _ => todo!(),
+        }
+    }
+
     /// Evaluate the function with given values and expression
     ///
     /// # Arguments
@@ -712,8 +763,8 @@ impl BinaryFunc {
                     t1 == t2,
                     InvalidQuerySnafu {
                         reason: format!(
-                            "Binary function {:?} requires both arguments to have the same type",
-                            generic
+                            "Binary function {:?} requires both arguments to have the same type, left={:?}, right={:?}",
+                            generic,t1,t2
                         ),
                     }
                 );

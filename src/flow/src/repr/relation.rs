@@ -374,10 +374,8 @@ impl RelationDesc {
             .collect();
         let arrow_schema = arrow_schema::Schema::new(fields);
 
-        DFSchema::try_from(arrow_schema.clone()).context({
-            DatafusionSnafu {
-                context: format!("Error when converting to DFSchema: {:?}", arrow_schema),
-            }
+        DFSchema::try_from(arrow_schema.clone()).with_context(|_e| DatafusionSnafu {
+            context: format!("Error when converting to DFSchema: {:?}", arrow_schema),
         })
     }
 
