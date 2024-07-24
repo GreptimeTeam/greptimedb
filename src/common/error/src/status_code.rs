@@ -36,7 +36,7 @@ pub enum StatusCode {
     InvalidArguments = 1004,
     /// The task is cancelled.
     Cancelled = 1005,
-    /// Illegal state, can be exposed to users
+    /// Illegal state, can be exposed to users.
     IllegalState = 1006,
     // ====== End of common status code ================
 
@@ -55,33 +55,34 @@ pub enum StatusCode {
     // ====== Begin of catalog related status code =====
     /// Table already exists.
     TableAlreadyExists = 4000,
-    /// Table not found
+    /// Table not found.
     TableNotFound = 4001,
-    /// Table column not found
+    /// Table column not found.
     TableColumnNotFound = 4002,
-    /// Table column already exists
+    /// Table column already exists.
     TableColumnExists = 4003,
-    /// Database not found
+    /// Database not found.
     DatabaseNotFound = 4004,
-    /// Region not found
+    /// Region not found.
     RegionNotFound = 4005,
-    /// Region already exists
+    /// Region already exists.
     RegionAlreadyExists = 4006,
+    /// Region is read-only in current state.
     RegionReadonly = 4007,
     /// Region is not in a proper state to handle specific request.
     RegionNotReady = 4008,
-    /// Region is temporarily in busy state
+    /// Region is temporarily in busy state.
     RegionBusy = 4009,
-    /// Table is temporarily unable to handle the request
+    /// Table is temporarily unable to handle the request.
     TableUnavailable = 4010,
-    /// Database not found
+    /// Database already exists.
     DatabaseAlreadyExists = 4011,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
-    /// Storage is temporarily unable to handle the request
+    /// Storage is temporarily unable to handle the request.
     StorageUnavailable = 5000,
-    /// Request is outdated, e.g., version mismatch
+    /// Request is outdated, e.g., version mismatch.
     RequestOutdated = 5001,
     // ====== End of storage related status code =======
 
@@ -89,24 +90,24 @@ pub enum StatusCode {
     /// Runtime resources exhausted, like creating threads failed.
     RuntimeResourcesExhausted = 6000,
 
-    /// Rate limit exceeded
+    /// Rate limit exceeded.
     RateLimited = 6001,
     // ====== End of server related status code =======
 
     // ====== Begin of auth related status code =====
-    /// User not exist
+    /// User not exist.
     UserNotFound = 7000,
-    /// Unsupported password type
+    /// Unsupported password type.
     UnsupportedPasswordType = 7001,
-    /// Username and password does not match
+    /// Username and password does not match.
     UserPasswordMismatch = 7002,
-    /// Not found http authorization header
+    /// Not found http authorization header.
     AuthHeaderNotFound = 7003,
-    /// Invalid http authorization header
+    /// Invalid http authorization header.
     InvalidAuthHeader = 7004,
-    /// Illegal request to connect catalog-schema
+    /// Illegal request to connect catalog-schema.
     AccessDenied = 7005,
-    /// User is not authorized to perform the operation
+    /// User is not authorized to perform the operation.
     PermissionDenied = 7006,
     // ====== End of auth related status code =====
 
