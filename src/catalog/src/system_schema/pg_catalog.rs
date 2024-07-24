@@ -99,9 +99,12 @@ impl PGCatalogProvider {
         }
         tables.insert(
             PG_NAMESPACE.to_string(),
-            self.build_table(PG_NAMESPACE).unwrap(),
+            self.build_table(PG_NAMESPACE).expect(PG_NAMESPACE),
         );
-        tables.insert(PG_CLASS.to_string(), self.build_table(PG_CLASS).unwrap());
+        tables.insert(
+            PG_CLASS.to_string(),
+            self.build_table(PG_CLASS).expect(PG_NAMESPACE),
+        );
         self.tables = tables;
     }
 }
