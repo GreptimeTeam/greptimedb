@@ -341,6 +341,8 @@ pub fn from_substrait_type(null_type: &substrait_proto::proto::Type) -> Result<C
 
 #[cfg(test)]
 mod test {
+    use pretty_assertions::assert_eq;
+
     use super::*;
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{self, ColumnType, RelationType};
@@ -357,7 +359,7 @@ mod test {
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)])
-                .into_unnamed(),
+                .into_named(vec![Some("Int64(1)".to_string())]),
             plan: Plan::Constant {
                 rows: vec![(
                     repr::Row::new(vec![Value::Int64(1)]),

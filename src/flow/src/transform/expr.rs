@@ -20,7 +20,7 @@ use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::ConcreteDataType as CDT;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
 use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
 use substrait_proto::proto::expression::{IfThen, RexType, ScalarFunction};
@@ -167,6 +167,16 @@ fn rewrite_scalar_function(
     arg_typed_exprs: &[TypedExpr],
 ) -> Result<ScalarFunction, Error> {
     let mut f_rewrite = f.clone();
+    ensure!(
+        f_rewrite.arguments.len() == arg_typed_exprs.len(),
+        crate::error::InternalSnafu {
+            reason: format!(
+                "Expect `f_rewrite` and `arg_typed_expr` to be same length, found {} and {}",
+                f_rewrite.arguments.len(),
+                arg_typed_exprs.len()
+            )
+        }
+    );
     for (idx, raw_expr) in f_rewrite.arguments.iter_mut().enumerate() {
         // only replace it with col(idx) if it is not literal
         // will try best to determine if it is literal, i.e. for function like `cast(<literal>)` will try
@@ -351,7 +361,13 @@ impl TypedExpr {
                 Ok(TypedExpr::new(ret_expr, ret_type))
             }
             _var => {
-                if VariadicFunc::is_valid_func_name(fn_name) {
+                if fn_name == "tumble_start" || fn_name == "tumble_end" {
+                    let (func, arg) = UnaryFunc::from_tumble_func(fn_name, &arg_typed_exprs)?;
+
+                    let ret_type = ColumnType::new_nullable(func.signature().output.clone());
+
+                    Ok(TypedExpr::new(arg.expr.call_unary(func), ret_type))
+                } else if VariadicFunc::is_valid_func_name(fn_name) {
                     let func = VariadicFunc::from_str_and_types(fn_name, &arg_types)?;
                     let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                     let mut expr = ScalarExpr::CallVariadic {
@@ -562,7 +578,7 @@ mod test {
         };
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])
-                .into_named(vec![Some("number".to_string())]),
+                .into_named(vec![Some("numbers.number".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
@@ -576,13 +592,7 @@ mod test {
                         .into_named(vec![Some("number".to_string())]),
                     ),
                 ),
-                mfp: MapFilterProject::new(1)
-                    .map(vec![ScalarExpr::Column(0)])
-                    .unwrap()
-                    .filter(vec![filter])
-                    .unwrap()
-                    .project(vec![1])
-                    .unwrap(),
+                mfp: MapFilterProject::new(1).filter(vec![filter]).unwrap(),
             },
         };
         assert_eq!(flow_plan.unwrap(), expected);
@@ -600,7 +610,7 @@ mod test {
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::boolean_datatype(), true)])
-                .into_unnamed(),
+                .into_named(vec![Some("Int64(1) + Int64(1) * Int64(2) - Int64(1) / Int64(1) + Int64(1) % Int64(2) = Int64(3)".to_string())]),
             plan: Plan::Constant {
                 rows: vec![(
                     repr::Row::new(vec![Value::from(true)]),
@@ -624,8 +634,8 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let expected = TypedPlan {
-            schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)])
-                .into_unnamed(),
+            schema: RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)])
+                .into_named(vec![Some("numbers.number + Int64(1)".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
@@ -640,10 +650,12 @@ mod test {
                     ),
                 ),
                 mfp: MapFilterProject::new(1)
-                    .map(vec![ScalarExpr::Column(0).call_binary(
-                        ScalarExpr::Literal(Value::from(1u32), CDT::uint32_datatype()),
-                        BinaryFunc::AddUInt32,
-                    )])
+                    .map(vec![ScalarExpr::Column(0)
+                        .call_unary(UnaryFunc::Cast(CDT::int64_datatype()))
+                        .call_binary(
+                            ScalarExpr::Literal(Value::from(1i64), CDT::int64_datatype()),
+                            BinaryFunc::AddInt64,
+                        )])
                     .unwrap()
                     .project(vec![1])
                     .unwrap(),
@@ -663,7 +675,9 @@ mod test {
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)])
-                .into_unnamed(),
+                .into_named(vec![Some(
+                    "arrow_cast(Int64(1),Utf8(\"Int16\"))".to_string(),
+                )]),
             plan: Plan::Constant {
                 // cast of literal is constant folded
                 rows: vec![(repr::Row::new(vec![Value::from(1i16)]), i64::MIN, 1)],
@@ -683,7 +697,7 @@ mod test {
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)])
-                .into_unnamed(),
+                .into_named(vec![Some("numbers.number + numbers.number".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
