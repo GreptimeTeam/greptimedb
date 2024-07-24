@@ -15,13 +15,14 @@ SELECT sum(number) FROM numbers_input_basic GROUP BY tumble(ts, '1 second', '202
 Affected Rows: 0
 
 -- TODO(discord9): confirm if it's necessary to flush flow here?
-select flush_flow('test_numbers_basic')*0;
+-- because flush_flow result is at most 1
+select flush_flow('test_numbers_basic')<=1;
 
-+---------------------------------------------------+
-| flush_flow(Utf8("test_numbers_basic")) * Int64(0) |
-+---------------------------------------------------+
-| 0                                                 |
-+---------------------------------------------------+
++----------------------------------------------------+
+| flush_flow(Utf8("test_numbers_basic")) <= Int64(1) |
++----------------------------------------------------+
+| true                                               |
++----------------------------------------------------+
 
 INSERT INTO numbers_input_basic 
 VALUES
@@ -30,13 +31,13 @@ VALUES
 
 Affected Rows: 2
 
-select flush_flow('test_numbers_basic')*0;
+select flush_flow('test_numbers_basic')<=1;
 
-+---------------------------------------------------+
-| flush_flow(Utf8("test_numbers_basic")) * Int64(0) |
-+---------------------------------------------------+
-| 0                                                 |
-+---------------------------------------------------+
++----------------------------------------------------+
+| flush_flow(Utf8("test_numbers_basic")) <= Int64(1) |
++----------------------------------------------------+
+| true                                               |
++----------------------------------------------------+
 
 SELECT col_0, window_start, window_end FROM out_num_cnt_basic;
 
@@ -46,13 +47,13 @@ SELECT col_0, window_start, window_end FROM out_num_cnt_basic;
 | 42    | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
 +-------+---------------------+---------------------+
 
-select flush_flow('test_numbers_basic')*0;
+select flush_flow('test_numbers_basic')<=1;
 
-+---------------------------------------------------+
-| flush_flow(Utf8("test_numbers_basic")) * Int64(0) |
-+---------------------------------------------------+
-| 0                                                 |
-+---------------------------------------------------+
++----------------------------------------------------+
+| flush_flow(Utf8("test_numbers_basic")) <= Int64(1) |
++----------------------------------------------------+
+| true                                               |
++----------------------------------------------------+
 
 INSERT INTO numbers_input_basic 
 VALUES
@@ -61,13 +62,13 @@ VALUES
 
 Affected Rows: 2
 
-select flush_flow('test_numbers_basic')*0;
+select flush_flow('test_numbers_basic')<=1;
 
-+---------------------------------------------------+
-| flush_flow(Utf8("test_numbers_basic")) * Int64(0) |
-+---------------------------------------------------+
-| 0                                                 |
-+---------------------------------------------------+
++----------------------------------------------------+
+| flush_flow(Utf8("test_numbers_basic")) <= Int64(1) |
++----------------------------------------------------+
+| true                                               |
++----------------------------------------------------+
 
 SELECT col_0, window_start, window_end FROM out_num_cnt_basic;
 

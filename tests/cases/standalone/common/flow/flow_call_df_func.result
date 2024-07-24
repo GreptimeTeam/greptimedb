@@ -15,13 +15,13 @@ SELECT sum(abs(number)) FROM numbers_input_df_func GROUP BY tumble(ts, '1 second
 
 Affected Rows: 0
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 INSERT INTO numbers_input_df_func 
 VALUES
@@ -31,13 +31,13 @@ VALUES
 Affected Rows: 2
 
 -- flush flow to make sure that table is created and data is inserted
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 
@@ -47,13 +47,13 @@ SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 | 42    | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
 +-------+---------------------+---------------------+
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 INSERT INTO numbers_input_df_func 
 VALUES
@@ -62,13 +62,13 @@ VALUES
 
 Affected Rows: 2
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 
@@ -108,13 +108,13 @@ SELECT abs(sum(number)) FROM numbers_input_df_func GROUP BY tumble(ts, '1 second
 
 Affected Rows: 0
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 INSERT INTO numbers_input_df_func 
 VALUES
@@ -124,13 +124,13 @@ VALUES
 Affected Rows: 2
 
 -- flush flow to make sure that table is created and data is inserted
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 
@@ -140,13 +140,13 @@ SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 | 2     | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
 +-------+---------------------+---------------------+
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 INSERT INTO numbers_input_df_func 
 VALUES
@@ -155,13 +155,13 @@ VALUES
 
 Affected Rows: 2
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 
@@ -201,13 +201,13 @@ SELECT max(number) - min(number), date_bin(INTERVAL '1 second', ts, '2021-07-01 
 
 Affected Rows: 0
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 INSERT INTO numbers_input_df_func 
 VALUES
@@ -216,13 +216,13 @@ VALUES
 
 Affected Rows: 2
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 SELECT col_0, col_1 FROM out_num_cnt_df_func;
 
@@ -232,13 +232,13 @@ SELECT col_0, col_1 FROM out_num_cnt_df_func;
 | 2     | 2021-07-01T00:00:00 |
 +-------+---------------------+
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 INSERT INTO numbers_input_df_func 
 VALUES
@@ -247,13 +247,13 @@ VALUES
 
 Affected Rows: 2
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 SELECT col_0, col_1 FROM out_num_cnt_df_func;
 
@@ -293,13 +293,13 @@ SELECT date_trunc('second', ts), sum(number) FROM numbers_input_df_func GROUP BY
 
 Affected Rows: 0
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 INSERT INTO numbers_input_df_func 
 VALUES
@@ -308,13 +308,13 @@ VALUES
 
 Affected Rows: 2
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 SELECT col_0, col_1 FROM out_num_cnt;
 
@@ -324,13 +324,13 @@ SELECT col_0, col_1 FROM out_num_cnt;
 | 2021-07-01T00:00:00 | 42    |
 +---------------------+-------+
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 INSERT INTO numbers_input_df_func 
 VALUES
@@ -339,13 +339,13 @@ VALUES
 
 Affected Rows: 2
 
-select flush_flow('test_numbers_df_func')*0;
+select flush_flow('test_numbers_df_func')<=1;
 
-+-----------------------------------------------------+
-| flush_flow(Utf8("test_numbers_df_func")) * Int64(0) |
-+-----------------------------------------------------+
-| 0                                                   |
-+-----------------------------------------------------+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
 
 SELECT col_0, col_1 FROM out_num_cnt;
 
