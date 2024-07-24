@@ -22,6 +22,7 @@ use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use meta_srv::bootstrap::MetasrvInstance;
+use meta_srv::metasrv::BackendImpl;
 use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -137,6 +138,9 @@ struct StartCommand {
     /// The max operations per txn
     #[clap(long)]
     max_txn_ops: Option<usize>,
+    /// The database backend.
+    #[clap(long)]
+    backend: Option<String>,
 }
 
 impl StartCommand {
@@ -217,6 +221,20 @@ impl StartCommand {
 
         if let Some(max_txn_ops) = self.max_txn_ops {
             opts.max_txn_ops = max_txn_ops;
+        }
+
+        if let Some(s) = &self.backend {
+            match s.to_lowercase().as_str() {
+                "etcdstore" => opts.backend = BackendImpl::EtcdStore,
+                "memorystore" => opts.backend = BackendImpl::MemoryStore,
+                "postgresstore" => opts.backend = BackendImpl::PostgresStore,
+                _ => {
+                    return error::IllegalConfigSnafu {
+                        msg: format!("Invalid backend input: {s}",),
+                    }
+                    .fail()
+                }
+            }
         }
 
         // Disable dashboard in metasrv.

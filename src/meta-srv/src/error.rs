@@ -851,6 +851,23 @@ pub enum Error {
         #[snafu(source(from(common_config::error::Error, Box::new)))]
         source: Box<common_config::error::Error>,
     },
+    #[snafu(display("Failed to execute via postgres"))]
+    PostgresFailed {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Failed to connect to PostgresSQL"))]
+    ConnectPostgres {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Empty server address"))]
+    EmptyServerAddr {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -902,7 +919,10 @@ impl ErrorExt for Error {
             | Error::Join { .. }
             | Error::WeightArray { .. }
             | Error::NotSetWeightArray { .. }
-            | Error::PeerUnavailable { .. } => StatusCode::Internal,
+            | Error::PeerUnavailable { .. }
+            | Error::ConnectPostgres { .. }
+            | Error::EmptyServerAddr { .. }
+            | Error::PostgresFailed { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
