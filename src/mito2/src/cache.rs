@@ -179,10 +179,7 @@ impl CacheManager {
     ) -> Option<Arc<SelectorResultValue>> {
         self.selector_result_cache
             .as_ref()
-            .and_then(|selector_result_cache| {
-                let value = selector_result_cache.get(selector_key);
-                update_hit_miss(value, SELECTOR_RESULT_TYPE)
-            })
+            .and_then(|selector_result_cache| selector_result_cache.get(selector_key))
     }
 
     /// Puts result of the selector into the cache.
@@ -207,6 +204,16 @@ impl CacheManager {
     pub(crate) fn index_cache(&self) -> Option<&InvertedIndexCacheRef> {
         self.index_cache.as_ref()
     }
+}
+
+/// Increases selector cache miss metrics.
+pub fn selector_result_cache_miss() {
+    CACHE_MISS.with_label_values(&[SELECTOR_RESULT_TYPE]).inc()
+}
+
+/// Increases selector cache hit metrics.
+pub fn selector_result_cache_hit() {
+    CACHE_HIT.with_label_values(&[SELECTOR_RESULT_TYPE]).inc()
 }
 
 /// Builder to construct a [CacheManager].

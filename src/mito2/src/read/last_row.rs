@@ -19,7 +19,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use store_api::storage::TimeSeriesRowSelector;
 
-use crate::cache::{CacheManagerRef, SelectorResultKey, SelectorResultValue};
+use crate::cache::{
+    selector_result_cache_hit, selector_result_cache_miss, CacheManagerRef, SelectorResultKey,
+    SelectorResultValue,
+};
 use crate::error::Result;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
 use crate::sst::file::FileId;
@@ -92,7 +95,7 @@ impl RowGroupLastRowCachedReader {
         };
 
         let Some(cache_manager) = cache_manager else {
-            return Self::Miss(RowGroupLastRowReader::new(key, row_group_reader, None));
+            return Self::new_miss(key, row_group_reader, None);
         };
         if let Some(value) = cache_manager.get_selector_result(&key) {
             let schema_matches = value.projection
@@ -102,21 +105,33 @@ impl RowGroupLastRowCachedReader {
                     .projection_indices();
             if schema_matches {
                 // Schema matches, use cache batches.
-                Self::Hit(LastRowCacheReader { value, idx: 0 })
+                Self::new_hit(value)
             } else {
-                Self::Miss(RowGroupLastRowReader::new(
-                    key,
-                    row_group_reader,
-                    Some(cache_manager),
-                ))
+                Self::new_miss(key, row_group_reader, Some(cache_manager))
             }
         } else {
-            Self::Miss(RowGroupLastRowReader::new(
-                key,
-                row_group_reader,
-                Some(cache_manager),
-            ))
+            Self::new_miss(key, row_group_reader, Some(cache_manager))
         }
+    }
+
+    /// Creates new Hit variant and updates metrics.
+    fn new_hit(value: Arc<SelectorResultValue>) -> Self {
+        selector_result_cache_hit();
+        Self::Hit(LastRowCacheReader { value, idx: 0 })
+    }
+
+    /// Creates new Miss variant and updates metrics.
+    fn new_miss(
+        key: SelectorResultKey,
+        row_group_reader: RowGroupReader,
+        cache_manager: Option<CacheManagerRef>,
+    ) -> Self {
+        selector_result_cache_miss();
+        Self::Miss(RowGroupLastRowReader::new(
+            key,
+            row_group_reader,
+            cache_manager,
+        ))
     }
 }
 
