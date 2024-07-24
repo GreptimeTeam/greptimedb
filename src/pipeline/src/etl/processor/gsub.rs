@@ -182,22 +182,23 @@ impl crate::etl::processor::Processor for GsubProcessor {
         for field in self.fields.iter() {
             let index = field.input_field.index;
             match val.get(index) {
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
                 Some(v) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
                     let mut map = self.exec_field(v, field)?;
                     field.output_fields.iter().for_each(|(k, output_index)| {
                         if let Some(v) = map.remove(k) {
                             val[*output_index] = v;
                         }
                     });
-                }
-                None => {
-                    if !self.ignore_missing {
-                        return Err(format!(
-                            "{} processor: missing field {}",
-                            self.kind(),
-                            field.get_field_name()
-                        ));
-                    }
                 }
             }
         }

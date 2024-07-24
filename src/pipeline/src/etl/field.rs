@@ -138,7 +138,9 @@ impl Field {
     }
 
     pub(crate) fn set_output_index(&mut self, key: &str, index: usize) {
-        self.output_fields.get_mut(key).map(|v| *v = index);
+        if let Some(v) = self.output_fields.get_mut(key) {
+            *v = index;
+        }
     }
 }
 
@@ -159,9 +161,12 @@ impl std::str::FromStr for Field {
         };
 
         // TODO(qtang): ???? what's this?
+        // weird design? field: <field>,<target_field>,<target_fields>,<target_fields>....
+        // and only use in csv processor
         let fields: Vec<_> = parts
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.trim().to_string())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
             .collect();
         let target_fields = if fields.is_empty() {
             None

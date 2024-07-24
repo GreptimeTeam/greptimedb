@@ -245,6 +245,7 @@ impl Processor for DateProcessor {
             let index = field.input_field.index;
             match val.get(index) {
                 Some(Value::String(s)) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
                     let mut map = self.process_field(s, field)?;
                     field.output_fields.iter().for_each(|(k, output_index)| {
                         if let Some(v) = map.remove(k) {
@@ -252,20 +253,20 @@ impl Processor for DateProcessor {
                         }
                     });
                 }
-                Some(_) if self.ignore_missing() => {}
-                Some(_) => {
-                    return Err(format!(
-                        "{} processor: expect string value, but got {val:?}",
-                        self.kind()
-                    ))
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
                 }
-                None if self.ignore_missing() => {}
-                None => {
+                Some(v) => {
                     return Err(format!(
-                        "{} processor: field '{}' is required but missing in {val:?}",
-                        self.kind(),
-                        field.input_field.name
-                    ))
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
                 }
             }
         }
@@ -275,29 +276,6 @@ impl Processor for DateProcessor {
     fn ignore_processor_array_failure(&self) -> bool {
         true
     }
-
-    // fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
-    //     for ff @ Field {
-    //         input_field: field, ..
-    //     } in self.fields().iter()
-    //     {
-    //         match map.get(&field.name) {
-    //             Some(v) => {
-    //                 map.extend(self.exec_field(v, ff)?);
-    //             }
-    //             None if self.ignore_missing() => {}
-    //             None => {
-    //                 return Err(std::format!(
-    //                     "{} processor: field '{}' is required but missing in {map}",
-    //                     self.kind(),
-    //                     field.name
-    //                 ))
-    //             }
-    //         }
-    //     }
-
-    //     Ok(map)
-    // }
 }
 
 /// try to parse val with timezone first, if failed, parse without timezone

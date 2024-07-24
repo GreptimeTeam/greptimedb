@@ -1,10 +1,19 @@
-use std::ptr;
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use pipeline::{
-    parse, Array, Content, GreptimeTransformer, Pipeline, Processor, Transformer,
-    Value as PipelineValue,
-};
+use pipeline::{parse, Array, Content, GreptimeTransformer, Pipeline, Value as PipelineValue};
 use serde_json::{Deserializer, Value};
 
 fn processor_map(
@@ -16,26 +25,23 @@ fn processor_map(
         .map(|v| PipelineValue::try_from(v).unwrap())
         .collect::<Vec<_>>();
 
-    let transformed_data = pipeline.exec(PipelineValue::Array(Array {
+    pipeline.exec(PipelineValue::Array(Array {
         values: pipeline_data,
-    }));
-    transformed_data
+    }))
 }
 
 fn processor_mut(
     pipeline: &Pipeline<GreptimeTransformer>,
     input_values: Vec<Value>,
 ) -> impl IntoIterator<Item = Vec<greptime_proto::v1::Row>> {
-    let mut payload = pipeline.init_vec();
+    let mut payload = pipeline.init_intermediate_state();
     let mut result = Vec::with_capacity(input_values.len());
 
     for v in input_values {
         pipeline.preprepase(v, &mut payload)?;
         let r = pipeline.exec_mut(&mut payload)?;
         result.push(r);
-        for i in payload.iter_mut() {
-            *i = PipelineValue::Null;
-        }
+        pipeline.reset_intermediate_state(&mut payload);
     }
 
     Ok::<Vec<greptime_proto::v1::Row>, String>(result)
@@ -241,36 +247,6 @@ fn criterion_benchmark(c: &mut Criterion) {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     let pipeline = prepare_pipeline();
-    // println!(
-    //     "transform output_keys: {:?}",
-    //     pipeline.transformer().transforms().output_keys()
-    // );
-
-    pipeline
-        .transformer()
-        .transforms()
-        .transforms()
-        .iter()
-        .for_each(|t| {
-            println!("[transform]: {:?}", t);
-        });
-    // pipeline.processors().processors.iter().for_each(|p| {
-    //     println!("[processor fields]: {:?}", p.fields());
-    // });
-    // println!("[pipeline required_keys]: {:?}", pipeline.required_keys());
-    // println!("[pipeline output_keys]: {:?}", pipeline.output_keys());
-    // println!(
-    //     "[pipeline intermediate_keys]: {:?}",
-    //     pipeline.intermediate_keys()
-    // );
-    // println!(
-    //     "[pipeline schemas]: {:?}",
-    //     pipeline
-    //         .schemas()
-    //         .iter()
-    //         .map(|s| &s.column_name)
-    //         .collect::<Vec<_>>()
-    // );
     let mut group = c.benchmark_group("pipeline");
     group.sample_size(50);
     group.bench_function("processor map", |b| {

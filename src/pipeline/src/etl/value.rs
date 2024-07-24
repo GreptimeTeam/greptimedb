@@ -59,10 +59,6 @@ impl Value {
         matches!(self, Value::Null)
     }
 
-    pub fn discriminant(&self) -> u8 {
-        unsafe { *(self as *const Self as *const u8) }
-    }
-
     pub fn parse_str_type(t: &str) -> Result<Self, String> {
         let mut parts = t.splitn(2, ',');
         let head = parts.next().unwrap_or_default();

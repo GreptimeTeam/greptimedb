@@ -612,27 +612,17 @@ impl Processor for DissectProcessor {
     }
 
     fn output_keys(&self) -> HashSet<String> {
-        self.patterns
-            .iter()
-            .flat_map(|p| {
-                p.parts
-                    .iter()
-                    .filter(|p| {
-                        if let Part::Name(name) = p {
-                            !name.is_empty()
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|p| {
-                        if let Part::Name(name) = p {
-                            name.to_string()
-                        } else {
-                            unreachable!()
-                        }
-                    })
-            })
-            .collect()
+        let mut result = HashSet::with_capacity(30);
+        for pattern in &self.patterns {
+            for part in pattern.iter() {
+                if let Part::Name(name) = part {
+                    if !name.is_empty() {
+                        result.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        result
     }
 
     fn exec_field(&self, val: &Value, _field: &Field) -> Result<Map, String> {
@@ -655,6 +645,7 @@ impl Processor for DissectProcessor {
         for field in self.fields.iter() {
             let index = field.input_field.index;
             match val.get(index) {
+                // TODO(qtang): Let this method use the intermediate state collection directly.
                 Some(Value::String(val_str)) => match self.process(val_str) {
                     Ok(mut map) => {
                         field.output_fields.iter().for_each(|(k, output_index)| {
@@ -667,7 +658,21 @@ impl Processor for DissectProcessor {
                         warn!("dissect processor: {}", e);
                     }
                 },
-                _ => {}
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
+                }
             }
         }
         Ok(())
@@ -1181,17 +1186,5 @@ mod tests {
                 expected.collect::<HashMap<String, Value>>(),
             );
         }
-    }
-
-    #[test]
-    fn test_abc() {
-        let pattern_str = r#"%{ip_address} - - [%{timestamp}] "%{http_method} %{request_line}" %{status_code} %{response_size} "-" "%{user_agent}""#;
-        let input = r#"127.0.0.1 - - [25/May/2024:20:16:37 +0000] "GET /index.html HTTP/1.1" 200 612 "-" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36""#;
-        let chs = input.chars().collect::<Vec<char>>();
-        let pattern: Pattern = pattern_str.parse().unwrap();
-        println!("{:?}", pattern);
-        let processor = DissectProcessor::default();
-        let map = processor.process_pattern(&chs, &pattern).unwrap();
-        println!("{:?}", map);
     }
 }

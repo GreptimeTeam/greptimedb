@@ -26,9 +26,9 @@ use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, TypedHeader};
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
-use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
+use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimeTransformer, Pipeline, PipelineVersion, Value as PipelineValue};
+use pipeline::{PipelineVersion, Value as PipelineValue};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Value};
@@ -194,7 +194,7 @@ pub async fn delete_pipeline(
 }
 
 /// Transform NDJSON array into a single array
-/// allways return an array
+/// always return an array
 fn transform_ndjson_array_factory(
     values: impl IntoIterator<Item = StdResult<Value, serde_json::Error>>,
     ignore_error: bool,
@@ -326,30 +326,39 @@ async fn ingest_logs_inner(
         .await?;
 
     let transform_timer = std::time::Instant::now();
-    let mut im = Vec::with_capacity(100);
+    let mut intermediate_state = pipeline.init_intermediate_state().clone();
 
-    let result = pipeline_data
-        .into_iter()
-        .map(|v| {
-            pipeline.preprepase(v, &mut im);
-            pipeline.exec_mut(&mut im)
-        })
-        .collect::<StdResult<Vec<_>, String>>()
-        .inspect(|_| {
-            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
-                .observe(transform_timer.elapsed().as_secs_f64());
-        })
-        .map_err(|reason| {
-            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                .observe(transform_timer.elapsed().as_secs_f64());
-            PipelineTransformSnafu { reason }.build()
-        })
-        .context(PipelineSnafu)?;
+    let mut results = Vec::with_capacity(pipeline_data.len());
+
+    for v in pipeline_data {
+        pipeline
+            .preprepase(v, &mut intermediate_state)
+            .map_err(|reason| {
+                METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                    .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                    .observe(transform_timer.elapsed().as_secs_f64());
+                PipelineTransformSnafu { reason }.build()
+            })
+            .context(PipelineSnafu)?;
+        let r = pipeline
+            .exec_mut(&mut intermediate_state)
+            .map_err(|reason| {
+                METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                    .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                    .observe(transform_timer.elapsed().as_secs_f64());
+                PipelineTransformSnafu { reason }.build()
+            })
+            .context(PipelineSnafu)?;
+        results.push(r);
+        pipeline.reset_intermediate_state(&mut intermediate_state);
+    }
+
+    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+        .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+        .observe(transform_timer.elapsed().as_secs_f64());
 
     let transformed_data: Rows = Rows {
-        rows: result,
+        rows: results,
         schema: pipeline.schemas().clone(),
     };
 

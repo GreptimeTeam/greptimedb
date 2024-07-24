@@ -10,5 +10,6 @@ extend-exclude = [
     "corrupted",
     "tests-fuzz/src/data/lorem_words",
     "*.sql",
-    "*.result"
+    "*.result",
+    "src/pipeline/benches/data.log"
 ]

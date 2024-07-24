@@ -66,8 +66,8 @@ fn set_processor_keys_index(
 
 fn set_transform_keys_index(
     transforms: &mut Transforms,
-    final_intermediate_keys: &Vec<String>,
-    output_keys: &Vec<String>,
+    final_intermediate_keys: &[String],
+    output_keys: &[String],
 ) -> Result<(), String> {
     for transform in transforms.iter_mut() {
         for field in transform.fields.iter_mut() {
@@ -168,7 +168,6 @@ where
             let output_keys = transforms.output_keys().clone();
             set_processor_keys_index(&mut processors, &final_intermediate_keys)?;
             set_transform_keys_index(&mut transforms, &final_intermediate_keys, &output_keys)?;
-            let intermediate_size = final_intermediate_keys.len();
 
             Ok(Pipeline {
                 description,
@@ -177,7 +176,6 @@ where
                 required_keys,
                 output_keys,
                 intermediate_keys: final_intermediate_keys,
-                intermediate_payload: vec![Value::Null; intermediate_size],
             })
         }
         Content::Json(_) => unimplemented!(),
@@ -200,7 +198,6 @@ where
     /// intermediate keys from the processors
     intermediate_keys: Vec<String>,
     // pub on_failure: processor::Processors,
-    intermediate_payload: Vec<Value>,
 }
 
 impl<T> std::fmt::Display for Pipeline<T>
@@ -263,11 +260,7 @@ where
         self.transformer.transform_mut(val)
     }
 
-    pub fn preprepase<'s, 'payload>(
-        &'s self,
-        val: serde_json::Value,
-        result: &'payload mut Vec<Value>,
-    ) -> Result<(), String> {
+    pub fn preprepase(&self, val: serde_json::Value, result: &mut [Value]) -> Result<(), String> {
         match val {
             serde_json::Value::Object(map) => {
                 let mut index = 0;
@@ -299,8 +292,14 @@ where
         Ok(())
     }
 
-    pub fn init_vec(&self) -> Vec<Value> {
+    pub fn init_intermediate_state(&self) -> Vec<Value> {
         vec![Value::Null; self.intermediate_keys.len()]
+    }
+
+    pub fn reset_intermediate_state(&self, result: &mut [Value]) {
+        for i in 0..result.len() {
+            result[i] = Value::Null;
+        }
     }
 
     pub fn processors(&self) -> &processor::Processors {

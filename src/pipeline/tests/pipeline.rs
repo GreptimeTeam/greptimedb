@@ -190,7 +190,7 @@ transform:
   - field: reqTimeSec, req_time_sec
     # epoch time is special, the resolution MUST BE specified
     type: epoch, second
-    index: timestamp
+    index: timeindex
 
   # the following is from cmcd
   - fields:
@@ -488,7 +488,7 @@ transform:
     type: string
   - field: ts
     type: time
-    index: timestamp
+    index: timeindex
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml.into());

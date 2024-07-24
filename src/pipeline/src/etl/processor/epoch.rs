@@ -83,7 +83,7 @@ impl EpochProcessor {
         let t: i64 = match val {
             Value::String(s) => s
                 .parse::<i64>()
-                .map_err(|e| format!("Failed to parse {} to number: {}", s, e.to_string()))?,
+                .map_err(|e| format!("Failed to parse {} to number: {}", s, e))?,
             Value::Int16(i) => *i as i64,
             Value::Int32(i) => *i as i64,
             Value::Int64(i) => *i,
@@ -196,21 +196,23 @@ impl Processor for EpochProcessor {
         for field in self.fields.iter() {
             let index = field.input_field.index;
             match val.get(index) {
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
                 Some(v) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
                     let mut map = self.process_field(v, field)?;
                     field.output_fields.iter().for_each(|(k, output_index)| {
                         if let Some(v) = map.remove(k) {
                             val[*output_index] = v;
                         }
                     });
-                }
-                None => {
-                    if !self.ignore_missing {
-                        return Err(format!(
-                            "{PROCESSOR_EPOCH} processor: missing field {}",
-                            field.get_field_name()
-                        ));
-                    }
                 }
             }
         }

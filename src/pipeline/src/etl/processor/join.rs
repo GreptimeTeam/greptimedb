@@ -137,26 +137,28 @@ impl Processor for JoinProcessor {
             let index = field.input_field.index;
             match val.get(index) {
                 Some(Value::Array(arr)) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
                     let mut map = self.process_field(arr, field)?;
-                    field.output_fields.iter().for_each(|(k, ouput_index)| {
+                    field.output_fields.iter().for_each(|(k, output_index)| {
                         if let Some(v) = map.remove(k) {
-                            val[*ouput_index] = v;
+                            val[*output_index] = v;
                         }
                     });
                 }
-                Some(_) => {
-                    return Err(format!(
-                        "{} processor: expect array value, but got {val:?}",
-                        self.kind()
-                    ));
-                }
-                None => {
+                Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return Err(format!(
-                            "{} processor: expect array value, but got missing value",
-                            self.kind()
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
                         ));
                     }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
                 }
             }
         }

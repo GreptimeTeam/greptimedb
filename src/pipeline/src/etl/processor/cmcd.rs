@@ -99,13 +99,13 @@ const CMCD_KEYS: [&str; 18] = [
 /// 11. The data payload syntax is intended to be compliant with Structured Field Values for HTTP [6].
 /// 12. Transport Layer Security SHOULD be used to protect all transmission of CMCD data.
 #[derive(Debug, Default)]
-pub struct CMCDProcessor {
+pub struct CmcdProcessor {
     fields: Fields,
 
     ignore_missing: bool,
 }
 
-impl CMCDProcessor {
+impl CmcdProcessor {
     fn with_fields(&mut self, mut fields: Fields) {
         Self::update_output_keys(&mut fields);
         self.fields = fields;
@@ -187,11 +187,11 @@ impl CMCDProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for CMCDProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessor {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = CMCDProcessor::default();
+        let mut processor = CmcdProcessor::default();
 
         for (k, v) in value.iter() {
             let key = k
@@ -217,7 +217,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CMCDProcessor {
     }
 }
 
-impl crate::etl::processor::Processor for CMCDProcessor {
+impl crate::etl::processor::Processor for CmcdProcessor {
     fn kind(&self) -> &str {
         PROCESSOR_CMCD
     }
@@ -265,15 +265,29 @@ impl crate::etl::processor::Processor for CMCDProcessor {
         for field in self.fields.iter() {
             match val.get(field.input_field.index) {
                 Some(Value::String(v)) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
                     let map = self.process_field(v, field)?;
                     for (k, v) in map.values.into_iter() {
-                        field.output_fields.get(&k).map(|index| {
+                        if let Some(index) = field.output_fields.get(&k) {
                             val[*index] = v;
-                        });
+                        }
                     }
                 }
-                Some(_) => {}
-                None => {}
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
+                }
             }
         }
         Ok(())
@@ -285,7 +299,7 @@ mod tests {
     use ahash::HashMap;
     use urlencoding::decode;
 
-    use super::CMCDProcessor;
+    use super::CmcdProcessor;
     use crate::etl::value::{Map, Value};
 
     #[test]
@@ -426,7 +440,7 @@ mod tests {
                 .collect::<HashMap<String, Value>>();
             let expected = Map { values };
 
-            let actual = CMCDProcessor::parse("prefix", &decoded).unwrap();
+            let actual = CmcdProcessor::parse("prefix", &decoded).unwrap();
             assert_eq!(actual, expected);
         }
     }

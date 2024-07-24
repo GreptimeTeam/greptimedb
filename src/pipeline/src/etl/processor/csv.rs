@@ -209,7 +209,12 @@ impl Processor for CsvProcessor {
     fn output_keys(&self) -> HashSet<String> {
         self.fields
             .iter()
-            .map(|f| f.get_renamed_field().to_string())
+            .flat_map(|f| {
+                f.target_fields
+                    .as_ref()
+                    .map(|tf| tf.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or(Vec::new())
+            })
             .collect()
     }
 
@@ -222,9 +227,37 @@ impl Processor for CsvProcessor {
             )),
         }
     }
-    
+
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        todo!()
+        for field in self.fields.iter() {
+            match val.get(field.input_field.index) {
+                Some(Value::String(v)) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
+                    let map = self.process_field(v, field)?;
+                    for (k, v) in map.values.into_iter() {
+                        if let Some(index) = field.output_fields.get(&k) {
+                            val[*index] = v;
+                        }
+                    }
+                }
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 

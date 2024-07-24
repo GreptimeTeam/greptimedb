@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-const INDEX_TIMESTAMP: &str = "timeindex";
+const INDEX_TIMESTAMP: &str = "timestamp";
+const INDEX_TIMEINDEX: &str = "timeindex";
 const INDEX_TAG: &str = "tag";
 const INDEX_FULLTEXT: &str = "fulltext";
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[allow(clippy::enum_variant_names)]
 pub enum Index {
     TimeIndex,
     Tag,
@@ -26,7 +28,7 @@ pub enum Index {
 impl std::fmt::Display for Index {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let index = match self {
-            Index::TimeIndex => INDEX_TIMESTAMP,
+            Index::TimeIndex => INDEX_TIMEINDEX,
             Index::Tag => INDEX_TAG,
             Index::Fulltext => INDEX_FULLTEXT,
         };
@@ -48,7 +50,7 @@ impl TryFrom<&str> for Index {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            INDEX_TIMESTAMP => Ok(Index::TimeIndex),
+            INDEX_TIMESTAMP | INDEX_TIMEINDEX => Ok(Index::TimeIndex),
             INDEX_TAG => Ok(Index::Tag),
             INDEX_FULLTEXT => Ok(Index::Fulltext),
             _ => Err(format!("unsupported index type: {}", value)),

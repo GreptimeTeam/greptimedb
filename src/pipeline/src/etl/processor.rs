@@ -24,7 +24,7 @@ pub mod regex;
 pub mod urlencoding;
 
 use ahash::{HashSet, HashSetExt};
-use cmcd::CMCDProcessor;
+use cmcd::CmcdProcessor;
 use csv::CsvProcessor;
 use date::DateProcessor;
 use dissect::DissectProcessor;
@@ -95,7 +95,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 
 #[derive(Debug)]
 pub enum ProcessorKind {
-    CMCD(CMCDProcessor),
+    Cmcd(CmcdProcessor),
     Csv(CsvProcessor),
     Date(DateProcessor),
     Dissect(DissectProcessor),
@@ -116,7 +116,7 @@ impl Clone for ProcessorKind {
 impl Processor for ProcessorKind {
     fn fields(&self) -> &Fields {
         match self {
-            ProcessorKind::CMCD(p) => p.fields(),
+            ProcessorKind::Cmcd(p) => p.fields(),
             ProcessorKind::Csv(p) => p.fields(),
             ProcessorKind::Date(p) => p.fields(),
             ProcessorKind::Dissect(p) => p.fields(),
@@ -131,7 +131,7 @@ impl Processor for ProcessorKind {
 
     fn kind(&self) -> &str {
         match self {
-            ProcessorKind::CMCD(p) => p.kind(),
+            ProcessorKind::Cmcd(p) => p.kind(),
             ProcessorKind::Csv(p) => p.kind(),
             ProcessorKind::Date(p) => p.kind(),
             ProcessorKind::Dissect(p) => p.kind(),
@@ -146,7 +146,7 @@ impl Processor for ProcessorKind {
 
     fn ignore_missing(&self) -> bool {
         match self {
-            ProcessorKind::CMCD(p) => p.ignore_missing(),
+            ProcessorKind::Cmcd(p) => p.ignore_missing(),
             ProcessorKind::Csv(p) => p.ignore_missing(),
             ProcessorKind::Date(p) => p.ignore_missing(),
             ProcessorKind::Dissect(p) => p.ignore_missing(),
@@ -161,7 +161,7 @@ impl Processor for ProcessorKind {
 
     fn output_keys(&self) -> HashSet<String> {
         match self {
-            ProcessorKind::CMCD(p) => p.output_keys(),
+            ProcessorKind::Cmcd(p) => p.output_keys(),
             ProcessorKind::Csv(p) => p.output_keys(),
             ProcessorKind::Date(p) => p.output_keys(),
             ProcessorKind::Dissect(p) => p.output_keys(),
@@ -176,7 +176,7 @@ impl Processor for ProcessorKind {
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         match self {
-            ProcessorKind::CMCD(p) => p.exec_field(val, field),
+            ProcessorKind::Cmcd(p) => p.exec_field(val, field),
             ProcessorKind::Csv(p) => p.exec_field(val, field),
             ProcessorKind::Date(p) => p.exec_field(val, field),
             ProcessorKind::Dissect(p) => p.exec_field(val, field),
@@ -191,7 +191,7 @@ impl Processor for ProcessorKind {
 
     fn fields_mut(&mut self) -> &mut Fields {
         match self {
-            ProcessorKind::CMCD(p) => p.fields_mut(),
+            ProcessorKind::Cmcd(p) => p.fields_mut(),
             ProcessorKind::Csv(p) => p.fields_mut(),
             ProcessorKind::Date(p) => p.fields_mut(),
             ProcessorKind::Dissect(p) => p.fields_mut(),
@@ -206,7 +206,7 @@ impl Processor for ProcessorKind {
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
         match self {
-            ProcessorKind::CMCD(p) => p.exec_mut(val),
+            ProcessorKind::Cmcd(p) => p.exec_mut(val),
             ProcessorKind::Csv(p) => p.exec_mut(val),
             ProcessorKind::Date(p) => p.exec_mut(val),
             ProcessorKind::Dissect(p) => p.exec_mut(val),
@@ -320,7 +320,7 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind, String> {
         .ok_or("processor key must be a string".to_string())?;
 
     let processor = match str_key {
-        cmcd::PROCESSOR_CMCD => ProcessorKind::CMCD(CMCDProcessor::try_from(value)?),
+        cmcd::PROCESSOR_CMCD => ProcessorKind::Cmcd(CmcdProcessor::try_from(value)?),
         csv::PROCESSOR_CSV => ProcessorKind::Csv(CsvProcessor::try_from(value)?),
         date::PROCESSOR_DATE => ProcessorKind::Date(DateProcessor::try_from(value)?),
         dissect::PROCESSOR_DISSECT => ProcessorKind::Dissect(DissectProcessor::try_from(value)?),
@@ -393,6 +393,6 @@ pub(crate) fn update_one_one_output_keys(fields: &mut Fields) {
     for field in fields.iter_mut() {
         field
             .output_fields
-            .insert(field.get_renamed_field().to_string(), 0 as usize);
+            .insert(field.get_renamed_field().to_string(), 0_usize);
     }
 }

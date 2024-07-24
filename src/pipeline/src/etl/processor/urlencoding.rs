@@ -90,7 +90,7 @@ impl UrlEncodingProcessor {
         for field in fields.iter_mut() {
             field
                 .output_fields
-                .insert(field.get_renamed_field().to_string(), 0 as usize);
+                .insert(field.get_renamed_field().to_string(), 0_usize);
         }
     }
 }
@@ -168,36 +168,28 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
         for field in self.fields.iter() {
             let index = field.input_field.index;
             match val.get(index) {
-                Some(v) => match v {
-                    Value::String(s) => {
-                        let mut map = self.process_field(s, field)?;
-                        field.output_fields.iter().for_each(|(k, output_index)| {
-                            if let Some(v) = map.remove(k) {
-                                val[*output_index] = v;
-                            }
-                        });
-                    }
-                    Value::Null => {
-                        if !self.ignore_missing {
-                            return Err(format!(
-                                "{PROCESSOR_URL_ENCODING} processor: missing field {}",
-                                field.get_field_name()
-                            ));
+                Some(Value::String(s)) => {
+                    let mut map = self.process_field(s, field)?;
+                    field.output_fields.iter().for_each(|(k, output_index)| {
+                        if let Some(v) = map.remove(k) {
+                            val[*output_index] = v;
                         }
-                    }
-                    _ => {
-                        return Err(format!(
-                                "{PROCESSOR_URL_ENCODING} processor: expect string value, but got {v:?}",
-                            ));
-                    }
-                },
-                None => {
+                    });
+                }
+                Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return Err(format!(
-                            "{PROCESSOR_URL_ENCODING} processor: missing field {}",
+                            "{} processor: missing field: {}",
+                            self.kind(),
                             field.get_field_name()
                         ));
                     }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
                 }
             }
         }

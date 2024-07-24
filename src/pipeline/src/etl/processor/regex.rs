@@ -147,7 +147,7 @@ impl RegexProcessor {
                 for group in &gr.groups {
                     field.output_fields.insert(
                         Self::generate_key(field.get_renamed_field(), group),
-                        0 as usize,
+                        0_usize,
                     );
                 }
             }
@@ -243,44 +243,34 @@ impl Processor for RegexProcessor {
         for field in self.fields.iter() {
             let index = field.input_field.index;
             match val.get(index) {
-                Some(v) => match v {
-                    Value::String(s) => {
-                        let mut map = Map::default();
-                        for gr in &self.patterns {
-                            let m = self.process_field(s, field, gr)?;
-                            map.extend(m);
-                        }
+                Some(Value::String(s)) => {
+                    let mut map = Map::default();
+                    for gr in &self.patterns {
+                        // TODO(qtang): Let this method use the intermediate state collection directly.
+                        let m = self.process_field(s, field, gr)?;
+                        map.extend(m);
+                    }
 
-                        field.output_fields.iter().for_each(|(k, output_index)| {
-                            if let Some(v) = map.remove(k) {
-                                val[*output_index] = v;
-                            }
-                        });
-                    }
-                    Value::Null => {
-                        if !self.ignore_missing {
-                            return Err(format!(
-                                "{} processor: missing field {}",
-                                self.kind(),
-                                field.get_field_name()
-                            ));
+                    field.output_fields.iter().for_each(|(k, output_index)| {
+                        if let Some(v) = map.remove(k) {
+                            val[*output_index] = v;
                         }
-                    }
-                    _ => {
-                        return Err(format!(
-                            "{} processor: expect string value, but got {v:?}",
-                            self.kind()
-                        ));
-                    }
-                },
-                None => {
+                    });
+                }
+                Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return Err(format!(
-                            "{} processor: missing field {}",
+                            "{} processor: missing field: {}",
                             self.kind(),
                             field.get_field_name()
                         ));
                     }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
                 }
             }
         }

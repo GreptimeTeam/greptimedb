@@ -161,6 +161,7 @@ impl Processor for LetterProcessor {
             let index = field.input_field.index;
             match val.get(index) {
                 Some(Value::String(s)) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
                     let mut processed = self.process_field(s, field)?;
                     field.output_fields.iter().for_each(|(k, output_index)| {
                         if let Some(v) = processed.remove(k) {
@@ -168,13 +169,20 @@ impl Processor for LetterProcessor {
                         }
                     });
                 }
-                _ => {
+                Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return Err(format!(
-                            "{} processor: expect string value, but got {val:?}",
-                            self.kind()
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
                         ));
                     }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
                 }
             }
         }

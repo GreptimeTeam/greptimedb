@@ -193,33 +193,16 @@ impl Transformer for GreptimeTransformer {
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         for transform in self.transforms.iter() {
             for field in transform.fields.iter() {
-                // let value_data = match map.get(field.get_field_name()) {
-                //     Some(val) => coerce_value(val, transform)?,
-                //     None => {
-                //         let default = transform.get_default();
-                //         if default.is_some() {
-                //             coerce_value(default.unwrap(), transform)?
-                //         } else {
-                //             None
-                //         }
-                //     }
-                // };
-                // values.push(GreptimeValue { value_data });
                 let index = field.input_field.index;
                 match val.get(index) {
                     Some(v) => {
                         let value_data = coerce_value(v, transform)
                             .map_err(|e| format!("{} processor: {}", field.get_field_name(), e))?;
                         // every transform fields has only one output field
-                        match field
-                            .output_fields
-                            .iter()
-                            .next()
-                            .map(|kv| kv.1)
-                            .map(|i| values[*i] = GreptimeValue { value_data })
-                        {
-                            None => return Err(format!("output_fields is empty")),
-                            _ => {}
+                        if let Some(i) = field.output_fields.iter().next().map(|kv| kv.1) {
+                            values[*i] = GreptimeValue { value_data }
+                        } else {
+                            return Err("output_fields is empty".to_string());
                         }
                     }
                     _ => {
