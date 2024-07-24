@@ -26,17 +26,17 @@ use crate::function::{Function, FunctionContext};
 use crate::scalars::expression::{scalar_unary_op, EvalContext};
 
 #[derive(Clone, Debug, Default)]
-pub struct PGTableIsVisbleFunction;
+pub struct PGTableIsVisibleFunction;
 
 const NAME: &str = crate::pg_catalog_func_fullname!("pg_table_is_visible");
 
-impl fmt::Display for PGTableIsVisbleFunction {
+impl fmt::Display for PGTableIsVisibleFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, crate::pg_catalog_func_fullname!("PG_TABLE_IS_VISIBLE"))
     }
 }
 
-impl Function for PGTableIsVisbleFunction {
+impl Function for PGTableIsVisibleFunction {
     fn name(&self) -> &str {
         NAME
     }

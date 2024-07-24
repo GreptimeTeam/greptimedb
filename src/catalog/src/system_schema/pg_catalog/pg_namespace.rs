@@ -1,4 +1,4 @@
-// Copyright 2023 Greptim Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -61,7 +61,7 @@ impl PGNamespace {
 
     fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
-            // TODO(J0HN50N133): we do not have a numeric schema id, use schema name as a workround. Use a proper schema id once we have it.
+            // TODO(J0HN50N133): we do not have a numeric schema id, use schema name as a workaround. Use a proper schema id once we have it.
             string_column(OID_COLUMN_NAME),
             string_column(NSPNAME),
         ]))
