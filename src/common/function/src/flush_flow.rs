@@ -67,5 +67,5 @@ pub(crate) async fn flush_flow(
         .await?;
     let affected_rows = res.affected_rows;
 
-    Ok(Value::from(affected_rows as u64))
+    Ok(Value::from(affected_rows))
 }
