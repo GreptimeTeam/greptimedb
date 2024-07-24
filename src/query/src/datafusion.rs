@@ -55,7 +55,6 @@ use crate::error::{
     TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
-use crate::logical_optimizer::LogicalOptimizer;
 use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
 use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
@@ -310,6 +309,37 @@ impl DatafusionQueryEngine {
             }
         }
     }
+
+    #[tracing::instrument(skip_all)]
+    pub fn optimize(
+        &self,
+        context: &QueryEngineContext,
+        plan: &LogicalPlan,
+    ) -> Result<LogicalPlan> {
+        let _timer = metrics::OPTIMIZE_LOGICAL_ELAPSED.start_timer();
+        match plan {
+            LogicalPlan::DfPlan(df_plan) => {
+                // Optimized by extension rules
+                let optimized_plan = self
+                    .state
+                    .optimize_by_extension_rules(df_plan.clone(), context)
+                    .context(error::DatafusionSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
+
+                // Optimized by datafusion optimizer
+                let optimized_plan = self
+                    .state
+                    .session_state()
+                    .optimize(&optimized_plan)
+                    .context(error::DatafusionSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
+
+                Ok(LogicalPlan::DfPlan(optimized_plan))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -384,35 +414,6 @@ impl QueryEngine for DatafusionQueryEngine {
         let mut state = self.state.session_state();
         state.config_mut().set_extension(query_ctx.clone());
         QueryEngineContext::new(state, query_ctx)
-    }
-}
-
-impl LogicalOptimizer for DatafusionQueryEngine {
-    #[tracing::instrument(skip_all)]
-    fn optimize(&self, context: &QueryEngineContext, plan: &LogicalPlan) -> Result<LogicalPlan> {
-        let _timer = metrics::OPTIMIZE_LOGICAL_ELAPSED.start_timer();
-        match plan {
-            LogicalPlan::DfPlan(df_plan) => {
-                // Optimized by extension rules
-                let optimized_plan = self
-                    .state
-                    .optimize_by_extension_rules(df_plan.clone(), context)
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
-
-                // Optimized by datafusion optimizer
-                let optimized_plan = self
-                    .state
-                    .session_state()
-                    .optimize(&optimized_plan)
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
-
-                Ok(LogicalPlan::DfPlan(optimized_plan))
-            }
-        }
     }
 }
 
