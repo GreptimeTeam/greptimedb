@@ -865,6 +865,22 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to execute via postgres"))]
+    PostgresExecution {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to connect to PostgresSQL"))]
+    ConnectPostgres {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -1003,6 +1019,10 @@ impl ErrorExt for Error {
 
             Error::Other { source, .. } => source.status_code(),
             Error::LookupPeer { source, .. } => source.status_code(),
+            #[cfg(feature = "pg_kvbackend")]
+            Error::ConnectPostgres { .. } => StatusCode::Internal,
+            #[cfg(feature = "pg_kvbackend")]
+            Error::PostgresExecution { .. } => StatusCode::Internal,
         }
     }
 

@@ -643,6 +643,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse {} from str to utf8", name))]
+    StrFromUtf8 {
+        name: String,
+        #[snafu(source)]
+        error: std::str::Utf8Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Value not exists"))]
     ValueNotExist {
         #[snafu(implicit)]
@@ -651,6 +660,24 @@ pub enum Error {
 
     #[snafu(display("Failed to get cache"))]
     GetCache { source: Arc<Error> },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to execute via Postgres"))]
+    PostgresExecution {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to connect to Postgres"))]
+    ConnectPostgres {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -704,7 +731,8 @@ impl ErrorExt for Error {
             | UnexpectedLogicalRouteTable { .. }
             | ProcedureOutput { .. }
             | FromUtf8 { .. }
-            | MetadataCorruption { .. } => StatusCode::Unexpected,
+            | MetadataCorruption { .. }
+            | StrFromUtf8 { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } | RenameTable { .. } => {
                 StatusCode::Internal
@@ -749,6 +777,11 @@ impl ErrorExt for Error {
             | ParseNum { .. }
             | InvalidRole { .. }
             | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
+
+            #[cfg(feature = "pg_kvbackend")]
+            PostgresExecution { .. } => StatusCode::Internal,
+            #[cfg(feature = "pg_kvbackend")]
+            ConnectPostgres { .. } => StatusCode::Internal,
         }
     }
 

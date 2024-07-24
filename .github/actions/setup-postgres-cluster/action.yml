@@ -1,0 +1,30 @@
+name: Setup PostgreSQL
+description: Deploy PostgreSQL on Kubernetes
+inputs:
+  postgres-replicas:
+    default: 1
+    description: "Number of PostgreSQL replicas"
+  namespace:
+    default: "postgres-namespace"
+  postgres-version:
+    default: "14.2"
+    description: "PostgreSQL version"
+  storage-size:
+    default: "1Gi"
+    description: "Storage size for PostgreSQL"
+
+runs:
+  using: composite
+  steps:
+  - name: Install PostgreSQL
+    shell: bash
+    run: |
+      helm upgrade \
+        --install postgresql oci://registry-1.docker.io/bitnamicharts/postgresql \
+        --set replicaCount=${{ inputs.postgres-replicas }} \
+        --set image.tag=${{ inputs.postgres-version }} \
+        --set persistence.size=${{ inputs.storage-size }} \
+        --set postgresql.username=greptimedb \
+        --set postgresql.password=admin \
+        --create-namespace \
+        -n ${{ inputs.namespace }}
