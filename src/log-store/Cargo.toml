@@ -26,6 +26,7 @@ common-time.workspace = true
 common-wal.workspace = true
 futures.workspace = true
 futures-util.workspace = true
+itertools.workspace = true
 lazy_static.workspace = true
 pin-project.workspace = true
 prometheus.workspace = true
@@ -37,7 +38,6 @@ serde_json.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 tokio.workspace = true
-itertools.workspace=true
 
 [dev-dependencies]
 common-meta = { workspace = true, features = ["testing"] }
