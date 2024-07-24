@@ -24,6 +24,7 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatch
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{Schema, SchemaRef};
+use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder, VectorRef};
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
@@ -34,6 +35,7 @@ use super::{OID_COLUMN_NAME, PG_CLASS};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
+use crate::information_schema::Predicates;
 use crate::system_schema::utils::tables::{string_column, u32_column};
 use crate::system_schema::SystemTable;
 use crate::CatalogManager;
@@ -179,17 +181,19 @@ impl PGClassBuilder {
         }
     }
 
-    async fn make_class(&mut self, _request: Option<ScanRequest>) -> Result<RecordBatch> {
+    async fn make_class(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
         let catalog_manager = self
             .catalog_manager
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
+        let predicates = Predicates::from_scan_request(&request);
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
             while let Some(table) = stream.try_next().await? {
                 let table_info = table.table_info();
                 self.add_class(
+                    &predicates,
                     table_info.table_id(),
                     &schema_name,
                     &table_info.name,
@@ -204,7 +208,26 @@ impl PGClassBuilder {
         self.finish()
     }
 
-    fn add_class(&mut self, oid: u32, schema: &str, table: &str, kind: &str) {
+    fn add_class(
+        &mut self,
+        predicates: &Predicates,
+        oid: u32,
+        schema: &str,
+        table: &str,
+        kind: &str,
+    ) {
+        let row = [
+            (OID_COLUMN_NAME, &Value::from(oid)),
+            (RELNAMESPACE, &Value::from(schema)),
+            (RELNAME, &Value::from(table)),
+            (RELKIND, &Value::from(kind)),
+            (RELOWNER, &Value::from(DUMMY_OWNER_ID)),
+        ];
+
+        if !predicates.eval(&row) {
+            return;
+        }
+
         self.oid.push(Some(oid));
         self.relnamespace.push(Some(schema));
         self.relname.push(Some(table));

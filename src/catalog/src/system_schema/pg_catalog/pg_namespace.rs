@@ -24,6 +24,7 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatch
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{Schema, SchemaRef};
+use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
@@ -32,6 +33,7 @@ use super::{OID_COLUMN_NAME, PG_NAMESPACE};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
+use crate::information_schema::Predicates;
 use crate::system_schema::utils::tables::string_column;
 use crate::system_schema::SystemTable;
 use crate::CatalogManager;
@@ -157,14 +159,15 @@ impl PGNamespaceBuilder {
     }
 
     /// Construct the `pg_catalog.pg_namespace` virtual table
-    async fn make_namespace(&mut self, _request: Option<ScanRequest>) -> Result<RecordBatch> {
+    async fn make_namespace(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
         let catalog_manager = self
             .catalog_manager
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
+        let predicates = Predicates::from_scan_request(&request);
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            self.add_namespace(&schema_name);
+            self.add_namespace(&predicates, &schema_name);
         }
         self.finish()
     }
@@ -174,7 +177,14 @@ impl PGNamespaceBuilder {
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
 
-    fn add_namespace(&mut self, schema_name: &str) {
+    fn add_namespace(&mut self, predicates: &Predicates, schema_name: &str) {
+        let row = [
+            (OID_COLUMN_NAME, &Value::from(schema_name)),
+            (NSPNAME, &Value::from(schema_name)),
+        ];
+        if !predicates.eval(&row) {
+            return;
+        }
         self.oid.push(Some(schema_name));
         self.nspname.push(Some(schema_name));
     }
