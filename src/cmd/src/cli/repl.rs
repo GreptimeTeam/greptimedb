@@ -34,7 +34,6 @@ use common_telemetry::debug;
 use either::Either;
 use meta_client::client::MetaClientBuilder;
 use query::datafusion::DatafusionQueryEngine;
-use query::logical_optimizer::LogicalOptimizer;
 use query::parser::QueryLanguageParser;
 use query::plan::LogicalPlan;
 use query::query_engine::{DefaultSerializer, QueryEngineState};
