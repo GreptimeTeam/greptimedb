@@ -562,9 +562,9 @@ impl FlowWorkerManager {
             for worker in self.worker_handles.iter() {
                 // TODO(discord9): consider how to handle error in individual worker
                 if blocking {
-                    worker.lock().await.run_available(now).await?;
+                    worker.lock().await.run_available(now, blocking).await?;
                 } else if let Ok(worker) = worker.try_lock() {
-                    worker.run_available(now).await?;
+                    worker.run_available(now, blocking).await?;
                 } else {
                     return Ok(row_cnt);
                 }

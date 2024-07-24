@@ -15,6 +15,7 @@
 //! impl `FlowNode` trait for FlowNodeManager so standalone can call them
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use api::v1::flow::{
     flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse, FlushFlow,
@@ -98,9 +99,25 @@ impl Flownode for FlowWorkerManager {
                 flow_id: Some(flow_id),
             })) => {
                 // TODO(discord9): impl individual flush
-                self.run_available(true).await.map_err(to_meta_err)?;
+                debug!("Starting to flush flow_id={:?}", flow_id);
+                // wait 100ms so that the source data is sended to our source
+                // so case like we run too quickly before input data have chance to be sended
+                // TODO(discord9): found better way to impl this flush
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let flushed_input_rows = self
+                    .node_context
+                    .read()
+                    .await
+                    .flush_all_sender()
+                    .await
+                    .map_err(to_meta_err)?;
+                let rows_send = self.run_available(true).await.map_err(to_meta_err)?;
                 let row = self.send_writeback_requests().await.map_err(to_meta_err)?;
 
+                debug!(
+                    "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
+                    flow_id, flushed_input_rows, rows_send, row
+                );
                 Ok(FlowResponse {
                     affected_flows: vec![flow_id],
                     affected_rows: row as u64,
