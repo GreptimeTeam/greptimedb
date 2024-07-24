@@ -18,14 +18,12 @@ pub mod flows;
 mod information_memory_table;
 pub mod key_column_usage;
 mod partitions;
-mod predicate;
 mod region_peers;
 mod runtime_metrics;
 pub mod schemata;
 mod table_constraints;
 mod table_names;
 pub mod tables;
-pub(crate) mod utils;
 mod views;
 
 use std::collections::HashMap;
@@ -37,7 +35,6 @@ use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
-pub(crate) use predicate::Predicates;
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
 use table::TableRef;
@@ -45,6 +42,12 @@ pub use table_names::*;
 use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
+pub(crate) use crate::system_schema::predicate::Predicates;
+// TODO(J0HN150N133): re-export to provide compatibility for legacy `information_schema` code.
+pub(crate) mod utils {
+    pub use crate::system_schema::utils::*;
+}
+
 use super::{SystemSchemaProviderInner, SystemTable, SystemTableRef};
 use crate::error::Result;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;

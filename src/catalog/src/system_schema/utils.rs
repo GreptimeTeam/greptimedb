@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod tables;
+
 use std::sync::{Arc, Weak};
 
 use common_config::Mode;
