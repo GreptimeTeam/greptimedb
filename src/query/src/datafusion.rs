@@ -56,7 +56,6 @@ use crate::error::{
 };
 use crate::executor::QueryExecutor;
 use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
-use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
@@ -340,6 +339,39 @@ impl DatafusionQueryEngine {
             }
         }
     }
+
+    #[tracing::instrument(skip_all)]
+    fn optimize_physical_plan(
+        &self,
+        ctx: &mut QueryEngineContext,
+        plan: Arc<dyn ExecutionPlan>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let _timer = metrics::OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
+
+        let state = ctx.state();
+        let config = state.config_options();
+        // skip optimize AnalyzeExec plan
+        let optimized_plan = if let Some(analyze_plan) = plan.as_any().downcast_ref::<AnalyzeExec>()
+        {
+            let mut new_plan = analyze_plan.input().clone();
+            for optimizer in state.physical_optimizers() {
+                new_plan = optimizer
+                    .optimize(new_plan, config)
+                    .context(DataFusionSnafu)?;
+            }
+            Arc::new(DistAnalyzeExec::new(new_plan))
+        } else {
+            let mut new_plan = plan;
+            for optimizer in state.physical_optimizers() {
+                new_plan = optimizer
+                    .optimize(new_plan, config)
+                    .context(DataFusionSnafu)?;
+            }
+            new_plan
+        };
+
+        Ok(optimized_plan)
+    }
 }
 
 #[async_trait]
@@ -414,41 +446,6 @@ impl QueryEngine for DatafusionQueryEngine {
         let mut state = self.state.session_state();
         state.config_mut().set_extension(query_ctx.clone());
         QueryEngineContext::new(state, query_ctx)
-    }
-}
-
-impl PhysicalOptimizer for DatafusionQueryEngine {
-    #[tracing::instrument(skip_all)]
-    fn optimize_physical_plan(
-        &self,
-        ctx: &mut QueryEngineContext,
-        plan: Arc<dyn ExecutionPlan>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        let _timer = metrics::OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
-
-        let state = ctx.state();
-        let config = state.config_options();
-        // skip optimize AnalyzeExec plan
-        let optimized_plan = if let Some(analyze_plan) = plan.as_any().downcast_ref::<AnalyzeExec>()
-        {
-            let mut new_plan = analyze_plan.input().clone();
-            for optimizer in state.physical_optimizers() {
-                new_plan = optimizer
-                    .optimize(new_plan, config)
-                    .context(DataFusionSnafu)?;
-            }
-            Arc::new(DistAnalyzeExec::new(new_plan))
-        } else {
-            let mut new_plan = plan;
-            for optimizer in state.physical_optimizers() {
-                new_plan = optimizer
-                    .optimize(new_plan, config)
-                    .context(DataFusionSnafu)?;
-            }
-            new_plan
-        };
-
-        Ok(optimized_plan)
     }
 }
 
