@@ -42,12 +42,6 @@ pub use table_names::*;
 use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
-pub(crate) use crate::system_schema::predicate::Predicates;
-// TODO(J0HN150N133): re-export to provide compatibility for legacy `information_schema` code.
-pub(crate) mod utils {
-    pub use crate::system_schema::utils::*;
-}
-
 use super::{SystemSchemaProviderInner, SystemTable, SystemTableRef};
 use crate::error::Result;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
@@ -61,6 +55,7 @@ use crate::system_schema::information_schema::schemata::InformationSchemaSchemat
 use crate::system_schema::information_schema::table_constraints::InformationSchemaTableConstraints;
 use crate::system_schema::information_schema::tables::InformationSchemaTables;
 use crate::system_schema::memory_table::MemoryTable;
+pub(crate) use crate::system_schema::predicate::Predicates;
 use crate::system_schema::SystemSchemaProvider;
 use crate::CatalogManager;
 

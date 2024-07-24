@@ -41,7 +41,8 @@ use store_api::storage::{ScanRequest, TableId};
 
 use super::CLUSTER_INFO;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, ListNodesSnafu, Result};
-use crate::system_schema::information_schema::{utils, InformationTable, Predicates};
+use crate::system_schema::information_schema::{InformationTable, Predicates};
+use crate::system_schema::utils;
 use crate::CatalogManager;
 
 const PEER_ID: &str = "peer_id";
