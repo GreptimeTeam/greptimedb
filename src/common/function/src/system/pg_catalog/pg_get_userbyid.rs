@@ -67,6 +67,6 @@ fn pg_get_user_by_id<I>(table_oid: Option<I>, _ctx: &mut EvalContext) -> Option<
 where
     I: AsPrimitive<u32>,
 {
-    // There is no user authentication in greptime open source core, so we always return ""
+    // TODO(J0HN50N133): We lack way to get the user_info by a numeric value. Once we have it, we can implement this function.
     table_oid.map(|_| "".to_string())
 }
