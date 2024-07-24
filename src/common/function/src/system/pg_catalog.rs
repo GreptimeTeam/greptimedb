@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod pg_get_userbyid;
+mod table_is_visible;
+
 use std::sync::Arc;
 
+use pg_get_userbyid::PGGetUserByIdFunction;
 use table_is_visible::PGTableIsVisbleFunction;
 
 use crate::function_registry::FunctionRegistry;
-
-mod table_is_visible;
 
 #[macro_export]
 macro_rules! pg_catalog_func_fullname {
@@ -31,6 +33,7 @@ pub(super) struct PGCatalogFunction;
 
 impl PGCatalogFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(PGTableIsVisbleFunction))
+        registry.register(Arc::new(PGTableIsVisbleFunction));
+        registry.register(Arc::new(PGGetUserByIdFunction));
     }
 }
