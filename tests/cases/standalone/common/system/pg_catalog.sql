@@ -72,7 +72,8 @@ where relnamespace in (
     select oid
     from pg_catalog.pg_namespace
     where nspname = 'my_db' or nspname = 'public'
-);
+)
+order by relname;
 
 select relname
 from pg_catalog.pg_class
