@@ -50,7 +50,7 @@
 
 ## Introduction
 
-**GreptimeDB** is an open-source unified time-series database for **Metrics**, **Events**, and **Logs** (also **Traces** in plan). You can gain real-time insights from Edge to Cloud at any scale.
+**GreptimeDB** is an open-source unified time-series database for **Metrics**, **Logs**, and **Events** (also **Traces** in plan). You can gain real-time insights from Edge to Cloud at any scale.
 
 ## Why GreptimeDB
 
@@ -58,7 +58,7 @@ Our core developers have been building time-series data platforms for years. Bas
 
 * **Unified all kinds of time series**
 
-  GreptimeDB treats all time series as contextual events with timestamp, and thus unifies the processing of metrics and events. It supports analyzing metrics and events with SQL and PromQL, and doing streaming with continuous aggregation.
+  GreptimeDB treats all time series as contextual events with timestamp, and thus unifies the processing of metrics, logs, and events. It supports analyzing metrics, logs, and events with SQL and PromQL, and doing streaming with continuous aggregation.
 
 * **Cloud-Edge collaboration**
 
