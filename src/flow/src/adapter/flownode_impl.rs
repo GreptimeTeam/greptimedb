@@ -15,7 +15,6 @@
 //! impl `FlowNode` trait for FlowNodeManager so standalone can call them
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use api::v1::flow::{
     flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse, FlushFlow,
@@ -100,10 +99,8 @@ impl Flownode for FlowWorkerManager {
             })) => {
                 // TODO(discord9): impl individual flush
                 debug!("Starting to flush flow_id={:?}", flow_id);
-                // wait 100ms so that the source data is sended to our source
-                // so case like we run too quickly before input data have chance to be sended
-                // TODO(discord9): found better way to impl this flush
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // lock to make sure writes before flush are written to flow
+                let _flush_lock = self.flush_lock.write().await;
                 let flushed_input_rows = self
                     .node_context
                     .read()
@@ -136,6 +133,7 @@ impl Flownode for FlowWorkerManager {
     }
 
     async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse> {
+        let _flush_lock = self.flush_lock.read().await;
         for write_request in request.requests {
             let region_id = write_request.region_id;
             let table_id = RegionId::from(region_id).table_id();

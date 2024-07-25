@@ -129,6 +129,10 @@ pub struct FlowWorkerManager {
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
     node_id: Option<u32>,
+    /// Lock for flushing, will be `read` by `handle_inserts` and `write` by `flush_flow`
+    ///
+    /// So that a series of event like `inserts -> flush` can be handled correctly
+    flush_lock: RwLock<()>,
 }
 
 /// Building FlownodeManager
@@ -161,6 +165,7 @@ impl FlowWorkerManager {
             src_send_buf_lens: Default::default(),
             tick_manager,
             node_id,
+            flush_lock: RwLock::new(()),
         }
     }
 
