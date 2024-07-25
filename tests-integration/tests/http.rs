@@ -839,8 +839,8 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-metadata_cache_size = "32MiB"
-content_cache_size = "32MiB"
+metadata_cache_size = "64MiB"
+content_cache_size = "128MiB"
 
 [region_engine.mito.fulltext_index]
 create_on_flush = "auto"
