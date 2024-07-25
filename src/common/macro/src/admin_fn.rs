@@ -219,7 +219,7 @@ fn build_struct(
                         .create_mutable_vector(rows_num);
 
                     if columns_num == 0 {
-                        let result = common_runtime::block_on_read(async move {
+                        let result = common_runtime::block_on_global(async move {
                             #fn_name(handler, query_ctx, &[]).await
                         })?;
 
@@ -230,7 +230,7 @@ fn build_struct(
                                 .map(|vector| vector.get_ref(i))
                                 .collect();
 
-                            let result = common_runtime::block_on_read(async move {
+                            let result = common_runtime::block_on_global(async move {
                                 #fn_name(handler, query_ctx, &args).await
                             })?;
 

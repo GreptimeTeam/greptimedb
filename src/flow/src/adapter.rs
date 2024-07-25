@@ -462,7 +462,7 @@ impl FlowWorkerManager {
         shutdown: Option<broadcast::Receiver<()>>,
     ) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             self.run(shutdown).await;
         })
     }

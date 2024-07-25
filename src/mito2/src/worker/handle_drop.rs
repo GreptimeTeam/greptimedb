@@ -100,7 +100,7 @@ where
         let object_store = region.access_layer.object_store().clone();
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             let gc_duration = listener
                 .on_later_drop_begin(region_id)
                 .unwrap_or(Duration::from_secs(GC_TASK_INTERVAL_SEC));

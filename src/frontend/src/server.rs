@@ -69,7 +69,7 @@ where
             max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
             tls: opts.tls.clone(),
         };
-        let builder = GrpcServerBuilder::new(grpc_config, common_runtime::bg_runtime())
+        let builder = GrpcServerBuilder::new(grpc_config, common_runtime::global_runtime())
             .with_tls_config(opts.tls.clone())
             .context(error::InvalidTlsConfigSnafu)?;
         Ok(builder)
@@ -208,7 +208,7 @@ where
             maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let mysql_server = MysqlServer::create_server(
-                common_runtime::bg_runtime(),
+                common_runtime::global_runtime(),
                 Arc::new(MysqlSpawnRef::new(
                     ServerSqlQueryHandlerAdapter::arc(instance.clone()),
                     user_provider.clone(),
@@ -237,7 +237,7 @@ where
                 ServerSqlQueryHandlerAdapter::arc(instance.clone()),
                 opts.tls.should_force_tls(),
                 tls_server_config,
-                common_runtime::bg_runtime(),
+                common_runtime::global_runtime(),
                 user_provider.clone(),
             )) as Box<dyn Server>;
 

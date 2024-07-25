@@ -223,7 +223,7 @@ impl DatanodeBuilder {
 
         if self.opts.init_regions_in_background {
             // Opens regions in background.
-            common_runtime::spawn_bg(async move {
+            common_runtime::spawn_global(async move {
                 if let Err(err) = open_all_regions.await {
                     error!(err; "Failed to open regions during the startup.");
                 }
@@ -328,7 +328,7 @@ impl DatanodeBuilder {
         let table_provider_factory = Arc::new(DummyTableProviderFactory);
         let mut region_server = RegionServer::with_table_provider(
             query_engine,
-            common_runtime::bg_runtime(),
+            common_runtime::global_runtime(),
             event_listener,
             table_provider_factory,
         );

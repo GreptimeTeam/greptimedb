@@ -68,7 +68,7 @@ impl EtcdElection {
 
         let leader_ident = leader_value.clone();
         let (tx, mut rx) = broadcast::channel(100);
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_global(async move {
             loop {
                 match rx.recv().await {
                     Ok(msg) => match msg {

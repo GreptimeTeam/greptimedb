@@ -36,7 +36,7 @@ where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    common_runtime::spawn_blocking_bg(f)
+    common_runtime::spawn_blocking_global(f)
 }
 
 /// Please only use this method because you are calling from (optionally first as async) to sync then to a async
@@ -50,7 +50,7 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let rt = common_runtime::bg_runtime();
+    let rt = common_runtime::global_runtime();
     // spawn a thread to block on the runtime, also should prevent `start a runtime inside of runtime` error
     // it's ok to block here, assume calling from async to sync is using a `spawn_blocking_*` call
     std::thread::spawn(move || rt.block_on(f)).join()

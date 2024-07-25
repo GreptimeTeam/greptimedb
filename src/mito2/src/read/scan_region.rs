@@ -665,7 +665,7 @@ impl ScanInput {
         semaphore: Arc<Semaphore>,
         sender: mpsc::Sender<Result<Batch>>,
     ) {
-        common_runtime::spawn_read(async move {
+        common_runtime::spawn_global(async move {
             loop {
                 // We release the permit before sending result to avoid the task waiting on
                 // the channel with the permit held.

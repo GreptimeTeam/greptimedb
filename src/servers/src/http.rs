@@ -913,7 +913,7 @@ impl Server for HttpServer {
         let listening = server.local_addr();
         info!("HTTP server is bound to {}", listening);
 
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             if let Err(e) = server
                 .with_graceful_shutdown(rx.map(drop))
                 .await
