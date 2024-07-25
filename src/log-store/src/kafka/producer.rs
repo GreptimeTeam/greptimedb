@@ -21,12 +21,15 @@ use rskafka::client::partition::Compression;
 use rskafka::client::producer::ProducerClient;
 use rskafka::record::Record;
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::oneshot;
 
+use super::collector::{IndexCollector, NoopCollector};
 use crate::error::{self, NoMaxValueSnafu, Result};
 
 pub struct ProduceRequest {
+    region_id: RegionId,
     batch: Vec<Record>,
     sender: oneshot::Sender<ProduceResultReceiver>,
 }
@@ -69,10 +72,13 @@ struct BackgroundProducerWorker {
     max_batch_bytes: usize,
     /// The [PendingRequest]s.
     pending_requests: Vec<PendingRequest>,
+    /// Collecting ids of WAL entries.
+    index_collector: Box<dyn IndexCollector>,
 }
 
 struct PendingRequest {
     batch: Vec<Record>,
+    region_ids: Vec<RegionId>,
     size: usize,
     sender: oneshot::Sender<Result<Vec<i64>>>,
 }
@@ -84,10 +90,16 @@ fn handle_produce_requests(
     max_batch_bytes: usize,
 ) -> Vec<PendingRequest> {
     let mut records_buffer = vec![];
+    let mut region_ids = vec![];
     let mut batch_size = 0;
     let mut pending_requests = Vec::with_capacity(requests.len());
 
-    for ProduceRequest { batch, sender } in requests.drain(..) {
+    for ProduceRequest {
+        batch,
+        sender,
+        region_id,
+    } in requests.drain(..)
+    {
         let mut receiver = ProduceResultReceiver::default();
         for record in batch {
             assert!(record.approximate_size() <= max_batch_bytes);
@@ -96,6 +108,7 @@ fn handle_produce_requests(
                 let (tx, rx) = oneshot::channel();
                 pending_requests.push(PendingRequest {
                     batch: std::mem::take(&mut records_buffer),
+                    region_ids: std::mem::take(&mut region_ids),
                     size: batch_size,
                     sender: tx,
                 });
@@ -105,6 +118,7 @@ fn handle_produce_requests(
 
             batch_size += record.approximate_size();
             records_buffer.push(record);
+            region_ids.push(region_id);
         }
         // The remaining records.
         if batch_size > 0 {
@@ -112,6 +126,7 @@ fn handle_produce_requests(
             let (tx, rx) = oneshot::channel();
             pending_requests.push(PendingRequest {
                 batch: std::mem::take(&mut records_buffer),
+                region_ids: std::mem::take(&mut region_ids),
                 size: batch_size,
                 sender: tx,
             });
@@ -126,8 +141,10 @@ fn handle_produce_requests(
 
 async fn do_flush(
     client: &Arc<dyn ProducerClient>,
+    collector: &mut Box<dyn IndexCollector>,
     PendingRequest {
         batch,
+        region_ids,
         sender,
         size: _size,
     }: PendingRequest,
@@ -138,22 +155,38 @@ async fn do_flush(
         .await
         .context(error::BatchProduceSnafu);
 
+    if let Ok(result) = &result {
+        for (idx, region_id) in result.iter().zip(region_ids) {
+            collector.append(region_id, *idx as u64);
+        }
+    }
+
     if let Err(err) = sender.send(result) {
         warn!(err; "BatchFlushState Receiver is dropped");
     }
 }
 
 impl BackgroundProducerWorker {
+    async fn try_flush_pending_requests(&mut self) {
+        // Processes pending requests first.
+        if !self.pending_requests.is_empty() {
+            // TODO(weny): Considering merge `PendingRequest`s.
+            for req in self.pending_requests.drain(..) {
+                do_flush(
+                    &self.client,
+                    &mut self.index_collector,
+                    req,
+                    self.compression,
+                )
+                .await
+            }
+        }
+    }
+
     async fn run(&mut self) {
         let mut buffer = Vec::with_capacity(self.request_batch_size);
         while self.running.load(Ordering::Relaxed) {
-            // Processes pending requests first.
-            if !self.pending_requests.is_empty() {
-                // TODO(weny): Considering merge `PendingRequest`s.
-                for req in self.pending_requests.drain(..) {
-                    do_flush(&self.client, req, self.compression).await
-                }
-            }
+            self.try_flush_pending_requests().await;
             match self.receiver.recv().await {
                 Some(req) => {
                     buffer.clear();
@@ -230,6 +263,7 @@ impl OrderedBatchProducer {
             request_batch_size,
             max_batch_bytes,
             pending_requests: vec![],
+            index_collector: Box::new(NoopCollector),
         };
         tokio::spawn(async move { worker.run().await });
         Self {
@@ -245,11 +279,19 @@ impl OrderedBatchProducer {
     ///
     /// ## Panic
     /// Panic if any [Record]'s `approximate_size` > `max_batch_bytes`.
-    pub(crate) async fn produce(&self, batch: Vec<Record>) -> Result<ProduceResultHandle> {
+    pub(crate) async fn produce(
+        &self,
+        region_id: RegionId,
+        batch: Vec<Record>,
+    ) -> Result<ProduceResultHandle> {
         let receiver = {
             let (tx, rx) = oneshot::channel();
             self.sender
-                .send(ProduceRequest { batch, sender: tx })
+                .send(ProduceRequest {
+                    region_id,
+                    batch,
+                    sender: tx,
+                })
                 .await
                 .context(error::SendProduceRequestSnafu)?;
             rx
@@ -275,6 +317,7 @@ mod tests {
     use rskafka::client::producer::ProducerClient;
     use rskafka::protocol::error::Error as ProtocolError;
     use rskafka::record::Record;
+    use store_api::storage::RegionId;
 
     use crate::kafka::producer::OrderedBatchProducer;
 
@@ -350,9 +393,13 @@ mod tests {
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
         );
 
+        let region_id = RegionId::new(1, 1);
         // Produces 3 records
         let handle = producer
-            .produce(vec![record.clone(), record.clone(), record.clone()])
+            .produce(
+                region_id,
+                vec![record.clone(), record.clone(), record.clone()],
+            )
             .await
             .unwrap();
         assert_eq!(handle.wait().await.unwrap(), 2);
@@ -360,14 +407,17 @@ mod tests {
 
         // Produces 2 records
         let handle = producer
-            .produce(vec![record.clone(), record.clone()])
+            .produce(region_id, vec![record.clone(), record.clone()])
             .await
             .unwrap();
         assert_eq!(handle.wait().await.unwrap(), 4);
         assert_eq!(client.batch_sizes.lock().unwrap().as_slice(), &[2, 1, 2]);
 
         // Produces 1 records
-        let handle = producer.produce(vec![record.clone()]).await.unwrap();
+        let handle = producer
+            .produce(region_id, vec![record.clone()])
+            .await
+            .unwrap();
         assert_eq!(handle.wait().await.unwrap(), 5);
         assert_eq!(client.batch_sizes.lock().unwrap().as_slice(), &[2, 1, 2, 1]);
     }
@@ -390,22 +440,25 @@ mod tests {
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
         );
 
+        let region_id = RegionId::new(1, 1);
         let mut futures = FuturesUnordered::new();
         futures.push(
             producer
-                .produce(vec![record.clone(), record.clone(), record.clone()])
+                .produce(
+                    region_id,
+                    vec![record.clone(), record.clone(), record.clone()],
+                )
                 .await
                 .unwrap()
                 .wait(),
         );
         futures.push(
             producer
-                .produce(vec![record.clone(), record.clone()])
+                .produce(region_id, vec![record.clone(), record.clone()])
                 .await
                 .unwrap()
                 .wait(),
         );
-        futures.push(producer.produce(vec![record.clone()]).await.unwrap().wait());
 
         futures.next().await.unwrap().unwrap_err();
         futures.next().await.unwrap().unwrap_err();
@@ -430,14 +483,23 @@ mod tests {
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
         );
 
+        let region_id = RegionId::new(1, 1);
         let a = producer
-            .produce(vec![record.clone(), record.clone(), record.clone()])
+            .produce(
+                region_id,
+                vec![record.clone(), record.clone(), record.clone()],
+            )
             .await
             .unwrap()
             .wait()
             .fuse();
 
-        let b = producer.produce(vec![record]).await.unwrap().wait().fuse();
+        let b = producer
+            .produce(region_id, vec![record])
+            .await
+            .unwrap()
+            .wait()
+            .fuse();
 
         let mut b = Box::pin(b);
 
