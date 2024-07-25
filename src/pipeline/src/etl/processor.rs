@@ -28,6 +28,7 @@ use cmcd::CmcdProcessor;
 use csv::CsvProcessor;
 use date::DateProcessor;
 use dissect::DissectProcessor;
+use enum_dispatch::enum_dispatch;
 use epoch::EpochProcessor;
 use gsub::GsubProcessor;
 use itertools::Itertools;
@@ -52,6 +53,7 @@ const SEPARATOR_NAME: &str = "separator";
 // const ON_FAILURE_NAME: &str = "on_failure";
 // const TAG_NAME: &str = "tag";
 
+#[enum_dispatch(ProcessorKind)]
 pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
     fn fields(&self) -> &Fields;
     fn fields_mut(&mut self) -> &mut Fields;
@@ -96,6 +98,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 }
 
 #[derive(Debug)]
+#[enum_dispatch]
 pub enum ProcessorKind {
     Cmcd(CmcdProcessor),
     Csv(CsvProcessor),
@@ -107,113 +110,6 @@ pub enum ProcessorKind {
     Letter(LetterProcessor),
     Regex(RegexProcessor),
     UrlEncoding(UrlEncodingProcessor),
-}
-
-impl Processor for ProcessorKind {
-    fn fields(&self) -> &Fields {
-        match self {
-            ProcessorKind::Cmcd(p) => p.fields(),
-            ProcessorKind::Csv(p) => p.fields(),
-            ProcessorKind::Date(p) => p.fields(),
-            ProcessorKind::Dissect(p) => p.fields(),
-            ProcessorKind::Epoch(p) => p.fields(),
-            ProcessorKind::Gsub(p) => p.fields(),
-            ProcessorKind::Join(p) => p.fields(),
-            ProcessorKind::Letter(p) => p.fields(),
-            ProcessorKind::Regex(p) => p.fields(),
-            ProcessorKind::UrlEncoding(p) => p.fields(),
-        }
-    }
-
-    fn kind(&self) -> &str {
-        match self {
-            ProcessorKind::Cmcd(p) => p.kind(),
-            ProcessorKind::Csv(p) => p.kind(),
-            ProcessorKind::Date(p) => p.kind(),
-            ProcessorKind::Dissect(p) => p.kind(),
-            ProcessorKind::Epoch(p) => p.kind(),
-            ProcessorKind::Gsub(p) => p.kind(),
-            ProcessorKind::Join(p) => p.kind(),
-            ProcessorKind::Letter(p) => p.kind(),
-            ProcessorKind::Regex(p) => p.kind(),
-            ProcessorKind::UrlEncoding(p) => p.kind(),
-        }
-    }
-
-    fn ignore_missing(&self) -> bool {
-        match self {
-            ProcessorKind::Cmcd(p) => p.ignore_missing(),
-            ProcessorKind::Csv(p) => p.ignore_missing(),
-            ProcessorKind::Date(p) => p.ignore_missing(),
-            ProcessorKind::Dissect(p) => p.ignore_missing(),
-            ProcessorKind::Epoch(p) => p.ignore_missing(),
-            ProcessorKind::Gsub(p) => p.ignore_missing(),
-            ProcessorKind::Join(p) => p.ignore_missing(),
-            ProcessorKind::Letter(p) => p.ignore_missing(),
-            ProcessorKind::Regex(p) => p.ignore_missing(),
-            ProcessorKind::UrlEncoding(p) => p.ignore_missing(),
-        }
-    }
-
-    fn output_keys(&self) -> HashSet<String> {
-        match self {
-            ProcessorKind::Cmcd(p) => p.output_keys(),
-            ProcessorKind::Csv(p) => p.output_keys(),
-            ProcessorKind::Date(p) => p.output_keys(),
-            ProcessorKind::Dissect(p) => p.output_keys(),
-            ProcessorKind::Epoch(p) => p.output_keys(),
-            ProcessorKind::Gsub(p) => p.output_keys(),
-            ProcessorKind::Join(p) => p.output_keys(),
-            ProcessorKind::Letter(p) => p.output_keys(),
-            ProcessorKind::Regex(p) => p.output_keys(),
-            ProcessorKind::UrlEncoding(p) => p.output_keys(),
-        }
-    }
-
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        match self {
-            ProcessorKind::Cmcd(p) => p.exec_field(val, field),
-            ProcessorKind::Csv(p) => p.exec_field(val, field),
-            ProcessorKind::Date(p) => p.exec_field(val, field),
-            ProcessorKind::Dissect(p) => p.exec_field(val, field),
-            ProcessorKind::Epoch(p) => p.exec_field(val, field),
-            ProcessorKind::Gsub(p) => p.exec_field(val, field),
-            ProcessorKind::Join(p) => p.exec_field(val, field),
-            ProcessorKind::Letter(p) => p.exec_field(val, field),
-            ProcessorKind::Regex(p) => p.exec_field(val, field),
-            ProcessorKind::UrlEncoding(p) => p.exec_field(val, field),
-        }
-    }
-
-    fn fields_mut(&mut self) -> &mut Fields {
-        match self {
-            ProcessorKind::Cmcd(p) => p.fields_mut(),
-            ProcessorKind::Csv(p) => p.fields_mut(),
-            ProcessorKind::Date(p) => p.fields_mut(),
-            ProcessorKind::Dissect(p) => p.fields_mut(),
-            ProcessorKind::Epoch(p) => p.fields_mut(),
-            ProcessorKind::Gsub(p) => p.fields_mut(),
-            ProcessorKind::Join(p) => p.fields_mut(),
-            ProcessorKind::Letter(p) => p.fields_mut(),
-            ProcessorKind::Regex(p) => p.fields_mut(),
-            ProcessorKind::UrlEncoding(p) => p.fields_mut(),
-        }
-    }
-
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        match self {
-            ProcessorKind::Cmcd(p) => p.exec_mut(val),
-            ProcessorKind::Csv(p) => p.exec_mut(val),
-            ProcessorKind::Date(p) => p.exec_mut(val),
-            ProcessorKind::Dissect(p) => p.exec_mut(val),
-            ProcessorKind::Epoch(p) => p.exec_mut(val),
-            ProcessorKind::Gsub(p) => p.exec_mut(val),
-            ProcessorKind::Join(p) => p.exec_mut(val),
-            ProcessorKind::Letter(p) => p.exec_mut(val),
-            ProcessorKind::Regex(p) => p.exec_mut(val),
-            ProcessorKind::UrlEncoding(p) => p.exec_mut(val),
-        }
-    }
 }
 
 #[derive(Debug, Default)]

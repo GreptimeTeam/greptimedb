@@ -36,6 +36,7 @@ datafusion-expr.workspace = true
 datafusion-functions.workspace = true
 datafusion-physical-expr.workspace = true
 datatypes.workspace = true
+enum_dispatch = "0.3"
 futures.workspace = true
 greptime-proto.workspace = true
 itertools.workspace = true
