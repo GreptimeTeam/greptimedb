@@ -21,8 +21,8 @@ use itertools::Itertools;
 
 use crate::etl::field::{Field, Fields};
 use crate::etl::processor::{
-    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
-    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_field, yaml_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
+    IGNORE_MISSING_NAME,
 };
 use crate::etl::value::{Map, Value};
 
@@ -64,8 +64,7 @@ impl CsvProcessor {
         }
     }
 
-    fn with_fields(&mut self, mut fields: Fields) {
-        update_one_one_output_keys(&mut fields);
+    fn with_fields(&mut self, fields: Fields) {
         self.fields = fields;
     }
 
@@ -147,6 +146,18 @@ impl CsvProcessor {
             Err("expected at least one record from csv format, but got none".into())
         }
     }
+
+    fn update_output_keys(&mut self) {
+        self.fields.iter_mut().for_each(|f| {
+            if let Some(tfs) = f.target_fields.as_ref() {
+                tfs.iter().for_each(|tf| {
+                    if !tf.is_empty() {
+                        f.output_fields.insert(tf.to_string(), 0);
+                    }
+                });
+            }
+        })
+    }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessor {
@@ -184,7 +195,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessor {
                 _ => {}
             }
         }
-
+        processor.update_output_keys();
         Ok(processor)
     }
 }
@@ -209,12 +220,7 @@ impl Processor for CsvProcessor {
     fn output_keys(&self) -> HashSet<String> {
         self.fields
             .iter()
-            .flat_map(|f| {
-                f.target_fields
-                    .as_ref()
-                    .map(|tf| tf.iter().cloned().collect::<Vec<_>>())
-                    .unwrap_or(Vec::new())
-            })
+            .flat_map(|f| f.target_fields.clone().unwrap_or_default())
             .collect()
     }
 

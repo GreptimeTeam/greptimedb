@@ -38,7 +38,7 @@ fn processor_mut(
     let mut result = Vec::with_capacity(input_values.len());
 
     for v in input_values {
-        pipeline.preprepase(v, &mut payload)?;
+        pipeline.prepase(v, &mut payload)?;
         let r = pipeline.exec_mut(&mut payload)?;
         result.push(r);
         pipeline.reset_intermediate_state(&mut payload);

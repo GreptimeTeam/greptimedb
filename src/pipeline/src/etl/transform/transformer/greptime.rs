@@ -40,7 +40,8 @@ impl GreptimeTransformer {
         let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let type_ = Value::Epoch(Epoch::Nanosecond(ns));
         let default = Some(type_.clone());
-        let field = Field::new(DEFAULT_GREPTIME_TIMESTAMP_COLUMN);
+        let mut field = Field::new(DEFAULT_GREPTIME_TIMESTAMP_COLUMN);
+        field.insert_output_index(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(), 0);
         let fields = Fields::new(vec![field]).unwrap();
 
         Transform {
@@ -48,7 +49,7 @@ impl GreptimeTransformer {
             type_,
             default,
             index: Some(Index::TimeIndex),
-            on_failure: None,
+            on_failure: Some(crate::etl::transform::OnFailure::Default),
         }
     }
 
@@ -152,6 +153,14 @@ impl Transformer for GreptimeTransformer {
         match timestamp_columns.len() {
             0 => {
                 transforms.push(GreptimeTransformer::default_greptime_timestamp_column());
+
+                let requied_keys = transforms.required_keys_mut();
+                requied_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
+                requied_keys.sort();
+
+                let output_keys = transforms.output_keys_mut();
+                output_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
+                output_keys.sort();
                 let schema = GreptimeTransformer::schemas(&transforms)?;
                 Ok(GreptimeTransformer { transforms, schema })
             }
@@ -202,7 +211,10 @@ impl Transformer for GreptimeTransformer {
                         if let Some(i) = field.output_fields.iter().next().map(|kv| kv.1) {
                             values[*i] = GreptimeValue { value_data }
                         } else {
-                            return Err("output_fields is empty".to_string());
+                            return Err(format!(
+                                "field: {} output_fields is empty.",
+                                field.get_field_name()
+                            ));
                         }
                     }
                     _ => {
@@ -222,5 +234,9 @@ impl Transformer for GreptimeTransformer {
 
     fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema> {
         &self.schema
+    }
+
+    fn transforms_mut(&mut self) -> &mut Transforms {
+        &mut self.transforms
     }
 }

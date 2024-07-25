@@ -28,7 +28,7 @@ use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::{PipelineVersion, Value as PipelineValue};
+use pipeline::PipelineVersion;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Value};
@@ -326,13 +326,13 @@ async fn ingest_logs_inner(
         .await?;
 
     let transform_timer = std::time::Instant::now();
-    let mut intermediate_state = pipeline.init_intermediate_state().clone();
+    let mut intermediate_state = pipeline.init_intermediate_state();
 
     let mut results = Vec::with_capacity(pipeline_data.len());
 
     for v in pipeline_data {
         pipeline
-            .preprepase(v, &mut intermediate_state)
+            .prepase(v, &mut intermediate_state)
             .map_err(|reason| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
@@ -354,7 +354,7 @@ async fn ingest_logs_inner(
     }
 
     METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-        .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+        .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
         .observe(transform_timer.elapsed().as_secs_f64());
 
     let transformed_data: Rows = Rows {

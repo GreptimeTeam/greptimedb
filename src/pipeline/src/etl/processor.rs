@@ -62,6 +62,8 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
         true
     }
 
+    /// processor all output keys
+    /// if a processor has multiple output keys, it should return all of them
     fn output_keys(&self) -> HashSet<String>;
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String>;
@@ -105,12 +107,6 @@ pub enum ProcessorKind {
     Letter(LetterProcessor),
     Regex(RegexProcessor),
     UrlEncoding(UrlEncodingProcessor),
-}
-
-impl Clone for ProcessorKind {
-    fn clone(&self) -> Self {
-        todo!()
-    }
 }
 
 impl Processor for ProcessorKind {
@@ -220,7 +216,7 @@ impl Processor for ProcessorKind {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct Processors {
     pub processors: Vec<ProcessorKind>,
     pub required_keys: Vec<String>,
@@ -243,14 +239,17 @@ impl std::ops::DerefMut for Processors {
 }
 
 impl Processors {
+    /// A collection of all the processor's requied input fields
     pub fn required_keys(&self) -> &Vec<String> {
         &self.required_keys
     }
 
+    /// A collection of all the processor's output fields
     pub fn output_keys(&self) -> &Vec<String> {
         &self.output_keys
     }
 
+    /// Required fields in user-supplied data, not pipeline output fields.
     pub fn required_original_keys(&self) -> &Vec<String> {
         &self.required_original_keys
     }

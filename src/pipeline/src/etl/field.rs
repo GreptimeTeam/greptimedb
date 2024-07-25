@@ -142,6 +142,10 @@ impl Field {
             *v = index;
         }
     }
+
+    pub(crate) fn insert_output_index(&mut self, key: String, index: usize) {
+        self.output_fields.insert(key, index);
+    }
 }
 
 impl std::str::FromStr for Field {

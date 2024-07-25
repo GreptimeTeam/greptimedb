@@ -41,14 +41,14 @@ transform:
 
     let expected_schema = vec![
         common::make_column_schema(
-            "version".to_string(),
-            ColumnDataType::Uint8,
-            SemanticType::Field,
-        ),
-        common::make_column_schema(
             "greptime_timestamp".to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
+        ),
+        common::make_column_schema(
+            "version".to_string(),
+            ColumnDataType::Uint8,
+            SemanticType::Field,
         ),
     ];
 
@@ -82,14 +82,14 @@ transform:
 
     let expected_schema = vec![
         common::make_column_schema(
-            "version".to_string(),
-            ColumnDataType::Uint8,
-            SemanticType::Field,
-        ),
-        common::make_column_schema(
             "greptime_timestamp".to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
+        ),
+        common::make_column_schema(
+            "version".to_string(),
+            ColumnDataType::Uint8,
+            SemanticType::Field,
         ),
     ];
 
@@ -118,14 +118,14 @@ transform:
 
     let expected_schema = vec![
         common::make_column_schema(
-            "version".to_string(),
-            ColumnDataType::Uint8,
-            SemanticType::Field,
-        ),
-        common::make_column_schema(
             "greptime_timestamp".to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
+        ),
+        common::make_column_schema(
+            "version".to_string(),
+            ColumnDataType::Uint8,
+            SemanticType::Field,
         ),
     ];
 
@@ -165,9 +165,9 @@ transform:
 
     let expected_schema = vec![
         common::make_column_schema(
-            "version".to_string(),
-            ColumnDataType::Uint8,
-            SemanticType::Field,
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
         ),
         common::make_column_schema(
             "spec_version".to_string(),
@@ -175,9 +175,9 @@ transform:
             SemanticType::Field,
         ),
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
-            ColumnDataType::TimestampNanosecond,
-            SemanticType::Timestamp,
+            "version".to_string(),
+            ColumnDataType::Uint8,
+            SemanticType::Field,
         ),
     ];
 

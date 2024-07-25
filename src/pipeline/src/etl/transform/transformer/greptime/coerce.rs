@@ -142,7 +142,16 @@ pub(crate) fn coerce_value(
     transform: &Transform,
 ) -> Result<Option<ValueData>, String> {
     match val {
-        Value::Null => Ok(None),
+        Value::Null => match transform.on_failure {
+            Some(OnFailure::Ignore) => Ok(None),
+            Some(OnFailure::Default) => transform
+                .get_default()
+                .map(|default| coerce_value(default, transform))
+                .unwrap_or_else(|| {
+                    coerce_value(transform.get_type_matched_default_val(), transform)
+                }),
+            None => Ok(None),
+        },
 
         Value::Int8(n) => coerce_i64_value(*n as i64, transform),
         Value::Int16(n) => coerce_i64_value(*n as i64, transform),

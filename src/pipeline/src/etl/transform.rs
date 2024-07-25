@@ -38,6 +38,7 @@ pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     fn new(transforms: Transforms) -> Result<Self, String>;
     fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema>;
     fn transforms(&self) -> &Transforms;
+    fn transforms_mut(&mut self) -> &mut Transforms;
     fn transform(&self, val: Value) -> Result<Self::Output, String>;
     fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput, String>;
 }
@@ -84,6 +85,14 @@ pub struct Transforms {
 impl Transforms {
     pub fn output_keys(&self) -> &Vec<String> {
         &self.output_keys
+    }
+
+    pub fn output_keys_mut(&mut self) -> &mut Vec<String> {
+        &mut self.output_keys
+    }
+
+    pub fn required_keys_mut(&mut self) -> &mut Vec<String> {
+        &mut self.required_keys
     }
 
     pub fn required_keys(&self) -> &Vec<String> {

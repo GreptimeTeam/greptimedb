@@ -46,7 +46,7 @@ fn set_processor_keys_index(
                 .iter()
                 .position(|r| *r == field.input_field.name)
                 .ok_or(format!(
-                    "input field {} is not found in required keys: {final_intermediate_keys:?}",
+                    "input field {} is not found in intermediate keys: {final_intermediate_keys:?} when set processor keys index",
                     field.input_field.name
                 ))?;
             field.set_input_index(index);
@@ -55,7 +55,7 @@ fn set_processor_keys_index(
                     .iter()
                     .position(|r| *r == *k)
                     .ok_or(format!(
-                    "output field {k} is not found in required keys: {final_intermediate_keys:?}"
+                    "output field {k} is not found in intermediate keys: {final_intermediate_keys:?} when set processor keys index"
                 ))?;
                 *v = index;
             }
@@ -75,13 +75,13 @@ fn set_transform_keys_index(
                 .iter()
                 .position(|r| *r == field.input_field.name)
                 .ok_or(format!(
-                    "input field {} is not found in required keys: {final_intermediate_keys:?}",
+                    "input field {} is not found in intermediate keys: {final_intermediate_keys:?} when set transform keys index",
                     field.input_field.name
                 ))?;
             field.set_input_index(index);
             for (k, v) in field.output_fields.iter_mut() {
                 let index = output_keys.iter().position(|r| *r == *k).ok_or(format!(
-                    "output field {k} is not found in required keys: {final_intermediate_keys:?}"
+                    "output field {k} is not found in output keys: {final_intermediate_keys:?} when set transform keys index"
                 ))?;
                 *v = index;
             }
@@ -108,11 +108,14 @@ where
                 processor::Processors::default()
             };
 
-            let mut transforms = if let Some(v) = doc[TRANSFORM].as_vec() {
+            let transforms = if let Some(v) = doc[TRANSFORM].as_vec() {
                 v.try_into()?
             } else {
                 Transforms::default()
             };
+
+            let mut transformer = T::new(transforms)?;
+            let transforms = transformer.transforms_mut();
 
             let processors_output_keys = processors.output_keys();
             let processors_required_keys = processors.required_keys();
@@ -167,12 +170,12 @@ where
 
             let output_keys = transforms.output_keys().clone();
             set_processor_keys_index(&mut processors, &final_intermediate_keys)?;
-            set_transform_keys_index(&mut transforms, &final_intermediate_keys, &output_keys)?;
+            set_transform_keys_index(transforms, &final_intermediate_keys, &output_keys)?;
 
             Ok(Pipeline {
                 description,
                 processors,
-                transformer: T::new(transforms)?,
+                transformer,
                 required_keys,
                 output_keys,
                 intermediate_keys: final_intermediate_keys,
@@ -182,7 +185,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Pipeline<T>
 where
     T: Transformer,
@@ -260,7 +263,7 @@ where
         self.transformer.transform_mut(val)
     }
 
-    pub fn preprepase(&self, val: serde_json::Value, result: &mut [Value]) -> Result<(), String> {
+    pub fn prepase(&self, val: serde_json::Value, result: &mut [Value]) -> Result<(), String> {
         match val {
             serde_json::Value::Object(map) => {
                 let mut index = 0;
@@ -297,8 +300,8 @@ where
     }
 
     pub fn reset_intermediate_state(&self, result: &mut [Value]) {
-        for i in 0..result.len() {
-            result[i] = Value::Null;
+        for i in result {
+            *i = Value::Null;
         }
     }
 
@@ -310,14 +313,17 @@ where
         &self.transformer
     }
 
+    /// Required fields in user-supplied data
     pub fn required_keys(&self) -> &Vec<String> {
         &self.required_keys
     }
 
+    /// All output keys from the pipeline
     pub fn output_keys(&self) -> &Vec<String> {
         &self.output_keys
     }
 
+    /// intermediate keys from the processors
     pub fn intermediate_keys(&self) -> &Vec<String> {
         &self.intermediate_keys
     }
@@ -330,10 +336,65 @@ where
 #[cfg(test)]
 mod tests {
 
+    use greptime_proto::v1::value::ValueData;
     use greptime_proto::v1::{self, ColumnDataType, SemanticType};
 
     use crate::etl::transform::GreptimeTransformer;
     use crate::etl::{parse, Content, Pipeline};
+    use crate::Value;
+
+    #[test]
+    fn test_pipeline_prepare() {
+        let input_value_str = r#"
+            {
+                "my_field": "1,2",
+                "foo": "bar"
+            }
+        "#;
+        let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
+
+        let pipeline_yaml = r#"
+---
+description: Pipeline for Apache Tomcat
+
+processors:
+  - csv:
+      field: my_field, my_field,field1, field2
+
+transform:
+  - field: field1
+    type: uint32
+  - field: field2
+    type: uint32
+"#;
+        let pipeline: Pipeline<GreptimeTransformer> =
+            parse(&Content::Yaml(pipeline_yaml.into())).unwrap();
+        let mut payload = pipeline.init_intermediate_state();
+        pipeline.prepase(input_value, &mut payload).unwrap();
+        assert_eq!(
+            &["greptime_timestamp", "my_field"].to_vec(),
+            pipeline.required_keys()
+        );
+        assert_eq!(
+            payload,
+            vec![
+                Value::Null,
+                Value::String("1,2".to_string()),
+                Value::Null,
+                Value::Null
+            ]
+        );
+        let result = pipeline.exec_mut(&mut payload).unwrap();
+
+        assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
+        assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
+        match &result.values[2].value_data {
+            Some(ValueData::TimestampNanosecondValue(v)) => {
+                assert_ne!(*v, 0);
+            }
+            _ => panic!("expect null value"),
+        }
+    }
 
     #[test]
     fn test_csv_pipeline() {
@@ -351,7 +412,7 @@ description: Pipeline for Apache Tomcat
 
 processors:
   - csv:
-      field: my_field, field1, field2
+      field: my_field,my_field, field1, field2
 
 transform:
   - field: field1
