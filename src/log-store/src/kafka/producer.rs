@@ -15,25 +15,23 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use rskafka::client::partition::Compression;
-use rskafka::client::producer::ProducerClient;
+use common_telemetry::warn;
+use rskafka::client::partition::{Compression, OffsetAt, PartitionClient};
 use rskafka::record::Record;
-use snafu::ResultExt;
+use store_api::logstore::provider::KafkaProvider;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Sender};
-use tokio::sync::oneshot;
 
-use super::worker::{BackgroundProducerWorker, ProduceResultHandle};
 use crate::error::{self, Result};
 use crate::kafka::collector::NoopCollector;
-use crate::kafka::worker::ProduceRequest;
+use crate::kafka::worker::{BackgroundProducerWorker, ProduceResultHandle, WorkerRequest};
 
 pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer>;
 
 /// [`OrderedBatchProducer`] attempts to aggregate multiple produce requests together
 #[derive(Debug)]
 pub(crate) struct OrderedBatchProducer {
-    pub(crate) sender: Sender<ProduceRequest>,
+    pub(crate) sender: Sender<WorkerRequest>,
     /// Used to control the [`BackgroundProducerWorker`].
     running: Arc<AtomicBool>,
 }
@@ -47,6 +45,7 @@ impl Drop for OrderedBatchProducer {
 impl OrderedBatchProducer {
     /// Constructs a new [`OrderedBatchProducer`].
     pub(crate) fn new(
+        provider: Arc<KafkaProvider>,
         client: Arc<dyn ProducerClient>,
         compression: Compression,
         channel_size: usize,
@@ -56,13 +55,13 @@ impl OrderedBatchProducer {
         let (tx, rx) = mpsc::channel(channel_size);
         let running = Arc::new(AtomicBool::new(true));
         let mut worker = BackgroundProducerWorker {
+            provider,
             client,
             compression,
             running: running.clone(),
             receiver: rx,
             request_batch_size,
             max_batch_bytes,
-            pending_requests: vec![],
             index_collector: Box::new(NoopCollector),
         };
         tokio::spawn(async move { worker.run().await });
@@ -70,6 +69,10 @@ impl OrderedBatchProducer {
             sender: tx,
             running,
         }
+    }
+
+    fn set_running(&self, val: bool) {
+        self.running.store(val, Ordering::Relaxed);
     }
 
     /// Writes `data` to the [`OrderedBatchProducer`].
@@ -84,20 +87,40 @@ impl OrderedBatchProducer {
         region_id: RegionId,
         batch: Vec<Record>,
     ) -> Result<ProduceResultHandle> {
-        let receiver = {
-            let (tx, rx) = oneshot::channel();
-            self.sender
-                .send(ProduceRequest {
-                    region_id,
-                    batch,
-                    sender: tx,
-                })
-                .await
-                .context(error::SendProduceRequestSnafu)?;
-            rx
-        };
+        let (req, handle) = WorkerRequest::new_produce_request(region_id, batch);
+        if self.sender.send(req).await.is_err() {
+            warn!("OrderedBatchProducer is already exited");
+            self.set_running(false);
+            return error::OrderedBatchProducerStoppedSnafu {}.fail();
+        }
 
-        Ok(ProduceResultHandle { receiver })
+        Ok(handle)
+    }
+}
+
+#[async_trait::async_trait]
+pub trait ProducerClient: std::fmt::Debug + Send + Sync {
+    async fn produce(
+        &self,
+        records: Vec<Record>,
+        compression: Compression,
+    ) -> rskafka::client::error::Result<Vec<i64>>;
+
+    async fn get_offset(&self, at: OffsetAt) -> rskafka::client::error::Result<i64>;
+}
+
+#[async_trait::async_trait]
+impl ProducerClient for PartitionClient {
+    async fn produce(
+        &self,
+        records: Vec<Record>,
+        compression: Compression,
+    ) -> rskafka::client::error::Result<Vec<i64>> {
+        self.produce(records, compression).await
+    }
+
+    async fn get_offset(&self, at: OffsetAt) -> rskafka::client::error::Result<i64> {
+        self.get_offset(at).await
     }
 }
 
@@ -109,16 +132,15 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use common_base::readable_size::ReadableSize;
     use common_telemetry::debug;
-    use futures::future::BoxFuture;
     use futures::stream::FuturesUnordered;
     use futures::{FutureExt, StreamExt};
     use rskafka::client::error::{Error as ClientError, RequestContext};
     use rskafka::client::partition::Compression;
-    use rskafka::client::producer::ProducerClient;
     use rskafka::protocol::error::Error as ProtocolError;
     use rskafka::record::Record;
     use store_api::storage::RegionId;
 
+    use super::*;
     use crate::kafka::producer::OrderedBatchProducer;
 
     #[derive(Debug)]
@@ -129,38 +151,41 @@ mod tests {
         batch_sizes: Mutex<Vec<usize>>,
     }
 
+    #[async_trait::async_trait]
     impl ProducerClient for MockClient {
-        fn produce(
+        async fn produce(
             &self,
             records: Vec<Record>,
             _compression: Compression,
-        ) -> BoxFuture<'_, Result<Vec<i64>, ClientError>> {
-            Box::pin(async move {
-                tokio::time::sleep(self.delay).await;
+        ) -> rskafka::client::error::Result<Vec<i64>> {
+            tokio::time::sleep(self.delay).await;
 
-                if let Some(e) = self.error {
-                    return Err(ClientError::ServerError {
-                        protocol_error: e,
-                        error_message: None,
-                        request: RequestContext::Partition("foo".into(), 1),
-                        response: None,
-                        is_virtual: false,
-                    });
-                }
+            if let Some(e) = self.error {
+                return Err(ClientError::ServerError {
+                    protocol_error: e,
+                    error_message: None,
+                    request: RequestContext::Partition("foo".into(), 1),
+                    response: None,
+                    is_virtual: false,
+                });
+            }
 
-                if let Some(p) = self.panic.as_ref() {
-                    panic!("{}", p);
-                }
+            if let Some(p) = self.panic.as_ref() {
+                panic!("{}", p);
+            }
 
-                let mut batch_sizes = self.batch_sizes.lock().unwrap();
-                let offset_base = batch_sizes.iter().sum::<usize>();
-                let offsets = (0..records.len())
-                    .map(|x| (x + offset_base) as i64)
-                    .collect();
-                batch_sizes.push(records.len());
-                debug!("Return offsets: {offsets:?}");
-                Ok(offsets)
-            })
+            let mut batch_sizes = self.batch_sizes.lock().unwrap();
+            let offset_base = batch_sizes.iter().sum::<usize>();
+            let offsets = (0..records.len())
+                .map(|x| (x + offset_base) as i64)
+                .collect();
+            batch_sizes.push(records.len());
+            debug!("Return offsets: {offsets:?}");
+            Ok(offsets)
+        }
+
+        async fn get_offset(&self, _at: OffsetAt) -> rskafka::client::error::Result<i64> {
+            todo!()
         }
     }
 
@@ -184,8 +209,9 @@ mod tests {
             delay,
             batch_sizes: Default::default(),
         });
-
+        let provider = Arc::new(KafkaProvider::new(String::new()));
         let producer = OrderedBatchProducer::new(
+            provider,
             client.clone(),
             Compression::NoCompression,
             128,
@@ -231,8 +257,9 @@ mod tests {
             delay: Duration::from_millis(1),
             batch_sizes: Default::default(),
         });
-
+        let provider = Arc::new(KafkaProvider::new(String::new()));
         let producer = OrderedBatchProducer::new(
+            provider,
             client.clone(),
             Compression::NoCompression,
             128,
@@ -275,7 +302,9 @@ mod tests {
             batch_sizes: Default::default(),
         });
 
+        let provider = Arc::new(KafkaProvider::new(String::new()));
         let producer = OrderedBatchProducer::new(
+            provider,
             client.clone(),
             Compression::NoCompression,
             128,

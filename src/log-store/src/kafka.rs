@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod client_manager;
+// TODO(weny): remove it
 #[allow(dead_code)]
 pub(crate) mod collector;
 pub(crate) mod consumer;
@@ -21,6 +22,8 @@ pub(crate) mod index;
 pub mod log_store;
 pub(crate) mod producer;
 pub(crate) mod util;
+// TODO(weny): remove it
+#[allow(dead_code)]
 pub(crate) mod worker;
 
 use serde::{Deserialize, Serialize};

@@ -148,6 +148,7 @@ impl ClientManager {
             .map(Arc::new)?;
 
         let producer = Arc::new(OrderedBatchProducer::new(
+            provider.clone(),
             client.clone(),
             self.compression,
             self.producer_channel_size,

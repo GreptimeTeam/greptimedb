@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod checkpoint;
 pub(crate) mod flush;
 pub(crate) mod produce;
 
@@ -21,26 +22,57 @@ use std::sync::Arc;
 use common_telemetry::debug;
 use futures::future::try_join_all;
 use rskafka::client::partition::Compression;
-use rskafka::client::producer::ProducerClient;
 use rskafka::record::Record;
 use snafu::{OptionExt, ResultExt};
+use store_api::logstore::provider::KafkaProvider;
+use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::oneshot;
+use tokio::sync::oneshot::{self};
 
-use super::collector::IndexCollector;
 use crate::error::{self, NoMaxValueSnafu, Result};
+use crate::kafka::collector::IndexCollector;
+use crate::kafka::producer::ProducerClient;
 
-pub struct ProduceRequest {
-    pub(crate) region_id: RegionId,
-    pub(crate) batch: Vec<Record>,
-    pub(crate) sender: oneshot::Sender<ProduceResultReceiver>,
+pub(crate) enum WorkerRequest {
+    Produce(ProduceRequest),
+    Checkpoint,
+    TruncateIndex(TruncateIndexRequest),
+}
+
+impl WorkerRequest {
+    pub(crate) fn new_produce_request(
+        region_id: RegionId,
+        batch: Vec<Record>,
+    ) -> (WorkerRequest, ProduceResultHandle) {
+        let (tx, rx) = oneshot::channel();
+
+        (
+            WorkerRequest::Produce(ProduceRequest {
+                region_id,
+                batch,
+                sender: tx,
+            }),
+            ProduceResultHandle { receiver: rx },
+        )
+    }
+}
+
+pub(crate) struct TruncateIndexRequest {
+    region_id: RegionId,
+    entry_id: EntryId,
+}
+
+pub(crate) struct ProduceRequest {
+    region_id: RegionId,
+    batch: Vec<Record>,
+    sender: oneshot::Sender<ProduceResultReceiver>,
 }
 
 /// Receives the committed offsets when data has been committed to Kafka
 /// or an unrecoverable error has been encountered.
 pub(crate) struct ProduceResultHandle {
-    pub(crate) receiver: oneshot::Receiver<ProduceResultReceiver>,
+    receiver: oneshot::Receiver<ProduceResultReceiver>,
 }
 
 impl ProduceResultHandle {
@@ -86,6 +118,7 @@ pub(crate) struct PendingRequest {
 }
 
 pub(crate) struct BackgroundProducerWorker {
+    pub(crate) provider: Arc<KafkaProvider>,
     /// The [`ProducerClient`].
     pub(crate) client: Arc<dyn ProducerClient>,
     // The compression configuration.
@@ -93,13 +126,11 @@ pub(crate) struct BackgroundProducerWorker {
     // The running flag.
     pub(crate) running: Arc<AtomicBool>,
     /// Receiver of [ProduceRequest].
-    pub(crate) receiver: Receiver<ProduceRequest>,
+    pub(crate) receiver: Receiver<WorkerRequest>,
     /// Max batch size for a worker to handle requests.
     pub(crate) request_batch_size: usize,
     /// Max bytes size for a single flush.
     pub(crate) max_batch_bytes: usize,
-    /// The [PendingRequest]s.
-    pub(crate) pending_requests: Vec<PendingRequest>,
     /// Collecting ids of WAL entries.
     pub(crate) index_collector: Box<dyn IndexCollector>,
 }
@@ -108,7 +139,6 @@ impl BackgroundProducerWorker {
     pub(crate) async fn run(&mut self) {
         let mut buffer = Vec::with_capacity(self.request_batch_size);
         while self.running.load(Ordering::Relaxed) {
-            self.try_flush_pending_requests().await;
             match self.receiver.recv().await {
                 Some(req) => {
                     buffer.clear();
@@ -119,8 +149,7 @@ impl BackgroundProducerWorker {
                             Err(_) => break,
                         }
                     }
-                    self.pending_requests =
-                        self.handle_produce_requests(&mut buffer, self.max_batch_bytes);
+                    self.handle_requests(&mut buffer).await;
                 }
                 None => {
                     debug!("The sender is dropped, BackgroundProducerWorker exited");
@@ -128,6 +157,29 @@ impl BackgroundProducerWorker {
                     break;
                 }
             }
+        }
+    }
+
+    async fn handle_requests(&mut self, buffer: &mut Vec<WorkerRequest>) {
+        let mut produce_requests = Vec::with_capacity(buffer.len());
+        let mut do_checkpoint = false;
+        for req in buffer.drain(..) {
+            match req {
+                WorkerRequest::Produce(req) => produce_requests.push(req),
+                WorkerRequest::Checkpoint => do_checkpoint = true,
+                WorkerRequest::TruncateIndex(TruncateIndexRequest {
+                    region_id,
+                    entry_id,
+                }) => self.index_collector.truncate(region_id, entry_id),
+            }
+        }
+
+        let pending_requests =
+            self.handle_produce_requests(&mut produce_requests, self.max_batch_bytes);
+        self.try_flush_pending_requests(pending_requests).await;
+
+        if do_checkpoint {
+            self.do_checkpoint().await;
         }
     }
 }

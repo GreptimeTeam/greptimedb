@@ -13,29 +13,85 @@
 // limitations under the License.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
+use store_api::logstore::provider::KafkaProvider;
 use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
 
 pub trait IndexCollector: Send + Sync {
+    fn set_latest_entry_id(&mut self, entry_id: EntryId);
+
     fn append(&mut self, region_id: RegionId, entry_id: EntryId);
 
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId);
 }
 
-pub struct NaiveCollector {
-    regions: HashMap<RegionId, BTreeSet<EntryId>>,
+#[derive(Debug, Clone)]
+pub struct GlobalCollector {
+    providers: Arc<Mutex<HashMap<Arc<KafkaProvider>, RegionIndexes>>>,
 }
 
-impl IndexCollector for NaiveCollector {
+#[derive(Debug, Clone, Default)]
+pub struct RegionIndexes {
+    regions: HashMap<RegionId, BTreeSet<EntryId>>,
+    latest_entry_id: EntryId,
+}
+
+impl RegionIndexes {
     fn append(&mut self, region_id: RegionId, entry_id: EntryId) {
         self.regions.entry(region_id).or_default().insert(entry_id);
+        self.latest_entry_id = self.latest_entry_id.max(entry_id);
     }
 
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId) {
         if let Some(entry_ids) = self.regions.get_mut(&region_id) {
             *entry_ids = entry_ids.split_off(&entry_id);
         }
+    }
+
+    fn set_latest_entry_id(&mut self, entry_id: EntryId) {
+        self.latest_entry_id = entry_id;
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderLevelIndexCollector {
+    global: GlobalCollector,
+    provider: Arc<KafkaProvider>,
+}
+
+impl IndexCollector for ProviderLevelIndexCollector {
+    fn append(&mut self, region_id: RegionId, entry_id: EntryId) {
+        self.global
+            .providers
+            .lock()
+            .unwrap()
+            .entry(self.provider.clone())
+            .or_default()
+            .append(region_id, entry_id);
+    }
+
+    fn truncate(&mut self, region_id: RegionId, entry_id: EntryId) {
+        if let Some(index) = self
+            .global
+            .providers
+            .lock()
+            .unwrap()
+            .get_mut(&self.provider)
+        {
+            index.truncate(region_id, entry_id);
+        }
+    }
+
+    fn set_latest_entry_id(&mut self, entry_id: EntryId) {
+        self.global
+            .providers
+            .lock()
+            .unwrap()
+            .entry(self.provider.clone())
+            .or_default()
+            .set_latest_entry_id(entry_id);
     }
 }
 
@@ -45,4 +101,6 @@ impl IndexCollector for NoopCollector {
     fn append(&mut self, _region_id: RegionId, _entry_id: EntryId) {}
 
     fn truncate(&mut self, _region_id: RegionId, _entry_id: EntryId) {}
+
+    fn set_latest_entry_id(&mut self, _entry_id: EntryId) {}
 }

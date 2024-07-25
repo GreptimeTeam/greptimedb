@@ -12,58 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use common_telemetry::warn;
-use rskafka::client::partition::Compression;
-use rskafka::client::producer::ProducerClient;
 use snafu::ResultExt;
 
 use crate::error;
-use crate::kafka::collector::IndexCollector;
 use crate::kafka::worker::{BackgroundProducerWorker, PendingRequest};
 
-async fn do_flush(
-    client: &Arc<dyn ProducerClient>,
-    collector: &mut Box<dyn IndexCollector>,
-    PendingRequest {
-        batch,
-        region_ids,
-        sender,
-        size: _size,
-    }: PendingRequest,
-    compression: Compression,
-) {
-    let result = client
-        .produce(batch, compression)
-        .await
-        .context(error::BatchProduceSnafu);
+impl BackgroundProducerWorker {
+    async fn do_flush(
+        &mut self,
+        PendingRequest {
+            batch,
+            region_ids,
+            sender,
+            size: _size,
+        }: PendingRequest,
+    ) {
+        let result = self
+            .client
+            .produce(batch, self.compression)
+            .await
+            .context(error::BatchProduceSnafu);
 
-    if let Ok(result) = &result {
-        for (idx, region_id) in result.iter().zip(region_ids) {
-            collector.append(region_id, *idx as u64);
+        if let Ok(result) = &result {
+            for (idx, region_id) in result.iter().zip(region_ids) {
+                self.index_collector.append(region_id, *idx as u64);
+            }
+        }
+
+        if let Err(err) = sender.send(result) {
+            warn!(err; "BatchFlushState Receiver is dropped");
         }
     }
 
-    if let Err(err) = sender.send(result) {
-        warn!(err; "BatchFlushState Receiver is dropped");
-    }
-}
-
-impl BackgroundProducerWorker {
-    pub(crate) async fn try_flush_pending_requests(&mut self) {
-        // Processes pending requests first.
-        if !self.pending_requests.is_empty() {
-            // TODO(weny): Considering merge `PendingRequest`s.
-            for req in self.pending_requests.drain(..) {
-                do_flush(
-                    &self.client,
-                    &mut self.index_collector,
-                    req,
-                    self.compression,
-                )
-                .await
-            }
+    pub(crate) async fn try_flush_pending_requests(
+        &mut self,
+        pending_requests: Vec<PendingRequest>,
+    ) {
+        // TODO(weny): Considering merge `PendingRequest`s.
+        for req in pending_requests {
+            self.do_flush(req).await
         }
     }
 }

@@ -21,8 +21,6 @@ use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 
-use crate::kafka::worker::ProduceRequest;
-
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -261,12 +259,10 @@ pub enum Error {
         attempt_index: u64,
     },
 
-    #[snafu(display("Failed to send produce request"))]
-    SendProduceRequest {
+    #[snafu(display("OrderedBatchProducer is stopped",))]
+    OrderedBatchProducerStopped {
         #[snafu(implicit)]
         location: Location,
-        #[snafu(source)]
-        error: tokio::sync::mpsc::error::SendError<ProduceRequest>,
     },
 
     #[snafu(display("Failed to send produce request"))]
