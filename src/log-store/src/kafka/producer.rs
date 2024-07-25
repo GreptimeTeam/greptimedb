@@ -15,207 +15,25 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::{debug, warn};
-use futures::future::try_join_all;
 use rskafka::client::partition::Compression;
 use rskafka::client::producer::ProducerClient;
 use rskafka::record::Record;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::RegionId;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::oneshot;
 
-use super::collector::{IndexCollector, NoopCollector};
-use crate::error::{self, NoMaxValueSnafu, Result};
-
-pub struct ProduceRequest {
-    region_id: RegionId,
-    batch: Vec<Record>,
-    sender: oneshot::Sender<ProduceResultReceiver>,
-}
-
-#[derive(Default)]
-struct ProduceResultReceiver {
-    receivers: Vec<oneshot::Receiver<Result<Vec<i64>>>>,
-}
-
-impl ProduceResultReceiver {
-    fn add_receiver(&mut self, receiver: oneshot::Receiver<Result<Vec<i64>>>) {
-        self.receivers.push(receiver)
-    }
-
-    async fn wait(self) -> Result<u64> {
-        Ok(try_join_all(self.receivers)
-            .await
-            .into_iter()
-            .flatten()
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .max()
-            .context(NoMaxValueSnafu)? as u64)
-    }
-}
-
-struct BackgroundProducerWorker {
-    /// The [`ProducerClient`].
-    client: Arc<dyn ProducerClient>,
-    // The compression configuration.
-    compression: Compression,
-    // The running flag.
-    running: Arc<AtomicBool>,
-    /// Receiver of [ProduceRequest].
-    receiver: Receiver<ProduceRequest>,
-    /// Max batch size for a worker to handle requests.
-    request_batch_size: usize,
-    /// Max bytes size for a single flush.
-    max_batch_bytes: usize,
-    /// The [PendingRequest]s.
-    pending_requests: Vec<PendingRequest>,
-    /// Collecting ids of WAL entries.
-    index_collector: Box<dyn IndexCollector>,
-}
-
-struct PendingRequest {
-    batch: Vec<Record>,
-    region_ids: Vec<RegionId>,
-    size: usize,
-    sender: oneshot::Sender<Result<Vec<i64>>>,
-}
-
-/// ## Panic
-/// Panic if any [Record]'s `approximate_size` > `max_batch_bytes`.
-fn handle_produce_requests(
-    requests: &mut Vec<ProduceRequest>,
-    max_batch_bytes: usize,
-) -> Vec<PendingRequest> {
-    let mut records_buffer = vec![];
-    let mut region_ids = vec![];
-    let mut batch_size = 0;
-    let mut pending_requests = Vec::with_capacity(requests.len());
-
-    for ProduceRequest {
-        batch,
-        sender,
-        region_id,
-    } in requests.drain(..)
-    {
-        let mut receiver = ProduceResultReceiver::default();
-        for record in batch {
-            assert!(record.approximate_size() <= max_batch_bytes);
-            // Yields the `PendingRequest` if buffer is full.
-            if batch_size + record.approximate_size() > max_batch_bytes {
-                let (tx, rx) = oneshot::channel();
-                pending_requests.push(PendingRequest {
-                    batch: std::mem::take(&mut records_buffer),
-                    region_ids: std::mem::take(&mut region_ids),
-                    size: batch_size,
-                    sender: tx,
-                });
-                batch_size = 0;
-                receiver.add_receiver(rx);
-            }
-
-            batch_size += record.approximate_size();
-            records_buffer.push(record);
-            region_ids.push(region_id);
-        }
-        // The remaining records.
-        if batch_size > 0 {
-            // Yields `PendingRequest`
-            let (tx, rx) = oneshot::channel();
-            pending_requests.push(PendingRequest {
-                batch: std::mem::take(&mut records_buffer),
-                region_ids: std::mem::take(&mut region_ids),
-                size: batch_size,
-                sender: tx,
-            });
-            batch_size = 0;
-            receiver.add_receiver(rx);
-        }
-
-        let _ = sender.send(receiver);
-    }
-    pending_requests
-}
-
-async fn do_flush(
-    client: &Arc<dyn ProducerClient>,
-    collector: &mut Box<dyn IndexCollector>,
-    PendingRequest {
-        batch,
-        region_ids,
-        sender,
-        size: _size,
-    }: PendingRequest,
-    compression: Compression,
-) {
-    let result = client
-        .produce(batch, compression)
-        .await
-        .context(error::BatchProduceSnafu);
-
-    if let Ok(result) = &result {
-        for (idx, region_id) in result.iter().zip(region_ids) {
-            collector.append(region_id, *idx as u64);
-        }
-    }
-
-    if let Err(err) = sender.send(result) {
-        warn!(err; "BatchFlushState Receiver is dropped");
-    }
-}
-
-impl BackgroundProducerWorker {
-    async fn try_flush_pending_requests(&mut self) {
-        // Processes pending requests first.
-        if !self.pending_requests.is_empty() {
-            // TODO(weny): Considering merge `PendingRequest`s.
-            for req in self.pending_requests.drain(..) {
-                do_flush(
-                    &self.client,
-                    &mut self.index_collector,
-                    req,
-                    self.compression,
-                )
-                .await
-            }
-        }
-    }
-
-    async fn run(&mut self) {
-        let mut buffer = Vec::with_capacity(self.request_batch_size);
-        while self.running.load(Ordering::Relaxed) {
-            self.try_flush_pending_requests().await;
-            match self.receiver.recv().await {
-                Some(req) => {
-                    buffer.clear();
-                    buffer.push(req);
-                    for _ in 1..self.request_batch_size {
-                        match self.receiver.try_recv() {
-                            Ok(req) => buffer.push(req),
-                            Err(_) => break,
-                        }
-                    }
-                    self.pending_requests =
-                        handle_produce_requests(&mut buffer, self.max_batch_bytes);
-                }
-                None => {
-                    debug!("The sender is dropped, BackgroundProducerWorker exited");
-                    // Exits the loop if the `sender` is dropped.
-                    break;
-                }
-            }
-        }
-    }
-}
+use super::worker::{BackgroundProducerWorker, ProduceResultHandle};
+use crate::error::{self, Result};
+use crate::kafka::collector::NoopCollector;
+use crate::kafka::worker::ProduceRequest;
 
 pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer>;
 
 /// [`OrderedBatchProducer`] attempts to aggregate multiple produce requests together
 #[derive(Debug)]
 pub(crate) struct OrderedBatchProducer {
-    sender: Sender<ProduceRequest>,
+    pub(crate) sender: Sender<ProduceRequest>,
     /// Used to control the [`BackgroundProducerWorker`].
     running: Arc<AtomicBool>,
 }
@@ -223,24 +41,6 @@ pub(crate) struct OrderedBatchProducer {
 impl Drop for OrderedBatchProducer {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
-    }
-}
-
-/// Receives the committed offsets when data has been committed to Kafka
-/// or an unrecoverable error has been encountered.
-pub(crate) struct ProduceResultHandle {
-    receiver: oneshot::Receiver<ProduceResultReceiver>,
-}
-
-impl ProduceResultHandle {
-    /// Waits for the data has been committed to Kafka.
-    /// Returns the **max** committed offsets.
-    pub(crate) async fn wait(self) -> Result<u64> {
-        self.receiver
-            .await
-            .context(error::WaitProduceResultReceiverSnafu)?
-            .wait()
-            .await
     }
 }
 

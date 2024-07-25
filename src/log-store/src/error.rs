@@ -21,7 +21,7 @@ use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 
-use crate::kafka::producer::ProduceRequest;
+use crate::kafka::worker::ProduceRequest;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]

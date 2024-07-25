@@ -21,6 +21,7 @@ pub(crate) mod index;
 pub mod log_store;
 pub(crate) mod producer;
 pub(crate) mod util;
+pub(crate) mod worker;
 
 use serde::{Deserialize, Serialize};
 use store_api::logstore::entry::Id as EntryId;
