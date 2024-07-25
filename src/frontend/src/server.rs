@@ -18,7 +18,6 @@ use std::sync::Arc;
 use auth::UserProviderRef;
 use common_base::Plugins;
 use common_config::{Configurable, Mode};
-use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
@@ -65,20 +64,12 @@ where
     }
 
     pub fn grpc_server_builder(&self, opts: &GrpcOptions) -> Result<GrpcServerBuilder> {
-        let grpc_runtime = Arc::new(
-            RuntimeBuilder::default()
-                .worker_threads(opts.runtime_size)
-                .thread_name("grpc-handlers")
-                .build()
-                .context(error::RuntimeResourceSnafu)?,
-        );
-
         let grpc_config = GrpcServerConfig {
             max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
             tls: opts.tls.clone(),
         };
-        let builder = GrpcServerBuilder::new(grpc_config, grpc_runtime)
+        let builder = GrpcServerBuilder::new(grpc_config, common_runtime::bg_runtime())
             .with_tls_config(opts.tls.clone())
             .context(error::InvalidTlsConfigSnafu)?;
         Ok(builder)
@@ -216,15 +207,8 @@ where
             // will not watch if watch is disabled in tls option
             maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
-            let mysql_io_runtime = Arc::new(
-                RuntimeBuilder::default()
-                    .worker_threads(opts.runtime_size)
-                    .thread_name("mysql-io-handlers")
-                    .build()
-                    .context(error::RuntimeResourceSnafu)?,
-            );
             let mysql_server = MysqlServer::create_server(
-                mysql_io_runtime,
+                common_runtime::bg_runtime(),
                 Arc::new(MysqlSpawnRef::new(
                     ServerSqlQueryHandlerAdapter::arc(instance.clone()),
                     user_provider.clone(),
@@ -249,19 +233,11 @@ where
 
             maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
-            let pg_io_runtime = Arc::new(
-                RuntimeBuilder::default()
-                    .worker_threads(opts.runtime_size)
-                    .thread_name("pg-io-handlers")
-                    .build()
-                    .context(error::RuntimeResourceSnafu)?,
-            );
-
             let pg_server = Box::new(PostgresServer::new(
                 ServerSqlQueryHandlerAdapter::arc(instance.clone()),
                 opts.tls.should_force_tls(),
                 tls_server_config,
-                pg_io_runtime,
+                common_runtime::bg_runtime(),
                 user_provider.clone(),
             )) as Box<dyn Server>;
 

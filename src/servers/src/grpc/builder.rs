@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::v1::greptime_database_server::GreptimeDatabaseServer;
 use api::v1::prometheus_gateway_server::PrometheusGatewayServer;
 use api::v1::region::region_server::RegionServer;
@@ -65,13 +63,13 @@ macro_rules! add_service {
 
 pub struct GrpcServerBuilder {
     config: GrpcServerConfig,
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     routes_builder: RoutesBuilder,
     tls_config: Option<ServerTlsConfig>,
 }
 
 impl GrpcServerBuilder {
-    pub fn new(config: GrpcServerConfig, runtime: Arc<Runtime>) -> Self {
+    pub fn new(config: GrpcServerConfig, runtime: Runtime) -> Self {
         Self {
             config,
             runtime,
@@ -84,7 +82,7 @@ impl GrpcServerBuilder {
         &self.config
     }
 
-    pub fn runtime(&self) -> &Arc<Runtime> {
+    pub fn runtime(&self) -> &Runtime {
         &self.runtime
     }
 

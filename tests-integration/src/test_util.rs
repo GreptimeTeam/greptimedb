@@ -495,13 +495,11 @@ pub async fn setup_grpc_server_with(
 ) -> (String, TestGuard, Arc<GrpcServer>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
-    let runtime = Arc::new(
-        RuntimeBuilder::default()
-            .worker_threads(2)
-            .thread_name("grpc-handlers")
-            .build()
-            .unwrap(),
-    );
+    let runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("grpc-handlers")
+        .build()
+        .unwrap();
 
     let fe_instance_ref = instance.instance.clone();
 
@@ -550,13 +548,11 @@ pub async fn setup_mysql_server_with_user_provider(
 ) -> (String, TestGuard, Arc<Box<dyn Server>>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
-    let runtime = Arc::new(
-        RuntimeBuilder::default()
-            .worker_threads(2)
-            .thread_name("mysql-runtime")
-            .build()
-            .unwrap(),
-    );
+    let runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("mysql-runtime")
+        .build()
+        .unwrap();
 
     let fe_mysql_addr = format!("127.0.0.1:{}", ports::get_port());
 
@@ -607,13 +603,11 @@ pub async fn setup_pg_server_with_user_provider(
 ) -> (String, TestGuard, Arc<Box<dyn Server>>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
-    let runtime = Arc::new(
-        RuntimeBuilder::default()
-            .worker_threads(2)
-            .thread_name("pg-runtime")
-            .build()
-            .unwrap(),
-    );
+    let runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("pg-runtime")
+        .build()
+        .unwrap();
 
     let fe_pg_addr = format!("127.0.0.1:{}", ports::get_port());
 
