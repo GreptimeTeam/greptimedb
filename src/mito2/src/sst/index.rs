@@ -263,15 +263,13 @@ impl<'a> IndexerBuilder<'a> {
 
         let err = match creator {
             Ok(creator) => {
-                if creator.is_empty() {
+                if creator.is_none() {
                     debug!(
                         "Skip creating full-text index due to no columns require indexing, region_id: {}, file_id: {}",
                         self.metadata.region_id, self.file_id,
                     );
-                    return None;
-                } else {
-                    return Some(creator);
                 }
+                return creator;
             }
             Err(err) => err,
         };
