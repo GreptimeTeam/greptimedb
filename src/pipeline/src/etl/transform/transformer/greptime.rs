@@ -154,9 +154,9 @@ impl Transformer for GreptimeTransformer {
             0 => {
                 transforms.push(GreptimeTransformer::default_greptime_timestamp_column());
 
-                let requied_keys = transforms.required_keys_mut();
-                requied_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
-                requied_keys.sort();
+                let required_keys = transforms.required_keys_mut();
+                required_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
+                required_keys.sort();
 
                 let output_keys = transforms.output_keys_mut();
                 output_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());

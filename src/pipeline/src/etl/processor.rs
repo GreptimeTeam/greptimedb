@@ -239,7 +239,7 @@ impl std::ops::DerefMut for Processors {
 }
 
 impl Processors {
-    /// A collection of all the processor's requied input fields
+    /// A collection of all the processor's required input fields
     pub fn required_keys(&self) -> &Vec<String> {
         &self.required_keys
     }
