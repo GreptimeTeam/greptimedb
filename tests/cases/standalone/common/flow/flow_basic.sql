@@ -84,7 +84,7 @@ INSERT INTO bytes_log VALUES
 
 SELECT flush_flow('find_approx_rate')<=1;
 
-SELECT * FROM approx_rate;
+SELECT rate, time_window FROM approx_rate;
 
 INSERT INTO bytes_log VALUES 
 (450, '2025-01-01 00:00:32'),
@@ -92,7 +92,7 @@ INSERT INTO bytes_log VALUES
 
 SELECT flush_flow('find_approx_rate')<=1;
 
-SELECT * FROM approx_rate;
+SELECT rate, time_window FROM approx_rate;
 
 DROP TABLE bytes_log;
 DROP FLOW find_approx_rate;
