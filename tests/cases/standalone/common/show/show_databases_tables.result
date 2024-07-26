@@ -115,37 +115,37 @@ SHOW TABLE STATUS;
 +++++++++++++++++++
 |Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
 +++++++++++++++++++
-|build_info||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|character_sets||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|check_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|cluster_info||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|collation_character_set_applicability||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|collations||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|column_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|column_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|columns||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|engines||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|events||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|files||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|flows||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|global_status||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|key_column_usage||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|optimizer_trace||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|parameters||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|partitions||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|profiling||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|referential_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|region_peers||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|routines||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|runtime_metrics||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|schema_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|schemata||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|session_status||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|table_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|table_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|triggers||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
-|views||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
+|build_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|character_sets||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|check_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|cluster_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|collation_character_set_applicability||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|collations||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|column_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|column_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|columns||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|engines||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|events||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|files||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|flows||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|global_status||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|key_column_usage||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|optimizer_trace||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|parameters||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|partitions||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|profiling||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|referential_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|region_peers||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|routines||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|runtime_metrics||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|schema_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|schemata||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|session_status||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|table_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|table_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|triggers||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|views||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 +++++++++++++++++++
 
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
@@ -155,7 +155,7 @@ SHOW TABLE STATUS LIKE 'tables';
 +++++++++++++++++++
 |Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
 +++++++++++++++++++
-|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
+|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 +++++++++++++++++++
 
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
@@ -165,7 +165,7 @@ SHOW TABLE STATUS WHERE Name = 'tables';
 +++++++++++++++++++
 |Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
 +++++++++++++++++++
-|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
+|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 +++++++++++++++++++
 
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
@@ -175,7 +175,7 @@ SHOW TABLE STATUS from public;
 +++++++++++++++++++
 |Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
 +++++++++++++++++++
-|numbers|test_engine|11|Fixed|0|0|0|0|0|0|0|DATETIME||||0|||
+|numbers|test_engine|11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 +++++++++++++++++++
 
 USE public;
