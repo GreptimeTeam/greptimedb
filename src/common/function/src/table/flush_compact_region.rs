@@ -12,23 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
-
 use common_macro::admin_fn;
-use common_query::error::Error::ThreadJoin;
 use common_query::error::{
     InvalidFuncArgsSnafu, MissingTableMutationHandlerSnafu, Result, UnsupportedInputDataTypeSnafu,
 };
 use common_query::prelude::{Signature, Volatility};
-use common_telemetry::error;
 use datatypes::prelude::*;
-use datatypes::vectors::VectorRef;
 use session::context::QueryContextRef;
-use snafu::{ensure, Location, OptionExt};
+use snafu::ensure;
 use store_api::storage::RegionId;
 
-use crate::ensure_greptime;
-use crate::function::{Function, FunctionContext};
 use crate::handlers::TableMutationHandlerRef;
 use crate::helper::cast_u64;
 
@@ -84,6 +77,7 @@ mod tests {
     use datatypes::vectors::UInt64Vector;
 
     use super::*;
+    use crate::function::{Function, FunctionContext};
 
     macro_rules! define_region_function_test {
         ($name: ident, $func: ident) => {

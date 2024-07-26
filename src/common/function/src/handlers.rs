@@ -65,6 +65,19 @@ pub trait ProcedureServiceHandler: Send + Sync {
     async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse>;
 }
 
+/// This flow service handler is only use for flush flow for now.
+#[async_trait]
+pub trait FlowServiceHandler: Send + Sync {
+    async fn flush(
+        &self,
+        catalog: &str,
+        flow: &str,
+        ctx: QueryContextRef,
+    ) -> Result<api::v1::flow::FlowResponse>;
+}
+
 pub type TableMutationHandlerRef = Arc<dyn TableMutationHandler>;
 
 pub type ProcedureServiceHandlerRef = Arc<dyn ProcedureServiceHandler>;
+
+pub type FlowServiceHandlerRef = Arc<dyn FlowServiceHandler>;

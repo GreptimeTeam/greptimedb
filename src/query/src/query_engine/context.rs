@@ -82,6 +82,7 @@ impl QueryEngineContext {
             None,
             None,
             None,
+            None,
             false,
             Plugins::default(),
         ));

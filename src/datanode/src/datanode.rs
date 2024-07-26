@@ -321,6 +321,7 @@ impl DatanodeBuilder {
             None,
             None,
             None,
+            None,
             false,
             self.plugins.clone(),
         );

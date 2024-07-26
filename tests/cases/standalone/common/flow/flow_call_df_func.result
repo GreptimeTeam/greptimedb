@@ -1,0 +1,370 @@
+CREATE TABLE numbers_input_df_func (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+-- call `sum(abs(number))` where `abs` is DataFusion Function and `sum` is flow function
+CREATE FLOW test_numbers_df_func 
+SINK TO out_num_cnt_df_func
+AS 
+SELECT sum(abs(number)) FROM numbers_input_df_func GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00');
+
+Affected Rows: 0
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+INSERT INTO numbers_input_df_func 
+VALUES
+    (-20, "2021-07-01 00:00:00.200"),
+    (22, "2021-07-01 00:00:00.600");
+
+Affected Rows: 2
+
+-- flush flow to make sure that table is created and data is inserted
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+
++-------+---------------------+---------------------+
+| col_0 | window_start        | window_end          |
++-------+---------------------+---------------------+
+| 42    | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
++-------+---------------------+---------------------+
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+INSERT INTO numbers_input_df_func 
+VALUES
+    (23,"2021-07-01 00:00:01.000"),
+    (-24,"2021-07-01 00:00:01.500");
+
+Affected Rows: 2
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+
++-------+---------------------+---------------------+
+| col_0 | window_start        | window_end          |
++-------+---------------------+---------------------+
+| 42    | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
+| 47    | 2021-07-01T00:00:01 | 2021-07-01T00:00:02 |
++-------+---------------------+---------------------+
+
+DROP FLOW test_numbers_df_func;
+
+Affected Rows: 0
+
+DROP TABLE numbers_input_df_func;
+
+Affected Rows: 0
+
+DROP TABLE out_num_cnt_df_func;
+
+Affected Rows: 0
+
+CREATE TABLE numbers_input_df_func (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+-- call `abs(sum(number))`to make sure that calling `abs` function(impl by datafusion) on `sum` function(impl by flow) is working
+CREATE FLOW test_numbers_df_func 
+SINK TO out_num_cnt_df_func
+AS 
+SELECT abs(sum(number)) FROM numbers_input_df_func GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00');
+
+Affected Rows: 0
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+INSERT INTO numbers_input_df_func 
+VALUES
+    (-20, "2021-07-01 00:00:00.200"),
+    (22, "2021-07-01 00:00:00.600");
+
+Affected Rows: 2
+
+-- flush flow to make sure that table is created and data is inserted
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+
++-------+---------------------+---------------------+
+| col_0 | window_start        | window_end          |
++-------+---------------------+---------------------+
+| 2     | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
++-------+---------------------+---------------------+
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+INSERT INTO numbers_input_df_func 
+VALUES
+    (23,"2021-07-01 00:00:01.000"),
+    (-24,"2021-07-01 00:00:01.500");
+
+Affected Rows: 2
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+
++-------+---------------------+---------------------+
+| col_0 | window_start        | window_end          |
++-------+---------------------+---------------------+
+| 2     | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
+| 1     | 2021-07-01T00:00:01 | 2021-07-01T00:00:02 |
++-------+---------------------+---------------------+
+
+DROP FLOW test_numbers_df_func;
+
+Affected Rows: 0
+
+DROP TABLE numbers_input_df_func;
+
+Affected Rows: 0
+
+DROP TABLE out_num_cnt_df_func;
+
+Affected Rows: 0
+
+-- test date_bin
+CREATE TABLE numbers_input_df_func (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+CREATE FLOW test_numbers_df_func 
+SINK TO out_num_cnt_df_func
+AS 
+SELECT max(number) - min(number), date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond) FROM numbers_input_df_func GROUP BY date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond);
+
+Affected Rows: 0
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+INSERT INTO numbers_input_df_func 
+VALUES
+    (20, "2021-07-01 00:00:00.200"),
+    (22, "2021-07-01 00:00:00.600");
+
+Affected Rows: 2
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+SELECT col_0, col_1 FROM out_num_cnt_df_func;
+
++-------+---------------------+
+| col_0 | col_1               |
++-------+---------------------+
+| 2     | 2021-07-01T00:00:00 |
++-------+---------------------+
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+INSERT INTO numbers_input_df_func 
+VALUES
+    (23,"2021-07-01 00:00:01.000"),
+    (24,"2021-07-01 00:00:01.500");
+
+Affected Rows: 2
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+SELECT col_0, col_1 FROM out_num_cnt_df_func;
+
++-------+---------------------+
+| col_0 | col_1               |
++-------+---------------------+
+| 2     | 2021-07-01T00:00:00 |
+| 1     | 2021-07-01T00:00:01 |
++-------+---------------------+
+
+DROP FLOW test_numbers_df_func;
+
+Affected Rows: 0
+
+DROP TABLE numbers_input_df_func;
+
+Affected Rows: 0
+
+DROP TABLE out_num_cnt_df_func;
+
+Affected Rows: 0
+
+-- test date_trunc
+CREATE TABLE numbers_input_df_func (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+CREATE FLOW test_numbers_df_func 
+SINK TO out_num_cnt
+AS 
+SELECT date_trunc('second', ts), sum(number) FROM numbers_input_df_func GROUP BY date_trunc('second', ts);
+
+Affected Rows: 0
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+INSERT INTO numbers_input_df_func 
+VALUES
+    (20, "2021-07-01 00:00:00.200"),
+    (22, "2021-07-01 00:00:00.600");
+
+Affected Rows: 2
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+SELECT col_0, col_1 FROM out_num_cnt;
+
++---------------------+-------+
+| col_0               | col_1 |
++---------------------+-------+
+| 2021-07-01T00:00:00 | 42    |
++---------------------+-------+
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+INSERT INTO numbers_input_df_func 
+VALUES
+    (23,"2021-07-01 00:00:01.000"),
+    (24,"2021-07-01 00:00:01.500");
+
+Affected Rows: 2
+
+select flush_flow('test_numbers_df_func')<=1;
+
++------------------------------------------------------+
+| flush_flow(Utf8("test_numbers_df_func")) <= Int64(1) |
++------------------------------------------------------+
+| true                                                 |
++------------------------------------------------------+
+
+SELECT col_0, col_1 FROM out_num_cnt;
+
++---------------------+-------+
+| col_0               | col_1 |
++---------------------+-------+
+| 2021-07-01T00:00:00 | 42    |
+| 2021-07-01T00:00:01 | 47    |
++---------------------+-------+
+
+DROP FLOW test_numbers_df_func;
+
+Affected Rows: 0
+
+DROP TABLE numbers_input_df_func;
+
+Affected Rows: 0
+
+DROP TABLE out_num_cnt;
+
+Affected Rows: 0
+

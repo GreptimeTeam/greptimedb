@@ -239,6 +239,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Missing FlowServiceHandler, not expected"))]
+    MissingFlowServiceHandler {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid function args: {}", err_msg))]
     InvalidFuncArgs {
         err_msg: String,
@@ -249,6 +255,12 @@ pub enum Error {
     #[snafu(display("Permission denied: {}", err_msg))]
     PermissionDenied {
         err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Can't found alive flownode"))]
+    FlownodeNotFound {
         #[snafu(implicit)]
         location: Location,
     },
@@ -269,7 +281,8 @@ impl ErrorExt for Error {
             | Error::BadAccumulatorImpl { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }
-            | Error::ArrowCompute { .. } => StatusCode::EngineExecuteQuery,
+            | Error::ArrowCompute { .. }
+            | Error::FlownodeNotFound { .. } => StatusCode::EngineExecuteQuery,
 
             Error::ExecuteFunction { error, .. } | Error::GeneralDataFusion { error, .. } => {
                 datafusion_status_code::<Self>(error, None)
@@ -283,6 +296,7 @@ impl ErrorExt for Error {
 
             Error::MissingTableMutationHandler { .. }
             | Error::MissingProcedureServiceHandler { .. }
+            | Error::MissingFlowServiceHandler { .. }
             | Error::ExecuteRepeatedly { .. }
             | Error::ThreadJoin { .. } => StatusCode::Unexpected,
 

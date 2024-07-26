@@ -53,7 +53,7 @@ pub(crate) fn sample_script_engine() -> PyEngine {
     let catalog_manager =
         MemoryCatalogManager::new_with_table(NumbersTable::table(NUMBERS_TABLE_ID));
     let query_engine =
-        QueryEngineFactory::new(catalog_manager, None, None, None, false).query_engine();
+        QueryEngineFactory::new(catalog_manager, None, None, None, None, false).query_engine();
 
     PyEngine::new(query_engine.clone())
 }
