@@ -208,7 +208,12 @@ impl Transformer for GreptimeTransformer {
                         let value_data = coerce_value(v, transform)
                             .map_err(|e| format!("{} processor: {}", field.get_field_name(), e))?;
                         // every transform fields has only one output field
-                        if let Some(i) = field.output_fields_index_mapping.iter().next().map(|kv| kv.1) {
+                        if let Some(i) = field
+                            .output_fields_index_mapping
+                            .iter()
+                            .next()
+                            .map(|kv| kv.1)
+                        {
                             values[*i] = GreptimeValue { value_data }
                         } else {
                             return Err(format!(

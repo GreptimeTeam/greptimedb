@@ -170,11 +170,14 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
             match val.get(index) {
                 Some(Value::String(s)) => {
                     let mut map = self.process_field(s, field)?;
-                    field.output_fields_index_mapping.iter().for_each(|(k, output_index)| {
-                        if let Some(v) = map.remove(k) {
-                            val[*output_index] = v;
-                        }
-                    });
+                    field
+                        .output_fields_index_mapping
+                        .iter()
+                        .for_each(|(k, output_index)| {
+                            if let Some(v) = map.remove(k) {
+                                val[*output_index] = v;
+                            }
+                        });
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {

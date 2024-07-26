@@ -139,11 +139,14 @@ impl Processor for JoinProcessor {
                 Some(Value::Array(arr)) => {
                     // TODO(qtang): Let this method use the intermediate state collection directly.
                     let mut map = self.process_field(arr, field)?;
-                    field.output_fields_index_mapping.iter().for_each(|(k, output_index)| {
-                        if let Some(v) = map.remove(k) {
-                            val[*output_index] = v;
-                        }
-                    });
+                    field
+                        .output_fields_index_mapping
+                        .iter()
+                        .for_each(|(k, output_index)| {
+                            if let Some(v) = map.remove(k) {
+                                val[*output_index] = v;
+                            }
+                        });
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {

@@ -145,10 +145,9 @@ impl RegexProcessor {
         for field in self.fields.iter_mut() {
             for gr in &self.patterns {
                 for group in &gr.groups {
-                    field.output_fields_index_mapping.insert(
-                        Self::generate_key(field.get_target_field(), group),
-                        0_usize,
-                    );
+                    field
+                        .output_fields_index_mapping
+                        .insert(Self::generate_key(field.get_target_field(), group), 0_usize);
                 }
             }
         }
@@ -251,11 +250,14 @@ impl Processor for RegexProcessor {
                         map.extend(m);
                     }
 
-                    field.output_fields_index_mapping.iter().for_each(|(k, output_index)| {
-                        if let Some(v) = map.remove(k) {
-                            val[*output_index] = v;
-                        }
-                    });
+                    field
+                        .output_fields_index_mapping
+                        .iter()
+                        .for_each(|(k, output_index)| {
+                            if let Some(v) = map.remove(k) {
+                                val[*output_index] = v;
+                            }
+                        });
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {

@@ -163,11 +163,14 @@ impl Processor for LetterProcessor {
                 Some(Value::String(s)) => {
                     // TODO(qtang): Let this method use the intermediate state collection directly.
                     let mut processed = self.process_field(s, field)?;
-                    field.output_fields_index_mapping.iter().for_each(|(k, output_index)| {
-                        if let Some(v) = processed.remove(k) {
-                            val[*output_index] = v;
-                        }
-                    });
+                    field
+                        .output_fields_index_mapping
+                        .iter()
+                        .for_each(|(k, output_index)| {
+                            if let Some(v) = processed.remove(k) {
+                                val[*output_index] = v;
+                            }
+                        });
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
