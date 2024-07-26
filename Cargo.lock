@@ -4234,7 +4234,11 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
+<<<<<<< HEAD
 source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=7ca323090b3ae8faf2c15036b7f41b7c5225cf5f#7ca323090b3ae8faf2c15036b7f41b7c5225cf5f"
+=======
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=fffd0b37cd258fa32677983cc36c5f1f2ef925b8#fffd0b37cd258fa32677983cc36c5f1f2ef925b8"
+>>>>>>> 3a8cc2a62f (feat: add source channel to meter recorders)
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -6155,7 +6159,7 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80b72716dcde47ec4161478416a5c6c21343364d#80b72716dcde47ec4161478416a5c6c21343364d"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=488844b4702916cc6f7d04898fb0b837afce4ca7#488844b4702916cc6f7d04898fb0b837afce4ca7"
 dependencies = [
  "anymap",
  "once_cell",
@@ -6165,7 +6169,7 @@ dependencies = [
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80b72716dcde47ec4161478416a5c6c21343364d#80b72716dcde47ec4161478416a5c6c21343364d"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=488844b4702916cc6f7d04898fb0b837afce4ca7#488844b4702916cc6f7d04898fb0b837afce4ca7"
 dependencies = [
  "meter-core",
 ]
@@ -10326,6 +10330,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "derive_builder 0.12.0",
+ "meter-core",
  "snafu 0.8.3",
  "sql",
 ]

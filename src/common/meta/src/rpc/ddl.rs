@@ -1073,12 +1073,14 @@ impl From<DropFlowTask> for PbDropFlowTask {
     }
 }
 
+// TODO(sunng87): refactor this to avoid duplication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryContext {
     current_catalog: String,
     current_schema: String,
     timezone: String,
     extensions: HashMap<String, String>,
+    channel: u8,
 }
 
 impl From<QueryContextRef> for QueryContext {
@@ -1088,6 +1090,7 @@ impl From<QueryContextRef> for QueryContext {
             current_schema: query_context.current_schema().to_string(),
             timezone: query_context.timezone().to_string(),
             extensions: query_context.extensions(),
+            channel: query_context.channel() as u8,
         }
     }
 }
@@ -1099,6 +1102,7 @@ impl From<QueryContext> for PbQueryContext {
             current_schema,
             timezone,
             extensions,
+            channel,
         }: QueryContext,
     ) -> Self {
         PbQueryContext {
@@ -1106,6 +1110,7 @@ impl From<QueryContext> for PbQueryContext {
             current_schema,
             timezone,
             extensions,
+            channel: channel as u32,
         }
     }
 }
