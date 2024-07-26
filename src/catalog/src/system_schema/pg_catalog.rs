@@ -94,6 +94,8 @@ impl PGCatalogProvider {
         // SECURITY NOTE:
         // Must follow the same security rules as [`InformationSchemaProvider::build_tables`].
         let mut tables = HashMap::new();
+        // TODO(J0HN50N133): modeling the table_name as a enum type to get rid of expect/unwrap here
+        // It's safe to unwrap here because we are sure that the constants have been handle corretly inside system_table.
         for name in MEMORY_TABLES.iter() {
             tables.insert(name.to_string(), self.build_table(name).expect(name));
         }
