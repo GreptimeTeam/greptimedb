@@ -29,7 +29,6 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use servers::error::Result;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
-use servers::query_handler::sql::SqlQueryHandler;
 use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
 use table::test_util::MemTable;
@@ -46,7 +45,7 @@ struct MysqlOpts<'a> {
 }
 
 fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn Server>> {
-let query_handler = create_testing_sql_query_handler(table);
+    let query_handler = create_testing_sql_query_handler(table);
     let io_runtime = RuntimeBuilder::default()
         .worker_threads(4)
         .thread_name("mysql-io-handlers")
