@@ -4234,11 +4234,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-<<<<<<< HEAD
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=7ca323090b3ae8faf2c15036b7f41b7c5225cf5f#7ca323090b3ae8faf2c15036b7f41b7c5225cf5f"
-=======
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=fffd0b37cd258fa32677983cc36c5f1f2ef925b8#fffd0b37cd258fa32677983cc36c5f1f2ef925b8"
->>>>>>> 3a8cc2a62f (feat: add source channel to meter recorders)
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=e52fa3e63c77545618328781e11178eb2cfc45c5#e52fa3e63c77545618328781e11178eb2cfc45c5"
 dependencies = [
  "prost 0.12.6",
  "serde",

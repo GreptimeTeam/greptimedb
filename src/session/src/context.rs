@@ -149,6 +149,14 @@ impl QueryContext {
             .build()
     }
 
+    pub fn with_channel(catalog: &str, schema: &str, channel: Channel) -> QueryContext {
+        QueryContextBuilder::default()
+            .current_catalog(catalog.to_string())
+            .current_schema(schema.to_string())
+            .channel(channel)
+            .build()
+    }
+
     pub fn with_db_name(db_name: Option<&str>) -> QueryContext {
         let (catalog, schema) = db_name
             .map(|db| {
@@ -253,7 +261,7 @@ impl QueryContextBuilder {
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
             extensions: self.extensions.unwrap_or_default(),
             configuration_parameter: self.configuration_parameter.unwrap_or_default(),
-            channel: self.channel.unwrap_or_default().into(),
+            channel: self.channel.unwrap_or_default(),
         }
     }
 
