@@ -133,7 +133,10 @@ impl Flownode for FlowWorkerManager {
     }
 
     async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse> {
-        let _flush_lock = self.flush_lock.read().await;
+        // using try_read makesure two things:
+        // 1. flush wouldn't happen until inserts before it is inserted
+        // 2. inserts happening concurrently with flush wouldn't be block by flush
+        let _flush_lock = self.flush_lock.try_read();
         for write_request in request.requests {
             let region_id = write_request.region_id;
             let table_id = RegionId::from(region_id).table_id();
