@@ -59,3 +59,41 @@ drop flow filter_numbers_basic;
 drop table out_num_cnt_basic;
 
 drop table numbers_input_basic;
+
+CREATE TABLE bytes_log (
+    byte INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- event time
+    TIME INDEX(ts)
+);
+
+CREATE TABLE approx_rate (
+    rate FLOAT,
+    time_window TIMESTAMP,
+    update_at TIMESTAMP,
+    TIME INDEX(time_window)
+);
+
+CREATE FLOW find_approx_rate
+SINK TO approx_rate
+AS
+SELECT CAST((max(byte) - min(byte)) AS FLOAT)/30.0, date_bin(INTERVAL '30 second', ts) as time_window from bytes_log GROUP BY time_window;
+
+INSERT INTO bytes_log VALUES 
+(101, '2025-01-01 00:00:01'),
+(300, '2025-01-01 00:00:29');
+
+SELECT flush_flow('find_approx_rate')<=1;
+
+SELECT * FROM approx_rate;
+
+INSERT INTO bytes_log VALUES 
+(450, '2025-01-01 00:00:32'),
+(500, '2025-01-01 00:00:37');
+
+SELECT flush_flow('find_approx_rate')<=1;
+
+SELECT * FROM approx_rate;
+
+DROP TABLE bytes_log;
+DROP FLOW find_approx_rate;
+DROP TABLE approx_rate;
