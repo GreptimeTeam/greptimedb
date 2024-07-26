@@ -171,7 +171,7 @@ impl CmcdProcessor {
     }
 
     fn process_field(&self, val: &str, field: &Field) -> Result<Map, String> {
-        let prefix = field.get_renamed_field();
+        let prefix = field.get_target_field();
 
         Self::parse(prefix, val)
     }
@@ -180,8 +180,8 @@ impl CmcdProcessor {
         for field in fields.iter_mut() {
             for key in CMCD_KEYS.iter() {
                 field
-                    .output_fields
-                    .insert(Self::generate_key(field.get_renamed_field(), key), 0);
+                    .output_fields_index_mapping
+                    .insert(Self::generate_key(field.get_target_field(), key), 0);
             }
         }
     }
@@ -239,7 +239,7 @@ impl crate::etl::processor::Processor for CmcdProcessor {
             .iter()
             .map(|field| {
                 field
-                    .renamed_field
+                    .target_field
                     .clone()
                     .unwrap_or_else(|| field.get_field_name().to_string())
             })
@@ -268,7 +268,7 @@ impl crate::etl::processor::Processor for CmcdProcessor {
                     // TODO(qtang): Let this method use the intermediate state collection directly.
                     let map = self.process_field(v, field)?;
                     for (k, v) in map.values.into_iter() {
-                        if let Some(index) = field.output_fields.get(&k) {
+                        if let Some(index) = field.output_fields_index_mapping.get(&k) {
                             val[*index] = v;
                         }
                     }

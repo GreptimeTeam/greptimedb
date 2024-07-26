@@ -124,7 +124,7 @@ impl Transformer for GreptimeTransformer {
             let target_fields_set = transform
                 .fields
                 .iter()
-                .map(|f| f.get_renamed_field())
+                .map(|f| f.get_target_field())
                 .collect::<HashSet<_>>();
 
             let intersections: Vec<_> = column_names_set.intersection(&target_fields_set).collect();
@@ -208,7 +208,7 @@ impl Transformer for GreptimeTransformer {
                         let value_data = coerce_value(v, transform)
                             .map_err(|e| format!("{} processor: {}", field.get_field_name(), e))?;
                         // every transform fields has only one output field
-                        if let Some(i) = field.output_fields.iter().next().map(|kv| kv.1) {
+                        if let Some(i) = field.output_fields_index_mapping.iter().next().map(|kv| kv.1) {
                             values[*i] = GreptimeValue { value_data }
                         } else {
                             return Err(format!(

@@ -145,7 +145,7 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
             let mut transform_output_keys = transform
                 .fields
                 .iter()
-                .map(|f| f.get_renamed_field().to_string())
+                .map(|f| f.get_target_field().to_string())
                 .collect();
             all_output_keys.append(&mut transform_output_keys);
 

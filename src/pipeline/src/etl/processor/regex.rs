@@ -129,7 +129,7 @@ impl RegexProcessor {
             for group in &gr.groups {
                 if let Some(capture) = captures.name(group) {
                     let value = capture.as_str().to_string();
-                    let prefix = field.get_renamed_field();
+                    let prefix = field.get_target_field();
 
                     let key = Self::generate_key(prefix, group);
 
@@ -145,8 +145,8 @@ impl RegexProcessor {
         for field in self.fields.iter_mut() {
             for gr in &self.patterns {
                 for group in &gr.groups {
-                    field.output_fields.insert(
-                        Self::generate_key(field.get_renamed_field(), group),
+                    field.output_fields_index_mapping.insert(
+                        Self::generate_key(field.get_target_field(), group),
                         0_usize,
                     );
                 }
@@ -251,7 +251,7 @@ impl Processor for RegexProcessor {
                         map.extend(m);
                     }
 
-                    field.output_fields.iter().for_each(|(k, output_index)| {
+                    field.output_fields_index_mapping.iter().for_each(|(k, output_index)| {
                         if let Some(v) = map.remove(k) {
                             val[*output_index] = v;
                         }

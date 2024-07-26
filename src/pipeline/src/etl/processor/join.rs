@@ -46,7 +46,7 @@ impl JoinProcessor {
     }
 
     fn process_field(&self, arr: &Array, field: &Field) -> Result<Map, String> {
-        let key = field.get_renamed_field();
+        let key = field.get_target_field();
 
         let sep = self.separator.as_ref().unwrap();
         let val = arr
@@ -118,7 +118,7 @@ impl Processor for JoinProcessor {
     fn output_keys(&self) -> HashSet<String> {
         self.fields
             .iter()
-            .map(|f| f.get_renamed_field().to_string())
+            .map(|f| f.get_target_field().to_string())
             .collect()
     }
 
@@ -139,7 +139,7 @@ impl Processor for JoinProcessor {
                 Some(Value::Array(arr)) => {
                     // TODO(qtang): Let this method use the intermediate state collection directly.
                     let mut map = self.process_field(arr, field)?;
-                    field.output_fields.iter().for_each(|(k, output_index)| {
+                    field.output_fields_index_mapping.iter().for_each(|(k, output_index)| {
                         if let Some(v) = map.remove(k) {
                             val[*output_index] = v;
                         }

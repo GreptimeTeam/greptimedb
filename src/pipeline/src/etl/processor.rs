@@ -287,7 +287,7 @@ pub(crate) fn yaml_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field, Stri
 pub(crate) fn update_one_one_output_keys(fields: &mut Fields) {
     for field in fields.iter_mut() {
         field
-            .output_fields
-            .insert(field.get_renamed_field().to_string(), 0_usize);
+            .output_fields_index_mapping
+            .insert(field.get_target_field().to_string(), 0_usize);
     }
 }

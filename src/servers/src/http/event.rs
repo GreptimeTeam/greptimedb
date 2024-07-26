@@ -198,40 +198,36 @@ pub async fn delete_pipeline(
 fn transform_ndjson_array_factory(
     values: impl IntoIterator<Item = StdResult<Value, serde_json::Error>>,
     ignore_error: bool,
-) -> Result<Value> {
-    values.into_iter().try_fold(
-        Value::Array(Vec::with_capacity(100)),
-        |acc, item| match acc {
-            Value::Array(mut acc_array) => {
-                if let Ok(item_value) = item {
-                    match item_value {
-                        Value::Array(item_array) => {
-                            acc_array.extend(item_array);
-                        }
-                        Value::Object(_) => {
-                            acc_array.push(item_value);
-                        }
-                        _ => {
-                            if !ignore_error {
-                                warn!("invalid item in array: {:?}", item_value);
-                                return InvalidParameterSnafu {
-                                    reason: format!("invalid item:{} in array", item_value),
-                                }
-                                .fail();
+) -> Result<Vec<Value>> {
+    values
+        .into_iter()
+        .try_fold(Vec::with_capacity(100), |mut acc_array, item| {
+            if let Ok(item_value) = item {
+                match item_value {
+                    Value::Array(item_array) => {
+                        acc_array.extend(item_array);
+                    }
+                    Value::Object(_) => {
+                        acc_array.push(item_value);
+                    }
+                    _ => {
+                        if !ignore_error {
+                            warn!("invalid item in array: {:?}", item_value);
+                            return InvalidParameterSnafu {
+                                reason: format!("invalid item:{} in array", item_value),
                             }
+                            .fail();
                         }
                     }
-                    Ok(Value::Array(acc_array))
-                } else if !ignore_error {
-                    item.context(ParseJsonSnafu)
-                } else {
-                    warn!("invalid item in array: {:?}", item);
-                    Ok(Value::Array(acc_array))
                 }
+                Ok(acc_array)
+            } else if !ignore_error {
+                item.map(|x| vec![x]).context(ParseJsonSnafu)
+            } else {
+                warn!("invalid item in array: {:?}", item);
+                Ok(acc_array)
             }
-            _ => unreachable!("invalid acc: {:?}", acc),
-        },
-    )
+        })
 }
 
 #[axum_macros::debug_handler]
@@ -287,20 +283,10 @@ fn extract_pipeline_value_by_content_type(
     ignore_errors: bool,
 ) -> Result<Vec<Value>> {
     Ok(match content_type {
-        ct if ct == ContentType::json() => {
-            let json_value = transform_ndjson_array_factory(
-                Deserializer::from_str(&payload).into_iter(),
-                ignore_errors,
-            )?;
-
-            match json_value {
-                Value::Array(arr) => arr,
-
-                _ => {
-                    unreachable!();
-                }
-            }
-        }
+        ct if ct == ContentType::json() => transform_ndjson_array_factory(
+            Deserializer::from_str(&payload).into_iter(),
+            ignore_errors,
+        )?,
         ct if ct == ContentType::text() || ct == ContentType::text_utf8() => payload
             .lines()
             .filter(|line| !line.is_empty())
@@ -332,7 +318,7 @@ async fn ingest_logs_inner(
 
     for v in pipeline_data {
         pipeline
-            .prepase(v, &mut intermediate_state)
+            .prepare(v, &mut intermediate_state)
             .map_err(|reason| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
@@ -417,27 +403,31 @@ mod tests {
     #[test]
     fn test_transform_ndjson() {
         let s = "{\"a\": 1}\n{\"b\": 2}";
-        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
-            .unwrap()
-            .to_string();
+        let a = Value::Array(
+            transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
+        )
+        .to_string();
         assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
 
         let s = "{\"a\": 1}";
-        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
-            .unwrap()
-            .to_string();
+        let a = Value::Array(
+            transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
+        )
+        .to_string();
         assert_eq!(a, "[{\"a\":1}]");
 
         let s = "[{\"a\": 1}]";
-        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
-            .unwrap()
-            .to_string();
+        let a = Value::Array(
+            transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
+        )
+        .to_string();
         assert_eq!(a, "[{\"a\":1}]");
 
         let s = "[{\"a\": 1}, {\"b\": 2}]";
-        let a = transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false)
-            .unwrap()
-            .to_string();
+        let a = Value::Array(
+            transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
+        )
+        .to_string();
         assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
     }
 }

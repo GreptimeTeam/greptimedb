@@ -549,7 +549,7 @@ impl DissectProcessor {
                 for part in pattern.iter() {
                     if let Part::Name(name) = part {
                         if !name.is_empty() {
-                            fields.output_fields.insert(name.to_string(), 0);
+                            fields.output_fields_index_mapping.insert(name.to_string(), 0);
                         }
                     }
                 }
@@ -648,7 +648,7 @@ impl Processor for DissectProcessor {
                 // TODO(qtang): Let this method use the intermediate state collection directly.
                 Some(Value::String(val_str)) => match self.process(val_str) {
                     Ok(mut map) => {
-                        field.output_fields.iter().for_each(|(k, output_index)| {
+                        field.output_fields_index_mapping.iter().for_each(|(k, output_index)| {
                             if let Some(v) = map.remove(k) {
                                 val[*output_index] = v
                             }

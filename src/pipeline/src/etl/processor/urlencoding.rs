@@ -81,7 +81,7 @@ impl UrlEncodingProcessor {
         };
         let val = Value::String(processed);
 
-        let key = field.get_renamed_field();
+        let key = field.get_target_field();
 
         Ok(Map::one(key, val))
     }
@@ -89,8 +89,8 @@ impl UrlEncodingProcessor {
     fn update_output_keys(fields: &mut Fields) {
         for field in fields.iter_mut() {
             field
-                .output_fields
-                .insert(field.get_renamed_field().to_string(), 0_usize);
+                .output_fields_index_mapping
+                .insert(field.get_target_field().to_string(), 0_usize);
         }
     }
 }
@@ -150,7 +150,7 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
     fn output_keys(&self) -> HashSet<String> {
         self.fields
             .iter()
-            .map(|f| f.get_renamed_field().to_string())
+            .map(|f| f.get_target_field().to_string())
             .collect()
     }
 
@@ -170,7 +170,7 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
             match val.get(index) {
                 Some(Value::String(s)) => {
                     let mut map = self.process_field(s, field)?;
-                    field.output_fields.iter().for_each(|(k, output_index)| {
+                    field.output_fields_index_mapping.iter().for_each(|(k, output_index)| {
                         if let Some(v) = map.remove(k) {
                             val[*output_index] = v;
                         }

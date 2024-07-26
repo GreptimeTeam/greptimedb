@@ -76,13 +76,13 @@ impl GsubProcessor {
             .to_string();
         let val = Value::String(new_val);
 
-        let key = field.get_renamed_field();
+        let key = field.get_target_field();
 
         Ok(Map::one(key, val))
     }
 
     fn process_array_field(&self, arr: &Array, field: &Field) -> Result<Map, String> {
-        let key = field.get_renamed_field();
+        let key = field.get_target_field();
 
         let re = self.pattern.as_ref().unwrap();
         let replacement = self.replacement.as_ref().unwrap();
@@ -163,7 +163,7 @@ impl crate::etl::processor::Processor for GsubProcessor {
     fn output_keys(&self) -> HashSet<String> {
         self.fields
             .iter()
-            .map(|f| f.get_renamed_field().to_string())
+            .map(|f| f.get_target_field().to_string())
             .collect()
     }
 
@@ -194,7 +194,7 @@ impl crate::etl::processor::Processor for GsubProcessor {
                 Some(v) => {
                     // TODO(qtang): Let this method use the intermediate state collection directly.
                     let mut map = self.exec_field(v, field)?;
-                    field.output_fields.iter().for_each(|(k, output_index)| {
+                    field.output_fields_index_mapping.iter().for_each(|(k, output_index)| {
                         if let Some(v) = map.remove(k) {
                             val[*output_index] = v;
                         }

@@ -31,7 +31,7 @@ impl Fields {
     }
 
     pub(crate) fn get_target_fields(&self) -> Vec<&str> {
-        self.0.iter().map(|f| f.get_renamed_field()).collect()
+        self.0.iter().map(|f| f.get_target_field()).collect()
     }
 
     fn check(self) -> Result<Self, String> {
@@ -97,14 +97,17 @@ impl InputFieldInfo {
     }
 }
 
+/// Used to represent the input and output fields of a processor or transform.
 #[derive(Debug, Default, Clone)]
 pub struct Field {
+    /// The input field name and index.
     pub input_field: InputFieldInfo,
 
-    pub output_fields: BTreeMap<String, usize>,
+    /// The output field name and index mapping.
+    pub output_fields_index_mapping: BTreeMap<String, usize>,
 
     // rename
-    pub renamed_field: Option<String>,
+    pub target_field: Option<String>,
 
     // 1-to-many mapping
     // processors:
@@ -116,35 +119,38 @@ impl Field {
     pub(crate) fn new(field: impl Into<String>) -> Self {
         Field {
             input_field: InputFieldInfo::name(field.into()),
-            output_fields: BTreeMap::new(),
-            renamed_field: None,
+            output_fields_index_mapping: BTreeMap::new(),
+            target_field: None,
             target_fields: None,
         }
     }
 
-    // column_name in transform
-    pub(crate) fn get_renamed_field(&self) -> &str {
-        self.renamed_field
+    /// target column_name in processor or transform
+    /// if target_field is None, return input field name
+    pub(crate) fn get_target_field(&self) -> &str {
+        self.target_field
             .as_deref()
             .unwrap_or(&self.input_field.name)
     }
 
+    /// input column_name in processor or transform
     pub(crate) fn get_field_name(&self) -> &str {
         &self.input_field.name
     }
 
+    /// set input column index in processor or transform
     pub(crate) fn set_input_index(&mut self, index: usize) {
         self.input_field.index = index;
     }
 
     pub(crate) fn set_output_index(&mut self, key: &str, index: usize) {
-        if let Some(v) = self.output_fields.get_mut(key) {
+        if let Some(v) = self.output_fields_index_mapping.get_mut(key) {
             *v = index;
         }
     }
 
     pub(crate) fn insert_output_index(&mut self, key: String, index: usize) {
-        self.output_fields.insert(key, index);
+        self.output_fields_index_mapping.insert(key, index);
     }
 }
 
@@ -180,8 +186,8 @@ impl std::str::FromStr for Field {
 
         Ok(Field {
             input_field: InputFieldInfo::name(field),
-            output_fields: BTreeMap::new(),
-            renamed_field,
+            output_fields_index_mapping: BTreeMap::new(),
+            target_field: renamed_field,
             target_fields,
         })
     }
@@ -189,7 +195,7 @@ impl std::str::FromStr for Field {
 
 impl std::fmt::Display for Field {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match (&self.renamed_field, &self.target_fields) {
+        match (&self.target_field, &self.target_fields) {
             (Some(target_field), None) => write!(f, "{}, {target_field}", self.input_field.name),
             (None, Some(target_fields)) => {
                 write!(
@@ -248,7 +254,7 @@ mod tests {
         for (s, field, target_field, target_fields) in cases.into_iter() {
             let f: Field = s.parse().unwrap();
             assert_eq!(f.get_field_name(), field, "{s}");
-            assert_eq!(f.renamed_field, target_field, "{s}");
+            assert_eq!(f.target_field, target_field, "{s}");
             assert_eq!(f.target_fields, target_fields, "{s}");
         }
     }

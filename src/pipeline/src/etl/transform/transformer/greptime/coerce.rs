@@ -63,7 +63,7 @@ pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>,
     let mut columns = Vec::new();
 
     for field in transform.fields.iter() {
-        let column_name = field.get_renamed_field().to_string();
+        let column_name = field.get_target_field().to_string();
 
         let datatype = coerce_type(transform)? as i32;
 

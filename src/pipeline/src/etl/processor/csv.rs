@@ -152,7 +152,7 @@ impl CsvProcessor {
             if let Some(tfs) = f.target_fields.as_ref() {
                 tfs.iter().for_each(|tf| {
                     if !tf.is_empty() {
-                        f.output_fields.insert(tf.to_string(), 0);
+                        f.output_fields_index_mapping.insert(tf.to_string(), 0);
                     }
                 });
             }
@@ -241,7 +241,7 @@ impl Processor for CsvProcessor {
                     // TODO(qtang): Let this method use the intermediate state collection directly.
                     let map = self.process_field(v, field)?;
                     for (k, v) in map.values.into_iter() {
-                        if let Some(index) = field.output_fields.get(&k) {
+                        if let Some(index) = field.output_fields_index_mapping.get(&k) {
                             val[*index] = v;
                         }
                     }

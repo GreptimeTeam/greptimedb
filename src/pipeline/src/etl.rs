@@ -50,7 +50,7 @@ fn set_processor_keys_index(
                     field.input_field.name
                 ))?;
             field.set_input_index(index);
-            for (k, v) in field.output_fields.iter_mut() {
+            for (k, v) in field.output_fields_index_mapping.iter_mut() {
                 let index = final_intermediate_keys
                     .iter()
                     .position(|r| *r == *k)
@@ -79,7 +79,7 @@ fn set_transform_keys_index(
                     field.input_field.name
                 ))?;
             field.set_input_index(index);
-            for (k, v) in field.output_fields.iter_mut() {
+            for (k, v) in field.output_fields_index_mapping.iter_mut() {
                 let index = output_keys.iter().position(|r| *r == *k).ok_or(format!(
                     "output field {k} is not found in output keys: {final_intermediate_keys:?} when set transform keys index"
                 ))?;
@@ -263,7 +263,7 @@ where
         self.transformer.transform_mut(val)
     }
 
-    pub fn prepase(&self, val: serde_json::Value, result: &mut [Value]) -> Result<(), String> {
+    pub fn prepare(&self, val: serde_json::Value, result: &mut [Value]) -> Result<(), String> {
         match val {
             serde_json::Value::Object(map) => {
                 let mut index = 0;
@@ -370,7 +370,7 @@ transform:
         let pipeline: Pipeline<GreptimeTransformer> =
             parse(&Content::Yaml(pipeline_yaml.into())).unwrap();
         let mut payload = pipeline.init_intermediate_state();
-        pipeline.prepase(input_value, &mut payload).unwrap();
+        pipeline.prepare(input_value, &mut payload).unwrap();
         assert_eq!(
             &["greptime_timestamp", "my_field"].to_vec(),
             pipeline.required_keys()
