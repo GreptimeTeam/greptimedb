@@ -839,8 +839,6 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-metadata_cache_size = "64MiB"
-content_cache_size = "128MiB"
 
 [region_engine.mito.fulltext_index]
 create_on_flush = "auto"
@@ -889,6 +887,8 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "vector_cache_size =",
         "page_cache_size =",
         "selector_result_cache_size =",
+        "metadata_cache_size =",
+        "content_cache_size =",
     ];
 
     input
