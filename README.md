@@ -154,6 +154,8 @@ The current version has not yet reached General Availability version standards.
 In line with our Greptime 2024 Roadmap, we plan to achieve a production-level
 version with the update to v1.0 in August. [[Join Force]](https://github.com/GreptimeTeam/greptimedb/issues/3412)
 
+We are approaching the GA release and welcome you to test and use it. Some customers have already adopted GreptimeDB in their production environments. If you want to give it a try, please use the latest stable release available.
+
 ## Community
 
 Our core team is thrilled to see you participate in any ways you like. When you are stuck, try to
