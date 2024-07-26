@@ -147,7 +147,7 @@ pub fn init_global_runtimes(options: &RuntimeOptions) {
             "compact-worker",
             options.compact_rt_size,
         ));
-        c.hb_runtime = Some(create_runtime("global-hb", "global-hb-worker", HB_WORKERS));
+        c.hb_runtime = Some(create_runtime("hreartbeat", "hb-worker", HB_WORKERS));
     });
 }
 
