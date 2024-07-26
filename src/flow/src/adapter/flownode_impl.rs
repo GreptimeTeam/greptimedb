@@ -100,7 +100,8 @@ impl Flownode for FlowWorkerManager {
                 // TODO(discord9): impl individual flush
                 debug!("Starting to flush flow_id={:?}", flow_id);
                 // lock to make sure writes before flush are written to flow
-                let _flush_lock = self.flush_lock.write().await;
+                // and immediately drop to prevent following writes to be blocked
+                drop(self.flush_lock.write().await);
                 let flushed_input_rows = self
                     .node_context
                     .read()
