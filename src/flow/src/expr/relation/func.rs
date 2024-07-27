@@ -21,7 +21,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
-use snafu::{OptionExt, ResultExt};
+use snafu::{IntoError, OptionExt, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::error::{DatafusionSnafu, Error, InvalidQuerySnafu};
@@ -201,11 +201,10 @@ impl AggregateFunc {
                 }
                 .fail()
             } else {
-                DatafusionSnafu {
-                    raw: err,
+                Err(DatafusionSnafu {
                     context: "Error when parsing aggregate function",
                 }
-                .fail()
+                .into_error(err))
             }
         })?;
 

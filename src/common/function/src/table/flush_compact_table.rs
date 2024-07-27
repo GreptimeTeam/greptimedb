@@ -12,28 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
 use std::str::FromStr;
 
 use api::v1::region::{compact_request, StrictWindow};
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
-use common_query::error::Error::ThreadJoin;
 use common_query::error::{
     InvalidFuncArgsSnafu, MissingTableMutationHandlerSnafu, Result, TableMutationSnafu,
     UnsupportedInputDataTypeSnafu,
 };
 use common_query::prelude::{Signature, Volatility};
-use common_telemetry::{error, info};
+use common_telemetry::info;
 use datatypes::prelude::*;
-use datatypes::vectors::VectorRef;
 use session::context::QueryContextRef;
 use session::table_name::table_name_to_full_name;
-use snafu::{ensure, Location, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 use table::requests::{CompactTableRequest, FlushTableRequest};
 
-use crate::ensure_greptime;
-use crate::function::{Function, FunctionContext};
 use crate::handlers::TableMutationHandlerRef;
 
 /// Compact type: strict window.
@@ -209,6 +204,7 @@ mod tests {
     use session::context::QueryContext;
 
     use super::*;
+    use crate::function::{Function, FunctionContext};
 
     macro_rules! define_table_function_test {
         ($name: ident, $func: ident) => {

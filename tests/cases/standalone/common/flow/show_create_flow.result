@@ -1,4 +1,4 @@
-CREATE TABLE numbers_input (
+CREATE TABLE numbers_input_show (
     number INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
@@ -7,75 +7,71 @@ CREATE TABLE numbers_input (
 
 Affected Rows: 0
 
-create table out_num_cnt (
+create table out_num_cnt_show (
     number INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
-SELECT flow_name, table_catalog, flow_definition FROM INFORMATION_SCHEMA.FLOWS;
-
-+-----------+---------------+-----------------+
-| flow_name | table_catalog | flow_definition |
-+-----------+---------------+-----------------+
-+-----------+---------------+-----------------+
-
-SHOW FLOWS;
+SELECT flow_name, table_catalog, flow_definition FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
 ++
 ++
 
-CREATE FLOW filter_numbers SINK TO out_num_cnt AS SELECT number FROM numbers_input where number > 10;
+SHOW FLOWS LIKE 'filter_numbers_show';
+
+++
+++
+
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number FROM numbers_input_show where number > 10;
 
 Affected Rows: 0
 
-SHOW CREATE FLOW filter_numbers;
+SHOW CREATE FLOW filter_numbers_show;
 
-+----------------+-------------------------------------------------------+
-| Flow           | Create Flow                                           |
-+----------------+-------------------------------------------------------+
-| filter_numbers | CREATE OR REPLACE FLOW IF NOT EXISTS filter_numbers   |
-|                | SINK TO out_num_cnt                                   |
-|                | AS SELECT number FROM numbers_input WHERE number > 10 |
-+----------------+-------------------------------------------------------+
++---------------------+------------------------------------------------------------+
+| Flow                | Create Flow                                                |
++---------------------+------------------------------------------------------------+
+| filter_numbers_show | CREATE OR REPLACE FLOW IF NOT EXISTS filter_numbers_show   |
+|                     | SINK TO out_num_cnt_show                                   |
+|                     | AS SELECT number FROM numbers_input_show WHERE number > 10 |
++---------------------+------------------------------------------------------------+
 
-SELECT flow_name, table_catalog, flow_definition FROM INFORMATION_SCHEMA.FLOWS;
+SELECT flow_name, table_catalog, flow_definition FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-+----------------+---------------+----------------------------------------------------+
-| flow_name      | table_catalog | flow_definition                                    |
-+----------------+---------------+----------------------------------------------------+
-| filter_numbers | greptime      | SELECT number FROM numbers_input WHERE number > 10 |
-+----------------+---------------+----------------------------------------------------+
++---------------------+---------------+---------------------------------------------------------+
+| flow_name           | table_catalog | flow_definition                                         |
++---------------------+---------------+---------------------------------------------------------+
+| filter_numbers_show | greptime      | SELECT number FROM numbers_input_show WHERE number > 10 |
++---------------------+---------------+---------------------------------------------------------+
 
-SHOW FLOWS;
+SHOW FLOWS LIKE 'filter_numbers_show';
 
-+----------------+
-| Flows          |
-+----------------+
-| filter_numbers |
-+----------------+
++---------------------+
+| Flows               |
++---------------------+
+| filter_numbers_show |
++---------------------+
 
-drop flow filter_numbers;
+drop flow filter_numbers_show;
 
 Affected Rows: 0
 
-SELECT flow_name, table_catalog, flow_definition FROM INFORMATION_SCHEMA.FLOWS;
-
-+-----------+---------------+-----------------+
-| flow_name | table_catalog | flow_definition |
-+-----------+---------------+-----------------+
-+-----------+---------------+-----------------+
-
-SHOW FLOWS;
+SELECT flow_name, table_catalog, flow_definition FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
 ++
 ++
 
-drop table out_num_cnt;
+SHOW FLOWS LIKE 'filter_numbers_show';
+
+++
+++
+
+drop table out_num_cnt_show;
 
 Affected Rows: 0
 
-drop table numbers_input;
+drop table numbers_input_show;
 
 Affected Rows: 0
 

@@ -364,12 +364,10 @@ impl ScalarExpr {
                     .fn_impl
                     // TODO(discord9): get scheme from args instead?
                     .data_type(df_scalar_fn.df_schema.as_arrow())
-                    .map_err(|err| {
+                    .context({
                         DatafusionSnafu {
-                            raw: err,
                             context: "Failed to get data type from datafusion scalar function",
                         }
-                        .build()
                     })?;
                 let typ = ConcreteDataType::try_from(&arrow_typ)
                     .map_err(BoxedError::new)
