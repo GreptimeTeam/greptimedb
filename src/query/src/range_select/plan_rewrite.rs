@@ -608,7 +608,7 @@ mod test {
                 table,
             })
             .is_ok());
-        QueryEngineFactory::new(catalog_list, None, None, None, false).query_engine()
+        QueryEngineFactory::new(catalog_list, None, None, None, None, false).query_engine()
     }
 
     async fn do_query(sql: &str) -> Result<crate::plan::LogicalPlan> {

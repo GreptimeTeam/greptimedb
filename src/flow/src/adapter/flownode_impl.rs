@@ -16,7 +16,9 @@
 
 use std::collections::HashMap;
 
-use api::v1::flow::{flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse};
+use api::v1::flow::{
+    flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse, FlushFlow,
+};
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
 use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
@@ -92,6 +94,34 @@ impl Flownode for FlowWorkerManager {
                     .map_err(to_meta_err)?;
                 Ok(Default::default())
             }
+            Some(flow_request::Body::Flush(FlushFlow {
+                flow_id: Some(flow_id),
+            })) => {
+                // TODO(discord9): impl individual flush
+                debug!("Starting to flush flow_id={:?}", flow_id);
+                // lock to make sure writes before flush are written to flow
+                // and immediately drop to prevent following writes to be blocked
+                drop(self.flush_lock.write().await);
+                let flushed_input_rows = self
+                    .node_context
+                    .read()
+                    .await
+                    .flush_all_sender()
+                    .await
+                    .map_err(to_meta_err)?;
+                let rows_send = self.run_available(true).await.map_err(to_meta_err)?;
+                let row = self.send_writeback_requests().await.map_err(to_meta_err)?;
+
+                debug!(
+                    "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
+                    flow_id, flushed_input_rows, rows_send, row
+                );
+                Ok(FlowResponse {
+                    affected_flows: vec![flow_id],
+                    affected_rows: row as u64,
+                    ..Default::default()
+                })
+            }
             None => UnexpectedSnafu {
                 err_msg: "Missing request body",
             }
@@ -104,6 +134,10 @@ impl Flownode for FlowWorkerManager {
     }
 
     async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse> {
+        // using try_read makesure two things:
+        // 1. flush wouldn't happen until inserts before it is inserted
+        // 2. inserts happening concurrently with flush wouldn't be block by flush
+        let _flush_lock = self.flush_lock.try_read();
         for write_request in request.requests {
             let region_id = write_request.region_id;
             let table_id = RegionId::from(region_id).table_id();

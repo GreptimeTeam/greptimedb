@@ -20,7 +20,9 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::function::FunctionRef;
-use common_function::handlers::{ProcedureServiceHandlerRef, TableMutationHandlerRef};
+use common_function::handlers::{
+    FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
+};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::state::FunctionState;
 use common_query::prelude::ScalarUdf;
@@ -83,6 +85,7 @@ impl QueryEngineState {
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
     ) -> Self {
@@ -138,6 +141,7 @@ impl QueryEngineState {
             function_state: Arc::new(FunctionState {
                 table_mutation_handler,
                 procedure_service_handler,
+                flow_service_handler,
             }),
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,

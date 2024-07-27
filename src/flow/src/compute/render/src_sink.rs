@@ -129,9 +129,14 @@ impl<'referred, 'df> Context<'referred, 'df> {
             collection.into_inner(),
             move |_ctx, recv| {
                 let data = recv.take_inner();
+                debug!(
+                    "render_unbounded_sink: send {} rows",
+                    data.iter().map(|i| i.len()).sum::<usize>()
+                );
                 for row in data.into_iter().flat_map(|i| i.into_iter()) {
                     // if the sender is closed, stop sending
                     if sender.is_closed() {
+                        common_telemetry::error!("UnboundedSink is closed");
                         break;
                     }
                     // TODO(discord9): handling tokio error

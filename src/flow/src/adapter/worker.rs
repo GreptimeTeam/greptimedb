@@ -151,9 +151,23 @@ impl WorkerHandle {
     ///
     /// will set the current timestamp to `now` for all dataflows before running them
     ///
+    /// `blocking` indicate whether it will wait til all dataflows are finished computing if true or
+    /// just start computing and return immediately if false
+    ///
     /// the returned error is unrecoverable, and the worker should be shutdown/rebooted
-    pub async fn run_available(&self, now: repr::Timestamp) -> Result<(), Error> {
-        self.itc_client.call_no_resp(Request::RunAvail { now })
+    pub async fn run_available(&self, now: repr::Timestamp, blocking: bool) -> Result<(), Error> {
+        common_telemetry::debug!("Running available with blocking={}", blocking);
+        if blocking {
+            let resp = self
+                .itc_client
+                .call_with_resp(Request::RunAvail { now, blocking })
+                .await?;
+            common_telemetry::debug!("Running available with response={:?}", resp);
+            Ok(())
+        } else {
+            self.itc_client
+                .call_no_resp(Request::RunAvail { now, blocking })
+        }
     }
 
     pub async fn contains_flow(&self, flow_id: FlowId) -> Result<bool, Error> {
@@ -332,9 +346,13 @@ impl<'s> Worker<'s> {
                 let ret = self.remove_flow(flow_id);
                 Some(Response::Remove { result: ret })
             }
-            Request::RunAvail { now } => {
+            Request::RunAvail { now, blocking } => {
                 self.run_tick(now);
-                None
+                if blocking {
+                    Some(Response::RunAvail)
+                } else {
+                    None
+                }
             }
             Request::ContainTask { flow_id } => {
                 let ret = self.task_states.contains_key(&flow_id);
@@ -365,6 +383,7 @@ pub enum Request {
     /// Trigger the worker to run, useful after input buffer is full
     RunAvail {
         now: repr::Timestamp,
+        blocking: bool,
     },
     ContainTask {
         flow_id: FlowId,
@@ -384,6 +403,7 @@ enum Response {
     ContainTask {
         result: bool,
     },
+    RunAvail,
 }
 
 fn create_inter_thread_call() -> (InterThreadCallClient, InterThreadCallServer) {
@@ -504,7 +524,7 @@ mod test {
             Some(flow_id)
         );
         tx.send((Row::empty(), 0, 0)).unwrap();
-        handle.run_available(0).await.unwrap();
+        handle.run_available(0, true).await.unwrap();
         assert_eq!(sink_rx.recv().await.unwrap().0, Row::empty());
         drop(handle);
         worker_thread_handle.join().unwrap();

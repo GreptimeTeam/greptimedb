@@ -150,6 +150,7 @@ pub enum Error {
 
     #[snafu(display("Datafusion error: {raw:?} in context: {context}"))]
     Datafusion {
+        #[snafu(source)]
         raw: datafusion_common::DataFusionError,
         context: String,
         #[snafu(implicit)]

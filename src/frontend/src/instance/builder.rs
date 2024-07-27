@@ -20,10 +20,12 @@ use common_base::Plugins;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
 use operator::delete::Deleter;
+use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
@@ -153,11 +155,15 @@ impl FrontendBuilder {
             self.procedure_executor.clone(),
         ));
 
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flow_service = FlowServiceOperator::new(flow_metadata_manager, node_manager.clone());
+
         let query_engine = QueryEngineFactory::new_with_plugins(
             self.catalog_manager.clone(),
             Some(region_query_handler.clone()),
             Some(table_mutation_handler),
             Some(procedure_service_handler),
+            Some(Arc::new(flow_service)),
             true,
             plugins.clone(),
         )

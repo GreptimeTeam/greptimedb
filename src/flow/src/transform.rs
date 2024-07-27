@@ -19,6 +19,8 @@ use std::sync::Arc;
 use bytes::buf::IntoIter;
 use common_error::ext::BoxedError;
 use common_telemetry::info;
+use datafusion::optimizer::simplify_expressions::SimplifyExpressions;
+use datafusion::optimizer::{OptimizerContext, OptimizerRule};
 use datatypes::data_type::ConcreteDataType as CDT;
 use literal::{from_substrait_literal, from_substrait_type};
 use prost::Message;
@@ -39,8 +41,8 @@ use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 use crate::adapter::FlownodeContext;
 use crate::error::{
-    Error, ExternalSnafu, InvalidQueryProstSnafu, NotImplementedSnafu, TableNotFoundSnafu,
-    UnexpectedSnafu,
+    DatafusionSnafu, Error, ExternalSnafu, InvalidQueryProstSnafu, NotImplementedSnafu,
+    TableNotFoundSnafu, UnexpectedSnafu,
 };
 use crate::expr::GlobalId;
 use crate::plan::TypedPlan;
@@ -135,6 +137,12 @@ pub async fn sql_to_flow_plan(
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
     let LogicalPlan::DfPlan(plan) = plan;
+    let plan = SimplifyExpressions::new()
+        .rewrite(plan, &OptimizerContext::default())
+        .context(DatafusionSnafu {
+            context: "Fail to apply `SimplifyExpressions` optimization",
+        })?
+        .data;
     let sub_plan = DFLogicalSubstraitConvertor {}
         .to_sub_plan(&plan, DefaultSerializer)
         .map_err(BoxedError::new)
@@ -292,7 +300,7 @@ mod test {
         };
         catalog_list.register_table_sync(req_with_ts).unwrap();
 
-        let factory = query::QueryEngineFactory::new(catalog_list, None, None, None, false);
+        let factory = query::QueryEngineFactory::new(catalog_list, None, None, None, None, false);
 
         let engine = factory.query_engine();
         engine.register_function(Arc::new(TumbleFunction {}));
