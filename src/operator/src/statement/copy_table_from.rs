@@ -376,10 +376,7 @@ impl StatementExecutor {
             .schema()
             .timestamp_column()
             .and_then(|c| {
-                common_query::logical_plan::build_filter_from_timestamp(
-                    &c.name,
-                    req.timestamp_range.as_ref(),
-                )
+                common_query::logical_plan::build_same_type_ts_filter(c, req.timestamp_range)
             })
             .into_iter()
             .collect::<Vec<_>>();
