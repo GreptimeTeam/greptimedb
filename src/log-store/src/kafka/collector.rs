@@ -19,19 +19,42 @@ use store_api::logstore::provider::KafkaProvider;
 use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
 
+/// The [`IndexCollector`] trait defines the operations for managing and collecting index entries.
 pub trait IndexCollector: Send + Sync {
+    /// Sets the latest [`EntryId`].
     fn set_latest_entry_id(&mut self, entry_id: EntryId);
 
+    /// Appends an [`EntryId`] for a specific region.
     fn append(&mut self, region_id: RegionId, entry_id: EntryId);
 
+    /// Truncates the index for a specific region up to a given [`EntryId`].
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId);
 }
 
+/// The [`GlobalIndexCollector`] struct is responsible for managing index entries
+/// across multiple providers.
 #[derive(Debug, Clone)]
-pub struct GlobalCollector {
+pub struct GlobalIndexCollector {
     providers: Arc<Mutex<HashMap<Arc<KafkaProvider>, RegionIndexes>>>,
 }
 
+impl GlobalIndexCollector {
+    /// Creates a new [`ProviderLevelIndexCollector`] for a specified provider.
+    pub fn provider_level_index_collector(
+        &self,
+        provider: Arc<KafkaProvider>,
+    ) -> Box<dyn IndexCollector> {
+        Box::new(ProviderLevelIndexCollector {
+            global: self.clone(),
+            provider,
+        })
+    }
+}
+
+/// The [`RegionIndexes`] struct maintains indexes for a collection of regions.
+/// Each region is identified by a `RegionId` and maps to a set of [`EntryId`]s,
+/// representing the entries within that region. It also keeps track of the
+/// latest [`EntryId`] across all regions.
 #[derive(Debug, Clone, Default)]
 pub struct RegionIndexes {
     regions: HashMap<RegionId, BTreeSet<EntryId>>,
@@ -47,6 +70,9 @@ impl RegionIndexes {
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId) {
         if let Some(entry_ids) = self.regions.get_mut(&region_id) {
             *entry_ids = entry_ids.split_off(&entry_id);
+            if let Some(last) = entry_ids.last() {
+                self.latest_entry_id = self.latest_entry_id.max(*last);
+            }
         }
     }
 
@@ -55,9 +81,11 @@ impl RegionIndexes {
     }
 }
 
+/// The [`ProviderLevelIndexCollector`] struct is responsible for managing index entries
+/// specific to a particular provider.
 #[derive(Debug, Clone)]
 pub struct ProviderLevelIndexCollector {
-    global: GlobalCollector,
+    global: GlobalIndexCollector,
     provider: Arc<KafkaProvider>,
 }
 
@@ -95,6 +123,10 @@ impl IndexCollector for ProviderLevelIndexCollector {
     }
 }
 
+/// The [`NoopCollector`] struct implements the [`IndexCollector`] trait with no-op methods.
+///
+/// This collector effectively ignores all operations, making it suitable for cases
+/// where index collection is not required or should be disabled.
 pub struct NoopCollector;
 
 impl IndexCollector for NoopCollector {

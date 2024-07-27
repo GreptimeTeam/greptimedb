@@ -22,8 +22,8 @@ use store_api::logstore::provider::KafkaProvider;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Sender};
 
+use super::collector::IndexCollector;
 use crate::error::{self, Result};
-use crate::kafka::collector::NoopCollector;
 use crate::kafka::worker::{BackgroundProducerWorker, ProduceResultHandle, WorkerRequest};
 
 pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer>;
@@ -51,6 +51,7 @@ impl OrderedBatchProducer {
         channel_size: usize,
         request_batch_size: usize,
         max_batch_bytes: usize,
+        index_collector: Box<dyn IndexCollector>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(channel_size);
         let running = Arc::new(AtomicBool::new(true));
@@ -62,7 +63,7 @@ impl OrderedBatchProducer {
             receiver: rx,
             request_batch_size,
             max_batch_bytes,
-            index_collector: Box::new(NoopCollector),
+            index_collector,
         };
         tokio::spawn(async move { worker.run().await });
         Self {
@@ -141,6 +142,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::kafka::collector::NoopCollector;
     use crate::kafka::producer::OrderedBatchProducer;
 
     #[derive(Debug)]
@@ -217,6 +219,7 @@ mod tests {
             128,
             64,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
+            Box::new(NoopCollector),
         );
 
         let region_id = RegionId::new(1, 1);
@@ -265,6 +268,7 @@ mod tests {
             128,
             64,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
+            Box::new(NoopCollector),
         );
 
         let region_id = RegionId::new(1, 1);
@@ -282,6 +286,13 @@ mod tests {
         futures.push(
             producer
                 .produce(region_id, vec![record.clone(), record.clone()])
+                .await
+                .unwrap()
+                .wait(),
+        );
+        futures.push(
+            producer
+                .produce(region_id, vec![record.clone()])
                 .await
                 .unwrap()
                 .wait(),
@@ -310,6 +321,7 @@ mod tests {
             128,
             64,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
+            Box::new(NoopCollector),
         );
 
         let region_id = RegionId::new(1, 1);

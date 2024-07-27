@@ -23,6 +23,7 @@ use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
 use tokio::sync::{Mutex, RwLock};
 
+use super::collector::{GlobalIndexCollector, NoopCollector};
 use super::producer::OrderedBatchProducer;
 use crate::error::{
     BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
@@ -63,6 +64,7 @@ pub(crate) struct ClientManager {
     /// Used to initialize a new [Client].
     mutex: Mutex<()>,
     instances: RwLock<HashMap<Arc<KafkaProvider>, Client>>,
+    global_index_collector: Option<GlobalIndexCollector>,
 
     producer_channel_size: usize,
     producer_request_batch_size: usize,
@@ -99,6 +101,7 @@ impl ClientManager {
             producer_request_batch_size: REQUEST_BATCH_SIZE,
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
             compression: Compression::Lz4,
+            global_index_collector: None,
         })
     }
 
@@ -147,6 +150,12 @@ impl ClientManager {
             })
             .map(Arc::new)?;
 
+        let index_collector = if let Some(global_collector) = self.global_index_collector.as_ref() {
+            global_collector.provider_level_index_collector(provider.clone())
+        } else {
+            Box::new(NoopCollector)
+        };
+
         let producer = Arc::new(OrderedBatchProducer::new(
             provider.clone(),
             client.clone(),
@@ -154,6 +163,7 @@ impl ClientManager {
             self.producer_channel_size,
             self.producer_request_batch_size,
             self.flush_batch_size,
+            index_collector,
         ));
 
         Ok(Client { client, producer })
