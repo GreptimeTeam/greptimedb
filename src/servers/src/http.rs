@@ -29,6 +29,7 @@ use axum::response::{Html, IntoResponse, Json, Response};
 use axum::{middleware, routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatch;
 use common_telemetry::{error, info};
@@ -932,7 +933,7 @@ impl Server for HttpServer {
 
 /// handle error middleware
 async fn handle_error(err: BoxError) -> Json<HttpResponse> {
-    error!(err; "Unhandled internal error");
+    error!(err; "Unhandled internal error: {}", err.to_string());
     Json(HttpResponse::Error(ErrorResponse::from_error_message(
         StatusCode::Unexpected,
         format!("Unhandled internal error: {err}"),
