@@ -32,16 +32,15 @@ use datafusion::physical_plan::{
     RecordBatchStream as DfRecordBatchStream,
 };
 use datafusion_common::arrow::error::ArrowError;
-use datafusion_common::cast::{as_boolean_array, as_null_array};
-use datafusion_common::{internal_err, DataFusionError, ToDFSchema};
-use datatypes::arrow::array::{Array, BooleanArray};
-use datatypes::arrow::compute::filter_record_batch;
+use datafusion_common::{DataFusionError, ToDFSchema};
+use datatypes::arrow::array::Array;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::ready;
 use pin_project::pin_project;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
+use crate::filter::batch_filter;
 use crate::{
     DfRecordBatch, DfSendableRecordBatchStream, OrderOption, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream, Stream,
@@ -49,32 +48,6 @@ use crate::{
 
 type FutureStream =
     Pin<Box<dyn std::future::Future<Output = Result<SendableRecordBatchStream>> + Send>>;
-
-// copy from datafusion::physical_plan::src::filter.rs
-pub fn batch_filter(
-    batch: &DfRecordBatch,
-    predicate: &Arc<dyn PhysicalExpr>,
-) -> DfResult<DfRecordBatch> {
-    predicate
-        .evaluate(batch)
-        .and_then(|v| v.into_array(batch.num_rows()))
-        .and_then(|array| {
-            let filter_array = match as_boolean_array(&array) {
-                Ok(boolean_array) => Ok(boolean_array.to_owned()),
-                Err(_) => {
-                    let Ok(null_array) = as_null_array(&array) else {
-                        return internal_err!(
-                            "Cannot create filter_array from non-boolean predicates"
-                        );
-                    };
-
-                    // if the predicate is null, then the result is also null
-                    Ok::<BooleanArray, DataFusionError>(BooleanArray::new_null(null_array.len()))
-                }
-            }?;
-            Ok(filter_record_batch(batch, &filter_array)?)
-        })
-}
 
 /// Casts the `RecordBatch`es of `stream` against the `output_schema`.
 #[pin_project]
