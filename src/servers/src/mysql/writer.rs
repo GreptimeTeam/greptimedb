@@ -58,11 +58,12 @@ pub fn handle_err(e: impl ErrorExt) -> (ErrorKind, String) {
     let kind = mysql_error_kind(&status_code);
 
     if status_code.should_log_error() {
-        error!(e; "Failed to handle mysql query, code: {}, kind: {:?}", status_code, kind);
+        let root_error = e.root_cause().unwrap_or(&e);
+        error!(e; "Failed to handle mysql query, code: {}, error: {}", status_code, root_error.to_string());
     } else {
         debug!(
-            "Failed to handle mysql query, code: {}, kind: {:?}, error: {:?}",
-            status_code, kind, e
+            "Failed to handle mysql query, code: {}, error: {:?}",
+            status_code, e
         );
     };
     let msg = e.output_msg();

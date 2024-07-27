@@ -53,6 +53,20 @@ pub trait ErrorExt: StackError {
             }
         }
     }
+
+    /// Find out root level error for nested error
+    fn root_cause(&self) -> Option<&dyn std::error::Error>
+    where
+        Self: Sized,
+    {
+        let error = self.last();
+        if let Some(external_error) = error.source() {
+            let external_root = external_error.sources().last().unwrap();
+            Some(external_root)
+        } else {
+            None
+        }
+    }
 }
 
 pub trait StackError: std::error::Error {
