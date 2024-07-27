@@ -274,6 +274,7 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "python")]
     #[snafu(display("Failed to start script manager"))]
     StartScriptManager {
         #[snafu(implicit)]
@@ -438,6 +439,7 @@ impl ErrorExt for Error {
             Error::External { source, .. } => source.status_code(),
             Error::FindTableRoute { source, .. } => source.status_code(),
 
+            #[cfg(feature = "python")]
             Error::StartScriptManager { source, .. } => source.status_code(),
 
             Error::TableOperation { source, .. } => source.status_code(),

@@ -129,6 +129,8 @@
 | `region_engine.mito.inverted_index.apply_on_query` | String | `auto` | Whether to apply the index on query<br/>- `auto`: automatically (default)<br/>- `disable`: never |
 | `region_engine.mito.inverted_index.mem_threshold_on_create` | String | `auto` | Memory threshold for performing an external sort during index creation.<br/>- `auto`: automatically determine the threshold based on the system memory size (default)<br/>- `unlimited`: no memory limit<br/>- `[size]` e.g. `64MB`: fixed memory threshold |
 | `region_engine.mito.inverted_index.intermediate_path` | String | `""` | Deprecated, use `region_engine.mito.index.aux_path` instead. |
+| `region_engine.mito.inverted_index.metadata_cache_size` | String | `64MiB` | Cache size for inverted index metadata. |
+| `region_engine.mito.inverted_index.content_cache_size` | String | `128MiB` | Cache size for inverted index content. |
 | `region_engine.mito.fulltext_index` | -- | -- | The options for full-text index in Mito engine. |
 | `region_engine.mito.fulltext_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
 | `region_engine.mito.fulltext_index.create_on_compaction` | String | `auto` | Whether to create the index on compaction.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
@@ -269,15 +271,15 @@
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |
 | `procedure.max_metadata_value_size` | String | `1500KiB` | Auto split large value<br/>GreptimeDB procedure uses etcd as the default metadata storage backend.<br/>The etcd the maximum size of any request is 1.5 MiB<br/>1500KiB = 1536KiB (1.5MiB) - 36KiB (reserved size of key)<br/>Comments out the `max_metadata_value_size`, for don't split large value (no limit). |
 | `failure_detector` | -- | -- | -- |
-| `failure_detector.threshold` | Float | `8.0` | -- |
-| `failure_detector.min_std_deviation` | String | `100ms` | -- |
-| `failure_detector.acceptable_heartbeat_pause` | String | `10000ms` | -- |
-| `failure_detector.first_heartbeat_estimate` | String | `1000ms` | -- |
+| `failure_detector.threshold` | Float | `8.0` | The threshold value used by the failure detector to determine failure conditions. |
+| `failure_detector.min_std_deviation` | String | `100ms` | The minimum standard deviation of the heartbeat intervals, used to calculate acceptable variations. |
+| `failure_detector.acceptable_heartbeat_pause` | String | `10000ms` | The acceptable pause duration between heartbeats, used to determine if a heartbeat interval is acceptable. |
+| `failure_detector.first_heartbeat_estimate` | String | `1000ms` | The initial estimate of the heartbeat interval used by the failure detector. |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
-| `datanode.client.timeout` | String | `10s` | -- |
-| `datanode.client.connect_timeout` | String | `10s` | -- |
-| `datanode.client.tcp_nodelay` | Bool | `true` | -- |
+| `datanode.client.timeout` | String | `10s` | Operation timeout. |
+| `datanode.client.connect_timeout` | String | `10s` | Connect server timeout. |
+| `datanode.client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |
 | `wal` | -- | -- | -- |
 | `wal.provider` | String | `raft_engine` | -- |
 | `wal.broker_endpoints` | Array | -- | The broker endpoints of the Kafka cluster. |

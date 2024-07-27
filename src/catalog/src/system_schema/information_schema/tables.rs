@@ -298,7 +298,7 @@ impl InformationSchemaTablesBuilder {
         self.data_free.push(Some(0));
         self.auto_increment.push(Some(0));
         self.row_format.push(Some("Fixed"));
-        self.table_collation.push(None);
+        self.table_collation.push(Some("utf8_bin"));
         self.update_time.push(None);
         self.check_time.push(None);
 
