@@ -149,7 +149,8 @@ impl DfPartitionStream for PGClass {
 }
 
 /// Builds the `pg_catalog.pg_class` table row by row
-/// `relowner` is always the [`DUMMY_OWNER_ID`] cuz we don't have user
+/// TODO(J0HN50N133): `relowner` is always the [`DUMMY_OWNER_ID`] cuz we don't have user.
+/// Once we have user system, make it the actual owner of the table.
 struct PGClassBuilder {
     schema: SchemaRef,
     catalog_name: String,
