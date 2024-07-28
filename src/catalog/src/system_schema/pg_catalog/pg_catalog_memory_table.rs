@@ -20,7 +20,7 @@ use datatypes::vectors::{Int16Vector, StringVector, UInt32Vector, VectorRef};
 use super::oid_column;
 use super::table_names::PG_TYPE;
 use crate::memory_table_cols;
-use crate::system_schema::memory_table::tables::{i16_column, string_column};
+use crate::system_schema::utils::tables::{i16_column, string_column};
 
 fn pg_type_schema_columns() -> (Vec<ColumnSchema>, Vec<VectorRef>) {
     // TODO(j0hn50n133): acquire this information from `DataType` instead of hardcoding it to avoid regression.

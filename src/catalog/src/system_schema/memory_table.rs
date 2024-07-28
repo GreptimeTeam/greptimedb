@@ -13,7 +13,6 @@
 // limitations under the License.
 
 mod table_columns;
-pub mod tables;
 
 use std::sync::Arc;
 

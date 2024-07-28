@@ -18,14 +18,12 @@ pub mod flows;
 mod information_memory_table;
 pub mod key_column_usage;
 mod partitions;
-mod predicate;
 mod region_peers;
 mod runtime_metrics;
 pub mod schemata;
 mod table_constraints;
 mod table_names;
 pub mod tables;
-pub(crate) mod utils;
 mod views;
 
 use std::collections::HashMap;
@@ -37,7 +35,6 @@ use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
-pub(crate) use predicate::Predicates;
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
 use table::TableRef;
@@ -58,6 +55,7 @@ use crate::system_schema::information_schema::schemata::InformationSchemaSchemat
 use crate::system_schema::information_schema::table_constraints::InformationSchemaTableConstraints;
 use crate::system_schema::information_schema::tables::InformationSchemaTables;
 use crate::system_schema::memory_table::MemoryTable;
+pub(crate) use crate::system_schema::predicate::Predicates;
 use crate::system_schema::SystemSchemaProvider;
 use crate::CatalogManager;
 
