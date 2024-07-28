@@ -151,7 +151,8 @@ impl SimpleFilterEvaluator {
     }
 }
 
-/// copy from datafusion::physical_plan::src::filter.rs
+/// Evaluate the predicate on the input [RecordBatch], and return a new [RecordBatch].
+/// Copy from datafusion::physical_plan::src::filter.rs
 pub fn batch_filter(
     batch: &RecordBatch,
     predicate: &Arc<dyn PhysicalExpr>,
@@ -161,7 +162,7 @@ pub fn batch_filter(
         .and_then(|v| v.into_array(batch.num_rows()))
         .and_then(|array| {
             let filter_array = match as_boolean_array(&array) {
-                Ok(boolean_array) => Ok(boolean_array.to_owned()),
+                Ok(boolean_array) => Ok(boolean_array.clone()),
                 Err(_) => {
                     let Ok(null_array) = as_null_array(&array) else {
                         return internal_err!(

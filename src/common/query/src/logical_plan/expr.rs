@@ -22,6 +22,8 @@ use datatypes::data_type::DataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 
+/// Builds a filter for a timestamp column with the same type as the timestamp column.
+/// Returns [None] if time range is [None] or full time range.
 pub fn build_same_type_ts_filter(
     ts_schema: &ColumnSchema,
     time_range: Option<TimestampRange>,
