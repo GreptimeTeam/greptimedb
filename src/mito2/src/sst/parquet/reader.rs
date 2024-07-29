@@ -408,13 +408,30 @@ impl ParquetReaderBuilder {
             }
         };
 
-        let row_group_to_row_ids = apply_res
-            .into_iter()
-            .group_by(|row_id| *row_id as usize / row_group_size);
+        let num_row_groups = parquet_meta.num_row_groups();
+        let est_rows_per_group = apply_res.len() / num_row_groups;
+
+        let mut row_group_to_row_ids: Vec<(usize, Vec<usize>)> = Vec::with_capacity(num_row_groups);
+        for row_id in apply_res {
+            let row_group_id = row_id as usize / row_group_size;
+            let row_id_in_group = row_id as usize % row_group_size;
+
+            if let Some((rg_id, row_ids)) = row_group_to_row_ids.last_mut()
+                && *rg_id == row_group_id
+            {
+                row_ids.push(row_id_in_group);
+            } else {
+                let mut row_ids = Vec::with_capacity(est_rows_per_group);
+                row_ids.push(row_id_in_group);
+                row_group_to_row_ids.push((row_group_id, row_ids));
+            }
+        }
 
         Self::prune_row_groups_by_rows(
             parquet_meta,
-            row_group_to_row_ids.into_iter(),
+            row_group_to_row_ids
+                .into_iter()
+                .map(|(rg, row_ids)| (rg, row_ids.into_iter())),
             output,
             &mut metrics.num_row_groups_fulltext_index_filtered,
             &mut metrics.num_rows_in_row_group_fulltext_index_filtered,
@@ -540,7 +557,7 @@ impl ParquetReaderBuilder {
     /// a list of row ids to keep.
     fn prune_row_groups_by_rows(
         parquet_meta: &ParquetMetaData,
-        rows_in_row_groups: impl Iterator<Item = (usize, impl Iterator<Item = u32>)>,
+        rows_in_row_groups: impl Iterator<Item = (usize, impl Iterator<Item = usize>)>,
         output: &mut BTreeMap<usize, Option<RowSelection>>,
         filtered_row_groups: &mut usize,
         filtered_rows: &mut usize,
