@@ -161,7 +161,7 @@ nextest: ## Install nextest tools.
 
 .PHONY: sqlness-test
 sqlness-test: ## Run sqlness test.
-	cargo sqlness
+	cargo sqlness --preserve-state
 
 # Run fuzz test ${FUZZ_TARGET}.
 RUNS ?= 1
@@ -172,7 +172,7 @@ fuzz:
 
 .PHONY: fuzz-ls
 fuzz-ls:
-	cargo fuzz list --fuzz-dir tests-fuzz 
+	cargo fuzz list --fuzz-dir tests-fuzz
 
 .PHONY: check
 check: ## Cargo check all the targets.
