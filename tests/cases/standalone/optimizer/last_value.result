@@ -27,6 +27,7 @@ Affected Rows: 9
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 explain analyze
     select
         last_value(host order by ts),
@@ -47,7 +48,7 @@ explain analyze
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[last_value(t.host) ORDER BY [t.ts ASC NULLS LAST], last_value(t.not_pk) ORDER BY [t.ts ASC NULLS LAST], last_value(t.val) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
-|_|_|_SeqScan: partition_count=1 (1 memtable ranges, 0 file ranges), selector=LastRow REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file ranges), selector=LastRow REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
