@@ -77,7 +77,7 @@ impl RegionWalRange {
 }
 
 impl RegionWalIndexIterator for RegionWalRange {
-    fn next_batch_hit(&self, avg_size: usize, max_merge_distance: usize) -> Option<NextBatchHit> {
+    fn next_batch_hit(&self, avg_size: usize, max_gap_size: usize) -> Option<NextBatchHit> {
         self.next_batch_size().map(|size| NextBatchHit {
             bytes: size as usize * avg_size,
             len: size as usize,
@@ -142,7 +142,7 @@ impl RegionWalIndexIterator for RegionWalVecIndex {
         );
 
         merger.merge().map(|(range, size)| NextBatchHit {
-            bytes: range.end - range.start,
+            bytes: range.end - range.start - 1,
             len: size,
         })
     }
@@ -172,9 +172,9 @@ impl MultipleRegionWalIndexIterator {
 }
 
 impl RegionWalIndexIterator for MultipleRegionWalIndexIterator {
-    fn next_batch_hit(&self, avg_size: usize, max_merge_distance: usize) -> Option<NextBatchHit> {
+    fn next_batch_hit(&self, avg_size: usize, max_gap_size: usize) -> Option<NextBatchHit> {
         for iter in &self.iterator {
-            if let Some(batch) = iter.next_batch_hit(avg_size, max_merge_distance) {
+            if let Some(batch) = iter.next_batch_hit(avg_size, max_gap_size) {
                 return Some(batch);
             }
         }
@@ -220,20 +220,20 @@ mod tests {
 
         // Advance 1 step
         assert_eq!(range.next(), Some(0));
-        assert_eq!(range.next_batch_size(), Some(0));
+        assert_eq!(range.next_batch_size(), None);
 
         // Advance 1 step
         assert_eq!(range.next(), None);
-        assert_eq!(range.next_batch_size(), Some(0));
+        assert_eq!(range.next_batch_size(), None);
         // No effect
         assert_eq!(range.next(), None);
-        assert_eq!(range.next_batch_size(), Some(0));
+        assert_eq!(range.next_batch_size(), None);
 
         let mut range = RegionWalRange::new(0..0);
-        assert_eq!(range.next_batch_size(), Some(0));
+        assert_eq!(range.next_batch_size(), None);
         // No effect
         assert_eq!(range.next(), None);
-        assert_eq!(range.next_batch_size(), Some(0));
+        assert_eq!(range.next_batch_size(), None);
     }
 
     #[test]
@@ -258,19 +258,19 @@ mod tests {
         assert_eq!(index.next_batch_size(), Some(1));
         // Advance 1 step
         assert_eq!(index.next(), Some(11));
-        assert_eq!(index.next_batch_size(), Some(0));
+        assert_eq!(index.next_batch_size(), None);
 
         // No effect
         assert_eq!(index.next(), None);
-        assert_eq!(index.next_batch_size(), Some(0));
+        assert_eq!(index.next_batch_size(), None);
 
         let mut index = RegionWalVecIndex::new([]);
-        assert_eq!(index.next_batch_size(), Some(0));
+        assert_eq!(index.next_batch_size(), None);
         assert_eq!(index.peek(), None);
         // No effect
         assert_eq!(index.peek(), None);
         assert_eq!(index.next(), None);
-        assert_eq!(index.next_batch_size(), Some(0));
+        assert_eq!(index.next_batch_size(), None);
     }
 
     #[test]

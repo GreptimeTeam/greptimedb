@@ -155,7 +155,8 @@ impl Stream for Consumer {
                                 len: 1,
                             });
 
-                        let fetch_range = 1i32..(bytes.min(*this.max_batch_size) as i32);
+                        let fetch_range =
+                            1i32..(bytes.saturating_add(1).min(*this.max_batch_size) as i32);
                         *this.fetch_fut = FutureExt::fuse(Box::pin(async move {
                             let (records_and_offsets, watermark) = client
                                 .fetch_records(offset, fetch_range, max_wait_ms)
