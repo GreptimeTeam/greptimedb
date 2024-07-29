@@ -30,6 +30,7 @@ pub trait RegionWalIndexIterator: Send + Sync {
     fn next(&mut self) -> Option<EntryId>;
 }
 
+/// Represents a range [next_entry_id, end_entry_id) of WAL entries for a region.
 pub struct RegionWalRange {
     next_entry_id: EntryId,
     end_entry_id: EntryId,
@@ -74,6 +75,8 @@ impl RegionWalIndexIterator for RegionWalRange {
     }
 }
 
+/// Represents an index of Write-Ahead Log entries for a region,
+/// stored as a vector of [EntryId]s.
 pub struct RegionWalVecIndex {
     index: VecDeque<EntryId>,
 }
@@ -113,6 +116,9 @@ impl RegionWalIndexIterator for RegionWalVecIndex {
     }
 }
 
+/// Represents an iterator over multiple region WAL indexes.
+/// 
+/// Allowing iteration through multiple WAL indexes.
 pub struct MultipleRegionWalIndexIterator {
     iterator: VecDeque<Box<dyn RegionWalIndexIterator>>,
 }
