@@ -51,7 +51,9 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Run sqlness
-        run: cargo sqlness --preserve-state
+        run: make sqlness-test
+        env:
+          SQLNESS_OPTS: "--preserve-state"
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v4
