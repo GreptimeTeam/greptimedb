@@ -134,7 +134,15 @@ where
         };
 
         let user_provider = self.plugins.get::<UserProviderRef>();
-        let runtime = match opts.mode {
+
+        // Determine whether it is Standalone or Distributed mode based on whether the meta client is configured.
+        let mode = if opts.meta_client.is_none() {
+            Mode::Standalone
+        } else {
+            Mode::Distributed
+        };
+
+        let runtime = match mode {
             Mode::Standalone => Some(builder.runtime().clone()),
             _ => None,
         };

@@ -932,7 +932,7 @@ impl Server for HttpServer {
 
 /// handle error middleware
 async fn handle_error(err: BoxError) -> Json<HttpResponse> {
-    error!(err; "Unhandled internal error");
+    error!(err; "Unhandled internal error: {}", err.to_string());
     Json(HttpResponse::Error(ErrorResponse::from_error_message(
         StatusCode::Unexpected,
         format!("Unhandled internal error: {err}"),

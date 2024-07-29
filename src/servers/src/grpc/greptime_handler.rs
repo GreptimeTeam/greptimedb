@@ -83,7 +83,8 @@ impl GreptimeRequestHandler {
                 .await
                 .map_err(|e| {
                     if e.status_code().should_log_error() {
-                        error!(e; "Failed to handle request");
+                        let root_error = e.root_cause().unwrap_or(&e);
+                        error!(e; "Failed to handle request, error: {}", root_error.to_string());
                     } else {
                         // Currently, we still print a debug log.
                         debug!("Failed to handle request, err: {:?}", e);

@@ -286,7 +286,7 @@ impl CountdownTaskHandle {
             region_id,
             rx,
         };
-        let handler = common_runtime::spawn_global(async move {
+        let handler = common_runtime::spawn_hb(async move {
             countdown_task.run().await;
         });
 

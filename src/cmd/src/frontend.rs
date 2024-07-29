@@ -243,7 +243,6 @@ impl StartCommand {
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs
                 .clone_from(metasrv_addrs);
-            opts.mode = Mode::Distributed;
         }
 
         if let Some(user_provider) = &self.user_provider {
@@ -317,7 +316,7 @@ impl StartCommand {
         );
 
         let catalog_manager = KvBackendCatalogManager::new(
-            opts.mode,
+            Mode::Distributed,
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
@@ -448,7 +447,6 @@ mod tests {
 
         let fe_opts = command.load_options(&Default::default()).unwrap().component;
 
-        assert_eq!(Mode::Distributed, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(30), fe_opts.http.timeout);
 

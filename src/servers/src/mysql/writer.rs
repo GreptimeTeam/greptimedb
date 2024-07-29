@@ -53,16 +53,19 @@ pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
 }
 
 /// Handle GreptimeDB error, convert it to MySQL error
-pub fn handle_err(e: impl ErrorExt) -> (ErrorKind, String) {
+pub fn handle_err(e: impl ErrorExt, query_ctx: QueryContextRef) -> (ErrorKind, String) {
     let status_code = e.status_code();
     let kind = mysql_error_kind(&status_code);
 
     if status_code.should_log_error() {
-        error!(e; "Failed to handle mysql query, code: {}, kind: {:?}", status_code, kind);
+        let root_error = e.root_cause().unwrap_or(&e);
+        error!(e; "Failed to handle mysql query, code: {}, error: {}, db: {}", status_code, root_error.to_string(), query_ctx.get_db_string());
     } else {
         debug!(
-            "Failed to handle mysql query, code: {}, kind: {:?}, error: {:?}",
-            status_code, kind, e
+            "Failed to handle mysql query, code: {}, db: {}, error: {:?}",
+            status_code,
+            query_ctx.get_db_string(),
+            e
         );
     };
     let msg = e.output_msg();
@@ -124,7 +127,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     )));
                 }
             },
-            Err(error) => Self::write_query_error(error, self.writer).await?,
+            Err(error) => Self::write_query_error(error, self.writer, self.query_context).await?,
         }
         Ok(None)
     }
@@ -169,7 +172,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                             .await?
                         }
                         Err(e) => {
-                            let (kind, err) = handle_err(e);
+                            let (kind, err) = handle_err(e, query_context);
                             debug!("Failed to get result, kind: {:?}, err: {}", kind, err);
                             row_writer.finish_error(kind, &err.as_bytes()).await?;
 
@@ -180,7 +183,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                 row_writer.finish().await?;
                 Ok(())
             }
-            Err(error) => Self::write_query_error(error, writer).await,
+            Err(error) => Self::write_query_error(error, writer, query_context).await,
         }
     }
 
@@ -234,12 +237,16 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         Ok(())
     }
 
-    async fn write_query_error(error: impl ErrorExt, w: QueryResultWriter<'a, W>) -> Result<()> {
+    async fn write_query_error(
+        error: impl ErrorExt,
+        w: QueryResultWriter<'a, W>,
+        query_context: QueryContextRef,
+    ) -> Result<()> {
         METRIC_ERROR_COUNTER
             .with_label_values(&[METRIC_ERROR_COUNTER_LABEL_MYSQL])
             .inc();
 
-        let (kind, err) = handle_err(error);
+        let (kind, err) = handle_err(error, query_context);
         debug!("Write query error, kind: {:?}, err: {}", kind, err);
         w.error(kind, err.as_bytes()).await?;
         Ok(())

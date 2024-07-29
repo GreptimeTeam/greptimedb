@@ -19,7 +19,7 @@ use datatypes::schema::{Schema, SchemaRef};
 use datatypes::vectors::{Int64Vector, StringVector, VectorRef};
 
 use super::table_names::*;
-use crate::system_schema::memory_table::tables::{
+use crate::system_schema::utils::tables::{
     bigint_column, datetime_column, string_column, string_columns,
 };
 

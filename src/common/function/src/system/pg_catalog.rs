@@ -12,33 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod build;
-mod database;
-mod pg_catalog;
-mod procedure_state;
-mod timezone;
-mod version;
+mod pg_get_userbyid;
+mod table_is_visible;
 
 use std::sync::Arc;
 
-use build::BuildFunction;
-use database::DatabaseFunction;
-use pg_catalog::PGCatalogFunction;
-use procedure_state::ProcedureStateFunction;
-use timezone::TimezoneFunction;
-use version::VersionFunction;
+use pg_get_userbyid::PGGetUserByIdFunction;
+use table_is_visible::PGTableIsVisibleFunction;
 
 use crate::function_registry::FunctionRegistry;
 
-pub(crate) struct SystemFunction;
+#[macro_export]
+macro_rules! pg_catalog_func_fullname {
+    ($name:literal) => {
+        concat!("pg_catalog.", $name)
+    };
+}
 
-impl SystemFunction {
+pub(super) struct PGCatalogFunction;
+
+impl PGCatalogFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(BuildFunction));
-        registry.register(Arc::new(VersionFunction));
-        registry.register(Arc::new(DatabaseFunction));
-        registry.register(Arc::new(TimezoneFunction));
-        registry.register(Arc::new(ProcedureStateFunction));
-        PGCatalogFunction::register(registry);
+        registry.register(Arc::new(PGTableIsVisibleFunction));
+        registry.register(Arc::new(PGGetUserByIdFunction));
     }
 }
