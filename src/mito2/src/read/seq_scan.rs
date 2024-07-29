@@ -408,7 +408,7 @@ impl SeqScan {
                 metrics.total_cost = stream_ctx.query_start.elapsed();
                 metrics.observe_metrics_on_finish();
 
-                common_telemetry::info!(
+                common_telemetry::debug!(
                     "Seq scan finished, region_id: {}, partition: {}, id: {}, metrics: {:?}, first_poll: {:?}",
                     stream_ctx.input.mapper.metadata().region_id,
                     partition,
