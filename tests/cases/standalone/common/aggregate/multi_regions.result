@@ -73,6 +73,7 @@ select sum(val) from t;
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
@@ -85,7 +86,7 @@ select sum(val) from t group by idc;
 | 0_| 0_|_ProjectionExec: expr=[SUM(t.val)@1 as SUM(t.val)] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[SUM(t.val)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([idc@0], 32), input_partitions=32 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[idc@1 as idc], aggr=[SUM(t.val)] REDACTED
 |_|_|_ProjectionExec: expr=[val@1 as val, idc@3 as idc] REDACTED
