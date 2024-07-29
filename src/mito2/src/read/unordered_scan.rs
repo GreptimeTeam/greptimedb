@@ -148,13 +148,18 @@ impl RegionScanner for UnorderedScan {
         let stream = try_stream! {
             let first_poll = stream_ctx.query_start.elapsed();
 
-            let mut parts = stream_ctx.parts.lock().await;
-            maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics)
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            let Some(part) = parts.0.get_part(partition) else {
-                return;
+            let part = {
+                let mut parts = stream_ctx.parts.lock().await;
+                maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                // Clone the part and releases the lock.
+                // We might wrap the part in an Arc in the future if cloning is too expensive.
+                let Some(part) = parts.0.get_part(partition).cloned() else {
+                    return;
+                };
+                part
             };
 
             let build_reader_start = Instant::now();

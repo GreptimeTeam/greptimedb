@@ -723,7 +723,7 @@ pub(crate) type FileRangesGroup = SmallVec<[Vec<FileRange>; 4]>;
 
 /// A partition of a scanner to read.
 /// It contains memtables and file ranges to scan.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ScanPart {
     /// Memtable ranges to scan.
     pub(crate) memtable_ranges: Vec<MemtableRange>,
