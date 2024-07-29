@@ -679,7 +679,7 @@
           "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_sql_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "sql-{{db}}-p95",
           "range": true,
           "refId": "SQL P95"
         },
@@ -692,7 +692,7 @@
           "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_sql_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "sql-{{db}}-p99",
           "range": true,
           "refId": "SQL P99"
         },
@@ -705,7 +705,7 @@
           "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_prometheus_read_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "promstore-read-{{db}}-p95",
           "range": true,
           "refId": "PromStore Read P95"
         },
@@ -718,9 +718,35 @@
           "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_prometheus_read_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "promstore-read-{{db}}-p99",
           "range": true,
           "refId": "PromStore Read P99"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, db, method) (rate(greptime_servers_http_prometheus_promql_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "prom-promql-{{db}}-{{method}}-p95",
+          "range": true,
+          "refId": "Prometheus PromQL P95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, db, method) (rate(greptime_servers_http_prometheus_promql_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "prom-promql-{{db}}-{{method}}-p99",
+          "range": true,
+          "refId": "Prometheus PromQL P99"
         }
       ],
       "title": "HTTP query elapsed",
@@ -1088,6 +1114,106 @@
         }
       ],
       "title": "gRPC insert elapsed",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS-1}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "id": 36,
+      "interval": "1s",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "sum by(db) (rate(greptime_servers_http_logs_ingestion_counter[$__rate_interval]))",
+          "fullMetaSearch": false,
+          "includeNullMetadata": false,
+          "instant": false,
+          "legendFormat": "{{db}}",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Logs ingest rate (number of lines)",
       "type": "timeseries"
     },
     {
