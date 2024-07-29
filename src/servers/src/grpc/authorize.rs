@@ -138,7 +138,7 @@ mod tests {
     use base64::Engine;
     use headers::Header;
     use hyper::{Body, Request};
-    use session::context::QueryContextRef;
+    use session::context::QueryContext;
 
     use crate::grpc::authorize::do_auth;
     use crate::http::header::GreptimeDbName;
@@ -196,7 +196,7 @@ mod tests {
         expected_schema: &str,
         expected_user_name: &str,
     ) {
-        let ctx = req.extensions().get::<QueryContextRef>().unwrap();
+        let ctx = req.extensions().get::<QueryContext>().unwrap();
         assert_eq!(expected_catalog, ctx.current_catalog());
         assert_eq!(expected_schema, ctx.current_schema());
 
