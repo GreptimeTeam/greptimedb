@@ -19,7 +19,7 @@ use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
-use common_telemetry::tracing;
+use common_telemetry::{debug, error, tracing};
 use datatypes::schema::SchemaRef;
 use futures::{future, stream, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
@@ -95,11 +95,26 @@ fn output_to_query_response<'a>(
                 )
             }
         },
-        Err(e) => Ok(Response::Error(Box::new(ErrorInfo::new(
-            "ERROR".to_string(),
-            "XX000".to_string(),
-            e.output_msg(),
-        )))),
+        Err(e) => {
+            let status_code = e.status_code();
+
+            if status_code.should_log_error() {
+                let root_error = e.root_cause().unwrap_or(&e);
+                error!(e; "Failed to handle postgres query, code: {}, db: {}, error: {}", status_code, query_ctx.get_db_string(), root_error.to_string());
+            } else {
+                debug!(
+                    "Failed to handle postgres query, code: {}, db: {}, error: {:?}",
+                    status_code,
+                    query_ctx.get_db_string(),
+                    e
+                );
+            };
+            Ok(Response::Error(Box::new(ErrorInfo::new(
+                "ERROR".to_string(),
+                "XX000".to_string(),
+                e.output_msg(),
+            ))))
+        }
     }
 }
 
