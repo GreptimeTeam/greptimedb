@@ -53,14 +53,14 @@ pub(crate) fn row_selection_from_row_ranges(
 /// Note: the input iterator must be sorted in ascending order and
 ///       contain unique row IDs in the range [0, total_row_count).
 pub(crate) fn row_selection_from_sorted_row_ids(
-    row_ids: impl Iterator<Item = u32>,
+    row_ids: impl Iterator<Item = usize>,
     total_row_count: usize,
 ) -> RowSelection {
     let mut selectors: Vec<RowSelector> = Vec::new();
     let mut last_processed_end = 0;
 
     for row_id in row_ids {
-        let start = row_id as usize;
+        let start = row_id;
         let end = start + 1;
 
         if start > last_processed_end {

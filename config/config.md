@@ -168,7 +168,6 @@
 
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
-| `mode` | String | `standalone` | The running mode of the datanode. It can be `standalone` or `distributed`. |
 | `default_timezone` | String | `None` | The default timezone of the server. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |

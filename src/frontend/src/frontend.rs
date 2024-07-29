@@ -20,7 +20,6 @@ use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
-use servers::Mode;
 
 use crate::service_config::{
     DatanodeOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
@@ -30,7 +29,6 @@ use crate::service_config::{
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct FrontendOptions {
-    pub mode: Mode,
     pub node_id: Option<String>,
     pub default_timezone: Option<String>,
     pub heartbeat: HeartbeatOptions,
@@ -53,7 +51,6 @@ pub struct FrontendOptions {
 impl Default for FrontendOptions {
     fn default() -> Self {
         Self {
-            mode: Mode::Standalone,
             node_id: None,
             default_timezone: None,
             heartbeat: HeartbeatOptions::frontend_default(),
