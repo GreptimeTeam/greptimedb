@@ -29,7 +29,6 @@ use axum::response::{Html, IntoResponse, Json, Response};
 use axum::{middleware, routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
-use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatch;
 use common_telemetry::{error, info};

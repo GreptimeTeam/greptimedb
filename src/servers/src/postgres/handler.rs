@@ -100,11 +100,13 @@ fn output_to_query_response<'a>(
 
             if status_code.should_log_error() {
                 let root_error = e.root_cause().unwrap_or(&e);
-                error!(e; "Failed to handle postgres query, code: {}, error: {}", status_code, root_error.to_string());
+                error!(e; "Failed to handle postgres query, code: {}, db: {}, error: {}", status_code, query_ctx.get_db_string(), root_error.to_string());
             } else {
                 debug!(
-                    "Failed to handle postgres query, code: {}, error: {:?}",
-                    status_code, e
+                    "Failed to handle postgres query, code: {}, db: {}, error: {:?}",
+                    status_code,
+                    query_ctx.get_db_string(),
+                    e
                 );
             };
             Ok(Response::Error(Box::new(ErrorInfo::new(
