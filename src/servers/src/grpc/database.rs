@@ -18,12 +18,15 @@ use api::v1::{AffectedRows, GreptimeRequest, GreptimeResponse, ResponseHeader};
 use async_trait::async_trait;
 use common_error::status_code::StatusCode;
 use common_query::OutputData;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use futures::StreamExt;
+use tonic::metadata::{KeyAndValueRef, MetadataMap};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::{cancellation, TonicResult};
+
+pub const GREPTIME_DB_HEADER_HINT_PREFIX: &str = "x-greptime-hint:";
 
 pub(crate) struct DatabaseService {
     handler: GreptimeRequestHandler,
@@ -32,6 +35,31 @@ pub(crate) struct DatabaseService {
 impl DatabaseService {
     pub(crate) fn new(handler: GreptimeRequestHandler) -> Self {
         Self { handler }
+    }
+
+    fn extract_hints(&self, metadata: &MetadataMap) -> Vec<(String, String)> {
+        metadata
+            .iter()
+            .filter_map(|kv| {
+                let KeyAndValueRef::Ascii(key, value) = kv else {
+                    return None;
+                };
+                let key = key.as_str();
+                if !key.starts_with(GREPTIME_DB_HEADER_HINT_PREFIX) {
+                    return None;
+                }
+                let Ok(value) = value.to_str() else {
+                    // Simply return None for non-string values.
+                    return None;
+                };
+                // Safety: we already checked the prefix.
+                let new_key = key
+                    .strip_prefix(GREPTIME_DB_HEADER_HINT_PREFIX)
+                    .unwrap()
+                    .to_string();
+                Some((new_key, value.to_string()))
+            })
+            .collect()
     }
 }
 
@@ -42,10 +70,15 @@ impl GreptimeDatabase for DatabaseService {
         request: Request<GreptimeRequest>,
     ) -> TonicResult<Response<GreptimeResponse>> {
         let remote_addr = request.remote_addr();
+        let hints = self.extract_hints(request.metadata());
+        debug!(
+            "GreptimeDatabase::Handle: request from {:?} with hints: {:?}",
+            remote_addr, hints
+        );
         let handler = self.handler.clone();
         let request_future = async move {
             let request = request.into_inner();
-            let output = handler.handle_request(request).await?;
+            let output = handler.handle_request(request, hints).await?;
             let message = match output.data {
                 OutputData::AffectedRows(rows) => GreptimeResponse {
                     header: Some(ResponseHeader {
@@ -83,6 +116,11 @@ impl GreptimeDatabase for DatabaseService {
         request: Request<Streaming<GreptimeRequest>>,
     ) -> Result<Response<GreptimeResponse>, Status> {
         let remote_addr = request.remote_addr();
+        let hints = self.extract_hints(request.metadata());
+        debug!(
+            "GreptimeDatabase::HandleRequests: request from {:?} with hints: {:?}",
+            remote_addr, hints
+        );
         let handler = self.handler.clone();
         let request_future = async move {
             let mut affected_rows = 0;
@@ -90,7 +128,7 @@ impl GreptimeDatabase for DatabaseService {
             let mut stream = request.into_inner();
             while let Some(request) = stream.next().await {
                 let request = request?;
-                let output = handler.handle_request(request).await?;
+                let output = handler.handle_request(request, hints.clone()).await?;
                 match output.data {
                     OutputData::AffectedRows(rows) => affected_rows += rows,
                     OutputData::Stream(_) | OutputData::RecordBatches(_) => {

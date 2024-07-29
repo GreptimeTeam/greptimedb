@@ -644,9 +644,18 @@ impl Inserter {
         statement_executor: &StatementExecutor,
         create_type: AutoCreateTableType,
     ) -> Result<TableRef> {
+        let mut hint_options = vec![];
         let options: &[(&str, &str)] = match create_type {
             AutoCreateTableType::Logical(_) => unreachable!(),
-            AutoCreateTableType::Physical => &[],
+            AutoCreateTableType::Physical => {
+                if let Some(append_mode) = ctx.extension(APPEND_MODE_KEY) {
+                    hint_options.push((APPEND_MODE_KEY, append_mode));
+                }
+                if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
+                    hint_options.push((MERGE_MODE_KEY, merge_mode));
+                }
+                hint_options.as_slice()
+            }
             // Set append_mode to true for log table.
             // because log tables should keep rows with the same ts and tags.
             AutoCreateTableType::Log => &[(APPEND_MODE_KEY, "true")],

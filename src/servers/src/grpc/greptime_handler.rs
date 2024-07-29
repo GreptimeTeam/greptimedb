@@ -59,13 +59,17 @@ impl GreptimeRequestHandler {
     }
 
     #[tracing::instrument(skip_all, fields(protocol = "grpc", request_type = get_request_type(&request)))]
-    pub(crate) async fn handle_request(&self, request: GreptimeRequest) -> Result<Output> {
+    pub(crate) async fn handle_request(
+        &self,
+        request: GreptimeRequest,
+        hints: Vec<(String, String)>,
+    ) -> Result<Output> {
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
 
         let header = request.header.as_ref();
-        let query_ctx = create_query_context(header);
+        let query_ctx = create_query_context(header, hints);
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
@@ -164,7 +168,10 @@ pub(crate) async fn auth(
     })
 }
 
-pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
+pub(crate) fn create_query_context(
+    header: Option<&RequestHeader>,
+    extensions: Vec<(String, String)>,
+) -> QueryContextRef {
     let (catalog, schema) = header
         .map(|header| {
             // We provide dbname field in newer versions of protos/sdks
@@ -193,12 +200,14 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
             )
         });
     let timezone = parse_timezone(header.map(|h| h.timezone.as_str()));
-    QueryContextBuilder::default()
+    let mut ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog)
         .current_schema(schema)
-        .timezone(timezone)
-        .build()
-        .into()
+        .timezone(timezone);
+    for (key, value) in extensions {
+        ctx_builder = ctx_builder.set_extension(key, value);
+    }
+    ctx_builder.build().into()
 }
 
 /// Histogram timer for handling gRPC request.
