@@ -42,7 +42,7 @@ use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
+use session::context::QueryContext;
 use snafu::{Location, OptionExt, ResultExt};
 
 pub use super::prometheus_resp::PrometheusJsonResponse;
@@ -122,7 +122,7 @@ pub struct FormatQuery {
 pub async fn format_query(
     State(_handler): State<PrometheusHandlerRef>,
     Query(params): Query<InstantQuery>,
-    Extension(_query_ctx): Extension<QueryContextRef>,
+    Extension(_query_ctx): Extension<QueryContext>,
     Form(form_params): Form<InstantQuery>,
 ) -> PrometheusJsonResponse {
     let query = params.query.or(form_params.query).unwrap_or_default();
@@ -168,7 +168,7 @@ pub struct InstantQuery {
 pub async fn instant_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<InstantQuery>,
-    Extension(mut query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<InstantQuery>,
 ) -> PrometheusJsonResponse {
     // Extract time from query string, or use current server time if not specified.
@@ -190,9 +190,10 @@ pub async fn instant_query(
     // update catalog and schema in query context if necessary
     if let Some(db) = &params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+        try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
     }
 
+    let query_ctx = Arc::new(query_ctx);
     let result = handler.do_query(&prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
@@ -222,7 +223,7 @@ pub struct RangeQuery {
 pub async fn range_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<RangeQuery>,
-    Extension(mut query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<RangeQuery>,
 ) -> PrometheusJsonResponse {
     let prom_query = PromQuery {
@@ -239,9 +240,10 @@ pub async fn range_query(
     // update catalog and schema in query context if necessary
     if let Some(db) = &params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+        try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
     }
 
+    let query_ctx = Arc::new(query_ctx);
     let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Err(err) => {
@@ -305,11 +307,12 @@ impl<'de> Deserialize<'de> for Matches {
 pub async fn labels_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<LabelsQuery>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<LabelsQuery>,
 ) -> PrometheusJsonResponse {
     let (catalog, schema) = get_catalog_schema(&params.db, &query_ctx);
-    let query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+    try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
+    let query_ctx = Arc::new(query_ctx);
 
     let mut queries = params.matches.0;
     if queries.is_empty() {
@@ -613,20 +616,10 @@ pub(crate) fn get_catalog_schema(db: &Option<String>, ctx: &QueryContext) -> (St
 }
 
 /// Update catalog and schema in [QueryContext] if necessary.
-pub(crate) fn try_update_catalog_schema(
-    ctx: QueryContextRef,
-    catalog: &str,
-    schema: &str,
-) -> QueryContextRef {
+pub(crate) fn try_update_catalog_schema(ctx: &mut QueryContext, catalog: &str, schema: &str) {
     if ctx.current_catalog() != catalog || ctx.current_schema() != schema {
-        Arc::new(
-            QueryContextBuilder::from_existing(&ctx)
-                .current_catalog(catalog.to_string())
-                .current_schema(schema.to_string())
-                .build(),
-        )
-    } else {
-        ctx
+        ctx.set_current_catalog(catalog);
+        ctx.set_current_schema(schema);
     }
 }
 
@@ -681,11 +674,12 @@ pub struct LabelValueQuery {
 pub async fn label_values_query(
     State(handler): State<PrometheusHandlerRef>,
     Path(label_name): Path<String>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Query(params): Query<LabelValueQuery>,
 ) -> PrometheusJsonResponse {
     let (catalog, schema) = get_catalog_schema(&params.db, &query_ctx);
-    let query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+    try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
+    let query_ctx = Arc::new(query_ctx);
 
     if label_name == METRIC_NAME_LABEL {
         let mut table_names = match handler
@@ -939,7 +933,7 @@ pub struct SeriesQuery {
 pub async fn series_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<SeriesQuery>,
-    Extension(mut query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<SeriesQuery>,
 ) -> PrometheusJsonResponse {
     let mut queries: Vec<String> = params.matches.0;
@@ -965,8 +959,9 @@ pub async fn series_query(
     // update catalog and schema in query context if necessary
     if let Some(db) = &params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+        try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
     }
+    let query_ctx = Arc::new(query_ctx);
 
     let mut series = Vec::new();
     let mut merge_map = HashMap::new();

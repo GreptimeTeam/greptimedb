@@ -187,6 +187,10 @@ impl QueryContext {
         &self.current_catalog
     }
 
+    pub fn set_current_catalog(&mut self, new_catalog: &str) {
+        self.current_catalog = new_catalog.to_string();
+    }
+
     pub fn sql_dialect(&self) -> &(dyn Dialect + Send + Sync) {
         &*self.sql_dialect
     }
@@ -270,18 +274,6 @@ impl QueryContextBuilder {
             .get_or_insert_with(HashMap::new)
             .insert(key, value);
         self
-    }
-
-    pub fn from_existing(context: &QueryContext) -> QueryContextBuilder {
-        QueryContextBuilder {
-            current_catalog: Some(context.current_catalog.clone()),
-            // note that this is a shallow copy
-            mutable_inner: Some(context.mutable_inner.clone()),
-            sql_dialect: Some(context.sql_dialect.clone()),
-            extensions: Some(context.extensions.clone()),
-            configuration_parameter: Some(context.configuration_parameter.clone()),
-            channel: Some(context.channel),
-        }
     }
 }
 
