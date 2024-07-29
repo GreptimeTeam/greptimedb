@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
@@ -162,11 +162,11 @@ impl SeqScan {
         // initialize parts list
         let mut parts = stream_ctx.parts.lock().await;
         Self::maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
-        let parts_len = parts.len();
+        let parts_len = parts.0.len();
 
         let mut sources = Vec::with_capacity(parts_len);
         for id in 0..parts_len {
-            let Some(part) = parts.get_part(id) else {
+            let Some(part) = parts.0.get_part(id) else {
                 return Ok(None);
             };
 
@@ -190,7 +190,7 @@ impl SeqScan {
             let mut parts = stream_ctx.parts.lock().await;
             Self::maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
 
-            let Some(part) = parts.get_part(range_id) else {
+            let Some(part) = parts.0.get_part(range_id) else {
                 return Ok(None);
             };
 
@@ -367,7 +367,7 @@ impl SeqScan {
                 Self::maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics).await
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
-                parts.len()
+                parts.0.len()
             };
 
             for id in (0..parts_len).skip(partition).step_by(num_partitions) {
@@ -430,10 +430,10 @@ impl SeqScan {
     /// Initializes parts if they are not built yet.
     async fn maybe_init_parts(
         input: &ScanInput,
-        part_list: &mut ScanPartList,
+        part_list: &mut (ScanPartList, Duration),
         metrics: &mut ScannerMetrics,
     ) -> Result<()> {
-        if part_list.is_none() {
+        if part_list.0.is_none() {
             let now = Instant::now();
             let mut distributor = SeqDistributor::default();
             input.prune_file_ranges(&mut distributor).await?;
@@ -442,14 +442,16 @@ impl SeqScan {
                 Some(input.mapper.column_ids()),
                 input.predicate.clone(),
             );
-            part_list.set_parts(distributor.build_parts(input.parallelism.parallelism));
+            part_list
+                .0
+                .set_parts(distributor.build_parts(input.parallelism.parallelism));
+            let build_part_cost = now.elapsed();
+            part_list.1 = build_part_cost;
 
-            metrics.observe_init_part(now.elapsed());
-            common_telemetry::info!(
-                "Seq scan maybe init parts done, region_id: {}, cost: {:?}",
-                input.mapper.metadata().region_id,
-                now.elapsed()
-            );
+            metrics.observe_init_part(build_part_cost);
+        } else {
+            // Updates the cost of building parts.
+            metrics.build_parts_cost = part_list.1;
         }
         Ok(())
     }

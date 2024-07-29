@@ -766,16 +766,13 @@ impl ScannerMetrics {
         READ_STAGE_ELAPSED
             .with_label_values(&["build_parts"])
             .observe(self.build_parts_cost.as_secs_f64());
-        if !self.build_reader_cost.is_zero() {
-            // Not all scanner has this cost.
-            READ_STAGE_ELAPSED
-                .with_label_values(&["build_reader"])
-                .observe(self.build_reader_cost.as_secs_f64());
-        }
     }
 
     /// Observes metrics on scanner finish.
     fn observe_metrics_on_finish(&self) {
+        READ_STAGE_ELAPSED
+            .with_label_values(&["build_reader"])
+            .observe(self.build_reader_cost.as_secs_f64());
         READ_STAGE_ELAPSED
             .with_label_values(&["convert_rb"])
             .observe(self.convert_cost.as_secs_f64());
@@ -783,11 +780,11 @@ impl ScannerMetrics {
             .with_label_values(&["scan"])
             .observe(self.scan_cost.as_secs_f64());
         READ_STAGE_ELAPSED
-            .with_label_values(&["total"])
-            .observe(self.total_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
             .with_label_values(&["yield"])
             .observe(self.yield_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["total"])
+            .observe(self.total_cost.as_secs_f64());
         READ_ROWS_RETURN.observe(self.num_rows as f64);
         READ_BATCHES_RETURN.observe(self.num_batches as f64);
     }

@@ -855,10 +855,10 @@ impl ScanPartList {
 pub(crate) struct StreamContext {
     /// Input memtables and files.
     pub(crate) input: ScanInput,
-    /// Parts to scan.
+    /// Parts to scan and the cost to build parts.
     /// The scanner builds parts to scan from the input lazily.
     /// The mutex is used to ensure the parts are only built once.
-    pub(crate) parts: Mutex<ScanPartList>,
+    pub(crate) parts: Mutex<(ScanPartList, Duration)>,
 
     // Metrics:
     /// The start time of the query.
@@ -872,7 +872,7 @@ impl StreamContext {
 
         Self {
             input,
-            parts: Mutex::new(ScanPartList::default()),
+            parts: Mutex::new((ScanPartList::default(), Duration::default())),
             query_start,
         }
     }
@@ -888,11 +888,11 @@ impl StreamContext {
                 DisplayFormatType::Default => write!(
                     f,
                     "partition_count={} ({} memtable ranges, {} file ranges)",
-                    inner.len(),
-                    inner.num_mem_ranges(),
-                    inner.num_file_ranges()
+                    inner.0.len(),
+                    inner.0.num_mem_ranges(),
+                    inner.0.num_file_ranges()
                 )?,
-                DisplayFormatType::Verbose => write!(f, "{:?}", &*inner)?,
+                DisplayFormatType::Verbose => write!(f, "{:?}", inner.0)?,
             },
             Err(_) => write!(f, "<locked>")?,
         }
