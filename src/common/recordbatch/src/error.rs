@@ -73,6 +73,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Create physical expr error"))]
+    PhysicalExpr {
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Fail to format record batch"))]
     Format {
         #[snafu(source)]
@@ -167,7 +175,8 @@ impl ErrorExt for Error {
             | Error::PollStream { .. }
             | Error::Format { .. }
             | Error::ToArrowScalar { .. }
-            | Error::ProjectArrowRecordBatch { .. } => StatusCode::Internal,
+            | Error::ProjectArrowRecordBatch { .. }
+            | Error::PhysicalExpr { .. } => StatusCode::Internal,
 
             Error::ArrowCompute { .. } => StatusCode::IllegalState,
 

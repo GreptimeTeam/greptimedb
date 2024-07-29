@@ -14,11 +14,18 @@
 
 //! Util record batch stream wrapper that can perform precise filter.
 
+use std::sync::Arc;
+
+use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::{Expr, Literal, Operator};
+use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::arrow::array::{ArrayRef, Datum, Scalar};
 use datafusion_common::arrow::buffer::BooleanBuffer;
 use datafusion_common::arrow::compute::kernels::cmp;
-use datafusion_common::ScalarValue;
+use datafusion_common::cast::{as_boolean_array, as_null_array};
+use datafusion_common::{internal_err, DataFusionError, ScalarValue};
+use datatypes::arrow::array::{Array, BooleanArray, RecordBatch};
+use datatypes::arrow::compute::filter_record_batch;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 
@@ -144,13 +151,43 @@ impl SimpleFilterEvaluator {
     }
 }
 
+/// Evaluate the predicate on the input [RecordBatch], and return a new [RecordBatch].
+/// Copy from datafusion::physical_plan::src::filter.rs
+pub fn batch_filter(
+    batch: &RecordBatch,
+    predicate: &Arc<dyn PhysicalExpr>,
+) -> DfResult<RecordBatch> {
+    predicate
+        .evaluate(batch)
+        .and_then(|v| v.into_array(batch.num_rows()))
+        .and_then(|array| {
+            let filter_array = match as_boolean_array(&array) {
+                Ok(boolean_array) => Ok(boolean_array.clone()),
+                Err(_) => {
+                    let Ok(null_array) = as_null_array(&array) else {
+                        return internal_err!(
+                            "Cannot create filter_array from non-boolean predicates"
+                        );
+                    };
+
+                    // if the predicate is null, then the result is also null
+                    Ok::<BooleanArray, DataFusionError>(BooleanArray::new_null(null_array.len()))
+                }
+            }?;
+            Ok(filter_record_batch(batch, &filter_array)?)
+        })
+}
+
 #[cfg(test)]
 mod test {
 
     use std::sync::Arc;
 
-    use datafusion::logical_expr::BinaryExpr;
-    use datafusion_common::Column;
+    use datafusion::execution::context::ExecutionProps;
+    use datafusion::logical_expr::{col, lit, BinaryExpr};
+    use datafusion::physical_expr::create_physical_expr;
+    use datafusion_common::{Column, DFSchema};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
 
     use super::*;
 
@@ -280,5 +317,36 @@ mod test {
         let input_3 = ScalarValue::Int64(None);
         let result = evaluator.evaluate_scalar(&input_3).unwrap();
         assert!(!result);
+    }
+
+    #[test]
+    fn batch_filter_test() {
+        let expr = col("ts").gt(lit(123456u64));
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("ts", DataType::UInt64, false),
+        ]);
+        let df_schema = DFSchema::try_from(schema.clone()).unwrap();
+        let props = ExecutionProps::new();
+        let physical_expr = create_physical_expr(&expr, &df_schema, &props).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(datatypes::arrow::array::Int32Array::from(vec![4, 5, 6])),
+                Arc::new(datatypes::arrow::array::UInt64Array::from(vec![
+                    123456, 123457, 123458,
+                ])),
+            ],
+        )
+        .unwrap();
+        let new_batch = batch_filter(&batch, &physical_expr).unwrap();
+        assert_eq!(new_batch.num_rows(), 2);
+        let first_column_values = new_batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::Int32Array>()
+            .unwrap();
+        let expected = datatypes::arrow::array::Int32Array::from(vec![5, 6]);
+        assert_eq!(first_column_values, &expected);
     }
 }
