@@ -36,6 +36,7 @@ use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_common::Statistics;
+use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::vectors::Helper;
@@ -225,6 +226,7 @@ impl StatementExecutor {
         object_store: &ObjectStore,
         file_metadata: &FileMetadata,
         projection: Vec<usize>,
+        filters: Vec<Expr>,
     ) -> Result<DfSendableRecordBatchStream> {
         match file_metadata {
             FileMetadata::Csv {
@@ -252,11 +254,11 @@ impl StatementExecutor {
                     )
                     .await?;
 
-                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    projected_schema,
-                    stream,
-                    Some(projection),
-                )))
+                Ok(Box::pin(
+                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                        .with_filter(filters)
+                        .context(error::PhysicalExprSnafu)?,
+                ))
             }
             FileMetadata::Json {
                 format,
@@ -286,11 +288,11 @@ impl StatementExecutor {
                     )
                     .await?;
 
-                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    projected_schema,
-                    stream,
-                    Some(projection),
-                )))
+                Ok(Box::pin(
+                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                        .with_filter(filters)
+                        .context(error::PhysicalExprSnafu)?,
+                ))
             }
             FileMetadata::Parquet { metadata, path, .. } => {
                 let meta = object_store
@@ -317,11 +319,11 @@ impl StatementExecutor {
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
-                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    projected_schema,
-                    stream,
-                    Some(projection),
-                )))
+                Ok(Box::pin(
+                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                        .with_filter(filters)
+                        .context(error::PhysicalExprSnafu)?,
+                ))
             }
             FileMetadata::Orc { path, .. } => {
                 let meta = object_store
@@ -345,11 +347,11 @@ impl StatementExecutor {
                         .context(error::ProjectSchemaSnafu)?,
                 );
 
-                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    projected_schema,
-                    stream,
-                    Some(projection),
-                )))
+                Ok(Box::pin(
+                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                        .with_filter(filters)
+                        .context(error::PhysicalExprSnafu)?,
+                ))
             }
         }
     }
@@ -370,6 +372,14 @@ impl StatementExecutor {
         let (object_store, entries) = self.list_copy_from_entries(&req).await?;
         let mut files = Vec::with_capacity(entries.len());
         let table_schema = table.schema().arrow_schema().clone();
+        let filters = table
+            .schema()
+            .timestamp_column()
+            .and_then(|c| {
+                common_query::logical_plan::build_same_type_ts_filter(c, req.timestamp_range)
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
 
         for entry in entries.iter() {
             if entry.metadata().mode() != EntryMode::FILE {
@@ -414,6 +424,7 @@ impl StatementExecutor {
                     &object_store,
                     &file_metadata,
                     file_schema_projection,
+                    filters.clone(),
                 )
                 .await?;
 

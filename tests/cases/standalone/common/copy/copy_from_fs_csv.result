@@ -2,19 +2,24 @@ CREATE TABLE demo(host string, cpu double, memory double, ts TIMESTAMP time inde
 
 Affected Rows: 0
 
-insert into demo(host, cpu, memory, ts) values ('host1', 66.6, 1024, 1655276557000), ('host2', 88.8,  333.3, 1655276558000);
+insert into
+    demo(host, cpu, memory, ts)
+values
+    ('host1', 66.6, 1024, 1655276557000),
+    ('host2', 88.8, 333.3, 1655276558000),
+    ('host3', 99.9, 444.4, 1722077263000);
 
-Affected Rows: 2
+Affected Rows: 3
 
 Copy demo TO '/tmp/demo/export/csv/demo.csv' with (format='csv');
 
-Affected Rows: 2
+Affected Rows: 3
 
 CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp time index);
 
 Affected Rows: 0
 
-Copy with_filename FROM '/tmp/demo/export/csv/demo.csv' with (format='csv');
+Copy with_filename FROM '/tmp/demo/export/csv/demo.csv' with (format='csv', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
 
 Affected Rows: 2
 
@@ -31,26 +36,25 @@ CREATE TABLE with_path(host string, cpu double, memory double, ts timestamp time
 
 Affected Rows: 0
 
-Copy with_path FROM '/tmp/demo/export/csv/' with (format='csv');
+Copy with_path FROM '/tmp/demo/export/csv/' with (format='csv', start_time='2023-06-15 07:02:37');
 
-Affected Rows: 2
+Affected Rows: 1
 
 select * from with_path order by ts;
 
 +-------+------+--------+---------------------+
 | host  | cpu  | memory | ts                  |
 +-------+------+--------+---------------------+
-| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
-| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
+| host3 | 99.9 | 444.4  | 2024-07-27T10:47:43 |
 +-------+------+--------+---------------------+
 
 CREATE TABLE with_pattern(host string, cpu double, memory double, ts timestamp time index);
 
 Affected Rows: 0
 
-Copy with_pattern FROM '/tmp/demo/export/csv/' WITH (pattern = 'demo.*',format='csv');
+Copy with_pattern FROM '/tmp/demo/export/csv/' WITH (pattern = 'demo.*', format='csv', end_time='2025-06-15 07:02:39');
 
-Affected Rows: 2
+Affected Rows: 3
 
 select * from with_pattern order by ts;
 
@@ -59,6 +63,7 @@ select * from with_pattern order by ts;
 +-------+------+--------+---------------------+
 | host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
 | host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
+| host3 | 99.9 | 444.4  | 2024-07-27T10:47:43 |
 +-------+------+--------+---------------------+
 
 drop table demo;

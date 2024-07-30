@@ -51,13 +51,15 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Run sqlness
-        run: cargo sqlness
+        run: make sqlness-test
+        env:
+          SQLNESS_OPTS: "--preserve-state"
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
-          path: /tmp/greptime-*.log
+          path: C:\tmp\greptime-*.log
           retention-days: 3
 
   test-on-windows:
@@ -109,11 +111,7 @@ jobs:
 
   check-status:
     name: Check status
-    needs: [
-      sqlness-test,
-      sqlness-windows,
-      test-on-windows,
-    ]
+    needs: [sqlness-test, sqlness-windows, test-on-windows]
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: ubuntu-20.04
     outputs:
@@ -127,9 +125,7 @@ jobs:
   notification:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }} # Not requiring successful dependent jobs, always run.
     name: Send notification to Greptime team
-    needs: [
-      check-status
-    ]
+    needs: [check-status]
     runs-on: ubuntu-20.04
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}

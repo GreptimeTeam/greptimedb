@@ -2,31 +2,41 @@ CREATE TABLE demo(host string, cpu double, memory double, ts TIMESTAMP time inde
 
 Affected Rows: 0
 
-insert into demo(host, cpu, memory, ts) values ('host1', 66.6, 1024, 1655276557000), ('host2', 88.8,  333.3, 1655276558000);
-
-Affected Rows: 2
-
-Copy demo TO '/tmp/demo/export/parquet_files/demo.parquet';
-
-Affected Rows: 2
-
 CREATE TABLE demo_2(host string, cpu double, memory double, ts TIMESTAMP time index);
 
 Affected Rows: 0
 
-insert into demo_2(host, cpu, memory, ts) values ('host3', 77.7, 1111, 1655276555000), ('host4', 99.9,  444.4, 1655276556000);
+insert into
+    demo(host, cpu, memory, ts)
+values
+    ('host1', 66.6, 1024, 1655276557000),
+    ('host2', 88.8, 333.3, 1655276558000),
+    ('host3', 111.1, 444.4, 1722077263000);
 
-Affected Rows: 2
+Affected Rows: 3
+
+insert into
+    demo_2(host, cpu, memory, ts)
+values
+    ('host4', 77.7, 1111, 1655276555000),
+    ('host5', 99.9, 444.4, 1655276556000),
+    ('host6', 222.2, 555.5, 1722077264000);
+
+Affected Rows: 3
+
+Copy demo TO '/tmp/demo/export/parquet_files/demo.parquet';
+
+Affected Rows: 3
 
 Copy demo_2 TO '/tmp/demo/export/parquet_files/demo_2.parquet';
 
-Affected Rows: 2
+Affected Rows: 3
 
 CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp time index);
 
 Affected Rows: 0
 
-Copy with_filename FROM '/tmp/demo/export/parquet_files/demo.parquet';
+Copy with_filename FROM '/tmp/demo/export/parquet_files/demo.parquet' with (start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
 
 Affected Rows: 2
 
@@ -45,37 +55,37 @@ Affected Rows: 0
 
 Copy with_path FROM '/tmp/demo/export/parquet_files/';
 
-Affected Rows: 4
+Affected Rows: 6
 
 select * from with_path order by ts;
 
-+-------+------+--------+---------------------+
-| host  | cpu  | memory | ts                  |
-+-------+------+--------+---------------------+
-| host3 | 77.7 | 1111.0 | 2022-06-15T07:02:35 |
-| host4 | 99.9 | 444.4  | 2022-06-15T07:02:36 |
-| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
-| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+
++-------+-------+--------+---------------------+
+| host  | cpu   | memory | ts                  |
++-------+-------+--------+---------------------+
+| host4 | 77.7  | 1111.0 | 2022-06-15T07:02:35 |
+| host5 | 99.9  | 444.4  | 2022-06-15T07:02:36 |
+| host1 | 66.6  | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8  | 333.3  | 2022-06-15T07:02:38 |
+| host3 | 111.1 | 444.4  | 2024-07-27T10:47:43 |
+| host6 | 222.2 | 555.5  | 2024-07-27T10:47:44 |
++-------+-------+--------+---------------------+
 
 CREATE TABLE with_pattern(host string, cpu double, memory double, ts timestamp time index);
 
 Affected Rows: 0
 
-Copy with_pattern FROM '/tmp/demo/export/parquet_files/' WITH (PATTERN = 'demo.*');
+Copy with_pattern FROM '/tmp/demo/export/parquet_files/' WITH (PATTERN = 'demo.*', start_time='2022-06-15 07:02:39');
 
-Affected Rows: 4
+Affected Rows: 2
 
 select * from with_pattern order by ts;
 
-+-------+------+--------+---------------------+
-| host  | cpu  | memory | ts                  |
-+-------+------+--------+---------------------+
-| host3 | 77.7 | 1111.0 | 2022-06-15T07:02:35 |
-| host4 | 99.9 | 444.4  | 2022-06-15T07:02:36 |
-| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
-| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+
++-------+-------+--------+---------------------+
+| host  | cpu   | memory | ts                  |
++-------+-------+--------+---------------------+
+| host3 | 111.1 | 444.4  | 2024-07-27T10:47:43 |
+| host6 | 222.2 | 555.5  | 2024-07-27T10:47:44 |
++-------+-------+--------+---------------------+
 
 CREATE TABLE without_limit_rows(host string, cpu double, memory double, ts timestamp time index);
 
@@ -83,30 +93,30 @@ Affected Rows: 0
 
 Copy without_limit_rows FROM '/tmp/demo/export/parquet_files/';
 
-Affected Rows: 4
+Affected Rows: 6
 
 select count(*) from without_limit_rows;
 
 +----------+
 | COUNT(*) |
 +----------+
-| 4        |
+| 6        |
 +----------+
 
 CREATE TABLE with_limit_rows_segment(host string, cpu double, memory double, ts timestamp time index);
 
 Affected Rows: 0
 
-Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT 2;
+Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT 3;
 
-Affected Rows: 2
+Affected Rows: 3
 
 select count(*) from with_limit_rows_segment;
 
 +----------+
 | COUNT(*) |
 +----------+
-| 2        |
+| 3        |
 +----------+
 
 Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT hello;
