@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use api::prom_store::remote::{ReadRequest, WriteRequest};
+use api::prom_store::remote::ReadRequest;
 use api::v1::greptime_request::Request;
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
@@ -360,7 +360,7 @@ pub trait PromStoreProtocolInterceptor {
 
     fn pre_write(
         &self,
-        _write_req: &WriteRequest,
+        _write_req: &RowInsertRequests,
         _ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
         Ok(())
@@ -377,7 +377,11 @@ pub type PromStoreProtocolInterceptorRef<E> =
 impl<E: ErrorExt> PromStoreProtocolInterceptor for Option<PromStoreProtocolInterceptorRef<E>> {
     type Error = E;
 
-    fn pre_write(&self, write_req: &WriteRequest, ctx: QueryContextRef) -> Result<(), Self::Error> {
+    fn pre_write(
+        &self,
+        write_req: &RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
         if let Some(this) = self {
             this.pre_write(write_req, ctx)
         } else {
