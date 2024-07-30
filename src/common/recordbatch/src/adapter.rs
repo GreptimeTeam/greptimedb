@@ -22,19 +22,25 @@ use std::task::{Context, Poll};
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
+use datafusion::execution::context::ExecutionProps;
+use datafusion::logical_expr::utils::conjunction;
+use datafusion::logical_expr::Expr;
+use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
 use datafusion::physical_plan::{
-    accept, displayable, ExecutionPlan, ExecutionPlanVisitor,
+    accept, displayable, ExecutionPlan, ExecutionPlanVisitor, PhysicalExpr,
     RecordBatchStream as DfRecordBatchStream,
 };
 use datafusion_common::arrow::error::ArrowError;
-use datafusion_common::DataFusionError;
+use datafusion_common::{DataFusionError, ToDFSchema};
+use datatypes::arrow::array::Array;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::ready;
 use pin_project::pin_project;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
+use crate::filter::batch_filter;
 use crate::{
     DfRecordBatch, DfSendableRecordBatchStream, OrderOption, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream, Stream,
@@ -50,6 +56,7 @@ pub struct RecordBatchStreamTypeAdapter<T, E> {
     stream: T,
     projected_schema: DfSchemaRef,
     projection: Vec<usize>,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
     phantom: PhantomData<E>,
 }
 
@@ -69,8 +76,27 @@ where
             stream,
             projected_schema,
             projection,
+            predicate: None,
             phantom: Default::default(),
         }
+    }
+
+    pub fn with_filter(mut self, filters: Vec<Expr>) -> Result<Self> {
+        let filters = if let Some(expr) = conjunction(filters) {
+            let df_schema = self
+                .projected_schema
+                .clone()
+                .to_dfschema_ref()
+                .context(error::PhysicalExprSnafu)?;
+
+            let filters = create_physical_expr(&expr, &df_schema, &ExecutionProps::new())
+                .context(error::PhysicalExprSnafu)?;
+            Some(filters)
+        } else {
+            None
+        };
+        self.predicate = filters;
+        Ok(self)
     }
 }
 
@@ -99,6 +125,8 @@ where
 
         let projected_schema = this.projected_schema.clone();
         let projection = this.projection.clone();
+        let predicate = this.predicate.clone();
+
         let batch = batch.map(|b| {
             b.and_then(|b| {
                 let projected_column = b.project(&projection)?;
@@ -121,6 +149,11 @@ where
                     }
                 }
                 let record_batch = DfRecordBatch::try_new(projected_schema, columns)?;
+                let record_batch = if let Some(predicate) = predicate {
+                    batch_filter(&record_batch, &predicate)?
+                } else {
+                    record_batch
+                };
                 Ok(record_batch)
             })
         });

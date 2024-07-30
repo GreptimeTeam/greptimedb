@@ -62,12 +62,13 @@ runs:
     # Get proper backtraces in mac Sonoma. Currently there's an issue with the new
     # linker that prevents backtraces from getting printed correctly.
     #
-    # <https://github.com/rust-lang/rust/issues/113783> 
+    # <https://github.com/rust-lang/rust/issues/113783>
     - name: Run integration tests
       if: ${{ inputs.disable-run-tests == 'false' }}
       shell: bash
-      env: 
+      env:
         CARGO_BUILD_RUSTFLAGS: "-Clink-arg=-Wl,-ld_classic"
+        SQLNESS_OPTS: "--preserve-state"
       run: |
         make test sqlness-test
 
@@ -81,7 +82,7 @@ runs:
 
     - name: Build greptime binary
       shell: bash
-      env: 
+      env:
         CARGO_BUILD_RUSTFLAGS: "-Clink-arg=-Wl,-ld_classic"
       run: |
         make build \

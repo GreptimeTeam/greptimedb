@@ -15,6 +15,7 @@ RUST_TOOLCHAIN ?= $(shell cat rust-toolchain.toml | grep channel | cut -d'"' -f2
 CARGO_REGISTRY_CACHE ?= ${HOME}/.cargo/registry
 ARCH := $(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
 OUTPUT_DIR := $(shell if [ "$(RELEASE)" = "true" ]; then echo "release"; elif [ ! -z "$(CARGO_PROFILE)" ]; then echo "$(CARGO_PROFILE)" ; else echo "debug"; fi)
+SQLNESS_OPTS ?=
 
 # The arguments for running integration tests.
 ETCD_VERSION ?= v3.5.9
@@ -161,7 +162,7 @@ nextest: ## Install nextest tools.
 
 .PHONY: sqlness-test
 sqlness-test: ## Run sqlness test.
-	cargo sqlness
+	cargo sqlness ${SQLNESS_OPTS}
 
 # Run fuzz test ${FUZZ_TARGET}.
 RUNS ?= 1
@@ -172,7 +173,7 @@ fuzz:
 
 .PHONY: fuzz-ls
 fuzz-ls:
-	cargo fuzz list --fuzz-dir tests-fuzz 
+	cargo fuzz list --fuzz-dir tests-fuzz
 
 .PHONY: check
 check: ## Cargo check all the targets.

@@ -120,6 +120,13 @@ lazy_static! {
         &[METRIC_DB_LABEL]
     )
     .unwrap();
+    /// Http prometheus endpoint query duration per database.
+    pub static ref METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_servers_http_prometheus_promql_elapsed",
+        "servers http prometheus promql elapsed",
+        &[METRIC_DB_LABEL, METRIC_METHOD_LABEL]
+    )
+    .unwrap();
     pub static ref METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED: HistogramVec =
         register_histogram_vec!(
             "greptime_servers_http_otlp_metrics_elapsed",

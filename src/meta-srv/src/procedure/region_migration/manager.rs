@@ -347,7 +347,7 @@ impl RegionMigrationManager {
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
         let procedure_manager = self.procedure_manager.clone();
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
                 Ok(watcher) => watcher,
                 Err(e) => {

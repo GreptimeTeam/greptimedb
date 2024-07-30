@@ -1,18 +1,13 @@
 meta:
   config: |-
     [runtime]
-    read_rt_size = 8
-    write_rt_size = 8
-    bg_rt_size = 8
+    global_rt_size = 4
 datanode:
   config: |-
     [runtime]
-    read_rt_size = 8
-    write_rt_size = 8
-    bg_rt_size = 8
+    global_rt_size = 4
+    compact_rt_size = 2
 frontend:
   config: |-
     [runtime]
-    read_rt_size = 8
-    write_rt_size = 8
-    bg_rt_size = 8
+    global_rt_size = 4

@@ -754,6 +754,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Create physical expr error"))]
+    PhysicalExpr {
+        #[snafu(source)]
+        error: common_recordbatch::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -788,7 +795,8 @@ impl ErrorExt for Error {
             | Error::ViewColumnsMismatch { .. }
             | Error::InvalidViewStmt { .. }
             | Error::ConvertIdentifier { .. }
-            | Error::InvalidPartition { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidPartition { .. }
+            | Error::PhysicalExpr { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists

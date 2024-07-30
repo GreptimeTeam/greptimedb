@@ -25,7 +25,7 @@ use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder};
 use datafusion_common::Column;
 use datafusion_expr::col;
 use datatypes::prelude::ConcreteDataType;
-pub use expr::build_filter_from_timestamp;
+pub use expr::{build_filter_from_timestamp, build_same_type_ts_filter};
 
 pub use self::accumulator::{Accumulator, AggregateFunctionCreator, AggregateFunctionCreatorRef};
 pub use self::udaf::AggregateFunction;

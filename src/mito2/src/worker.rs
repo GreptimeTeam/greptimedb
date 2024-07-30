@@ -438,7 +438,7 @@ impl<S: LogStore> WorkerStarter<S> {
             flush_receiver: self.flush_receiver,
             stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&self.id.to_string()]),
         };
-        let handle = common_runtime::spawn_write(async move {
+        let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
         });
 
@@ -830,7 +830,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ) {
         if let Some(region) = self.regions.get_region(region_id) {
             // We need to do this in background as we need the manifest lock.
-            common_runtime::spawn_bg(async move {
+            common_runtime::spawn_global(async move {
                 region.set_readonly_gracefully().await;
 
                 let last_entry_id = region.version_control.current().last_entry_id;

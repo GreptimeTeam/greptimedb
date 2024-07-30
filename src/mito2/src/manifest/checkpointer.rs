@@ -165,7 +165,7 @@ impl Checkpointer {
         self.inner.set_doing_checkpoint();
 
         let inner = self.inner.clone();
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             inner.do_checkpoint(checkpoint).await;
         });
     }

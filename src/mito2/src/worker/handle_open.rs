@@ -113,7 +113,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let config = self.config.clone();
         let opening_regions = self.opening_regions.clone();
         opening_regions.insert_sender(region_id, sender);
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             match opener.open(&config, &wal).await {
                 Ok(region) => {
                     info!("Region {} is opened", region_id);

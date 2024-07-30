@@ -42,7 +42,7 @@ impl PostgresServer {
         query_handler: ServerSqlQueryHandlerRef,
         force_tls: bool,
         tls_server_config: Arc<ReloadableTlsServerConfig>,
-        io_runtime: Arc<Runtime>,
+        io_runtime: Runtime,
         user_provider: Option<UserProviderRef>,
     ) -> PostgresServer {
         let make_handler = Arc::new(
@@ -62,7 +62,7 @@ impl PostgresServer {
 
     fn accept(
         &self,
-        io_runtime: Arc<Runtime>,
+        io_runtime: Runtime,
         accepting_stream: AbortableStream,
     ) -> impl Future<Output = ()> {
         let handler_maker = self.make_handler.clone();
@@ -124,7 +124,7 @@ impl Server for PostgresServer {
         let (stream, addr) = self.base_server.bind(listening).await?;
 
         let io_runtime = self.base_server.io_runtime();
-        let join_handle = common_runtime::spawn_read(self.accept(io_runtime, stream));
+        let join_handle = common_runtime::spawn_global(self.accept(io_runtime, stream));
 
         self.base_server.start_with(join_handle).await?;
         Ok(addr)

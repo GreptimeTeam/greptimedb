@@ -192,8 +192,12 @@ pub async fn instant_query(
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
         try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
     }
-
     let query_ctx = Arc::new(query_ctx);
+
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[query_ctx.get_db_string().as_str(), "instant_query"])
+        .start_timer();
+
     let result = handler.do_query(&prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
@@ -242,8 +246,12 @@ pub async fn range_query(
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
         try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
     }
-
     let query_ctx = Arc::new(query_ctx);
+
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[query_ctx.get_db_string().as_str(), "range_query"])
+        .start_timer();
+
     let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Err(err) => {
@@ -318,6 +326,10 @@ pub async fn labels_query(
     if queries.is_empty() {
         queries = form_params.matches.0;
     }
+
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[query_ctx.get_db_string().as_str(), "labels_query"])
+        .start_timer();
 
     // Fetch all tag columns. It will be used as white-list for tag names.
     let mut labels = match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await
@@ -681,6 +693,10 @@ pub async fn label_values_query(
     try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
     let query_ctx = Arc::new(query_ctx);
 
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[query_ctx.get_db_string().as_str(), "label_values_query"])
+        .start_timer();
+
     if label_name == METRIC_NAME_LABEL {
         let mut table_names = match handler
             .catalog_manager()
@@ -962,6 +978,10 @@ pub async fn series_query(
         try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
     }
     let query_ctx = Arc::new(query_ctx);
+
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[query_ctx.get_db_string().as_str(), "series_query"])
+        .start_timer();
 
     let mut series = Vec::new();
     let mut merge_map = HashMap::new();

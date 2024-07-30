@@ -337,7 +337,7 @@ impl EngineInner {
 
         // Waits for entries distribution.
         let distribution =
-            common_runtime::spawn_read(async move { distributor.distribute().await });
+            common_runtime::spawn_global(async move { distributor.distribute().await });
         // Waits for worker returns.
         let responses = join_all(responses).await;
 

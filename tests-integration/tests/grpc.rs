@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::v1::alter_expr::Kind;
 use api::v1::promql_request::Promql;
 use api::v1::{
@@ -790,7 +788,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
             max_send_message_size: 1024,
             tls,
         };
-        let runtime = Arc::new(Runtime::builder().build().unwrap());
+        let runtime = Runtime::builder().build().unwrap();
         let grpc_builder =
             GrpcServerBuilder::new(config.clone(), runtime).with_tls_config(config.tls);
         assert!(grpc_builder.is_err());

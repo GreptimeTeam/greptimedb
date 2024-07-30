@@ -40,7 +40,7 @@ runs:
     - name: Install Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
+        python-version: "3.10"
 
     - name: Install PyArrow Package
       shell: pwsh
@@ -62,13 +62,14 @@ runs:
       env:
         RUSTUP_WINDOWS_PATH_ADD_BIN: 1 # Workaround for https://github.com/nextest-rs/nextest/issues/1493
         RUST_BACKTRACE: 1
+        SQLNESS_OPTS: "--preserve-state"
 
     - name: Upload sqlness logs
       if: ${{ failure() }} # Only upload logs when the integration tests failed.
       uses: actions/upload-artifact@v4
       with:
         name: sqlness-logs
-        path: /tmp/greptime-*.log
+        path: C:\tmp\greptime-*.log
         retention-days: 3
 
     - name: Build greptime binary
