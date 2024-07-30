@@ -144,7 +144,7 @@ impl Database {
         let mut request = tonic::Request::new(request);
         let metadata = request.metadata_mut();
         for (key, value) in hints {
-            let key = AsciiMetadataKey::from_bytes(format!("x-greptime-hint:{}", key).as_bytes())
+            let key = AsciiMetadataKey::from_bytes(format!("x-greptime-hint-{}", key).as_bytes())
                 .map_err(|_| {
                 InvalidAsciiSnafu {
                     value: key.to_string(),

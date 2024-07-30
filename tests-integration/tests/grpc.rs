@@ -410,13 +410,13 @@ async fn insert_with_hints_and_assert(db: &Database) {
             InsertRequests {
                 inserts: vec![request],
             },
-            &[("append_mode", "true"), ("merge_mode", "last_non_null")],
+            &[("append_mode", "true")],
         )
         .await;
     assert_eq!(result.unwrap(), 4);
 
     // show table
-    let output = db.sql("SHOW CREATE TABLE demo").await.unwrap();
+    let output = db.sql("SHOW CREATE TABLE demo;").await.unwrap();
 
     let record_batches = match output.data {
         OutputData::RecordBatches(record_batches) => record_batches,
@@ -426,16 +426,23 @@ async fn insert_with_hints_and_assert(db: &Database) {
 
     let pretty = record_batches.pretty_print().unwrap();
     let expected = "\
-+-------+------+--------+-------------------------+
-| host  | cpu  | memory | ts                      |
-+-------+------+--------+-------------------------+
-| host1 | 0.31 | 0.1    | 1970-01-01T00:00:00.100 |
-| host2 |      | 0.2    | 1970-01-01T00:00:00.101 |
-| host3 | 0.41 |        | 1970-01-01T00:00:00.102 |
-| host4 | 0.2  | 0.3    | 1970-01-01T00:00:00.103 |
-| host5 | 66.6 | 1024.0 | 2022-12-28T04:17:07     |
-| host6 | 88.8 | 333.3  | 2022-12-28T04:17:08     |
-+-------+------+--------+-------------------------+\
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS \"demo\" ( |
+|       |   \"host\" STRING NULL,               |
+|       |   \"cpu\" DOUBLE NULL,                |
+|       |   \"memory\" DOUBLE NULL,             |
+|       |   \"ts\" TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX (\"ts\"),                |
+|       |   PRIMARY KEY (\"host\")              |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+\
 ";
     assert_eq!(pretty, expected);
 }

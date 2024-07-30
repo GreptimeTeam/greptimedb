@@ -26,7 +26,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::{cancellation, TonicResult};
 
-pub const GREPTIME_DB_HEADER_HINT_PREFIX: &str = "x-greptime-hint:";
+pub const GREPTIME_DB_HEADER_HINT_PREFIX: &str = "x-greptime-hint-";
 
 pub(crate) struct DatabaseService {
     handler: GreptimeRequestHandler,
@@ -177,7 +177,11 @@ mod tests {
     #[test]
     fn test_extract_hints() {
         let mut metadata = MetadataMap::new();
-        metadata.insert("x-greptime-hint:append_mode", "true".parse().unwrap());
+        let prev = metadata.insert(
+            "x-greptime-hint-append_mode",
+            MetadataValue::from_static("true"),
+        );
+        assert!(prev.is_none());
         let hints = extract_hints(&metadata);
         assert_eq!(hints, vec![("append_mode".to_string(), "true".to_string())]);
     }
@@ -186,7 +190,7 @@ mod tests {
     fn extract_hints_ignores_non_ascii_metadata() {
         let mut metadata = MetadataMap::new();
         metadata.insert_bin(
-            "x-greptime-hint:merge_mode",
+            "x-greptime-hint-merge_mode-bin",
             MetadataValue::from_bytes(b"last_non_null"),
         );
         let hints = extract_hints(&metadata);
