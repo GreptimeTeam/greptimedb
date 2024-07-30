@@ -71,7 +71,7 @@ impl LocalScheduler {
             let child = token.child_token();
             let receiver = rx.clone();
             let state_clone = state.clone();
-            let handle = common_runtime::spawn_bg(async move {
+            let handle = common_runtime::spawn_global(async move {
                 while state_clone.load(Ordering::Relaxed) == STATE_RUNNING {
                     tokio::select! {
                         _ = child.cancelled() => {

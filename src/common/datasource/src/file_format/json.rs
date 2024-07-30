@@ -101,7 +101,7 @@ impl FileFormat for JsonFormat {
 
         let schema_infer_max_record = self.schema_infer_max_record;
 
-        common_runtime::spawn_blocking_read(move || {
+        common_runtime::spawn_blocking_global(move || {
             let mut reader = BufReader::new(SyncIoBridge::new(decoded));
 
             let iter = ValueIter::new(&mut reader, schema_infer_max_record);

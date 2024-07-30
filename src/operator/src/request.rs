@@ -171,7 +171,7 @@ impl Requester {
             let request = request_factory.build_request(req_body.clone());
             let partition_manager = self.partition_manager.clone();
             let node_manager = self.node_manager.clone();
-            common_runtime::spawn_write(async move {
+            common_runtime::spawn_global(async move {
                 let peer =
                     Self::find_region_leader_by_request(partition_manager, &req_body).await?;
                 node_manager

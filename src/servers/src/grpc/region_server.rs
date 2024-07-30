@@ -38,11 +38,11 @@ pub type RegionServerHandlerRef = Arc<dyn RegionServerHandler>;
 #[derive(Clone)]
 pub struct RegionServerRequestHandler {
     handler: Arc<dyn RegionServerHandler>,
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
 }
 
 impl RegionServerRequestHandler {
-    pub fn new(handler: Arc<dyn RegionServerHandler>, runtime: Arc<Runtime>) -> Self {
+    pub fn new(handler: Arc<dyn RegionServerHandler>, runtime: Runtime) -> Self {
         Self { handler, runtime }
     }
 

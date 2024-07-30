@@ -40,14 +40,14 @@ use crate::{create_testing_grpc_query_handler, LOCALHOST_WITH_0};
 struct MockGrpcServer {
     query_handler: ServerGrpcQueryHandlerRef,
     user_provider: Option<UserProviderRef>,
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
 }
 
 impl MockGrpcServer {
     fn new(
         query_handler: ServerGrpcQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
-        runtime: Arc<Runtime>,
+        runtime: Runtime,
     ) -> Self {
         Self {
             query_handler,
@@ -107,13 +107,11 @@ impl Server for MockGrpcServer {
 
 fn create_grpc_server(table: TableRef) -> Result<Arc<dyn Server>> {
     let query_handler = create_testing_grpc_query_handler(table);
-    let io_runtime = Arc::new(
-        RuntimeBuilder::default()
-            .worker_threads(4)
-            .thread_name("grpc-io-handlers")
-            .build()
-            .unwrap(),
-    );
+    let io_runtime = RuntimeBuilder::default()
+        .worker_threads(4)
+        .thread_name("grpc-io-handlers")
+        .build()
+        .unwrap();
 
     let provider = MockUserProvider::default();
 

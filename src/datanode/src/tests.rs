@@ -92,7 +92,7 @@ impl QueryEngine for MockQueryEngine {
 pub fn mock_region_server() -> RegionServer {
     RegionServer::new(
         Arc::new(MockQueryEngine),
-        Arc::new(Runtime::builder().build().unwrap()),
+        Runtime::builder().build().unwrap(),
         Box::new(NoopRegionServerEventListener),
     )
 }

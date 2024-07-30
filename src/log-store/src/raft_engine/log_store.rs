@@ -111,7 +111,7 @@ impl RaftEngineLogStore {
 
     fn start(&self) -> Result<()> {
         self.gc_task
-            .start(common_runtime::bg_runtime())
+            .start(common_runtime::global_runtime())
             .context(StartGcTaskSnafu)
     }
 
@@ -279,7 +279,7 @@ impl LogStore for RaftEngineLogStore {
         );
         let max_batch_size = self.config.read_batch_size;
         let (tx, mut rx) = tokio::sync::mpsc::channel(max_batch_size);
-        let _handle = common_runtime::spawn_read(async move {
+        let _handle = common_runtime::spawn_global(async move {
             while start_index <= last_index {
                 let mut vec = Vec::with_capacity(max_batch_size);
                 match engine

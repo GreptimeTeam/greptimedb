@@ -72,7 +72,7 @@ impl GreptimeDBTelemetryTask {
         match self {
             GreptimeDBTelemetryTask::Enable((task, _)) => {
                 print_anonymous_usage_data_disclaimer();
-                task.start(common_runtime::bg_runtime())
+                task.start(common_runtime::global_runtime())
             }
             GreptimeDBTelemetryTask::Disable => Ok(()),
         }

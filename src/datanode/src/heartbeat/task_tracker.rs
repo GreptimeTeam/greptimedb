@@ -156,7 +156,7 @@ impl<T: Send + Sync + Clone + 'static> TaskTracker<T> {
         } else {
             let moved_inner = self.inner.clone();
             let (tx, rx) = watch::channel(TaskState::<T>::Running);
-            common_runtime::spawn_bg(async move {
+            common_runtime::spawn_global(async move {
                 match fut.await {
                     Ok(result) => {
                         let _ = tx.send(TaskState::Done(result));

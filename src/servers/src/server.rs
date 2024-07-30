@@ -183,11 +183,11 @@ impl AcceptTask {
 pub(crate) struct BaseTcpServer {
     name: String,
     accept_task: Mutex<AcceptTask>,
-    io_runtime: Arc<Runtime>,
+    io_runtime: Runtime,
 }
 
 impl BaseTcpServer {
-    pub(crate) fn create_server(name: impl Into<String>, io_runtime: Arc<Runtime>) -> Self {
+    pub(crate) fn create_server(name: impl Into<String>, io_runtime: Runtime) -> Self {
         let (abort_handle, registration) = AbortHandle::new_pair();
         Self {
             name: name.into(),
@@ -218,7 +218,7 @@ impl BaseTcpServer {
         task.start_with(join_handle, &self.name)
     }
 
-    pub(crate) fn io_runtime(&self) -> Arc<Runtime> {
+    pub(crate) fn io_runtime(&self) -> Runtime {
         self.io_runtime.clone()
     }
 }

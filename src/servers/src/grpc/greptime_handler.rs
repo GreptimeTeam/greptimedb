@@ -14,7 +14,6 @@
 
 //! Handler for Greptime Database service. It's implemented by frontend.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use api::helper::request_type;
@@ -42,14 +41,14 @@ use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 pub struct GreptimeRequestHandler {
     handler: ServerGrpcQueryHandlerRef,
     user_provider: Option<UserProviderRef>,
-    runtime: Option<Arc<Runtime>>,
+    runtime: Option<Runtime>,
 }
 
 impl GreptimeRequestHandler {
     pub fn new(
         handler: ServerGrpcQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
-        runtime: Option<Arc<Runtime>>,
+        runtime: Option<Runtime>,
     ) -> Self {
         Self {
             handler,

@@ -227,7 +227,7 @@ impl Server for GrpcServer {
         let mut serve_state = self.serve_state.lock().await;
         *serve_state = Some(serve_state_rx);
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_global(async move {
             let result = builder
                 .serve_with_incoming_shutdown(incoming, rx.map(drop))
                 .await

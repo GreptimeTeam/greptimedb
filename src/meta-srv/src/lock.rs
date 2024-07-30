@@ -89,7 +89,7 @@ impl Drop for DistLockGuard<'_> {
         if let Some(key) = self.key.take() {
             let lock = self.lock.clone();
             let name = self.name.clone();
-            let _handle = common_runtime::spawn_bg(async move {
+            let _handle = common_runtime::spawn_global(async move {
                 if let Err(e) = lock.unlock(key).await {
                     error!(e; "Failed to unlock '{}'", String::from_utf8_lossy(&name));
                 }

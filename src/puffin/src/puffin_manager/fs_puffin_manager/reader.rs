@@ -184,7 +184,7 @@ where
 
             let reader = accessor.reader(&puffin_file_name).await?;
             let writer = writer_provider.writer(&file_meta.relative_path).await?;
-            let task = common_runtime::spawn_read(async move {
+            let task = common_runtime::spawn_global(async move {
                 let mut file = PuffinFileReader::new(reader);
                 let reader = file.blob_reader(&blob_meta)?;
                 let compression = blob_meta.compression_codec;
