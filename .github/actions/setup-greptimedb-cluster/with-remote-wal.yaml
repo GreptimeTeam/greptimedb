@@ -43,3 +43,8 @@ objectStorage:
   credentials:
     accessKeyId: rootuser
     secretAccessKey: rootpass123
+remoteWal:
+   enabled: true
+   kafka:
+     brokerEndpoints: 
+      - "kafka.kafka-cluster.svc.cluster.local:9092"
