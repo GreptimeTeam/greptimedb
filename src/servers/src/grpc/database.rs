@@ -36,31 +36,6 @@ impl DatabaseService {
     pub(crate) fn new(handler: GreptimeRequestHandler) -> Self {
         Self { handler }
     }
-
-    fn extract_hints(&self, metadata: &MetadataMap) -> Vec<(String, String)> {
-        metadata
-            .iter()
-            .filter_map(|kv| {
-                let KeyAndValueRef::Ascii(key, value) = kv else {
-                    return None;
-                };
-                let key = key.as_str();
-                if !key.starts_with(GREPTIME_DB_HEADER_HINT_PREFIX) {
-                    return None;
-                }
-                let Ok(value) = value.to_str() else {
-                    // Simply return None for non-string values.
-                    return None;
-                };
-                // Safety: we already checked the prefix.
-                let new_key = key
-                    .strip_prefix(GREPTIME_DB_HEADER_HINT_PREFIX)
-                    .unwrap()
-                    .to_string();
-                Some((new_key, value.to_string()))
-            })
-            .collect()
-    }
 }
 
 #[async_trait]
@@ -70,7 +45,7 @@ impl GreptimeDatabase for DatabaseService {
         request: Request<GreptimeRequest>,
     ) -> TonicResult<Response<GreptimeResponse>> {
         let remote_addr = request.remote_addr();
-        let hints = self.extract_hints(request.metadata());
+        let hints = extract_hints(request.metadata());
         debug!(
             "GreptimeDatabase::Handle: request from {:?} with hints: {:?}",
             remote_addr, hints
@@ -116,7 +91,7 @@ impl GreptimeDatabase for DatabaseService {
         request: Request<Streaming<GreptimeRequest>>,
     ) -> Result<Response<GreptimeResponse>, Status> {
         let remote_addr = request.remote_addr();
-        let hints = self.extract_hints(request.metadata());
+        let hints = extract_hints(request.metadata());
         debug!(
             "GreptimeDatabase::HandleRequests: request from {:?} with hints: {:?}",
             remote_addr, hints
@@ -165,5 +140,56 @@ impl GreptimeDatabase for DatabaseService {
             ))
         };
         cancellation::with_cancellation_handler(request_future, cancellation_future).await
+    }
+}
+
+fn extract_hints(metadata: &MetadataMap) -> Vec<(String, String)> {
+    metadata
+        .iter()
+        .filter_map(|kv| {
+            let KeyAndValueRef::Ascii(key, value) = kv else {
+                return None;
+            };
+            let key = key.as_str();
+            if !key.starts_with(GREPTIME_DB_HEADER_HINT_PREFIX) {
+                return None;
+            }
+            let Ok(value) = value.to_str() else {
+                // Simply return None for non-string values.
+                return None;
+            };
+            // Safety: we already checked the prefix.
+            let new_key = key
+                .strip_prefix(GREPTIME_DB_HEADER_HINT_PREFIX)
+                .unwrap()
+                .to_string();
+            Some((new_key, value.trim().to_string()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use tonic::metadata::MetadataValue;
+
+    use super::*;
+
+    #[test]
+    fn test_extract_hints() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert("x-greptime-hint:append_mode", "true".parse().unwrap());
+        let hints = extract_hints(&metadata);
+        assert_eq!(hints, vec![("append_mode".to_string(), "true".to_string())]);
+    }
+
+    #[test]
+    fn extract_hints_ignores_non_ascii_metadata() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert_bin(
+            "x-greptime-hint:merge_mode",
+            MetadataValue::from_bytes(b"last_non_null"),
+        );
+        let hints = extract_hints(&metadata);
+        assert!(hints.is_empty());
     }
 }
