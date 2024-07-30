@@ -298,13 +298,6 @@ pub enum Error {
         error: std::io::Error,
     },
 
-    #[snafu(display("Invalid database name: {}", database))]
-    InvalidDatabaseName {
-        #[snafu(implicit)]
-        location: Location,
-        database: String,
-    },
-
     #[snafu(display("Failed to create directory {}", dir))]
     CreateDir {
         dir: String,
@@ -384,8 +377,7 @@ impl ErrorExt for Error {
             | Error::ConnectEtcd { .. }
             | Error::NotDataFromOutput { .. }
             | Error::CreateDir { .. }
-            | Error::EmptyResult { .. }
-            | Error::InvalidDatabaseName { .. } => StatusCode::InvalidArguments,
+            | Error::EmptyResult { .. } => StatusCode::InvalidArguments,
 
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
