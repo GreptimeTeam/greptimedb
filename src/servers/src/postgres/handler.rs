@@ -109,11 +109,9 @@ fn output_to_query_response<'a>(
                     e
                 );
             };
-            Ok(Response::Error(Box::new(ErrorInfo::new(
-                "ERROR".to_string(),
-                "XX000".to_string(),
-                e.output_msg(),
-            ))))
+            Ok(Response::Error(Box::new(
+                PgErrorCode::from(status_code).to_err_info(e.output_msg()),
+            )))
         }
     }
 }
@@ -184,10 +182,8 @@ impl QueryParser for DefaultQueryParser {
             ParserContext::create_with_dialect(sql, &PostgreSqlDialect {}, ParseOptions::default())
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         if stmts.len() != 1 {
-            Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                "ERROR".to_owned(),
-                "42P14".to_owned(),
-                "invalid_prepared_statement_definition".to_owned(),
+            Err(PgWireError::UserError(Box::new(ErrorInfo::from(
+                PgErrorCode::Ec42P14,
             ))))
         } else {
             let stmt = stmts.remove(0);
