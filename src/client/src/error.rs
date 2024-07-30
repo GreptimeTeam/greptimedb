@@ -122,6 +122,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to parse ascii string: {}", value))]
+    InvalidAscii {
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -143,6 +150,8 @@ impl ErrorExt for Error {
             | Error::ConvertFlightData { source, .. }
             | Error::CreateTlsChannel { source, .. } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
+
+            Error::InvalidAscii { .. } => StatusCode::InvalidArguments,
         }
     }
 

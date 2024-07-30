@@ -73,6 +73,7 @@ macro_rules! grpc_tests {
 
                 test_invalid_dbname,
                 test_auto_create_table,
+                test_auto_create_table_with_hints,
                 test_insert_and_select,
                 test_dbname,
                 test_grpc_message_size_ok,
@@ -279,6 +280,17 @@ pub async fn test_auto_create_table(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_auto_create_table_with_hints(store_type: StorageType) {
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server(store_type, "auto_create_table_with_hints").await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
+    insert_with_hints_and_assert(&db).await;
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
 fn expect_data() -> (Column, Column, Column, Column) {
     // testing data:
     let expected_host_col = Column {
@@ -377,6 +389,55 @@ pub async fn test_insert_and_select(store_type: StorageType) {
 
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
+}
+
+async fn insert_with_hints_and_assert(db: &Database) {
+    // testing data:
+    let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
+
+    let request = InsertRequest {
+        table_name: "demo".to_string(),
+        columns: vec![
+            expected_host_col.clone(),
+            expected_cpu_col.clone(),
+            expected_mem_col.clone(),
+            expected_ts_col.clone(),
+        ],
+        row_count: 4,
+    };
+    let result = db
+        .insert_with_hints(
+            InsertRequests {
+                inserts: vec![request],
+            },
+            &[("append_mode", "true"), ("merge_mode", "last_non_null")],
+        )
+        .await;
+    assert_eq!(result.unwrap(), 4);
+
+    // show table
+    let output = db.sql("SHOW CREATE TABLE demo").await.unwrap();
+
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+
+    let pretty = record_batches.pretty_print().unwrap();
+    let expected = "\
++-------+------+--------+-------------------------+
+| host  | cpu  | memory | ts                      |
++-------+------+--------+-------------------------+
+| host1 | 0.31 | 0.1    | 1970-01-01T00:00:00.100 |
+| host2 |      | 0.2    | 1970-01-01T00:00:00.101 |
+| host3 | 0.41 |        | 1970-01-01T00:00:00.102 |
+| host4 | 0.2  | 0.3    | 1970-01-01T00:00:00.103 |
+| host5 | 66.6 | 1024.0 | 2022-12-28T04:17:07     |
+| host6 | 88.8 | 333.3  | 2022-12-28T04:17:08     |
++-------+------+--------+-------------------------+\
+";
+    assert_eq!(pretty, expected);
 }
 
 async fn insert_and_assert(db: &Database) {
