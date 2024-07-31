@@ -1073,7 +1073,6 @@ impl From<DropFlowTask> for PbDropFlowTask {
     }
 }
 
-// TODO(sunng87): refactor this to avoid duplication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryContext {
     current_catalog: String,
