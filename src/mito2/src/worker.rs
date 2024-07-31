@@ -51,7 +51,7 @@ use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
-use crate::metrics::WRITE_STALL_TOTAL;
+use crate::metrics::{REGION_COUNT, WRITE_STALL_TOTAL};
 use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
@@ -403,6 +403,7 @@ impl<S: LogStore> WorkerStarter<S> {
 
         let running = Arc::new(AtomicBool::new(true));
         let now = self.time_provider.current_time_millis();
+        let id_string = self.id.to_string();
         let mut worker_thread = RegionWorkerLoop {
             id: self.id,
             config: self.config.clone(),
@@ -438,7 +439,8 @@ impl<S: LogStore> WorkerStarter<S> {
             last_periodical_check_millis: now,
             flush_sender: self.flush_sender,
             flush_receiver: self.flush_receiver,
-            stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&self.id.to_string()]),
+            stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&id_string]),
+            region_count: REGION_COUNT.with_label_values(&[&id_string]),
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -625,6 +627,8 @@ struct RegionWorkerLoop<S> {
     flush_receiver: watch::Receiver<()>,
     /// Gauge of stalled request count.
     stalled_count: IntGauge,
+    /// Gauge of regions in the worker.
+    region_count: IntGauge,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
