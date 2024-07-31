@@ -104,10 +104,10 @@ Read more about [Installation](https://docs.greptime.com/getting-started/install
 
 ## Getting Started
 
-* [Quickstart](https://docs.greptime.com/getting-started/quick-start/overview)
-* [Write Data](https://docs.greptime.com/user-guide/clients/overview)
-* [Query Data](https://docs.greptime.com/user-guide/query-data/overview)
-* [Operations](https://docs.greptime.com/user-guide/operations/overview)
+* [Quickstart](https://docs.greptime.com/getting-started/quick-start)
+* [User Guide](https://docs.greptime.com/user-guide/overview)
+* [Demos](https://github.com/GreptimeTeam/demo-scene)
+* [FAQ](https://docs.greptime.com/faq-and-others/faq)
 
 ## Build
 
