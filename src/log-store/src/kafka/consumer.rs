@@ -185,7 +185,7 @@ impl Stream for Consumer {
                     batch_size,
                 }) => {
                     // Sort records by offset in case they aren't in order
-                    records_and_offsets.sort_by_key(|x| x.offset);
+                    records_and_offsets.sort_unstable_by_key(|x| x.offset);
                     *this.last_high_watermark = watermark;
                     if !records_and_offsets.is_empty() {
                         *this.avg_record_size = fetch_bytes as usize / records_and_offsets.len();
