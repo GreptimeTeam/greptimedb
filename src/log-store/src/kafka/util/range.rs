@@ -52,28 +52,25 @@ impl<'a, I: Iterator<Item = &'a EntryId>> Iterator for ConvertIndexToRange<'a, I
     }
 }
 
-/// Merge all ranges smaller than the `batch_window_size`.
+/// Merge all ranges smaller than the `window_size`.
 ///
 /// e.g.,
 ///
 /// Case 1
-/// - input: range: [(0..3), (5..6), (5..8)], batch_window_size: 6
+/// - input: range: [(0..3), (5..6), (5..8)], window_size: 6
 /// - output: range: (0..6)
 ///
 /// Case 2
-/// - input: range: [(0..3)], batch_window_size: 6
+/// - input: range: [(0..3)], window_size: 6
 /// - output: range: (0..3)
 pub(crate) struct MergeRange<I: Iterator<Item = Range<usize>>> {
     iter: I,
-    batch_window_size: usize,
+    window_size: usize,
 }
 
 impl<I: Iterator<Item = Range<usize>>> MergeRange<I> {
-    pub fn new(iter: I, batch_window_size: usize) -> Self {
-        Self {
-            iter,
-            batch_window_size,
-        }
+    pub fn new(iter: I, window_size: usize) -> Self {
+        Self { iter, window_size }
     }
 }
 
@@ -90,7 +87,8 @@ impl<I: Iterator<Item = Range<usize>>> MergeRange<I> {
         if let Some(this) = merged_range.as_mut() {
             let mut merged = 1;
             for other in self.iter {
-                if other.start > self.batch_window_size {
+                let window = other.start - this.start;
+                if window > self.window_size {
                     break;
                 } else {
                     merge(this, &other);
@@ -130,19 +128,23 @@ mod tests {
     #[test]
     fn test_merge_range() {
         let size_range = [(10usize..13), (12..14), (16..18), (19..29)];
-        let merger = MergeRange::new(size_range.into_iter(), 17);
-        assert_eq!(merger.merge(), Some((10..18, 3)));
+        let merger = MergeRange::new(size_range.into_iter(), 9);
+        assert_eq!(merger.merge(), Some((10..29, 4)));
 
         let size_range = [(10usize..13), (12..14), (16..18)];
-        let merger = MergeRange::new(size_range.into_iter(), 15);
+        let merger = MergeRange::new(size_range.into_iter(), 5);
         assert_eq!(merger.merge(), Some((10..14, 2)));
 
+        let size_range = [(10usize..13), (15..17), (16..18)];
+        let merger = MergeRange::new(size_range.into_iter(), 5);
+        assert_eq!(merger.merge(), Some((10..17, 2)));
+
         let size_range = [(10usize..13)];
-        let merger = MergeRange::new(size_range.into_iter(), 15);
+        let merger = MergeRange::new(size_range.into_iter(), 4);
         assert_eq!(merger.merge(), Some((10..13, 1)));
 
         let size_range = [(10usize..13)];
-        let merger = MergeRange::new(size_range.into_iter(), 5);
+        let merger = MergeRange::new(size_range.into_iter(), 2);
         assert_eq!(merger.merge(), Some((10..13, 1)));
 
         let size_range = [];
