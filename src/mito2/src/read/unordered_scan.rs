@@ -155,7 +155,7 @@ impl RegionScanner for UnorderedScan {
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
                 // Clone the part and releases the lock.
-                // We might wrap the part in an Arc in the future if cloning is too expensive.
+                // TODO(yingwen): We might wrap the part in an Arc in the future if cloning is too expensive.
                 let Some(part) = parts.0.get_part(partition).cloned() else {
                     return;
                 };
