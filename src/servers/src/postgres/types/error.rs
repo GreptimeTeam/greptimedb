@@ -21,20 +21,19 @@ use strum::{AsRefStr, Display, EnumIter, EnumMessage};
 #[allow(dead_code)]
 enum ErrorSeverity {
     #[strum(serialize = "INFO")]
-    Info = 0,
+    Info,
     #[strum(serialize = "DEBUG")]
-    Debug = 1,
+    Debug,
     #[strum(serialize = "NOTICE")]
-    Notice = 2,
+    Notice,
     #[strum(serialize = "WARNING")]
-    Warning = 3,
-
+    Warning,
     #[strum(serialize = "ERROR")]
-    Error = 10,
+    Error,
     #[strum(serialize = "FATAL")]
-    Fatal = 11,
+    Fatal,
     #[strum(serialize = "PANIC")]
-    Panic = 12,
+    Panic,
 }
 
 // refer to: https://www.postgresql.org/docs/16/errcodes-appendix.html
