@@ -310,7 +310,7 @@ impl ConnInfo {
 #[repr(u8)]
 pub enum Channel {
     #[default]
-    Other = 0,
+    Unknown = 0,
 
     Mysql = 1,
     Postgres = 2,
@@ -334,7 +334,7 @@ impl From<u32> for Channel {
             7 => Self::Influx,
             8 => Self::Opentsdb,
 
-            _ => Self::Other,
+            _ => Self::Unknown,
         }
     }
 }
@@ -360,7 +360,7 @@ impl Display for Channel {
             Channel::Grpc => write!(f, "grpc"),
             Channel::Influx => write!(f, "influx"),
             Channel::Opentsdb => write!(f, "opentsdb"),
-            Channel::Other => write!(f, "other"),
+            Channel::Unknown => write!(f, "unknown"),
         }
     }
 }
