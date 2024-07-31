@@ -89,22 +89,19 @@ struct RecordsBuffer {
 
 impl RecordsBuffer {
     fn pop_front(&mut self) -> Option<RecordAndOffset> {
-        if let Some(index) = self.index.peek() {
+        while let Some(index) = self.index.peek() {
             if let Some(record_and_offset) = self.buffer.pop_front() {
                 if index == record_and_offset.offset as u64 {
                     self.index.next();
-                    Some(record_and_offset)
-                } else {
-                    self.pop_front()
+                    return Some(record_and_offset);
                 }
             } else {
-                None
+                return None;
             }
-        } else {
-            // Reached the end
-            self.buffer.clear();
-            None
         }
+
+        self.buffer.clear();
+        None
     }
 
     fn extend(&mut self, records: Vec<RecordAndOffset>) {
