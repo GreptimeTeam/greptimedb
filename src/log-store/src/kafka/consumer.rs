@@ -78,9 +78,6 @@ pub struct Consumer {
     /// The avg record size
     avg_record_size: usize,
 
-    /// Merges two records when the gap between them is smaller than `max_gap_size`.
-    max_gap_size: usize,
-
     /// Termination flag
     terminated: bool,
 
@@ -156,7 +153,7 @@ impl Stream for Consumer {
                         let NextBatchHint { bytes, len } = this
                             .buffer
                             .index
-                            .next_batch_hint(*this.avg_record_size, *this.max_gap_size)
+                            .next_batch_hint(*this.avg_record_size)
                             .unwrap_or(NextBatchHint {
                                 bytes: *this.avg_record_size,
                                 len: 1,
@@ -283,14 +280,13 @@ mod tests {
         let mock_client = MockFetchClient {
             record: record.clone(),
         };
-        let index = RegionWalVecIndex::new([1, 3, 4, 8, 10, 12]);
+        let index = RegionWalVecIndex::new([1, 3, 4, 8, 10, 12], record_size * 3);
         let consumer = Consumer {
             last_high_watermark: -1,
             client: Arc::new(mock_client),
             max_batch_size: usize::MAX,
             max_wait_ms: 500,
             avg_record_size: record_size,
-            max_gap_size: record_size * 2 + 1,
             terminated: false,
             buffer: RecordsBuffer {
                 buffer: VecDeque::new(),
@@ -316,14 +312,13 @@ mod tests {
         let mock_client = MockFetchClient {
             record: record.clone(),
         };
-        let index = RegionWalRange::new(0..30);
+        let index = RegionWalRange::new(0..30, 1024);
         let consumer = Consumer {
             last_high_watermark: -1,
             client: Arc::new(mock_client),
             max_batch_size: usize::MAX,
             max_wait_ms: 500,
             avg_record_size: record.approximate_size(),
-            max_gap_size: record.approximate_size() * 2,
             terminated: false,
             buffer: RecordsBuffer {
                 buffer: VecDeque::new(),
@@ -344,24 +339,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_consumer_with_multiple_index() {
-        let iter0 = Box::new(RegionWalRange::new(0..0)) as _;
-        let iter1 = Box::new(RegionWalVecIndex::new([0, 1, 2, 7, 8, 11])) as _;
-        let iter2 = Box::new(RegionWalRange::new(12..12)) as _;
-        let iter3 = Box::new(RegionWalRange::new(1024..1028)) as _;
-        let iter = MultipleRegionWalIndexIterator::new([iter0, iter1, iter2, iter3]);
-
         common_telemetry::init_default_ut_logging();
         let record = test_record();
         let mock_client = MockFetchClient {
             record: record.clone(),
         };
+
+        let iter0 = Box::new(RegionWalRange::new(0..0, 1024)) as _;
+        let iter1 = Box::new(RegionWalVecIndex::new(
+            [0, 1, 2, 7, 8, 11],
+            record.approximate_size() * 4,
+        )) as _;
+        let iter2 = Box::new(RegionWalRange::new(12..12, 1024)) as _;
+        let iter3 = Box::new(RegionWalRange::new(1024..1028, 1024)) as _;
+        let iter = MultipleRegionWalIndexIterator::new([iter0, iter1, iter2, iter3]);
+
         let consumer = Consumer {
             last_high_watermark: -1,
             client: Arc::new(mock_client),
             max_batch_size: usize::MAX,
             max_wait_ms: 500,
             avg_record_size: record.approximate_size(),
-            max_gap_size: record.approximate_size() * 2,
             terminated: false,
             buffer: RecordsBuffer {
                 buffer: VecDeque::new(),
