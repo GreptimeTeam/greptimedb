@@ -95,7 +95,7 @@ impl PuffinManagerFactory {
         let tempdir = common_test_util::temp_dir::create_temp_dir(prefix);
 
         let f = Self::new(tempdir.path().to_path_buf(), 1024, None);
-        let factory = common_runtime::block_on_bg(f).unwrap();
+        let factory = common_runtime::block_on_global(f).unwrap();
 
         (tempdir, factory)
     }

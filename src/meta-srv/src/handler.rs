@@ -316,7 +316,7 @@ impl HeartbeatMailbox {
         let mailbox = Arc::new(Self::new(pushers, sequence));
 
         let timeout_checker = mailbox.clone();
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_global(async move {
             timeout_checker.check_timeout_bg(10).await;
         });
 

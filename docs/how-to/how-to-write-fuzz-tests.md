@@ -105,7 +105,7 @@ use tests_fuzz::utils::{init_greptime_connections, Connections};
 
 fuzz_target!(|input: FuzzInput| {
     common_telemetry::init_default_ut_logging();
-    common_runtime::block_on_write(async {
+    common_runtime::block_on_global(async {
         let Connections { mysql } = init_greptime_connections().await;
             let mut rng = ChaChaRng::seed_from_u64(input.seed);
             let columns = rng.gen_range(2..30);

@@ -400,7 +400,7 @@ impl Metasrv {
                 leader_cached_kv_backend: leader_cached_kv_backend.clone(),
                 region_supervisor_ticker,
             };
-            let _handle = common_runtime::spawn_bg(async move {
+            let _handle = common_runtime::spawn_global(async move {
                 loop {
                     match rx.recv().await {
                         Ok(msg) => {
@@ -436,7 +436,7 @@ impl Metasrv {
                 let election = election.clone();
                 let started = self.started.clone();
                 let node_info = self.node_info();
-                let _handle = common_runtime::spawn_bg(async move {
+                let _handle = common_runtime::spawn_global(async move {
                     while started.load(Ordering::Relaxed) {
                         let res = election.register_candidate(&node_info).await;
                         if let Err(e) = res {
@@ -450,7 +450,7 @@ impl Metasrv {
             {
                 let election = election.clone();
                 let started = self.started.clone();
-                let _handle = common_runtime::spawn_write(async move {
+                let _handle = common_runtime::spawn_global(async move {
                     while started.load(Ordering::Relaxed) {
                         let res = election.campaign().await;
                         if let Err(e) = res {

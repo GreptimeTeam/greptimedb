@@ -341,7 +341,7 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
 fuzz_target!(|input: FuzzInput| {
     common_telemetry::init_default_ut_logging();
-    common_runtime::block_on_write(async {
+    common_runtime::block_on_global(async {
         let Connections { mysql } = init_greptime_connections_via_env().await;
         let ctx = FuzzContext {
             greptime: mysql.expect("mysql connection init must be succeed"),

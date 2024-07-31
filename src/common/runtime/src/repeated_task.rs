@@ -200,7 +200,7 @@ mod tests {
 
         let task = RepeatedTask::new(Duration::from_millis(100), Box::new(task_fn));
 
-        task.start(crate::bg_runtime()).unwrap();
+        task.start(crate::global_runtime()).unwrap();
         tokio::time::sleep(Duration::from_millis(550)).await;
         task.stop().await.unwrap();
 
@@ -217,7 +217,7 @@ mod tests {
         let task = RepeatedTask::new(Duration::from_millis(100), Box::new(task_fn))
             .with_initial_delay(Some(Duration::ZERO));
 
-        task.start(crate::bg_runtime()).unwrap();
+        task.start(crate::global_runtime()).unwrap();
         tokio::time::sleep(Duration::from_millis(550)).await;
         task.stop().await.unwrap();
 

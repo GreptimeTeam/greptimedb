@@ -43,7 +43,7 @@ pub struct FlightRecordBatchStream {
 impl FlightRecordBatchStream {
     pub fn new(recordbatches: SendableRecordBatchStream, tracing_context: TracingContext) -> Self {
         let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
-        let join_handle = common_runtime::spawn_read(async move {
+        let join_handle = common_runtime::spawn_global(async move {
             Self::flight_data_stream(recordbatches, tx)
                 .trace(tracing_context.attach(info_span!("flight_data_stream")))
                 .await

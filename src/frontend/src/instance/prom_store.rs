@@ -170,6 +170,10 @@ impl PromStoreProtocolHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
             .context(AuthSnafu)?;
+        let interceptor_ref = self
+            .plugins
+            .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
+        interceptor_ref.pre_write(&request, ctx.clone())?;
 
         let output = if with_metric_engine {
             let physical_table = ctx

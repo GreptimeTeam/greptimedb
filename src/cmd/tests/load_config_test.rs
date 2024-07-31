@@ -46,9 +46,8 @@ fn test_load_datanode_example_config() {
 
     let expected = GreptimeOptions::<DatanodeOptions> {
         runtime: RuntimeOptions {
-            read_rt_size: 8,
-            write_rt_size: 8,
-            bg_rt_size: 4,
+            global_rt_size: 8,
+            compact_rt_size: 4,
         },
         component: DatanodeOptions {
             node_id: Some(42),
@@ -119,9 +118,8 @@ fn test_load_frontend_example_config() {
             .unwrap();
     let expected = GreptimeOptions::<FrontendOptions> {
         runtime: RuntimeOptions {
-            read_rt_size: 8,
-            write_rt_size: 8,
-            bg_rt_size: 4,
+            global_rt_size: 8,
+            compact_rt_size: 4,
         },
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
@@ -167,9 +165,8 @@ fn test_load_metasrv_example_config() {
             .unwrap();
     let expected = GreptimeOptions::<MetasrvOptions> {
         runtime: RuntimeOptions {
-            read_rt_size: 8,
-            write_rt_size: 8,
-            bg_rt_size: 4,
+            global_rt_size: 8,
+            compact_rt_size: 4,
         },
         component: MetasrvOptions {
             selector: SelectorType::LeaseBased,
@@ -200,9 +197,8 @@ fn test_load_standalone_example_config() {
             .unwrap();
     let expected = GreptimeOptions::<StandaloneOptions> {
         runtime: RuntimeOptions {
-            read_rt_size: 8,
-            write_rt_size: 8,
-            bg_rt_size: 4,
+            global_rt_size: 8,
+            compact_rt_size: 4,
         },
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),

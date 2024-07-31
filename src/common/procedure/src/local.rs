@@ -461,7 +461,7 @@ impl LocalManager {
 
         let tracing_context = TracingContext::from_current_span();
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_global(async move {
             // Run the root procedure.
             // The task was moved to another runtime for execution.
             // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
@@ -593,7 +593,7 @@ impl ProcedureManager for LocalManager {
         let task_inner = self.build_remove_outdated_meta_task();
 
         task_inner
-            .start(common_runtime::bg_runtime())
+            .start(common_runtime::global_runtime())
             .context(StartRemoveOutdatedMetaTaskSnafu)?;
 
         *task = Some(task_inner);

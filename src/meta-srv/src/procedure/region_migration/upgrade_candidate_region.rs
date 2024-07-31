@@ -438,7 +438,7 @@ mod tests {
             .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
             .await;
 
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             let resp = rx.recv().await.unwrap().unwrap();
             let reply_id = resp.mailbox_message.unwrap().id;
             mailbox
@@ -497,7 +497,7 @@ mod tests {
             .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
             .await;
 
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             let resp = rx.recv().await.unwrap().unwrap();
             let reply_id = resp.mailbox_message.unwrap().id;
             mailbox

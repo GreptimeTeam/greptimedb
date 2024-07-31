@@ -291,7 +291,7 @@ pub fn send_mock_reply(
     mut rx: MockHeartbeatReceiver,
     msg: impl Fn(u64) -> Result<MailboxMessage> + Send + 'static,
 ) {
-    common_runtime::spawn_bg(async move {
+    common_runtime::spawn_global(async move {
         while let Some(Ok(resp)) = rx.recv().await {
             let reply_id = resp.mailbox_message.unwrap().id;
             mailbox.on_recv(reply_id, msg(reply_id)).await.unwrap();
