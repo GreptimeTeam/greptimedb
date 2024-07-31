@@ -19,7 +19,7 @@ pub mod time;
 use ahash::{HashMap, HashMapExt};
 pub use array::Array;
 pub use map::Map;
-pub use time::{Epoch, Time};
+pub use time::{Epoch, Timestamp};
 
 /// Value can be used as type
 /// acts as value: the enclosed value is the actual value
@@ -47,7 +47,7 @@ pub enum Value {
     Boolean(bool),
     String(String),
 
-    Time(Time),
+    Timestamp(Timestamp),
     Epoch(Epoch),
 
     Array(Array),
@@ -80,7 +80,7 @@ impl Value {
             "boolean" => Ok(Value::Boolean(false)),
             "string" => Ok(Value::String("".to_string())),
 
-            "time" => Ok(Value::Time(Time::default())),
+            "time" => Ok(Value::Timestamp(Timestamp::default())),
             "epoch" => match tail {
                 Some(resolution) if !resolution.is_empty() => match resolution.as_str() {
                     time::NANOSECOND_RESOLUTION | time::NANO_RESOLUTION | time::NS_RESOLUTION => {
@@ -212,7 +212,7 @@ impl Value {
             Value::Boolean(_) => "boolean",
             Value::String(_) => "string",
 
-            Value::Time(_) => "time",
+            Value::Timestamp(_) => "time",
             Value::Epoch(_) => "epoch",
 
             Value::Array(_) => "array",
@@ -244,7 +244,7 @@ impl std::fmt::Display for Value {
             Value::Boolean(v) => format!("boolean({})", v),
             Value::String(v) => format!("string({})", v),
 
-            Value::Time(v) => format!("time({})", v),
+            Value::Timestamp(v) => format!("time({})", v),
             Value::Epoch(v) => format!("epoch({})", v),
 
             Value::Array(v) => format!("{}", v),

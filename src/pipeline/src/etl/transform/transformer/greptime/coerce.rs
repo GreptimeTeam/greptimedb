@@ -20,7 +20,7 @@ use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{OnFailure, Transform};
-use crate::etl::value::{Epoch, Time, Value};
+use crate::etl::value::{Epoch, Timestamp, Value};
 
 impl TryFrom<Value> for ValueData {
     type Error = String;
@@ -45,7 +45,7 @@ impl TryFrom<Value> for ValueData {
             Value::Boolean(v) => Ok(ValueData::BoolValue(v)),
             Value::String(v) => Ok(ValueData::StringValue(v)),
 
-            Value::Time(Time { nanosecond, .. }) => Ok(ValueData::TimeNanosecondValue(nanosecond)),
+            Value::Timestamp(Timestamp { nanosecond, .. }) => Ok(ValueData::TimeNanosecondValue(nanosecond)),
 
             Value::Epoch(Epoch::Nanosecond(ns)) => Ok(ValueData::TimestampNanosecondValue(ns)),
             Value::Epoch(Epoch::Microsecond(us)) => Ok(ValueData::TimestampMicrosecondValue(us)),
@@ -120,7 +120,7 @@ fn coerce_type(transform: &Transform) -> Result<ColumnDataType, String> {
         Value::Boolean(_) => Ok(ColumnDataType::Boolean),
         Value::String(_) => Ok(ColumnDataType::String),
 
-        Value::Time(_) => Ok(ColumnDataType::TimestampNanosecond),
+        Value::Timestamp(_) => Ok(ColumnDataType::TimestampNanosecond),
 
         Value::Epoch(Epoch::Nanosecond(_)) => Ok(ColumnDataType::TimestampNanosecond),
         Value::Epoch(Epoch::Microsecond(_)) => Ok(ColumnDataType::TimestampMicrosecond),
@@ -169,7 +169,7 @@ pub(crate) fn coerce_value(
         Value::Boolean(b) => coerce_bool_value(*b, transform),
         Value::String(s) => coerce_string_value(s, transform),
 
-        Value::Time(Time { nanosecond, .. }) => {
+        Value::Timestamp(Timestamp { nanosecond, .. }) => {
             Ok(Some(ValueData::TimestampNanosecondValue(*nanosecond)))
         }
 
@@ -201,7 +201,7 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
         Value::Boolean(_) => ValueData::BoolValue(b),
         Value::String(_) => ValueData::StringValue(b.to_string()),
 
-        Value::Time(_) => match transform.on_failure {
+        Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
                 return Err("default value not supported for Time".to_string())
@@ -243,7 +243,7 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::Boolean(_) => ValueData::BoolValue(n != 0),
         Value::String(_) => ValueData::StringValue(n.to_string()),
 
-        Value::Time(_) => match transform.on_failure {
+        Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
                 return Err("default value not supported for Time".to_string())
@@ -286,7 +286,7 @@ fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::Boolean(_) => ValueData::BoolValue(n != 0),
         Value::String(_) => ValueData::StringValue(n.to_string()),
 
-        Value::Time(_) => match transform.on_failure {
+        Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
                 return Err("default value not supported for Time".to_string())
@@ -329,7 +329,7 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::Boolean(_) => ValueData::BoolValue(n != 0.0),
         Value::String(_) => ValueData::StringValue(n.to_string()),
 
-        Value::Time(_) => match transform.on_failure {
+        Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
                 return Err("default value not supported for Time".to_string())
@@ -415,7 +415,7 @@ fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<Value
 
         Value::String(_) => Ok(Some(ValueData::StringValue(s.to_string()))),
 
-        Value::Time(_) => match transform.on_failure {
+        Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => Ok(None),
             Some(OnFailure::Default) => Err("default value not supported for Time".to_string()),
             None => Err("String type not supported for Time".to_string()),

@@ -164,7 +164,7 @@ transform:
   - field: reqTimeSec, req_time_sec
     # epoch time is special, the resolution MUST BE specified
     type: epoch, ms
-    index: timeindex
+    index: time
 
   # the following is from cmcd
   - fields:
@@ -258,5 +258,6 @@ fn criterion_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+// Testing the pipeline's performance in converting Json to Rows
 criterion_group!(benches, criterion_benchmark);
 criterion_main!(benches);

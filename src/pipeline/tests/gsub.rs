@@ -44,7 +44,7 @@ processors:
 transform:
   - field: reqTimeSec
     type: epoch, millisecond
-    index: timeindex
+    index: time
 "#;
 
     let output = common::parse_and_exec(input_value_str, pipeline_yaml);

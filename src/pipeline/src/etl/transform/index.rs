@@ -13,7 +13,7 @@
 // limitations under the License.
 
 const INDEX_TIMESTAMP: &str = "timestamp";
-const INDEX_TIMEINDEX: &str = "timeindex";
+const INDEX_TIMEINDEX: &str = "time";
 const INDEX_TAG: &str = "tag";
 const INDEX_FULLTEXT: &str = "fulltext";
 

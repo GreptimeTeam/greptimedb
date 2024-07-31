@@ -94,7 +94,7 @@ impl EpochProcessor {
             Value::Float32(f) => *f as i64,
             Value::Float64(f) => *f as i64,
 
-            Value::Time(t) => match self.resolution {
+            Value::Timestamp(t) => match self.resolution {
                 Resolution::Second => t.timestamp(),
                 Resolution::Milli => t.timestamp_millis(),
                 Resolution::Micro => t.timestamp_micros(),

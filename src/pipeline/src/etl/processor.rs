@@ -21,6 +21,7 @@ pub mod gsub;
 pub mod join;
 pub mod letter;
 pub mod regex;
+pub mod timestamp;
 pub mod urlencoding;
 
 use ahash::{HashSet, HashSetExt};
@@ -35,6 +36,7 @@ use itertools::Itertools;
 use join::JoinProcessor;
 use letter::LetterProcessor;
 use regex::RegexProcessor;
+use timestamp::TimestampProcessor;
 use urlencoding::UrlEncodingProcessor;
 
 use crate::etl::field::{Field, Fields};
@@ -53,25 +55,39 @@ const SEPARATOR_NAME: &str = "separator";
 // const ON_FAILURE_NAME: &str = "on_failure";
 // const TAG_NAME: &str = "tag";
 
+/// Processor trait defines the interface for all processors
+/// A processor is a transformation that can be applied to a field in a document
+/// It can be used to extract, transform, or enrich data
+/// Now Processor only have one input field. In the future, we may support multiple input fields.
+/// The output of a processor is a map of key-value pairs that will be merged into the document when you use exec_map method.
 #[enum_dispatch(ProcessorKind)]
 pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
+    /// Get the processor's fields
+    /// fields is just the same processor for multiple keys. It is not the case that a processor has multiple inputs
     fn fields(&self) -> &Fields;
-    fn fields_mut(&mut self) -> &mut Fields;
-    fn kind(&self) -> &str;
-    fn ignore_missing(&self) -> bool;
 
-    fn ignore_processor_array_failure(&self) -> bool {
-        true
-    }
+    /// Get the processor's fields mutably
+    fn fields_mut(&mut self) -> &mut Fields;
+
+    /// Get the processor's kind
+    fn kind(&self) -> &str;
+
+    /// Whether to ignore missing
+    fn ignore_missing(&self) -> bool;
 
     /// processor all output keys
     /// if a processor has multiple output keys, it should return all of them
     fn output_keys(&self) -> HashSet<String>;
 
+    /// Execute the processor on a document
+    /// and return a map of key-value pairs
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String>;
 
+    /// Execute the processor on a vector which be proprocessed by the pipeline
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String>;
 
+    /// Execute the processor on a map
+    /// and merge the output into the original map
     fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
         for ff @ Field {
             input_field: field_info,
@@ -109,14 +125,21 @@ pub enum ProcessorKind {
     Join(JoinProcessor),
     Letter(LetterProcessor),
     Regex(RegexProcessor),
+    Timestamp(TimestampProcessor),
     UrlEncoding(UrlEncodingProcessor),
 }
 
 #[derive(Debug, Default)]
 pub struct Processors {
+    /// A ordered list of processors
+    /// The order of processors is important
+    /// The output of the first processor will be the input of the second processor
     pub processors: Vec<ProcessorKind>,
+    /// all required keys in all processors
     pub required_keys: Vec<String>,
+    /// all required keys in user-supplied data, not pipeline output fields
     pub required_original_keys: Vec<String>,
+    /// all output keys in all processors
     pub output_keys: Vec<String>,
 }
 
@@ -224,6 +247,9 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind, String> {
         join::PROCESSOR_JOIN => ProcessorKind::Join(JoinProcessor::try_from(value)?),
         letter::PROCESSOR_LETTER => ProcessorKind::Letter(LetterProcessor::try_from(value)?),
         regex::PROCESSOR_REGEX => ProcessorKind::Regex(RegexProcessor::try_from(value)?),
+        timestamp::PROCESSOR_TIMESTAMP => {
+            ProcessorKind::Timestamp(TimestampProcessor::try_from(value)?)
+        }
         urlencoding::PROCESSOR_URL_ENCODING => {
             ProcessorKind::UrlEncoding(UrlEncodingProcessor::try_from(value)?)
         }

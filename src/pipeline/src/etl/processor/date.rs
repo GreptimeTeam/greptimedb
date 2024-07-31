@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use ahash::HashSet;
@@ -25,7 +24,7 @@ use crate::etl::processor::{
     update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, yaml_strings,
     Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
-use crate::etl::value::{Map, Time, Value};
+use crate::etl::value::{Map, Timestamp, Value};
 
 pub(crate) const PROCESSOR_DATE: &str = "date";
 
@@ -132,7 +131,7 @@ impl DateProcessor {
         self.ignore_missing = ignore_missing;
     }
 
-    fn parse(&self, val: &str) -> Result<Time, String> {
+    fn parse(&self, val: &str) -> Result<Timestamp, String> {
         let mut tz = Tz::UTC;
         if let Some(timezone) = &self.timezone {
             tz = timezone.parse::<Tz>().map_err(|e| e.to_string())?;
@@ -140,10 +139,7 @@ impl DateProcessor {
 
         for fmt in self.formats.iter() {
             if let Ok(ns) = try_parse(val, fmt, tz) {
-                let mut t = Time::new(Cow::Borrowed(val), ns);
-                t.with_format(Some(fmt.clone()));
-                t.with_timezone(self.timezone.clone());
-                return Ok(t);
+                return Ok(Timestamp::new(ns));
             }
         }
 
@@ -153,7 +149,7 @@ impl DateProcessor {
     fn process_field(&self, val: &str, field: &Field) -> Result<Map, String> {
         let key = field.get_target_field();
 
-        Ok(Map::one(key, Value::Time(self.parse(val)?)))
+        Ok(Map::one(key, Value::Timestamp(self.parse(val)?)))
     }
 }
 
@@ -274,10 +270,6 @@ impl Processor for DateProcessor {
             }
         }
         Ok(())
-    }
-
-    fn ignore_processor_array_failure(&self) -> bool {
-        true
     }
 }
 

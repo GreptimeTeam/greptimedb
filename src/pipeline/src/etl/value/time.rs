@@ -12,37 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use common_telemetry::error;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Time {
-    pub value: String,
+pub struct Timestamp {
     pub nanosecond: i64,
-    pub format: Option<Arc<String>>,
-    pub timezone: Option<Arc<String>>,
-    // TODO(yuanbohan): support locale
-    // pub locale: Option<String>,
 }
 
-impl Time {
-    pub(crate) fn new(value: impl Into<String>, nanosecond: i64) -> Self {
-        let value = value.into();
-        Time {
-            value,
-            nanosecond,
-            format: None,
-            timezone: None,
-        }
-    }
-
-    pub(crate) fn with_format(&mut self, format: Option<Arc<String>>) {
-        self.format = format;
-    }
-
-    pub(crate) fn with_timezone(&mut self, timezone: Option<Arc<String>>) {
-        self.timezone = timezone;
+impl Timestamp {
+    pub(crate) fn new(nanosecond: i64) -> Self {
+        Timestamp { nanosecond }
     }
 
     pub(crate) fn timestamp_nanos(&self) -> i64 {
@@ -62,10 +41,9 @@ impl Time {
     }
 }
 
-impl Default for Time {
+impl Default for Timestamp {
     fn default() -> Self {
         let dt = chrono::Utc::now();
-        let v = dt.to_rfc3339();
         let ns = match dt.timestamp_nanos_opt() {
             Some(ns) => ns,
             None => {
@@ -73,25 +51,13 @@ impl Default for Time {
                 0
             }
         };
-        Time::new(v, ns)
+        Timestamp::new(ns)
     }
 }
 
-impl std::fmt::Display for Time {
+impl std::fmt::Display for Timestamp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let format = if let Some(format) = &self.format {
-            format!(", format: {}", format)
-        } else {
-            "".to_string()
-        };
-
-        let timezone = if let Some(timezone) = &self.timezone {
-            format!(", timezone: {}", timezone)
-        } else {
-            "".to_string()
-        };
-
-        write!(f, "{}, format: {}{}", self.value, format, timezone)
+        write!(f, "ns: {}", self.nanosecond)
     }
 }
 

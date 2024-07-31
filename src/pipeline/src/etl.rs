@@ -36,6 +36,8 @@ pub enum Content {
     Yaml(String),
 }
 
+/// set the index for the processor keys
+/// the index is the position of the key in the final intermediate keys
 fn set_processor_keys_index(
     processors: &mut processor::Processors,
     final_intermediate_keys: &Vec<String>,
