@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use ::auth::UserProviderRef;
 use axum::extract::State;
 use axum::http::{self, Request, StatusCode};
@@ -68,7 +66,7 @@ pub async fn inner_auth<B>(
         .current_schema(schema.clone())
         .timezone(timezone);
 
-    let query_ctx = Arc::new(query_ctx_builder.build());
+    let query_ctx = query_ctx_builder.build();
     let need_auth = need_auth(&req);
 
     // 2. check if auth is needed

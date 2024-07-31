@@ -270,7 +270,12 @@ impl Inserter {
         requests: RegionInsertRequests,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
-        let write_cost = write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
+        let write_cost = write_meter!(
+            ctx.current_catalog(),
+            ctx.current_schema(),
+            requests,
+            ctx.channel() as u8
+        );
         let request_factory = RegionRequestFactory::new(RegionRequestHeader {
             tracing_context: TracingContext::from_current_span().to_w3c(),
             dbname: ctx.get_db_string(),

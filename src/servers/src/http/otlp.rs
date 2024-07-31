@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use axum::extract::{RawBody, State};
 use axum::http::header;
 use axum::response::IntoResponse;
@@ -25,7 +27,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 use prost::Message;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 
 use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
@@ -36,10 +38,12 @@ use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "metrics"))]
 pub async fn metrics(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     RawBody(body): RawBody,
 ) -> Result<OtlpMetricsResponse> {
     let db = query_ctx.get_db_string();
+    query_ctx.set_channel(Channel::Otlp);
+    let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
@@ -83,10 +87,12 @@ impl IntoResponse for OtlpMetricsResponse {
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "traces"))]
 pub async fn traces(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     RawBody(body): RawBody,
 ) -> Result<OtlpTracesResponse> {
     let db = query_ctx.get_db_string();
+    query_ctx.set_channel(Channel::Otlp);
+    let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();

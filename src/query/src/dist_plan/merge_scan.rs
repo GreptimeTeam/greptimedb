@@ -194,6 +194,7 @@ impl MergeScanExec {
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_catalog = self.query_ctx.current_catalog().to_string();
         let current_schema = self.query_ctx.current_schema().to_string();
+        let current_channel = self.query_ctx.channel();
         let timezone = self.query_ctx.timezone().to_string();
         let extensions = self.query_ctx.extensions();
         let target_partition = self.target_partition;
@@ -221,6 +222,7 @@ impl MergeScanExec {
                             current_schema: current_schema.clone(),
                             timezone: timezone.clone(),
                             extensions: extensions.clone(),
+                            channel: current_channel as u32,
                         }),
                     }),
                     region_id,
@@ -271,7 +273,8 @@ impl MergeScanExec {
                         ReadItem {
                             cpu_time: metrics.elapsed_compute as u64,
                             table_scan: metrics.memory_usage as u64
-                        }
+                        },
+                        current_channel as u8
                     );
                     metric.record_greptime_exec_cost(value as usize);
 

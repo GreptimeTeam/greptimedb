@@ -32,7 +32,7 @@ use pipeline::{PipelineVersion, Value as PipelineValue};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Value};
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
@@ -107,7 +107,7 @@ where
 pub async fn add_pipeline(
     State(state): State<LogState>,
     Path(pipeline_name): Path<String>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     PipelineContent(payload): PipelineContent,
 ) -> Result<GreptimedbManageResponse> {
     let start = Instant::now();
@@ -125,6 +125,9 @@ pub async fn add_pipeline(
         }
         .build());
     }
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
 
     let content_type = "yaml";
     let result = handler
@@ -148,7 +151,7 @@ pub async fn add_pipeline(
 #[axum_macros::debug_handler]
 pub async fn delete_pipeline(
     State(state): State<LogState>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Query(query_params): Query<LogIngesterQueryParams>,
     Path(pipeline_name): Path<String>,
 ) -> Result<GreptimedbManageResponse> {
@@ -166,6 +169,9 @@ pub async fn delete_pipeline(
     })?;
 
     let version = to_pipeline_version(Some(version_str.clone())).context(PipelineSnafu)?;
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
 
     handler
         .delete_pipeline(&pipeline_name, version, query_ctx)
@@ -231,7 +237,7 @@ fn transform_ndjson_array_factory(
 pub async fn log_ingester(
     State(log_state): State<LogState>,
     Query(query_params): Query<LogIngesterQueryParams>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     TypedHeader(content_type): TypedHeader<ContentType>,
     payload: String,
 ) -> Result<HttpResponse> {
@@ -255,6 +261,9 @@ pub async fn log_ingester(
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
     let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
 
     ingest_logs_inner(
         handler,

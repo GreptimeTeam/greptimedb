@@ -119,12 +119,12 @@ etcd-client = { version = "0.13" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "7ca323090b3ae8faf2c15036b7f41b7c5225cf5f" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "c437b55725b7f5224fe9d46db21072b4a682ee4b" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "80b72716dcde47ec4161478416a5c6c21343364d" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "049171eb16cb4249d8099751a0c46750d1fe88e7" }
 mockall = "0.11.4"
 moka = "0.12"
 notify = "6.1"
@@ -238,7 +238,7 @@ table = { path = "src/table" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "80b72716dcde47ec4161478416a5c6c21343364d"
+rev = "049171eb16cb4249d8099751a0c46750d1fe88e7"
 
 [profile.release]
 debug = 1
