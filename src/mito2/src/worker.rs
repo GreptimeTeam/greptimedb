@@ -130,9 +130,11 @@ impl WorkerGroup {
         object_store_manager: ObjectStoreManagerRef,
         plugins: Plugins,
     ) -> Result<WorkerGroup> {
-        let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
-            config.global_write_buffer_size.as_bytes() as usize,
-        ));
+        let (flush_sender, flush_receiver) = watch::channel(());
+        let write_buffer_manager = Arc::new(
+            WriteBufferManagerImpl::new(config.global_write_buffer_size.as_bytes() as usize)
+                .with_notifier(flush_sender.clone()),
+        );
         let puffin_manager_factory = PuffinManagerFactory::new(
             &config.index.aux_path,
             config.index.staging_size.as_bytes(),
@@ -165,7 +167,6 @@ impl WorkerGroup {
                 .build(),
         );
         let time_provider = Arc::new(StdTimeProvider);
-        let (flush_sender, flush_receiver) = watch::channel(());
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -265,10 +266,12 @@ impl WorkerGroup {
         listener: Option<crate::engine::listener::EventListenerRef>,
         time_provider: TimeProviderRef,
     ) -> Result<WorkerGroup> {
+        let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
-            Arc::new(WriteBufferManagerImpl::new(
-                config.global_write_buffer_size.as_bytes() as usize,
-            ))
+            Arc::new(
+                WriteBufferManagerImpl::new(config.global_write_buffer_size.as_bytes() as usize)
+                    .with_notifier(flush_sender.clone()),
+            )
         });
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
@@ -297,7 +300,6 @@ impl WorkerGroup {
                 .write_cache(write_cache)
                 .build(),
         );
-        let (flush_sender, flush_receiver) = watch::channel(());
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
