@@ -83,7 +83,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
     /// and return a map of key-value pairs
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String>;
 
-    /// Execute the processor on a vector which be proprocessed by the pipeline
+    /// Execute the processor on a vector which be preprocessed by the pipeline
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String>;
 
     /// Execute the processor on a map

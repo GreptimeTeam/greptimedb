@@ -234,7 +234,7 @@ fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>,
                     ));
                 }
                 let mut iter = s.into_iter();
-                // safty: unwrap is safe here
+                // safety: unwrap is safe here
                 let formatter = iter.next().unwrap();
                 let tz = iter
                     .next()
