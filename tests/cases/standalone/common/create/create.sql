@@ -26,6 +26,12 @@ CREATE TABLE test2 (i INTEGER, j TIMESTAMP TIME INDEX);
 
 CREATE TABLE 'N.~' (i TIMESTAMP TIME INDEX);
 
+CREATE TABLE neg_default_value_min(i TIMESTAMP TIME INDEX, j SMALLINT DEFAULT -32768);
+
+DESC TABLE neg_default_value_min;
+
+DROP TABLE neg_default_value_min;
+
 DESC TABLE integers;
 
 DESC TABLE test1;
