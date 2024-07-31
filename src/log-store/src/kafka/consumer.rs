@@ -60,24 +60,34 @@ struct FetchResult {
     used_offset: i64,
 }
 
+/// The [`Consumer`] struct represents a Kafka consumer that fetches messages from
+/// a Kafka cluster. Yielding records respecting the [`RegionWalIndexIterator`].
 #[pin_project]
 pub struct Consumer {
     last_high_watermark: i64,
 
+    /// The client is used to fetch records from kafka topic.
     client: Arc<dyn FetchClient>,
 
+    /// The max batch size in a single fetch request.
     max_batch_size: usize,
 
+    /// The max wait milliseconds.
     max_wait_ms: u32,
 
+    /// The avg record size
     avg_record_size: usize,
 
+    /// Merges two records when the gap between them is smaller than `max_gap_size`.
     max_gap_size: usize,
 
+    /// Termination flag
     terminated: bool,
 
+    /// The buffer of records.
     buffer: RecordsBuffer,
 
+    /// The fetch future.
     fetch_fut: Fuse<BoxFuture<'static, rskafka::client::error::Result<FetchResult>>>,
 }
 
