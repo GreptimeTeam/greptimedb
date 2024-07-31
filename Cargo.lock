@@ -4234,7 +4234,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=e52fa3e63c77545618328781e11178eb2cfc45c5#e52fa3e63c77545618328781e11178eb2cfc45c5"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=c437b55725b7f5224fe9d46db21072b4a682ee4b#c437b55725b7f5224fe9d46db21072b4a682ee4b"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -6155,7 +6155,7 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=488844b4702916cc6f7d04898fb0b837afce4ca7#488844b4702916cc6f7d04898fb0b837afce4ca7"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=049171eb16cb4249d8099751a0c46750d1fe88e7#049171eb16cb4249d8099751a0c46750d1fe88e7"
 dependencies = [
  "anymap",
  "once_cell",
@@ -6165,7 +6165,7 @@ dependencies = [
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=488844b4702916cc6f7d04898fb0b837afce4ca7#488844b4702916cc6f7d04898fb0b837afce4ca7"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=049171eb16cb4249d8099751a0c46750d1fe88e7#049171eb16cb4249d8099751a0c46750d1fe88e7"
 dependencies = [
  "meter-core",
 ]
