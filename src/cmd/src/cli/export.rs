@@ -21,11 +21,12 @@ use base64::engine::general_purpose;
 use base64::Engine;
 use clap::{Parser, ValueEnum};
 use client::DEFAULT_SCHEMA_NAME;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_telemetry::{debug, error, info, warn};
 use serde_json::Value;
 use servers::http::greptime_result_v1::GreptimedbV1Response;
 use servers::http::GreptimeQueryOutput;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
@@ -34,8 +35,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::cli::{Instance, Tool};
 use crate::error::{
-    EmptyResultSnafu, Error, FileIoSnafu, HttpQuerySqlSnafu, InvalidDatabaseNameSnafu, Result,
-    SerdeJsonSnafu,
+    EmptyResultSnafu, Error, FileIoSnafu, HttpQuerySqlSnafu, Result, SerdeJsonSnafu,
 };
 
 type TableReference = (String, String, String);
@@ -539,11 +539,11 @@ impl Tool for Export {
 
 /// Split at `-`.
 fn split_database(database: &str) -> Result<(String, Option<String>)> {
-    let (catalog, schema) = database
-        .split_once('-')
-        .with_context(|| InvalidDatabaseNameSnafu {
-            database: database.to_string(),
-        })?;
+    let (catalog, schema) = match database.split_once('-') {
+        Some((catalog, schema)) => (catalog, schema),
+        None => (DEFAULT_CATALOG_NAME, database),
+    };
+
     if schema == "*" {
         Ok((catalog.to_string(), None))
     } else {
@@ -558,9 +558,25 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_telemetry::logging::LoggingOptions;
 
+    use crate::cli::export::split_database;
     use crate::error::Result as CmdResult;
     use crate::options::GlobalOptions;
     use crate::{cli, standalone, App};
+
+    #[test]
+    fn test_split_database() {
+        let result = split_database("catalog-schema").unwrap();
+        assert_eq!(result, ("catalog".to_string(), Some("schema".to_string())));
+
+        let result = split_database("schema").unwrap();
+        assert_eq!(result, ("greptime".to_string(), Some("schema".to_string())));
+
+        let result = split_database("catalog-*").unwrap();
+        assert_eq!(result, ("catalog".to_string(), None));
+
+        let result = split_database("*").unwrap();
+        assert_eq!(result, ("greptime".to_string(), None));
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_export_create_table_with_quoted_names() -> CmdResult<()> {
