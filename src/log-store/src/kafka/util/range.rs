@@ -68,7 +68,7 @@ impl<I: Iterator<Item = Range<usize>>> MergeRange<I> {
 fn overlaps(this: &Range<usize>, other: &Range<usize>, max_gap_size: usize) -> bool {
     let end_with_gap = this.end + max_gap_size;
     (other.start >= this.start && other.start <= end_with_gap)
-        || (other.end >= this.start && other.end <= end_with_gap)
+        || (other.end > this.start && other.end <= end_with_gap)
 }
 
 /// Merges ranges.
