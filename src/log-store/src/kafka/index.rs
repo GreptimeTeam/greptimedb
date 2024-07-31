@@ -25,22 +25,22 @@ use store_api::logstore::EntryId;
 use super::util::range::{ConvertIndexToRange, MergeRange};
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct NextBatchHit {
+pub(crate) struct NextBatchHint {
     pub(crate) bytes: usize,
     pub(crate) len: usize,
 }
 
 #[cfg(test)]
-impl NextBatchHit {
-    pub fn new(bytes: usize, len: usize) -> NextBatchHit {
-        NextBatchHit { bytes, len }
+impl NextBatchHint {
+    pub fn new(bytes: usize, len: usize) -> NextBatchHint {
+        NextBatchHint { bytes, len }
     }
 }
 
 /// An iterator over WAL (Write-Ahead Log) entries index for a region.
 pub trait RegionWalIndexIterator: Send + Sync {
-    /// Returns next batch hit.
-    fn next_batch_hit(&self, avg_size: usize, max_gap_size: usize) -> Option<NextBatchHit>;
+    /// Returns next batch hint.
+    fn next_batch_hint(&self, avg_size: usize, max_gap_size: usize) -> Option<NextBatchHint>;
 
     // Peeks the next EntryId without advancing the iterator.
     fn peek(&self) -> Option<EntryId>;
@@ -77,8 +77,8 @@ impl RegionWalRange {
 }
 
 impl RegionWalIndexIterator for RegionWalRange {
-    fn next_batch_hit(&self, avg_size: usize, max_gap_size: usize) -> Option<NextBatchHit> {
-        self.next_batch_size().map(|size| NextBatchHit {
+    fn next_batch_hint(&self, avg_size: usize, max_gap_size: usize) -> Option<NextBatchHint> {
+        self.next_batch_size().map(|size| NextBatchHint {
             bytes: size as usize * avg_size,
             len: size as usize,
         })
@@ -135,13 +135,13 @@ impl RegionWalVecIndex {
 }
 
 impl RegionWalIndexIterator for RegionWalVecIndex {
-    fn next_batch_hit(&self, avg_size: usize, max_gap_size: usize) -> Option<NextBatchHit> {
+    fn next_batch_hint(&self, avg_size: usize, max_gap_size: usize) -> Option<NextBatchHint> {
         let merger = MergeRange::new(
             ConvertIndexToRange::new(self.index.iter().peekable(), avg_size),
             max_gap_size,
         );
 
-        merger.merge().map(|(range, size)| NextBatchHit {
+        merger.merge().map(|(range, size)| NextBatchHint {
             bytes: range.end - range.start - 1,
             len: size,
         })
@@ -172,9 +172,9 @@ impl MultipleRegionWalIndexIterator {
 }
 
 impl RegionWalIndexIterator for MultipleRegionWalIndexIterator {
-    fn next_batch_hit(&self, avg_size: usize, max_gap_size: usize) -> Option<NextBatchHit> {
+    fn next_batch_hint(&self, avg_size: usize, max_gap_size: usize) -> Option<NextBatchHint> {
         for iter in &self.iterator {
-            if let Some(batch) = iter.next_batch_hit(avg_size, max_gap_size) {
+            if let Some(batch) = iter.next_batch_hint(avg_size, max_gap_size) {
                 return Some(batch);
             }
         }
@@ -281,42 +281,42 @@ mod tests {
         let mut iter = MultipleRegionWalIndexIterator::new([iter0, iter1, iter2]);
 
         // The next batch is 0, 1, 2
-        assert_eq!(iter.next_batch_hit(1, 0), Some(NextBatchHit::new(3, 3)));
+        assert_eq!(iter.next_batch_hint(1, 0), Some(NextBatchHint::new(3, 3)));
         assert_eq!(iter.peek(), Some(0));
         // Advance 1 step
         assert_eq!(iter.next(), Some(0));
 
         // The next batch is 1,2
-        assert_eq!(iter.next_batch_hit(1, 0), Some(NextBatchHit::new(2, 2)));
+        assert_eq!(iter.next_batch_hint(1, 0), Some(NextBatchHint::new(2, 2)));
         assert_eq!(iter.peek(), Some(1));
         // Advance 1 step
         assert_eq!(iter.next(), Some(1));
 
         // The next batch is 2
-        assert_eq!(iter.next_batch_hit(1, 0), Some(NextBatchHit::new(1, 1)));
+        assert_eq!(iter.next_batch_hint(1, 0), Some(NextBatchHint::new(1, 1)));
         assert_eq!(iter.peek(), Some(2));
 
         // Advance 1 step
         assert_eq!(iter.next(), Some(2));
         // The next batch is 7, 8
-        assert_eq!(iter.next_batch_hit(1, 0), Some(NextBatchHit::new(2, 2)));
+        assert_eq!(iter.next_batch_hint(1, 0), Some(NextBatchHint::new(2, 2)));
         assert_eq!(iter.peek(), Some(7));
 
         // Advance 1 step
         assert_eq!(iter.next(), Some(7));
         // The next batch is 8
-        assert_eq!(iter.next_batch_hit(1, 0), Some(NextBatchHit::new(1, 1)));
+        assert_eq!(iter.next_batch_hint(1, 0), Some(NextBatchHint::new(1, 1)));
         assert_eq!(iter.peek(), Some(8));
 
         // Advance 1 step
         assert_eq!(iter.next(), Some(8));
         // The next batch is 11
-        assert_eq!(iter.next_batch_hit(1, 0), Some(NextBatchHit::new(1, 1)));
+        assert_eq!(iter.next_batch_hint(1, 0), Some(NextBatchHint::new(1, 1)));
         assert_eq!(iter.peek(), Some(11));
         // Advance 1 step
         assert_eq!(iter.next(), Some(11));
 
-        assert_eq!(iter.next_batch_hit(1, 0), None);
+        assert_eq!(iter.next_batch_hint(1, 0), None);
         assert_eq!(iter.peek(), None);
         assert!(!iter.iterator.is_empty());
         assert_eq!(iter.next(), None);
@@ -324,7 +324,7 @@ mod tests {
 
         // No effect
         assert_eq!(iter.next(), None);
-        assert_eq!(iter.next_batch_hit(1, 0), None);
+        assert_eq!(iter.next_batch_hint(1, 0), None);
         assert_eq!(iter.peek(), None);
         assert_eq!(iter.next(), None);
     }

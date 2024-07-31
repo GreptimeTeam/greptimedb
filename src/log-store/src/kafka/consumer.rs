@@ -25,7 +25,7 @@ use pin_project::pin_project;
 use rskafka::client::partition::PartitionClient;
 use rskafka::record::RecordAndOffset;
 
-use super::index::{NextBatchHit, RegionWalIndexIterator};
+use super::index::{NextBatchHint, RegionWalIndexIterator};
 
 #[async_trait::async_trait]
 pub trait FetchClient: std::fmt::Debug + Send + Sync {
@@ -146,11 +146,11 @@ impl Stream for Consumer {
                         let client = Arc::clone(this.client);
                         let max_wait_ms = *this.max_wait_ms as i32;
                         let offset = next_offset as i64;
-                        let NextBatchHit { bytes, len } = this
+                        let NextBatchHint { bytes, len } = this
                             .buffer
                             .index
-                            .next_batch_hit(*this.avg_record_size, *this.max_gap_size)
-                            .unwrap_or(NextBatchHit {
+                            .next_batch_hint(*this.avg_record_size, *this.max_gap_size)
+                            .unwrap_or(NextBatchHint {
                                 bytes: *this.avg_record_size,
                                 len: 1,
                             });
