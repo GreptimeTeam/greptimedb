@@ -82,13 +82,13 @@ impl IntoResponse for ErrorResponse {
             HeaderValue::from(execution_time),
         );
         let status = StatusCode::from_u32(code).unwrap_or(StatusCode::Unknown);
-        let status_code = status_code_to_http_status(status);
+        let status_code = status_code_to_http_status(&status);
 
         (status_code, resp).into_response()
     }
 }
 
-pub fn status_code_to_http_status(status_code: StatusCode) -> HttpStatusCode {
+pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
     match status_code {
         StatusCode::Success | StatusCode::Cancelled => HttpStatusCode::OK,
 

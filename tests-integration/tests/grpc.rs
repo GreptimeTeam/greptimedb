@@ -577,6 +577,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         error_type: None,
         warnings: None,
         resp_metrics: Default::default(),
+        status_code: None,
     };
     assert_eq!(instant_query_result, expected);
 
@@ -628,6 +629,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         error_type: None,
         warnings: None,
         resp_metrics: Default::default(),
+        status_code: None,
     };
     assert_eq!(range_query_result, expected);
 
@@ -660,6 +662,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         error_type: None,
         warnings: None,
         resp_metrics: Default::default(),
+        status_code: None,
     };
     assert_eq!(range_query_result, expected);
 

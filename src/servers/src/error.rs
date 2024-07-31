@@ -752,7 +752,7 @@ fn log_error_if_necessary(error: &Error) {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let error_msg = self.output_msg();
-        let status = status_code_to_http_status(self.status_code());
+        let status = status_code_to_http_status(&self.status_code());
 
         log_error_if_necessary(&self);
 

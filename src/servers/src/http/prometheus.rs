@@ -133,7 +133,7 @@ pub async fn format_query(
         }
         Err(reason) => {
             let err = InvalidQuerySnafu { reason }.build();
-            PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg())
+            PrometheusJsonResponse::error(err.status_code(), err.output_msg())
         }
     }
 }
@@ -201,9 +201,7 @@ pub async fn instant_query(
     let result = handler.do_query(&prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
-        Err(err) => {
-            return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg())
-        }
+        Err(err) => return PrometheusJsonResponse::error(err.status_code(), err.output_msg()),
     };
     PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
 }
@@ -254,9 +252,7 @@ pub async fn range_query(
 
     let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
-        Err(err) => {
-            return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg())
-        }
+        Err(err) => return PrometheusJsonResponse::error(err.status_code(), err.output_msg()),
         Ok((metric_name, _)) => metric_name.unwrap_or_default(),
     };
     PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix).await
@@ -335,9 +331,7 @@ pub async fn labels_query(
     let mut labels = match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await
     {
         Ok(labels) => labels,
-        Err(e) => {
-            return PrometheusJsonResponse::error(e.status_code().to_string(), e.output_msg())
-        }
+        Err(e) => return PrometheusJsonResponse::error(e.status_code(), e.output_msg()),
     };
     // insert the special metric name label
     let _ = labels.insert(METRIC_NAME.to_string());
@@ -385,10 +379,7 @@ pub async fn labels_query(
             if err.status_code() != StatusCode::TableNotFound
                 && err.status_code() != StatusCode::TableColumnNotFound
             {
-                return PrometheusJsonResponse::error(
-                    err.status_code().to_string(),
-                    err.output_msg(),
-                );
+                return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
             }
         }
     }
@@ -705,7 +696,7 @@ pub async fn label_values_query(
         {
             Ok(table_names) => table_names,
             Err(e) => {
-                return PrometheusJsonResponse::error(e.status_code().to_string(), e.output_msg());
+                return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
             }
         };
         table_names.sort_unstable();
@@ -717,10 +708,7 @@ pub async fn label_values_query(
             {
                 Ok(table_names) => table_names,
                 Err(e) => {
-                    return PrometheusJsonResponse::error(
-                        e.status_code().to_string(),
-                        e.output_msg(),
-                    );
+                    return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
                 }
             };
         let mut field_columns = field_columns.into_iter().collect::<Vec<_>>();
@@ -730,7 +718,10 @@ pub async fn label_values_query(
 
     let queries = params.matches.0;
     if queries.is_empty() {
-        return PrometheusJsonResponse::error("Invalid argument", "match[] parameter is required");
+        return PrometheusJsonResponse::error(
+            StatusCode::InvalidArguments,
+            "match[] parameter is required",
+        );
     }
 
     let start = params.start.unwrap_or_else(yesterday_rfc3339);
@@ -758,10 +749,7 @@ pub async fn label_values_query(
             if err.status_code() != StatusCode::TableNotFound
                 && err.status_code() != StatusCode::TableColumnNotFound
             {
-                return PrometheusJsonResponse::error(
-                    err.status_code().to_string(),
-                    err.output_msg(),
-                );
+                return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
             }
         }
     }
@@ -957,7 +945,10 @@ pub async fn series_query(
         queries = form_params.matches.0;
     }
     if queries.is_empty() {
-        return PrometheusJsonResponse::error("Unsupported", "match[] parameter is required");
+        return PrometheusJsonResponse::error(
+            StatusCode::Unsupported,
+            "match[] parameter is required",
+        );
     }
     let start = params
         .start
@@ -1007,7 +998,7 @@ pub async fn series_query(
         )
         .await
         {
-            return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg());
+            return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
         }
     }
     let merge_map = merge_map
