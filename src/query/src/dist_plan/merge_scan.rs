@@ -198,7 +198,7 @@ impl MergeScanExec {
         let extensions = self.query_ctx.extensions();
         let target_partition = self.target_partition;
 
-        let sub_sgate_metrics_moved = self.sub_stage_metrics.clone();
+        let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
         let plan = self.plan.clone();
         let stream = Box::pin(stream!({
             MERGE_SCAN_REGIONS.observe(regions.len() as f64);
@@ -226,6 +226,7 @@ impl MergeScanExec {
                     region_id,
                     plan: plan.clone(),
                 };
+                let do_get_start = Instant::now();
                 let mut stream = region_query_handler
                     .do_get(request)
                     .await
@@ -234,11 +235,11 @@ impl MergeScanExec {
                         BoxedError::new(e)
                     })
                     .context(ExternalSnafu)?;
+                let do_get_cost = do_get_start.elapsed();
 
                 ready_timer.stop();
 
-                let mut poll_duration = Duration::new(0, 0);
-
+                let mut poll_duration = Duration::ZERO;
                 let mut poll_timer = Instant::now();
                 while let Some(batch) = stream.next().await {
                     let poll_elapsed = poll_timer.elapsed();
@@ -249,13 +250,17 @@ impl MergeScanExec {
                     // to remove metadata and correct column name
                     let batch = RecordBatch::new(schema.clone(), batch.columns().iter().cloned())?;
                     metric.record_output_batch_rows(batch.num_rows());
-                    if let Some(first_consume_timer) = first_consume_timer.as_mut().take() {
+                    if let Some(mut first_consume_timer) = first_consume_timer.take() {
                         first_consume_timer.stop();
                     }
                     yield Ok(batch);
                     // reset poll timer
                     poll_timer = Instant::now();
                 }
+                common_telemetry::debug!(
+                    "Merge scan stop poll stream, partition: {}, region_id: {}, poll_duration: {:?}, first_consume: {}, do_get_cost: {:?}",
+                    partition, region_id, poll_duration, metric.first_consume_time(), do_get_cost
+                );
 
                 // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
@@ -271,7 +276,7 @@ impl MergeScanExec {
                     metric.record_greptime_exec_cost(value as usize);
 
                     // record metrics from sub sgates
-                    sub_sgate_metrics_moved.lock().unwrap().push(metrics);
+                    sub_stage_metrics_moved.lock().unwrap().push(metrics);
                 }
 
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());

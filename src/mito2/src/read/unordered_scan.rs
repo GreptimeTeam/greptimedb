@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
@@ -115,11 +115,11 @@ impl UnorderedScan {
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
         }
+        metrics.scan_cost += start.elapsed();
 
         let convert_start = Instant::now();
         let record_batch = mapper.convert(&batch, cache)?;
         metrics.convert_cost += convert_start.elapsed();
-        metrics.scan_cost += start.elapsed();
 
         Ok(Some(record_batch))
     }
@@ -148,15 +148,21 @@ impl RegionScanner for UnorderedScan {
         let stream = try_stream! {
             let first_poll = stream_ctx.query_start.elapsed();
 
-            let mut parts = stream_ctx.parts.lock().await;
-            maybe_init_parts(&mut parts, &stream_ctx.input, &mut metrics)
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            let Some(part) = parts.get_part(partition) else {
-                return;
+            let part = {
+                let mut parts = stream_ctx.parts.lock().await;
+                maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                // Clone the part and releases the lock.
+                // TODO(yingwen): We might wrap the part in an Arc in the future if cloning is too expensive.
+                let Some(part) = parts.0.get_part(partition).cloned() else {
+                    return;
+                };
+                part
             };
 
+            let build_reader_start = Instant::now();
             let mapper = &stream_ctx.input.mapper;
             let memtable_sources = part
                 .memtable_ranges
@@ -168,6 +174,7 @@ impl RegionScanner for UnorderedScan {
                 .collect::<Result<Vec<_>>>()
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
+            metrics.build_reader_cost = build_reader_start.elapsed();
             let query_start = stream_ctx.query_start;
             let cache = stream_ctx.input.cache_manager.as_deref();
             // Scans memtables first.
@@ -175,20 +182,26 @@ impl RegionScanner for UnorderedScan {
                 while let Some(batch) = Self::fetch_from_source(&mut source, mapper, cache, None, &mut metrics).await? {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
+                    let yield_start = Instant::now();
                     yield batch;
+                    metrics.yield_cost += yield_start.elapsed();
                 }
             }
             // Then scans file ranges.
             let mut reader_metrics = ReaderMetrics::default();
             // Safety: UnorderedDistributor::build_parts() ensures this.
             for file_range in &part.file_ranges[0] {
+                let build_reader_start = Instant::now();
                 let reader = file_range.reader(None).await.map_err(BoxedError::new).context(ExternalSnafu)?;
+                metrics.build_reader_cost += build_reader_start.elapsed();
                 let compat_batch = file_range.compat_batch();
                 let mut source = Source::PruneReader(reader);
                 while let Some(batch) = Self::fetch_from_source(&mut source, mapper, cache, compat_batch, &mut metrics).await? {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
+                    let yield_start = Instant::now();
                     yield batch;
+                    metrics.yield_cost += yield_start.elapsed();
                 }
                 if let Source::PruneReader(mut reader) = source {
                     reader_metrics.merge_from(reader.metrics());
@@ -213,7 +226,11 @@ impl RegionScanner for UnorderedScan {
 
 impl DisplayAs for UnorderedScan {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "UnorderedScan: ")?;
+        write!(
+            f,
+            "UnorderedScan: region={}, ",
+            self.stream_ctx.input.mapper.metadata().region_id
+        )?;
         self.stream_ctx.format_for_explain(t, f)
     }
 }
@@ -236,11 +253,11 @@ impl UnorderedScan {
 
 /// Initializes parts if they are not built yet.
 async fn maybe_init_parts(
-    part_list: &mut ScanPartList,
     input: &ScanInput,
+    part_list: &mut (ScanPartList, Duration),
     metrics: &mut ScannerMetrics,
 ) -> Result<()> {
-    if part_list.is_none() {
+    if part_list.0.is_none() {
         let now = Instant::now();
         let mut distributor = UnorderedDistributor::default();
         input.prune_file_ranges(&mut distributor).await?;
@@ -249,9 +266,16 @@ async fn maybe_init_parts(
             Some(input.mapper.column_ids()),
             input.predicate.clone(),
         );
-        part_list.set_parts(distributor.build_parts(input.parallelism.parallelism));
+        part_list
+            .0
+            .set_parts(distributor.build_parts(input.parallelism.parallelism));
+        let build_part_cost = now.elapsed();
+        part_list.1 = build_part_cost;
 
-        metrics.observe_init_part(now.elapsed());
+        metrics.observe_init_part(build_part_cost);
+    } else {
+        // Updates the cost of building parts.
+        metrics.build_parts_cost = part_list.1;
     }
     Ok(())
 }

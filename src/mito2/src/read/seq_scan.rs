@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
@@ -162,11 +162,11 @@ impl SeqScan {
         // initialize parts list
         let mut parts = stream_ctx.parts.lock().await;
         Self::maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
-        let parts_len = parts.len();
+        let parts_len = parts.0.len();
 
         let mut sources = Vec::with_capacity(parts_len);
         for id in 0..parts_len {
-            let Some(part) = parts.get_part(id) else {
+            let Some(part) = parts.0.get_part(id) else {
                 return Ok(None);
             };
 
@@ -185,17 +185,32 @@ impl SeqScan {
         semaphore: Arc<Semaphore>,
         metrics: &mut ScannerMetrics,
     ) -> Result<Option<BoxedBatchReader>> {
-        let mut parts = stream_ctx.parts.lock().await;
-        Self::maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
-
         let mut sources = Vec::new();
-        let Some(part) = parts.get_part(range_id) else {
-            return Ok(None);
+        let build_start = {
+            let mut parts = stream_ctx.parts.lock().await;
+            Self::maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
+
+            let Some(part) = parts.0.get_part(range_id) else {
+                return Ok(None);
+            };
+
+            let build_start = Instant::now();
+            Self::build_part_sources(part, &mut sources, stream_ctx.input.series_row_selector)?;
+
+            build_start
         };
 
-        Self::build_part_sources(part, &mut sources, stream_ctx.input.series_row_selector)?;
+        let maybe_reader = Self::build_reader_from_sources(stream_ctx, sources, semaphore).await;
+        let build_reader_cost = build_start.elapsed();
+        metrics.build_reader_cost += build_reader_cost;
+        common_telemetry::debug!(
+            "Build reader region: {}, range_id: {}, from sources, build_reader_cost: {:?}",
+            stream_ctx.input.mapper.metadata().region_id,
+            range_id,
+            build_reader_cost
+        );
 
-        Self::build_reader_from_sources(stream_ctx, sources, semaphore).await
+        maybe_reader
     }
 
     async fn build_reader_from_sources(
@@ -290,7 +305,9 @@ impl SeqScan {
                     let convert_start = Instant::now();
                     let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
                     metrics.convert_cost += convert_start.elapsed();
+                    let yield_start = Instant::now();
                     yield record_batch;
+                    metrics.yield_cost += yield_start.elapsed();
 
                     fetch_start = Instant::now();
                 }
@@ -350,7 +367,7 @@ impl SeqScan {
                 Self::maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics).await
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
-                parts.len()
+                parts.0.len()
             };
 
             for id in (0..parts_len).skip(partition).step_by(num_partitions) {
@@ -381,7 +398,9 @@ impl SeqScan {
                     let convert_start = Instant::now();
                     let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
                     metrics.convert_cost += convert_start.elapsed();
+                    let yield_start = Instant::now();
                     yield record_batch;
+                    metrics.yield_cost += yield_start.elapsed();
 
                     fetch_start = Instant::now();
                 }
@@ -389,12 +408,13 @@ impl SeqScan {
                 metrics.total_cost = stream_ctx.query_start.elapsed();
                 metrics.observe_metrics_on_finish();
 
-                debug!(
-                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}, first_poll: {:?}",
+                common_telemetry::debug!(
+                    "Seq scan finished, region_id: {}, partition: {}, id: {}, metrics: {:?}, first_poll: {:?}",
                     stream_ctx.input.mapper.metadata().region_id,
                     partition,
+                    id,
                     metrics,
-                    first_poll
+                    first_poll,
                 );
             }
         };
@@ -410,10 +430,10 @@ impl SeqScan {
     /// Initializes parts if they are not built yet.
     async fn maybe_init_parts(
         input: &ScanInput,
-        part_list: &mut ScanPartList,
+        part_list: &mut (ScanPartList, Duration),
         metrics: &mut ScannerMetrics,
     ) -> Result<()> {
-        if part_list.is_none() {
+        if part_list.0.is_none() {
             let now = Instant::now();
             let mut distributor = SeqDistributor::default();
             input.prune_file_ranges(&mut distributor).await?;
@@ -422,9 +442,16 @@ impl SeqScan {
                 Some(input.mapper.column_ids()),
                 input.predicate.clone(),
             );
-            part_list.set_parts(distributor.build_parts(input.parallelism.parallelism));
+            part_list
+                .0
+                .set_parts(distributor.build_parts(input.parallelism.parallelism));
+            let build_part_cost = now.elapsed();
+            part_list.1 = build_part_cost;
 
-            metrics.observe_init_part(now.elapsed());
+            metrics.observe_init_part(build_part_cost);
+        } else {
+            // Updates the cost of building parts.
+            metrics.build_parts_cost = part_list.1;
         }
         Ok(())
     }
@@ -451,7 +478,11 @@ impl RegionScanner for SeqScan {
 
 impl DisplayAs for SeqScan {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SeqScan: ")?;
+        write!(
+            f,
+            "SeqScan: region={}, ",
+            self.stream_ctx.input.mapper.metadata().region_id
+        )?;
         self.stream_ctx.format_for_explain(t, f)
     }
 }
