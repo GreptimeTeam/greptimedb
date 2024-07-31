@@ -51,23 +51,23 @@ pub trait RegionWalIndexIterator: Send + Sync {
 
 /// Represents a range [next_entry_id, end_entry_id) of WAL entries for a region.
 pub struct RegionWalRange {
-    next_entry_id: EntryId,
+    current_entry_id: EntryId,
     end_entry_id: EntryId,
 }
 
 impl RegionWalRange {
     pub fn new(range: Range<EntryId>) -> Self {
         Self {
-            next_entry_id: range.start,
+            current_entry_id: range.start,
             end_entry_id: range.end,
         }
     }
 
     pub(crate) fn next_batch_size(&self) -> Option<u64> {
-        if self.next_entry_id < self.end_entry_id {
+        if self.current_entry_id < self.end_entry_id {
             Some(
                 self.end_entry_id
-                    .checked_sub(self.next_entry_id)
+                    .checked_sub(self.current_entry_id)
                     .unwrap_or_default(),
             )
         } else {
@@ -85,17 +85,17 @@ impl RegionWalIndexIterator for RegionWalRange {
     }
 
     fn peek(&self) -> Option<EntryId> {
-        if self.next_entry_id < self.end_entry_id {
-            Some(self.next_entry_id)
+        if self.current_entry_id < self.end_entry_id {
+            Some(self.current_entry_id)
         } else {
             None
         }
     }
 
     fn next(&mut self) -> Option<EntryId> {
-        if self.next_entry_id < self.end_entry_id {
-            let next = self.next_entry_id;
-            self.next_entry_id += 1;
+        if self.current_entry_id < self.end_entry_id {
+            let next = self.current_entry_id;
+            self.current_entry_id += 1;
             Some(next)
         } else {
             None
