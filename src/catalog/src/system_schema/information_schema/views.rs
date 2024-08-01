@@ -26,7 +26,7 @@ use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatc
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{BooleanVectorBuilder, StringVectorBuilder};
+use datatypes::vectors::StringVectorBuilder;
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
@@ -76,7 +76,7 @@ impl InformationSchemaViews {
             ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(VIEW_DEFINITION, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(CHECK_OPTION, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(IS_UPDATABLE, ConcreteDataType::boolean_datatype(), true),
+            ColumnSchema::new(IS_UPDATABLE, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(DEFINER, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(SECURITY_TYPE, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(
@@ -148,7 +148,7 @@ struct InformationSchemaViewsBuilder {
     table_names: StringVectorBuilder,
     view_definitions: StringVectorBuilder,
     check_options: StringVectorBuilder,
-    is_updatable: BooleanVectorBuilder,
+    is_updatable: StringVectorBuilder,
     definer: StringVectorBuilder,
     security_type: StringVectorBuilder,
     character_set_client: StringVectorBuilder,
@@ -170,7 +170,7 @@ impl InformationSchemaViewsBuilder {
             table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             view_definitions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             check_options: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            is_updatable: BooleanVectorBuilder::with_capacity(INIT_CAPACITY),
+            is_updatable: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             definer: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             security_type: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             character_set_client: StringVectorBuilder::with_capacity(INIT_CAPACITY),
@@ -241,7 +241,8 @@ impl InformationSchemaViewsBuilder {
         self.table_names.push(Some(table_name));
         self.view_definitions.push(Some(definition));
         self.check_options.push(None);
-        self.is_updatable.push(Some(true));
+        // View is not updatable, statements such UPDATE , DELETE , and INSERT are illegal and are rejected.
+        self.is_updatable.push(Some("NO"));
         self.definer.push(None);
         self.security_type.push(None);
         self.character_set_client.push(Some("utf8"));

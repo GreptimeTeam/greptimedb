@@ -14,12 +14,11 @@
 
 use std::pin::Pin;
 use std::result::Result as StdResult;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use auth::UserProviderRef;
 use hyper::Body;
-use session::context::QueryContext;
+use session::context::{Channel, QueryContext};
 use tonic::body::BoxBody;
 use tonic::server::NamedService;
 use tower::{Layer, Service};
@@ -105,7 +104,7 @@ async fn do_auth<T>(
 ) -> Result<(), tonic::Status> {
     let (catalog, schema) = extract_catalog_and_schema(req);
 
-    let query_ctx = Arc::new(QueryContext::with(&catalog, &schema));
+    let query_ctx = QueryContext::with_channel(&catalog, &schema, Channel::Grpc);
 
     let Some(user_provider) = user_provider else {
         query_ctx.set_current_user(auth::userinfo_by_name(None));
@@ -139,7 +138,7 @@ mod tests {
     use base64::Engine;
     use headers::Header;
     use hyper::{Body, Request};
-    use session::context::QueryContextRef;
+    use session::context::QueryContext;
 
     use crate::grpc::authorize::do_auth;
     use crate::http::header::GreptimeDbName;
@@ -197,7 +196,7 @@ mod tests {
         expected_schema: &str,
         expected_user_name: &str,
     ) {
-        let ctx = req.extensions().get::<QueryContextRef>().unwrap();
+        let ctx = req.extensions().get::<QueryContext>().unwrap();
         assert_eq!(expected_catalog, ctx.current_catalog());
         assert_eq!(expected_schema, ctx.current_schema());
 

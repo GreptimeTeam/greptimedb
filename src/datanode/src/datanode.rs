@@ -25,7 +25,6 @@ use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue}
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::wal_options_allocator::prepare_wal_options;
 pub use common_procedure::options::ProcedureConfig;
-use common_runtime::Runtime;
 use common_telemetry::{error, info, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
@@ -55,8 +54,8 @@ use tokio::sync::Notify;
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
     self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu,
-    MissingNodeIdSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu,
-    ShutdownServerSnafu, StartServerSnafu,
+    MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu, ShutdownServerSnafu,
+    StartServerSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -224,7 +223,7 @@ impl DatanodeBuilder {
 
         if self.opts.init_regions_in_background {
             // Opens regions in background.
-            common_runtime::spawn_bg(async move {
+            common_runtime::spawn_global(async move {
                 if let Err(err) = open_all_regions.await {
                     error!(err; "Failed to open regions during the startup.");
                 }
@@ -321,23 +320,16 @@ impl DatanodeBuilder {
             None,
             None,
             None,
+            None,
             false,
             self.plugins.clone(),
         );
         let query_engine = query_engine_factory.query_engine();
 
-        let runtime = Arc::new(
-            Runtime::builder()
-                .worker_threads(opts.grpc.runtime_size)
-                .thread_name("io-handlers")
-                .build()
-                .context(RuntimeResourceSnafu)?,
-        );
-
         let table_provider_factory = Arc::new(DummyTableProviderFactory);
         let mut region_server = RegionServer::with_table_provider(
             query_engine,
-            runtime,
+            common_runtime::global_runtime(),
             event_listener,
             table_provider_factory,
         );

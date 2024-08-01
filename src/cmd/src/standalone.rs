@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
+use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, Configurable, KvBackendConfig};
 use common_error::ext::BoxedError;
@@ -181,7 +182,6 @@ impl StandaloneOptions {
     pub fn frontend_options(&self) -> FrontendOptions {
         let cloned_opts = self.clone();
         FrontendOptions {
-            mode: cloned_opts.mode,
             default_timezone: cloned_opts.default_timezone,
             http: cloned_opts.http,
             grpc: cloned_opts.grpc,
@@ -396,7 +396,9 @@ impl StartCommand {
             opts.influxdb.enable = self.influxdb_enable;
         }
 
-        opts.user_provider.clone_from(&self.user_provider);
+        if let Some(user_provider) = &self.user_provider {
+            opts.user_provider = Some(user_provider.clone());
+        }
 
         Ok(())
     }
@@ -418,14 +420,18 @@ impl StartCommand {
         info!("Standalone start command: {:#?}", self);
         info!("Standalone options: {opts:#?}");
 
+        let mut plugins = Plugins::new();
         let opts = opts.component;
-        let mut fe_opts = opts.frontend_options();
-        #[allow(clippy::unnecessary_mut_passed)]
-        let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it
+        let fe_opts = opts.frontend_options();
+        let dn_opts = opts.datanode_options();
+
+        plugins::setup_frontend_plugins(&mut plugins, &fe_opts)
             .await
             .context(StartFrontendSnafu)?;
 
-        let dn_opts = opts.datanode_options();
+        plugins::setup_datanode_plugins(&mut plugins, &dn_opts)
+            .await
+            .context(StartDatanodeSnafu)?;
 
         set_default_timezone(fe_opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
@@ -464,7 +470,7 @@ impl StartCommand {
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
 
-        let datanode = DatanodeBuilder::new(dn_opts, fe_plugins.clone())
+        let datanode = DatanodeBuilder::new(dn_opts, plugins.clone())
             .with_kv_backend(kv_backend.clone())
             .build()
             .await
@@ -472,7 +478,7 @@ impl StartCommand {
 
         let flow_builder = FlownodeBuilder::new(
             Default::default(),
-            fe_plugins.clone(),
+            plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
         );
@@ -533,7 +539,7 @@ impl StartCommand {
             node_manager.clone(),
             ddl_task_executor.clone(),
         )
-        .with_plugin(fe_plugins.clone())
+        .with_plugin(plugins.clone())
         .try_build()
         .await
         .context(StartFrontendSnafu)?;
@@ -554,7 +560,7 @@ impl StartCommand {
 
         let (tx, _rx) = broadcast::channel(1);
 
-        let servers = Services::new(fe_opts, Arc::new(frontend.clone()), fe_plugins)
+        let servers = Services::new(fe_opts, Arc::new(frontend.clone()), plugins)
             .build()
             .await
             .context(StartFrontendSnafu)?;
@@ -629,20 +635,21 @@ mod tests {
     use common_test_util::temp_dir::create_named_temp_file;
     use common_wal::config::DatanodeWalConfig;
     use datanode::config::{FileConfig, GcsConfig};
-    use servers::Mode;
 
     use super::*;
     use crate::options::GlobalOptions;
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let mut fe_opts = FrontendOptions {
+        let fe_opts = FrontendOptions {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             ..Default::default()
         };
 
-        #[allow(clippy::unnecessary_mut_passed)]
-        let plugins = plugins::setup_frontend_plugins(&mut fe_opts).await.unwrap();
+        let mut plugins = Plugins::new();
+        plugins::setup_frontend_plugins(&mut plugins, &fe_opts)
+            .await
+            .unwrap();
 
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider
@@ -727,7 +734,6 @@ mod tests {
         let fe_opts = options.frontend_options();
         let dn_opts = options.datanode_options();
         let logging_opts = options.logging;
-        assert_eq!(Mode::Standalone, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(33), fe_opts.http.timeout);
         assert_eq!(ReadableSize::mb(128), fe_opts.http.body_limit);

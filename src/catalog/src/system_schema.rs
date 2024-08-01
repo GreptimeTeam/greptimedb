@@ -15,6 +15,8 @@
 pub mod information_schema;
 mod memory_table;
 pub mod pg_catalog;
+mod predicate;
+mod utils;
 
 use std::collections::HashMap;
 use std::sync::Arc;

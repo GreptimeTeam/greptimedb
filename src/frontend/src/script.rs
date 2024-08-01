@@ -13,18 +13,14 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
-use common_error::ext::ErrorExt;
 use common_query::Output;
 use query::QueryEngineRef;
-use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContextRef;
 
-use crate::error::{Error, Result};
-
-type FrontendGrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler<Error = Error> + Send + Sync>;
+use crate::error::Result;
+use crate::instance::Instance;
 
 #[cfg(not(feature = "python"))]
 mod dummy {
@@ -40,7 +36,7 @@ mod dummy {
             Ok(Self {})
         }
 
-        pub fn start(&self, instance: &Instance) -> Result<()> {
+        pub fn start(&self, _instance: &Instance) -> Result<()> {
             Ok(())
         }
 
@@ -66,12 +62,14 @@ mod dummy {
 
 #[cfg(feature = "python")]
 mod python {
+    use std::sync::Arc;
+
     use api::v1::ddl_request::Expr;
     use api::v1::greptime_request::Request;
     use api::v1::DdlRequest;
     use arc_swap::ArcSwap;
     use catalog::RegisterSystemTableRequest;
-    use common_error::ext::BoxedError;
+    use common_error::ext::{BoxedError, ErrorExt};
     use common_telemetry::{error, info};
     use script::manager::ScriptManager;
     use servers::query_handler::grpc::GrpcQueryHandler;
@@ -80,8 +78,9 @@ mod python {
     use table::table_name::TableName;
 
     use super::*;
-    use crate::error::{CatalogSnafu, TableNotFoundSnafu};
-    use crate::instance::Instance;
+    use crate::error::{CatalogSnafu, Error, TableNotFoundSnafu};
+
+    type FrontendGrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler<Error = Error> + Send + Sync>;
 
     /// A placeholder for the real gRPC handler.
     /// It is temporary and will be replaced soon.

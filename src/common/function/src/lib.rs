@@ -15,6 +15,7 @@
 #![feature(let_chains)]
 #![feature(try_blocks)]
 
+mod flush_flow;
 mod macros;
 pub mod scalars;
 mod system;

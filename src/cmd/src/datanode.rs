@@ -18,6 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
+use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::logging::TracingOptions;
 use common_telemetry::{info, warn};
@@ -271,8 +272,9 @@ impl StartCommand {
         info!("Datanode start command: {:#?}", self);
         info!("Datanode options: {:#?}", opts);
 
-        let mut opts = opts.component;
-        let plugins = plugins::setup_datanode_plugins(&mut opts)
+        let opts = opts.component;
+        let mut plugins = Plugins::new();
+        plugins::setup_datanode_plugins(&mut plugins, &opts)
             .await
             .context(StartDatanodeSnafu)?;
 

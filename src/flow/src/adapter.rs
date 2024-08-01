@@ -26,7 +26,7 @@ use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, info, trace};
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
@@ -129,6 +129,10 @@ pub struct FlowWorkerManager {
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
     node_id: Option<u32>,
+    /// Lock for flushing, will be `read` by `handle_inserts` and `write` by `flush_flow`
+    ///
+    /// So that a series of event like `inserts -> flush` can be handled correctly
+    flush_lock: RwLock<()>,
 }
 
 /// Building FlownodeManager
@@ -161,6 +165,7 @@ impl FlowWorkerManager {
             src_send_buf_lens: Default::default(),
             tick_manager,
             node_id,
+            flush_lock: RwLock::new(()),
         }
     }
 
@@ -462,7 +467,7 @@ impl FlowWorkerManager {
         shutdown: Option<broadcast::Receiver<()>>,
     ) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             self.run(shutdown).await;
         })
     }
@@ -535,10 +540,10 @@ impl FlowWorkerManager {
             } else {
                 (9 * avg_spd + cur_spd) / 10
             };
-            debug!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
+            trace!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
             let new_wait = BATCH_SIZE * 1000 / avg_spd.max(1); //in ms
             let new_wait = Duration::from_millis(new_wait as u64).min(default_interval);
-            debug!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
+            trace!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
             since_last_run = tokio::time::Instant::now();
             tokio::time::sleep(new_wait).await;
         }
@@ -562,9 +567,9 @@ impl FlowWorkerManager {
             for worker in self.worker_handles.iter() {
                 // TODO(discord9): consider how to handle error in individual worker
                 if blocking {
-                    worker.lock().await.run_available(now).await?;
+                    worker.lock().await.run_available(now, blocking).await?;
                 } else if let Ok(worker) = worker.try_lock() {
-                    worker.run_available(now).await?;
+                    worker.run_available(now, blocking).await?;
                 } else {
                     return Ok(row_cnt);
                 }

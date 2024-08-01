@@ -371,7 +371,20 @@ fn parse_column_default_constraint(
                 // Always use lowercase for function expression
                 ColumnDefaultConstraint::Function(func.to_lowercase())
             }
+
             ColumnOption::Default(Expr::UnaryOp { op, expr }) => {
+                // Specialized process for handling numerical inputs to prevent
+                // overflow errors during the parsing of negative numbers,
+                // See https://github.com/GreptimeTeam/greptimedb/issues/4351
+                if let (UnaryOperator::Minus, Expr::Value(SqlValue::Number(n, _))) =
+                    (op, expr.as_ref())
+                {
+                    return Ok(Some(ColumnDefaultConstraint::Value(sql_number_to_value(
+                        data_type,
+                        &format!("-{n}"),
+                    )?)));
+                }
+
                 if let Expr::Value(v) = &**expr {
                     let value = sql_value_to_value(column_name, data_type, v, timezone, Some(*op))?;
                     ColumnDefaultConstraint::Value(value)
@@ -1049,6 +1062,28 @@ mod tests {
         assert_matches!(
             constraint,
             Some(ColumnDefaultConstraint::Value(Value::Boolean(true)))
+        );
+
+        // Test negative number
+        let opts = vec![ColumnOptionDef {
+            name: None,
+            option: ColumnOption::Default(Expr::UnaryOp {
+                op: UnaryOperator::Minus,
+                expr: Box::new(Expr::Value(SqlValue::Number("32768".to_string(), false))),
+            }),
+        }];
+
+        let constraint = parse_column_default_constraint(
+            "coll",
+            &ConcreteDataType::int16_datatype(),
+            &opts,
+            None,
+        )
+        .unwrap();
+
+        assert_matches!(
+            constraint,
+            Some(ColumnDefaultConstraint::Value(Value::Int16(-32768)))
         );
     }
 

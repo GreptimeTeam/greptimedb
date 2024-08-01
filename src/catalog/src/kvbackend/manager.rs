@@ -25,6 +25,7 @@ use common_config::Mode;
 use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, ViewInfoCacheRef};
 use common_meta::key::catalog_name::CatalogNameKey;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_name::TableNameKey;
@@ -85,7 +86,7 @@ impl KvBackendCatalogManager {
                     .get()
                     .expect("Failed to get table_route_cache"),
             )),
-            table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
+            table_metadata_manager: Arc::new(TableMetadataManager::new(backend.clone())),
             system_catalog: SystemCatalog {
                 catalog_manager: me.clone(),
                 catalog_cache: Cache::new(CATALOG_CACHE_MAX_CAPACITY),
@@ -93,11 +94,13 @@ impl KvBackendCatalogManager {
                 information_schema_provider: Arc::new(InformationSchemaProvider::new(
                     DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
+                    Arc::new(FlowMetadataManager::new(backend.clone())),
                 )),
                 pg_catalog_provider: Arc::new(PGCatalogProvider::new(
                     DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
                 )),
+                backend,
             },
             cache_registry,
         })
@@ -313,6 +316,7 @@ struct SystemCatalog {
     // system_schema_provier for default catalog
     information_schema_provider: Arc<InformationSchemaProvider>,
     pg_catalog_provider: Arc<PGCatalogProvider>,
+    backend: KvBackendRef,
 }
 
 impl SystemCatalog {
@@ -358,6 +362,7 @@ impl SystemCatalog {
                     Arc::new(InformationSchemaProvider::new(
                         catalog.to_string(),
                         self.catalog_manager.clone(),
+                        Arc::new(FlowMetadataManager::new(self.backend.clone())),
                     ))
                 });
             information_schema_provider.table(table_name)

@@ -42,7 +42,7 @@ use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
+use session::context::QueryContext;
 use snafu::{Location, OptionExt, ResultExt};
 
 pub use super::prometheus_resp::PrometheusJsonResponse;
@@ -122,7 +122,7 @@ pub struct FormatQuery {
 pub async fn format_query(
     State(_handler): State<PrometheusHandlerRef>,
     Query(params): Query<InstantQuery>,
-    Extension(_query_ctx): Extension<QueryContextRef>,
+    Extension(_query_ctx): Extension<QueryContext>,
     Form(form_params): Form<InstantQuery>,
 ) -> PrometheusJsonResponse {
     let query = params.query.or(form_params.query).unwrap_or_default();
@@ -133,7 +133,7 @@ pub async fn format_query(
         }
         Err(reason) => {
             let err = InvalidQuerySnafu { reason }.build();
-            PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg())
+            PrometheusJsonResponse::error(err.status_code(), err.output_msg())
         }
     }
 }
@@ -168,7 +168,7 @@ pub struct InstantQuery {
 pub async fn instant_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<InstantQuery>,
-    Extension(mut query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<InstantQuery>,
 ) -> PrometheusJsonResponse {
     // Extract time from query string, or use current server time if not specified.
@@ -190,15 +190,18 @@ pub async fn instant_query(
     // update catalog and schema in query context if necessary
     if let Some(db) = &params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+        try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
     }
+    let query_ctx = Arc::new(query_ctx);
+
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[query_ctx.get_db_string().as_str(), "instant_query"])
+        .start_timer();
 
     let result = handler.do_query(&prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
-        Err(err) => {
-            return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg())
-        }
+        Err(err) => return PrometheusJsonResponse::error(err.status_code(), err.output_msg()),
     };
     PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
 }
@@ -222,7 +225,7 @@ pub struct RangeQuery {
 pub async fn range_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<RangeQuery>,
-    Extension(mut query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<RangeQuery>,
 ) -> PrometheusJsonResponse {
     let prom_query = PromQuery {
@@ -239,14 +242,17 @@ pub async fn range_query(
     // update catalog and schema in query context if necessary
     if let Some(db) = &params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+        try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
     }
+    let query_ctx = Arc::new(query_ctx);
+
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[query_ctx.get_db_string().as_str(), "range_query"])
+        .start_timer();
 
     let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
-        Err(err) => {
-            return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg())
-        }
+        Err(err) => return PrometheusJsonResponse::error(err.status_code(), err.output_msg()),
         Ok((metric_name, _)) => metric_name.unwrap_or_default(),
     };
     PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix).await
@@ -305,24 +311,27 @@ impl<'de> Deserialize<'de> for Matches {
 pub async fn labels_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<LabelsQuery>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<LabelsQuery>,
 ) -> PrometheusJsonResponse {
     let (catalog, schema) = get_catalog_schema(&params.db, &query_ctx);
-    let query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+    try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
+    let query_ctx = Arc::new(query_ctx);
 
     let mut queries = params.matches.0;
     if queries.is_empty() {
         queries = form_params.matches.0;
     }
 
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[query_ctx.get_db_string().as_str(), "labels_query"])
+        .start_timer();
+
     // Fetch all tag columns. It will be used as white-list for tag names.
     let mut labels = match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await
     {
         Ok(labels) => labels,
-        Err(e) => {
-            return PrometheusJsonResponse::error(e.status_code().to_string(), e.output_msg())
-        }
+        Err(e) => return PrometheusJsonResponse::error(e.status_code(), e.output_msg()),
     };
     // insert the special metric name label
     let _ = labels.insert(METRIC_NAME.to_string());
@@ -370,10 +379,7 @@ pub async fn labels_query(
             if err.status_code() != StatusCode::TableNotFound
                 && err.status_code() != StatusCode::TableColumnNotFound
             {
-                return PrometheusJsonResponse::error(
-                    err.status_code().to_string(),
-                    err.output_msg(),
-                );
+                return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
             }
         }
     }
@@ -613,20 +619,10 @@ pub(crate) fn get_catalog_schema(db: &Option<String>, ctx: &QueryContext) -> (St
 }
 
 /// Update catalog and schema in [QueryContext] if necessary.
-pub(crate) fn try_update_catalog_schema(
-    ctx: QueryContextRef,
-    catalog: &str,
-    schema: &str,
-) -> QueryContextRef {
+pub(crate) fn try_update_catalog_schema(ctx: &mut QueryContext, catalog: &str, schema: &str) {
     if ctx.current_catalog() != catalog || ctx.current_schema() != schema {
-        Arc::new(
-            QueryContextBuilder::from_existing(&ctx)
-                .current_catalog(catalog.to_string())
-                .current_schema(schema.to_string())
-                .build(),
-        )
-    } else {
-        ctx
+        ctx.set_current_catalog(catalog);
+        ctx.set_current_schema(schema);
     }
 }
 
@@ -681,11 +677,16 @@ pub struct LabelValueQuery {
 pub async fn label_values_query(
     State(handler): State<PrometheusHandlerRef>,
     Path(label_name): Path<String>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Query(params): Query<LabelValueQuery>,
 ) -> PrometheusJsonResponse {
     let (catalog, schema) = get_catalog_schema(&params.db, &query_ctx);
-    let query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+    try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
+    let query_ctx = Arc::new(query_ctx);
+
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[query_ctx.get_db_string().as_str(), "label_values_query"])
+        .start_timer();
 
     if label_name == METRIC_NAME_LABEL {
         let mut table_names = match handler
@@ -695,7 +696,7 @@ pub async fn label_values_query(
         {
             Ok(table_names) => table_names,
             Err(e) => {
-                return PrometheusJsonResponse::error(e.status_code().to_string(), e.output_msg());
+                return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
             }
         };
         table_names.sort_unstable();
@@ -707,10 +708,7 @@ pub async fn label_values_query(
             {
                 Ok(table_names) => table_names,
                 Err(e) => {
-                    return PrometheusJsonResponse::error(
-                        e.status_code().to_string(),
-                        e.output_msg(),
-                    );
+                    return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
                 }
             };
         let mut field_columns = field_columns.into_iter().collect::<Vec<_>>();
@@ -720,7 +718,10 @@ pub async fn label_values_query(
 
     let queries = params.matches.0;
     if queries.is_empty() {
-        return PrometheusJsonResponse::error("Invalid argument", "match[] parameter is required");
+        return PrometheusJsonResponse::error(
+            StatusCode::InvalidArguments,
+            "match[] parameter is required",
+        );
     }
 
     let start = params.start.unwrap_or_else(yesterday_rfc3339);
@@ -748,10 +749,7 @@ pub async fn label_values_query(
             if err.status_code() != StatusCode::TableNotFound
                 && err.status_code() != StatusCode::TableColumnNotFound
             {
-                return PrometheusJsonResponse::error(
-                    err.status_code().to_string(),
-                    err.output_msg(),
-                );
+                return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
             }
         }
     }
@@ -939,7 +937,7 @@ pub struct SeriesQuery {
 pub async fn series_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<SeriesQuery>,
-    Extension(mut query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<SeriesQuery>,
 ) -> PrometheusJsonResponse {
     let mut queries: Vec<String> = params.matches.0;
@@ -947,7 +945,10 @@ pub async fn series_query(
         queries = form_params.matches.0;
     }
     if queries.is_empty() {
-        return PrometheusJsonResponse::error("Unsupported", "match[] parameter is required");
+        return PrometheusJsonResponse::error(
+            StatusCode::Unsupported,
+            "match[] parameter is required",
+        );
     }
     let start = params
         .start
@@ -965,8 +966,13 @@ pub async fn series_query(
     // update catalog and schema in query context if necessary
     if let Some(db) = &params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+        try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
     }
+    let query_ctx = Arc::new(query_ctx);
+
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[query_ctx.get_db_string().as_str(), "series_query"])
+        .start_timer();
 
     let mut series = Vec::new();
     let mut merge_map = HashMap::new();
@@ -992,7 +998,7 @@ pub async fn series_query(
         )
         .await
         {
-            return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg());
+            return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
         }
     }
     let merge_map = merge_map

@@ -140,7 +140,7 @@ mod tests {
     #[tokio::test]
     async fn test_serializer_decode_plan() {
         let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
-        let factory = QueryEngineFactory::new(catalog_list, None, None, None, false);
+        let factory = QueryEngineFactory::new(catalog_list, None, None, None, None, false);
 
         let engine = factory.query_engine();
 

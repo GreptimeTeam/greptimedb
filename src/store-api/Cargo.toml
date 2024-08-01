@@ -30,4 +30,5 @@ tokio.workspace = true
 
 [dev-dependencies]
 async-stream.workspace = true
+common-meta.workspace = true
 serde_json.workspace = true

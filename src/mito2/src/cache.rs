@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use parquet::column::page::Page;
 use parquet::file::metadata::ParquetMetaData;
@@ -36,7 +37,7 @@ use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
-use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
+use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
 use crate::sst::file::FileId;
 
@@ -179,10 +180,7 @@ impl CacheManager {
     ) -> Option<Arc<SelectorResultValue>> {
         self.selector_result_cache
             .as_ref()
-            .and_then(|selector_result_cache| {
-                let value = selector_result_cache.get(selector_key);
-                update_hit_miss(value, SELECTOR_RESULT_TYPE)
-            })
+            .and_then(|selector_result_cache| selector_result_cache.get(selector_key))
     }
 
     /// Puts result of the selector into the cache.
@@ -207,6 +205,16 @@ impl CacheManager {
     pub(crate) fn index_cache(&self) -> Option<&InvertedIndexCacheRef> {
         self.index_cache.as_ref()
     }
+}
+
+/// Increases selector cache miss metrics.
+pub fn selector_result_cache_miss() {
+    CACHE_MISS.with_label_values(&[SELECTOR_RESULT_TYPE]).inc()
+}
+
+/// Increases selector cache hit metrics.
+pub fn selector_result_cache_hit() {
+    CACHE_HIT.with_label_values(&[SELECTOR_RESULT_TYPE]).inc()
 }
 
 /// Builder to construct a [CacheManager].
@@ -266,15 +274,27 @@ impl CacheManagerBuilder {
 
     /// Builds the [CacheManager].
     pub fn build(self) -> CacheManager {
+        fn to_str(cause: RemovalCause) -> &'static str {
+            match cause {
+                RemovalCause::Expired => "expired",
+                RemovalCause::Explicit => "explicit",
+                RemovalCause::Replaced => "replaced",
+                RemovalCause::Size => "size",
+            }
+        }
+
         let sst_meta_cache = (self.sst_meta_cache_size != 0).then(|| {
             Cache::builder()
                 .max_capacity(self.sst_meta_cache_size)
                 .weigher(meta_cache_weight)
-                .eviction_listener(|k, v, _cause| {
+                .eviction_listener(|k, v, cause| {
                     let size = meta_cache_weight(&k, &v);
                     CACHE_BYTES
                         .with_label_values(&[SST_META_TYPE])
                         .sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[SST_META_TYPE, to_str(cause)])
+                        .inc();
                 })
                 .build()
         });
@@ -282,11 +302,14 @@ impl CacheManagerBuilder {
             Cache::builder()
                 .max_capacity(self.vector_cache_size)
                 .weigher(vector_cache_weight)
-                .eviction_listener(|k, v, _cause| {
+                .eviction_listener(|k, v, cause| {
                     let size = vector_cache_weight(&k, &v);
                     CACHE_BYTES
                         .with_label_values(&[VECTOR_TYPE])
                         .sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[VECTOR_TYPE, to_str(cause)])
+                        .inc();
                 })
                 .build()
         });
@@ -294,9 +317,12 @@ impl CacheManagerBuilder {
             Cache::builder()
                 .max_capacity(self.page_cache_size)
                 .weigher(page_cache_weight)
-                .eviction_listener(|k, v, _cause| {
+                .eviction_listener(|k, v, cause| {
                     let size = page_cache_weight(&k, &v);
                     CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[PAGE_TYPE, to_str(cause)])
+                        .inc();
                 })
                 .build()
         });
@@ -306,11 +332,14 @@ impl CacheManagerBuilder {
             Cache::builder()
                 .max_capacity(self.selector_result_cache_size)
                 .weigher(selector_result_cache_weight)
-                .eviction_listener(|k, v, _cause| {
+                .eviction_listener(|k, v, cause| {
                     let size = selector_result_cache_weight(&k, &v);
                     CACHE_BYTES
                         .with_label_values(&[SELECTOR_RESULT_TYPE])
                         .sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[SELECTOR_RESULT_TYPE, to_str(cause)])
+                        .inc();
                 })
                 .build()
         });

@@ -24,6 +24,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, TypedHeader};
+use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
 use pipeline::util::to_pipeline_version;
@@ -31,7 +32,7 @@ use pipeline::{PipelineVersion, Value as PipelineValue};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Value};
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
@@ -40,6 +41,10 @@ use crate::error::{
 use crate::http::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
+use crate::metrics::{
+    METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_INGESTION_COUNTER, METRIC_HTTP_LOGS_INGESTION_ELAPSED,
+    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
+};
 use crate::query_handler::LogHandlerRef;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -102,7 +107,7 @@ where
 pub async fn add_pipeline(
     State(state): State<LogState>,
     Path(pipeline_name): Path<String>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     PipelineContent(payload): PipelineContent,
 ) -> Result<GreptimedbManageResponse> {
     let start = Instant::now();
@@ -120,6 +125,9 @@ pub async fn add_pipeline(
         }
         .build());
     }
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
 
     let content_type = "yaml";
     let result = handler
@@ -143,7 +151,7 @@ pub async fn add_pipeline(
 #[axum_macros::debug_handler]
 pub async fn delete_pipeline(
     State(state): State<LogState>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Query(query_params): Query<LogIngesterQueryParams>,
     Path(pipeline_name): Path<String>,
 ) -> Result<GreptimedbManageResponse> {
@@ -161,6 +169,9 @@ pub async fn delete_pipeline(
     })?;
 
     let version = to_pipeline_version(Some(version_str.clone())).context(PipelineSnafu)?;
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
 
     handler
         .delete_pipeline(&pipeline_name, version, query_ctx)
@@ -226,7 +237,7 @@ fn transform_ndjson_array_factory(
 pub async fn log_ingester(
     State(log_state): State<LogState>,
     Query(query_params): Query<LogIngesterQueryParams>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     TypedHeader(content_type): TypedHeader<ContentType>,
     payload: String,
 ) -> Result<HttpResponse> {
@@ -250,6 +261,9 @@ pub async fn log_ingester(
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
     let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
 
     ingest_logs_inner(
         handler,
@@ -298,14 +312,27 @@ async fn ingest_logs_inner(
     pipeline_data: PipelineValue,
     query_ctx: QueryContextRef,
 ) -> Result<HttpResponse> {
-    let start = std::time::Instant::now();
+    let db = query_ctx.get_db_string();
+    let exec_timer = std::time::Instant::now();
 
     let pipeline = state
         .get_pipeline(&pipeline_name, version, query_ctx.clone())
         .await?;
+
+    let transform_timer = std::time::Instant::now();
     let transformed_data: Rows = pipeline
         .exec(pipeline_data)
-        .map_err(|reason| PipelineTransformSnafu { reason }.build())
+        .inspect(|_| {
+            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
+                .observe(transform_timer.elapsed().as_secs_f64());
+        })
+        .map_err(|reason| {
+            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                .observe(transform_timer.elapsed().as_secs_f64());
+            PipelineTransformSnafu { reason }.build()
+        })
         .context(PipelineSnafu)?;
 
     let insert_request = RowInsertRequest {
@@ -317,9 +344,26 @@ async fn ingest_logs_inner(
     };
     let output = state.insert_logs(insert_requests, query_ctx).await;
 
+    if let Ok(Output {
+        data: OutputData::AffectedRows(rows),
+        meta: _,
+    }) = &output
+    {
+        METRIC_HTTP_LOGS_INGESTION_COUNTER
+            .with_label_values(&[db.as_str()])
+            .inc_by(*rows as u64);
+        METRIC_HTTP_LOGS_INGESTION_ELAPSED
+            .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
+            .observe(exec_timer.elapsed().as_secs_f64());
+    } else {
+        METRIC_HTTP_LOGS_INGESTION_ELAPSED
+            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+            .observe(exec_timer.elapsed().as_secs_f64());
+    }
+
     let response = GreptimedbV1Response::from_output(vec![output])
         .await
-        .with_execution_time(start.elapsed().as_millis() as u64);
+        .with_execution_time(exec_timer.elapsed().as_millis() as u64);
     Ok(response)
 }
 

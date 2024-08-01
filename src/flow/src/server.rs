@@ -181,7 +181,7 @@ impl servers::server::Server for FlownodeServer {
 
         let builder = tonic::transport::Server::builder().add_service(self.create_flow_service());
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_global(async move {
             let _result = builder
                 .serve_with_incoming_shutdown(incoming, rx_server.recv().map(drop))
                 .await
@@ -272,6 +272,7 @@ impl FlownodeBuilder {
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in flownode is only used for translate plan with resolved table source.
             self.catalog_manager.clone(),
+            None,
             None,
             None,
             None,

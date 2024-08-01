@@ -176,7 +176,7 @@ impl Categorizer {
         }
         let ref_cols = ref_cols
             .into_iter()
-            .map(|c| c.flat_name())
+            .map(|c| c.name.clone())
             .collect::<HashSet<_>>();
         for col in partition_cols {
             if !ref_cols.contains(col) {

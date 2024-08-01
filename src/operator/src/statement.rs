@@ -138,6 +138,8 @@ impl StatementExecutor {
 
             Statement::ShowViews(stmt) => self.show_views(stmt, query_ctx).await,
 
+            Statement::ShowFlows(stmt) => self.show_flows(stmt, query_ctx).await,
+
             Statement::Copy(sql::statements::copy::Copy::CopyTable(stmt)) => {
                 let req = to_copy_table_request(stmt, query_ctx.clone())?;
                 match req.direction {

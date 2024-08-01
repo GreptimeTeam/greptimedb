@@ -19,6 +19,7 @@ use prometheus::*;
 pub const STAGE_LABEL: &str = "stage";
 /// Type label.
 pub const TYPE_LABEL: &str = "type";
+const CACHE_EVICTION_CAUSE: &str = "cause";
 /// Reason to flush.
 pub const FLUSH_REASON: &str = "reason";
 /// File type label.
@@ -190,6 +191,12 @@ lazy_static! {
         "mito upload bytes total",
     )
     .unwrap();
+    /// Cache eviction counter, labeled with cache type and eviction reason.
+    pub static ref CACHE_EVICTION: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_cache_eviction",
+        "mito cache eviction",
+        &[TYPE_LABEL, CACHE_EVICTION_CAUSE]
+    ).unwrap();
     // ------- End of cache metrics.
 
     // Index metrics.

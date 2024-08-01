@@ -82,7 +82,7 @@ pub struct RegionStat {
 impl RegionServer {
     pub fn new(
         query_engine: QueryEngineRef,
-        runtime: Arc<Runtime>,
+        runtime: Runtime,
         event_listener: RegionServerEventListenerRef,
     ) -> Self {
         Self::with_table_provider(
@@ -95,7 +95,7 @@ impl RegionServer {
 
     pub fn with_table_provider(
         query_engine: QueryEngineRef,
-        runtime: Arc<Runtime>,
+        runtime: Runtime,
         event_listener: RegionServerEventListenerRef,
         table_provider_factory: TableProviderFactoryRef,
     ) -> Self {
@@ -286,7 +286,7 @@ impl RegionServer {
         }
     }
 
-    pub fn runtime(&self) -> Arc<Runtime> {
+    pub fn runtime(&self) -> Runtime {
         self.inner.runtime.clone()
     }
 
@@ -447,7 +447,7 @@ struct RegionServerInner {
     engines: RwLock<HashMap<String, RegionEngineRef>>,
     region_map: DashMap<RegionId, RegionEngineWithStatus>,
     query_engine: QueryEngineRef,
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     event_listener: RegionServerEventListenerRef,
     table_provider_factory: TableProviderFactoryRef,
 }
@@ -475,7 +475,7 @@ impl Debug for CurrentEngine {
 impl RegionServerInner {
     pub fn new(
         query_engine: QueryEngineRef,
-        runtime: Arc<Runtime>,
+        runtime: Runtime,
         event_listener: RegionServerEventListenerRef,
         table_provider_factory: TableProviderFactoryRef,
     ) -> Self {
@@ -860,7 +860,7 @@ impl RegionServerInner {
         // complains "higher-ranked lifetime error". Rust can't prove some future is legit.
         // Possible related issue: https://github.com/rust-lang/rust/issues/102211
         //
-        // The walkaround is to put the async functions in the `common_runtime::spawn_bg`. Or like
+        // The walkaround is to put the async functions in the `common_runtime::spawn_global`. Or like
         // it here, collect the values first then use later separately.
 
         let regions = self

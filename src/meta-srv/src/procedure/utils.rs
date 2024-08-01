@@ -34,7 +34,7 @@ pub mod mock {
     /// An mock implementation of region server that simply echoes the request.
     #[derive(Clone)]
     pub struct EchoRegionServer {
-        runtime: Arc<Runtime>,
+        runtime: Runtime,
         received_requests: mpsc::Sender<region_request::Body>,
     }
 
@@ -43,7 +43,7 @@ pub mod mock {
             let (tx, rx) = mpsc::channel(10);
             (
                 Self {
-                    runtime: Arc::new(RuntimeBuilder::default().worker_threads(2).build().unwrap()),
+                    runtime: RuntimeBuilder::default().worker_threads(2).build().unwrap(),
                     received_requests: tx,
                 },
                 rx,

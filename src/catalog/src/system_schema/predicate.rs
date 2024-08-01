@@ -25,7 +25,7 @@ type ColumnName = String;
 /// we only support these simple predicates currently.
 /// TODO(dennis): supports more predicate types.
 #[derive(Clone, PartialEq, Eq, Debug)]
-enum Predicate {
+pub(crate) enum Predicate {
     Eq(ColumnName, Value),
     Like(ColumnName, String, bool),
     NotEq(ColumnName, Value),

@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -607,7 +607,9 @@ impl ScanInput {
         &self,
         collector: &mut impl FileRangeCollector,
     ) -> Result<()> {
+        let mut file_prune_cost = Duration::ZERO;
         for file in &self.files {
+            let prune_start = Instant::now();
             let res = self
                 .access_layer
                 .read_sst(file.clone())
@@ -620,6 +622,7 @@ impl ScanInput {
                 .expected_metadata(Some(self.mapper.metadata().clone()))
                 .build_reader_input()
                 .await;
+            file_prune_cost += prune_start.elapsed();
             let (mut file_range_ctx, row_groups) = match res {
                 Ok(x) => x,
                 Err(e) => {
@@ -655,6 +658,13 @@ impl ScanInput {
 
         READ_SST_COUNT.observe(self.files.len() as f64);
 
+        common_telemetry::debug!(
+            "Region {} prune {} files, cost is {:?}",
+            self.mapper.metadata().region_id,
+            self.files.len(),
+            file_prune_cost
+        );
+
         Ok(())
     }
 
@@ -665,7 +675,7 @@ impl ScanInput {
         semaphore: Arc<Semaphore>,
         sender: mpsc::Sender<Result<Batch>>,
     ) {
-        common_runtime::spawn_read(async move {
+        common_runtime::spawn_global(async move {
             loop {
                 // We release the permit before sending result to avoid the task waiting on
                 // the channel with the permit held.
@@ -713,7 +723,7 @@ pub(crate) type FileRangesGroup = SmallVec<[Vec<FileRange>; 4]>;
 
 /// A partition of a scanner to read.
 /// It contains memtables and file ranges to scan.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ScanPart {
     /// Memtable ranges to scan.
     pub(crate) memtable_ranges: Vec<MemtableRange>,
@@ -845,10 +855,10 @@ impl ScanPartList {
 pub(crate) struct StreamContext {
     /// Input memtables and files.
     pub(crate) input: ScanInput,
-    /// Parts to scan.
+    /// Parts to scan and the cost to build parts.
     /// The scanner builds parts to scan from the input lazily.
     /// The mutex is used to ensure the parts are only built once.
-    pub(crate) parts: Mutex<ScanPartList>,
+    pub(crate) parts: Mutex<(ScanPartList, Duration)>,
 
     // Metrics:
     /// The start time of the query.
@@ -862,7 +872,7 @@ impl StreamContext {
 
         Self {
             input,
-            parts: Mutex::new(ScanPartList::default()),
+            parts: Mutex::new((ScanPartList::default(), Duration::default())),
             query_start,
         }
     }
@@ -878,11 +888,11 @@ impl StreamContext {
                 DisplayFormatType::Default => write!(
                     f,
                     "partition_count={} ({} memtable ranges, {} file ranges)",
-                    inner.len(),
-                    inner.num_mem_ranges(),
-                    inner.num_file_ranges()
+                    inner.0.len(),
+                    inner.0.num_mem_ranges(),
+                    inner.0.num_file_ranges()
                 )?,
-                DisplayFormatType::Verbose => write!(f, "{:?}", &*inner)?,
+                DisplayFormatType::Verbose => write!(f, "{:?}", inner.0)?,
             },
             Err(_) => write!(f, "<locked>")?,
         }

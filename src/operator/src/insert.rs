@@ -270,7 +270,12 @@ impl Inserter {
         requests: RegionInsertRequests,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
-        let write_cost = write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
+        let write_cost = write_meter!(
+            ctx.current_catalog(),
+            ctx.current_schema(),
+            requests,
+            ctx.channel() as u8
+        );
         let request_factory = RegionRequestFactory::new(RegionRequestHeader {
             tracing_context: TracingContext::from_current_span().to_w3c(),
             dbname: ctx.get_db_string(),
@@ -283,7 +288,7 @@ impl Inserter {
                 let node_manager = self.node_manager.clone();
                 let flow_tasks = flow_requests.into_iter().map(|(peer, inserts)| {
                     let node_manager = node_manager.clone();
-                    common_runtime::spawn_bg(async move {
+                    common_runtime::spawn_global(async move {
                         node_manager
                             .flownode(&peer)
                             .await
@@ -320,7 +325,7 @@ impl Inserter {
             .map(|(peer, inserts)| {
                 let node_manager = self.node_manager.clone();
                 let request = request_factory.build_insert(inserts);
-                common_runtime::spawn_write(async move {
+                common_runtime::spawn_global(async move {
                     node_manager
                         .datanode(&peer)
                         .await

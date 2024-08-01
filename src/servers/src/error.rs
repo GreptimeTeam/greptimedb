@@ -16,7 +16,6 @@ use std::any::Any;
 use std::net::SocketAddr;
 use std::string::FromUtf8Error;
 
-use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{http, Json};
 use base64::DecodeError;
@@ -31,6 +30,8 @@ use headers::ContentType;
 use query::parser::PromQuery;
 use serde_json::json;
 use snafu::{Location, Snafu};
+
+use crate::http::error_result::status_code_to_http_status;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -750,28 +751,8 @@ fn log_error_if_necessary(error: &Error) {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        use pipeline::error::Error as PipelineError;
         let error_msg = self.output_msg();
-        let status = match self {
-            Error::InfluxdbLineProtocol { .. }
-            | Error::RowWriter { .. }
-            | Error::PromSeriesWrite { .. }
-            | Error::InvalidOpentsdbJsonRequest { .. }
-            | Error::DecodePromRemoteRequest { .. }
-            | Error::DecodeOtlpRequest { .. }
-            | Error::DecompressSnappyPromRemoteRequest { .. }
-            | Error::DecompressZstdPromRemoteRequest { .. }
-            | Error::InvalidPromRemoteRequest { .. }
-            | Error::InvalidQuery { .. }
-            | Error::TimePrecision { .. } => HttpStatusCode::BAD_REQUEST,
-            Error::Pipeline { ref source, .. } => match source {
-                PipelineError::CompilePipeline { .. }
-                | PipelineError::InvalidPipelineVersion { .. }
-                | PipelineError::PipelineNotFound { .. } => HttpStatusCode::BAD_REQUEST,
-                _ => HttpStatusCode::INTERNAL_SERVER_ERROR,
-            },
-            _ => HttpStatusCode::INTERNAL_SERVER_ERROR,
-        };
+        let status = status_code_to_http_status(&self.status_code());
 
         log_error_if_necessary(&self);
 

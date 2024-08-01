@@ -12,24 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{self};
 use std::time::Duration;
 
 use common_macro::admin_fn;
 use common_meta::rpc::procedure::MigrateRegionRequest;
-use common_query::error::Error::ThreadJoin;
 use common_query::error::{InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result};
 use common_query::prelude::{Signature, TypeSignature, Volatility};
-use common_telemetry::error;
-use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
-use datatypes::vectors::VectorRef;
 use session::context::QueryContextRef;
-use snafu::{Location, OptionExt};
 
-use crate::ensure_greptime;
-use crate::function::{Function, FunctionContext};
 use crate::handlers::ProcedureServiceHandlerRef;
 use crate::helper::cast_u64;
 
@@ -128,9 +120,10 @@ mod tests {
     use std::sync::Arc;
 
     use common_query::prelude::TypeSignature;
-    use datatypes::vectors::{StringVector, UInt64Vector};
+    use datatypes::vectors::{StringVector, UInt64Vector, VectorRef};
 
     use super::*;
+    use crate::function::{Function, FunctionContext};
 
     #[test]
     fn test_migrate_region_misc() {

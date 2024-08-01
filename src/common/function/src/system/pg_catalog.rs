@@ -12,13 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datafusion_expr::LogicalPlan;
+mod pg_get_userbyid;
+mod table_is_visible;
 
-use crate::error::Result;
-use crate::QueryEngineContext;
+use std::sync::Arc;
 
-/// Logical plan optimizer, rewrite the [`LogicalPlan`] in some way.
-pub trait LogicalOptimizer {
-    /// Optimize the `plan`
-    fn optimize(&self, context: &QueryEngineContext, plan: &LogicalPlan) -> Result<LogicalPlan>;
+use pg_get_userbyid::PGGetUserByIdFunction;
+use table_is_visible::PGTableIsVisibleFunction;
+
+use crate::function_registry::FunctionRegistry;
+
+#[macro_export]
+macro_rules! pg_catalog_func_fullname {
+    ($name:literal) => {
+        concat!("pg_catalog.", $name)
+    };
+}
+
+pub(super) struct PGCatalogFunction;
+
+impl PGCatalogFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(PGTableIsVisibleFunction));
+        registry.register(Arc::new(PGGetUserByIdFunction));
+    }
 }

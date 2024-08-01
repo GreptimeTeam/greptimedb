@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -21,7 +22,7 @@ use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::precision::Precision;
 use common_telemetry::tracing;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContext, QueryContextRef};
 
 use super::header::write_cost_header_map;
 use crate::error::{Result, TimePrecisionSnafu};
@@ -45,12 +46,14 @@ pub async fn influxdb_health() -> Result<impl IntoResponse> {
 pub async fn influxdb_write_v1(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     lines: String,
 ) -> Result<impl IntoResponse> {
     let db = params
         .remove("db")
         .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+    query_ctx.set_channel(Channel::Influx);
+    let query_ctx = Arc::new(query_ctx);
 
     let precision = params
         .get("precision")
@@ -65,7 +68,7 @@ pub async fn influxdb_write_v1(
 pub async fn influxdb_write_v2(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     lines: String,
 ) -> Result<impl IntoResponse> {
     let db = match (params.remove("db"), params.remove("bucket")) {
@@ -73,6 +76,8 @@ pub async fn influxdb_write_v2(
         (Some(db), None) => db.clone(),
         _ => DEFAULT_SCHEMA_NAME.to_string(),
     };
+    query_ctx.set_channel(Channel::Influx);
+    let query_ctx = Arc::new(query_ctx);
 
     let precision = params
         .get("precision")

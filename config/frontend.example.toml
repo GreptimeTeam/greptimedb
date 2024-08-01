@@ -1,6 +1,3 @@
-## The running mode of the datanode. It can be `standalone` or `distributed`.
-mode = "standalone"
-
 ## The default timezone of the server.
 ## +toml2docs:none-default
 default_timezone = "UTC"
@@ -8,11 +5,9 @@ default_timezone = "UTC"
 ## The runtime options.
 [runtime]
 ## The number of threads to execute the runtime for global read operations.
-read_rt_size = 8
+global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
-write_rt_size = 8
-## The number of threads to execute the runtime for global background operations.
-bg_rt_size = 4
+compact_rt_size = 4
 
 ## The heartbeat options.
 [heartbeat]

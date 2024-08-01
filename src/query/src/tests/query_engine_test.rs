@@ -46,7 +46,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let catalog_list = catalog::memory::new_memory_catalog_manager()
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
-    let factory = QueryEngineFactory::new(catalog_list, None, None, None, false);
+    let factory = QueryEngineFactory::new(catalog_list, None, None, None, None, false);
     let engine = factory.query_engine();
 
     let column_schemas = vec![ColumnSchema::new(
@@ -126,7 +126,7 @@ async fn test_query_validate() -> Result<()> {
     });
 
     let factory =
-        QueryEngineFactory::new_with_plugins(catalog_list, None, None, None, false, plugins);
+        QueryEngineFactory::new_with_plugins(catalog_list, None, None, None, None, false, plugins);
     let engine = factory.query_engine();
 
     let stmt =
@@ -156,7 +156,7 @@ async fn test_udf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let catalog_list = catalog_manager()?;
 
-    let factory = QueryEngineFactory::new(catalog_list, None, None, None, false);
+    let factory = QueryEngineFactory::new(catalog_list, None, None, None, None, false);
     let engine = factory.query_engine();
 
     let pow = make_scalar_function(pow);

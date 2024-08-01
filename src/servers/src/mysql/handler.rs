@@ -332,7 +332,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 let plan = match replace_params_with_values(&plan, param_types, &params) {
                     Ok(plan) => plan,
                     Err(e) => {
-                        let (kind, err) = handle_err(e);
+                        let (kind, err) = handle_err(e, query_ctx);
                         debug!(
                             "Failed to replace params on execute, kind: {:?}, err: {}",
                             kind, err
@@ -449,7 +449,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                             {
                                 Ok(plan) => plan,
                                 Err(e) => {
-                                    let (kind, err) = handle_err(e);
+                                    let (kind, err) = handle_err(e, query_ctx);
                                     debug!(
                                         "Failed to replace params on query, kind: {:?}, err: {}",
                                         kind, err

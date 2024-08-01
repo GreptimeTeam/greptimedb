@@ -69,7 +69,7 @@ fn internal_fields() -> [FieldRef; 3] {
     [
         Arc::new(Field::new_dictionary(
             PRIMARY_KEY_COLUMN_NAME,
-            ArrowDataType::UInt16,
+            ArrowDataType::UInt32,
             ArrowDataType::Binary,
             false,
         )),

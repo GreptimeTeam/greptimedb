@@ -30,7 +30,7 @@ use object_pool::Pool;
 use prost::Message;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 
 use super::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
@@ -74,7 +74,7 @@ impl Default for RemoteWriteQuery {
 pub async fn route_write_without_metric_engine(
     handler: State<PromStoreProtocolHandlerRef>,
     query: Query<RemoteWriteQuery>,
-    extension: Extension<QueryContextRef>,
+    extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
     raw_body: RawBody,
 ) -> Result<impl IntoResponse> {
@@ -96,7 +96,7 @@ pub async fn route_write_without_metric_engine(
 pub async fn route_write_without_metric_engine_and_strict_mode(
     handler: State<PromStoreProtocolHandlerRef>,
     query: Query<RemoteWriteQuery>,
-    extension: Extension<QueryContextRef>,
+    extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
     raw_body: RawBody,
 ) -> Result<impl IntoResponse> {
@@ -120,7 +120,7 @@ pub async fn route_write_without_metric_engine_and_strict_mode(
 pub async fn remote_write(
     handler: State<PromStoreProtocolHandlerRef>,
     query: Query<RemoteWriteQuery>,
-    extension: Extension<QueryContextRef>,
+    extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
     raw_body: RawBody,
 ) -> Result<impl IntoResponse> {
@@ -144,7 +144,7 @@ pub async fn remote_write(
 pub async fn remote_write_without_strict_mode(
     handler: State<PromStoreProtocolHandlerRef>,
     query: Query<RemoteWriteQuery>,
-    extension: Extension<QueryContextRef>,
+    extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
     raw_body: RawBody,
 ) -> Result<impl IntoResponse> {
@@ -163,7 +163,7 @@ pub async fn remote_write_without_strict_mode(
 async fn remote_write_impl(
     State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<RemoteWriteQuery>,
-    Extension(mut query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
     RawBody(body): RawBody,
     is_strict_mode: bool,
@@ -175,6 +175,7 @@ async fn remote_write_impl(
     }
 
     let db = params.db.clone().unwrap_or_default();
+    query_ctx.set_channel(Channel::Prometheus);
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
@@ -183,10 +184,9 @@ async fn remote_write_impl(
     let (request, samples) = decode_remote_write_request(is_zstd, body, is_strict_mode).await?;
 
     if let Some(physical_table) = params.physical_table {
-        let mut new_query_ctx = query_ctx.as_ref().clone();
-        new_query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table);
-        query_ctx = Arc::new(new_query_ctx);
+        query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table);
     }
+    let query_ctx = Arc::new(query_ctx);
 
     let output = handler.write(request, query_ctx, is_metric_engine).await?;
     crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(samples as u64);
@@ -224,10 +224,12 @@ impl IntoResponse for PromStoreResponse {
 pub async fn remote_read(
     State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<RemoteWriteQuery>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     RawBody(body): RawBody,
 ) -> Result<PromStoreResponse> {
     let db = params.db.clone().unwrap_or_default();
+    query_ctx.set_channel(Channel::Prometheus);
+    let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();

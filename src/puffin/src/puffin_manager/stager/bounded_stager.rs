@@ -89,7 +89,7 @@ impl BoundedStager {
             .build();
 
         let (delete_queue, rx) = tokio::sync::mpsc::channel(DELETE_QUEUE_SIZE);
-        common_runtime::bg_runtime().spawn(Self::delete_routine(rx));
+        common_runtime::global_runtime().spawn(Self::delete_routine(rx));
 
         let stager = Self {
             cache,

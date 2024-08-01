@@ -25,11 +25,11 @@ use std::time::Duration;
 use std::{env, path};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::info;
-use object_store::layers::{LruCacheLayer, RetryLayer};
+use common_telemetry::{info, warn};
+use object_store::layers::{LruCacheLayer, RetryInterceptor, RetryLayer};
 use object_store::services::Fs;
 use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
-use object_store::{HttpClient, ObjectStore, ObjectStoreBuilder};
+use object_store::{Error, HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
 use crate::config::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
@@ -55,7 +55,11 @@ pub(crate) async fn new_object_store(
     // Enable retry layer and cache layer for non-fs object storages
     let object_store = if !matches!(store, ObjectStoreConfig::File(..)) {
         let object_store = create_object_store_with_cache(object_store, &store).await?;
-        object_store.layer(RetryLayer::new().with_jitter())
+        object_store.layer(
+            RetryLayer::new()
+                .with_jitter()
+                .with_notify(PrintDetailedError),
+        )
     } else {
         object_store
     };
@@ -170,4 +174,13 @@ pub(crate) fn build_http_client() -> Result<HttpClient> {
     };
 
     HttpClient::build(http_builder).context(error::InitBackendSnafu)
+}
+
+struct PrintDetailedError;
+
+// PrintDetailedError is a retry interceptor that prints error in Debug format in retrying.
+impl RetryInterceptor for PrintDetailedError {
+    fn intercept(&self, err: &Error, dur: Duration) {
+        warn!("Retry after {}s, error: {:#?}", dur.as_secs_f64(), err);
+    }
 }

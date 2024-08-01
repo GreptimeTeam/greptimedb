@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::handlers::{ProcedureServiceHandlerRef, TableMutationHandlerRef};
+use crate::handlers::{FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef};
 
 /// Shared state for SQL functions.
 /// The handlers in state may be `None` in cli command-line or test cases.
@@ -22,6 +22,8 @@ pub struct FunctionState {
     pub table_mutation_handler: Option<TableMutationHandlerRef>,
     // The procedure service handler
     pub procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+    // The flownode handler
+    pub flow_service_handler: Option<FlowServiceHandlerRef>,
 }
 
 impl FunctionState {
@@ -42,9 +44,10 @@ impl FunctionState {
             CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest,
         };
 
-        use crate::handlers::{ProcedureServiceHandler, TableMutationHandler};
+        use crate::handlers::{FlowServiceHandler, ProcedureServiceHandler, TableMutationHandler};
         struct MockProcedureServiceHandler;
         struct MockTableMutationHandler;
+        struct MockFlowServiceHandler;
         const ROWS: usize = 42;
 
         #[async_trait]
@@ -116,9 +119,22 @@ impl FunctionState {
             }
         }
 
+        #[async_trait]
+        impl FlowServiceHandler for MockFlowServiceHandler {
+            async fn flush(
+                &self,
+                _catalog: &str,
+                _flow: &str,
+                _ctx: QueryContextRef,
+            ) -> Result<api::v1::flow::FlowResponse> {
+                todo!()
+            }
+        }
+
         Self {
             table_mutation_handler: Some(Arc::new(MockTableMutationHandler)),
             procedure_service_handler: Some(Arc::new(MockProcedureServiceHandler)),
+            flow_service_handler: Some(Arc::new(MockFlowServiceHandler)),
         }
     }
 }

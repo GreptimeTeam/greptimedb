@@ -34,11 +34,9 @@ enable_region_failover = false
 ## The runtime options.
 [runtime]
 ## The number of threads to execute the runtime for global read operations.
-read_rt_size = 8
+global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
-write_rt_size = 8
-## The number of threads to execute the runtime for global background operations.
-bg_rt_size = 4
+compact_rt_size = 4
 
 ## Procedure storage options.
 [procedure]
@@ -58,17 +56,32 @@ max_metadata_value_size = "1500KiB"
 
 # Failure detectors options.
 [failure_detector]
+
+## The threshold value used by the failure detector to determine failure conditions.
 threshold = 8.0
+
+## The minimum standard deviation of the heartbeat intervals, used to calculate acceptable variations.
 min_std_deviation = "100ms"
+
+## The acceptable pause duration between heartbeats, used to determine if a heartbeat interval is acceptable.
 acceptable_heartbeat_pause = "10000ms"
+
+## The initial estimate of the heartbeat interval used by the failure detector.
 first_heartbeat_estimate = "1000ms"
 
 ## Datanode options.
 [datanode]
+
 ## Datanode client options.
 [datanode.client]
+
+## Operation timeout.
 timeout = "10s"
+
+## Connect server timeout.
 connect_timeout = "10s"
+
+## `TCP_NODELAY` option for accepted connections.
 tcp_nodelay = true
 
 [wal]

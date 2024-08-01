@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::result::Result as StdResult;
+use std::sync::Arc;
 
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsService;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
@@ -22,7 +23,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::Trac
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContext};
 use snafu::OptionExt;
 use tonic::{Request, Response, Status};
 
@@ -47,10 +48,12 @@ impl TraceService for OtlpService {
     ) -> StdResult<Response<ExportTraceServiceResponse>, Status> {
         let (_headers, extensions, req) = request.into_parts();
 
-        let ctx = extensions
-            .get::<QueryContextRef>()
+        let mut ctx = extensions
+            .get::<QueryContext>()
             .cloned()
             .context(error::MissingQueryContextSnafu)?;
+        ctx.set_channel(Channel::Otlp);
+        let ctx = Arc::new(ctx);
 
         let _ = self.handler.traces(req, ctx).await?;
 
@@ -68,10 +71,12 @@ impl MetricsService for OtlpService {
     ) -> StdResult<Response<ExportMetricsServiceResponse>, Status> {
         let (_headers, extensions, req) = request.into_parts();
 
-        let ctx = extensions
-            .get::<QueryContextRef>()
+        let mut ctx = extensions
+            .get::<QueryContext>()
             .cloned()
             .context(error::MissingQueryContextSnafu)?;
+        ctx.set_channel(Channel::Otlp);
+        let ctx = Arc::new(ctx);
 
         let _ = self.handler.metrics(req, ctx).await?;
 

@@ -82,48 +82,53 @@ impl IntoResponse for ErrorResponse {
             HeaderValue::from(execution_time),
         );
         let status = StatusCode::from_u32(code).unwrap_or(StatusCode::Unknown);
-        let status_code = match status {
-            StatusCode::Success | StatusCode::Cancelled => HttpStatusCode::OK,
+        let status_code = status_code_to_http_status(&status);
 
-            StatusCode::Unsupported
-            | StatusCode::InvalidArguments
-            | StatusCode::InvalidSyntax
-            | StatusCode::RequestOutdated
-            | StatusCode::RegionAlreadyExists
-            | StatusCode::TableColumnExists
-            | StatusCode::TableAlreadyExists
-            | StatusCode::RegionNotFound
-            | StatusCode::DatabaseNotFound
-            | StatusCode::TableNotFound
-            | StatusCode::TableColumnNotFound
-            | StatusCode::PlanQuery
-            | StatusCode::DatabaseAlreadyExists
-            | StatusCode::FlowNotFound
-            | StatusCode::FlowAlreadyExists => HttpStatusCode::BAD_REQUEST,
-
-            StatusCode::AuthHeaderNotFound
-            | StatusCode::InvalidAuthHeader
-            | StatusCode::UserNotFound
-            | StatusCode::UnsupportedPasswordType
-            | StatusCode::UserPasswordMismatch
-            | StatusCode::RegionReadonly => HttpStatusCode::UNAUTHORIZED,
-
-            StatusCode::PermissionDenied | StatusCode::AccessDenied => HttpStatusCode::FORBIDDEN,
-
-            StatusCode::RateLimited => HttpStatusCode::TOO_MANY_REQUESTS,
-
-            StatusCode::RegionNotReady
-            | StatusCode::TableUnavailable
-            | StatusCode::RegionBusy
-            | StatusCode::StorageUnavailable => HttpStatusCode::SERVICE_UNAVAILABLE,
-
-            StatusCode::Internal
-            | StatusCode::Unexpected
-            | StatusCode::IllegalState
-            | StatusCode::Unknown
-            | StatusCode::RuntimeResourcesExhausted
-            | StatusCode::EngineExecuteQuery => HttpStatusCode::INTERNAL_SERVER_ERROR,
-        };
         (status_code, resp).into_response()
+    }
+}
+
+pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
+    match status_code {
+        StatusCode::Success | StatusCode::Cancelled => HttpStatusCode::OK,
+
+        StatusCode::Unsupported
+        | StatusCode::InvalidArguments
+        | StatusCode::InvalidSyntax
+        | StatusCode::RequestOutdated
+        | StatusCode::RegionAlreadyExists
+        | StatusCode::TableColumnExists
+        | StatusCode::TableAlreadyExists
+        | StatusCode::RegionNotFound
+        | StatusCode::DatabaseNotFound
+        | StatusCode::TableNotFound
+        | StatusCode::TableColumnNotFound
+        | StatusCode::PlanQuery
+        | StatusCode::DatabaseAlreadyExists
+        | StatusCode::FlowNotFound
+        | StatusCode::FlowAlreadyExists => HttpStatusCode::BAD_REQUEST,
+
+        StatusCode::AuthHeaderNotFound
+        | StatusCode::InvalidAuthHeader
+        | StatusCode::UserNotFound
+        | StatusCode::UnsupportedPasswordType
+        | StatusCode::UserPasswordMismatch
+        | StatusCode::RegionReadonly => HttpStatusCode::UNAUTHORIZED,
+
+        StatusCode::PermissionDenied | StatusCode::AccessDenied => HttpStatusCode::FORBIDDEN,
+
+        StatusCode::RateLimited => HttpStatusCode::TOO_MANY_REQUESTS,
+
+        StatusCode::RegionNotReady
+        | StatusCode::TableUnavailable
+        | StatusCode::RegionBusy
+        | StatusCode::StorageUnavailable => HttpStatusCode::SERVICE_UNAVAILABLE,
+
+        StatusCode::Internal
+        | StatusCode::Unexpected
+        | StatusCode::IllegalState
+        | StatusCode::Unknown
+        | StatusCode::RuntimeResourcesExhausted
+        | StatusCode::EngineExecuteQuery => HttpStatusCode::INTERNAL_SERVER_ERROR,
     }
 }

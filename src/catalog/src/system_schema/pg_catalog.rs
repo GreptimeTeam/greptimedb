@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod pg_catalog_memory_table;
+mod pg_class;
+mod pg_namespace;
 mod table_names;
 
 use std::collections::HashMap;
@@ -23,11 +25,13 @@ use datatypes::schema::ColumnSchema;
 use lazy_static::lazy_static;
 use paste::paste;
 use pg_catalog_memory_table::get_schema_columns;
+use pg_class::PGClass;
+use pg_namespace::PGNamespace;
 use table::TableRef;
 pub use table_names::*;
 
-use super::memory_table::tables::u32_column;
 use super::memory_table::MemoryTable;
+use super::utils::tables::u32_column;
 use super::{SystemSchemaProvider, SystemSchemaProviderInner, SystemTableRef};
 use crate::CatalogManager;
 
@@ -46,7 +50,7 @@ fn oid_column() -> ColumnSchema {
 /// [`PGCatalogProvider`] is the provider for a schema named `pg_catalog`, it is not a catalog.
 pub struct PGCatalogProvider {
     catalog_name: String,
-    _catalog_manager: Weak<dyn CatalogManager>,
+    catalog_manager: Weak<dyn CatalogManager>,
     tables: HashMap<String, TableRef>,
 }
 
@@ -79,7 +83,7 @@ impl PGCatalogProvider {
     pub fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
         let mut provider = Self {
             catalog_name,
-            _catalog_manager: catalog_manager,
+            catalog_manager,
             tables: HashMap::new(),
         };
         provider.build_tables();
@@ -90,9 +94,19 @@ impl PGCatalogProvider {
         // SECURITY NOTE:
         // Must follow the same security rules as [`InformationSchemaProvider::build_tables`].
         let mut tables = HashMap::new();
+        // TODO(J0HN50N133): modeling the table_name as a enum type to get rid of expect/unwrap here
+        // It's safe to unwrap here because we are sure that the constants have been handle correctly inside system_table.
         for name in MEMORY_TABLES.iter() {
             tables.insert(name.to_string(), self.build_table(name).expect(name));
         }
+        tables.insert(
+            PG_NAMESPACE.to_string(),
+            self.build_table(PG_NAMESPACE).expect(PG_NAMESPACE),
+        );
+        tables.insert(
+            PG_CLASS.to_string(),
+            self.build_table(PG_CLASS).expect(PG_NAMESPACE),
+        );
         self.tables = tables;
     }
 }
@@ -105,6 +119,14 @@ impl SystemSchemaProviderInner for PGCatalogProvider {
     fn system_table(&self, name: &str) -> Option<SystemTableRef> {
         match name {
             table_names::PG_TYPE => setup_memory_table!(PG_TYPE),
+            table_names::PG_NAMESPACE => Some(Arc::new(PGNamespace::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            ))),
+            table_names::PG_CLASS => Some(Arc::new(PGClass::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            ))),
             _ => None,
         }
     }

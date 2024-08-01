@@ -214,7 +214,7 @@ async fn validate_columns(client: &Pool<MySql>, schema_name: &str, table_ctx: &T
 
 fuzz_target!(|input: FuzzInput| {
     common_telemetry::init_default_ut_logging();
-    common_runtime::block_on_write(async {
+    common_runtime::block_on_global(async {
         let variables = load_unstable_test_env_variables();
         let root_dir = variables.root_dir.unwrap_or(DEFAULT_ROOT_DIR.to_string());
         create_dir_all(&root_dir).unwrap();

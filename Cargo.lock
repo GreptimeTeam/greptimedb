@@ -1949,6 +1949,7 @@ dependencies = [
  "serde_json",
  "session",
  "snafu 0.8.3",
+ "sql",
  "statrs",
  "store-api",
  "table",
@@ -3896,6 +3897,7 @@ dependencies = [
  "common-datasource",
  "common-error",
  "common-frontend",
+ "common-function",
  "common-grpc",
  "common-macro",
  "common-meta",
@@ -4232,7 +4234,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=5c801650435d464891114502539b701c77a1b914#5c801650435d464891114502539b701c77a1b914"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=c437b55725b7f5224fe9d46db21072b4a682ee4b#c437b55725b7f5224fe9d46db21072b4a682ee4b"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -6153,7 +6155,7 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80b72716dcde47ec4161478416a5c6c21343364d#80b72716dcde47ec4161478416a5c6c21343364d"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=049171eb16cb4249d8099751a0c46750d1fe88e7#049171eb16cb4249d8099751a0c46750d1fe88e7"
 dependencies = [
  "anymap",
  "once_cell",
@@ -6163,7 +6165,7 @@ dependencies = [
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80b72716dcde47ec4161478416a5c6c21343364d#80b72716dcde47ec4161478416a5c6c21343364d"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=049171eb16cb4249d8099751a0c46750d1fe88e7#049171eb16cb4249d8099751a0c46750d1fe88e7"
 dependencies = [
  "meter-core",
 ]
@@ -10324,6 +10326,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "derive_builder 0.12.0",
+ "meter-core",
  "snafu 0.8.3",
  "sql",
 ]
@@ -10899,6 +10902,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
+ "common-meta",
  "common-recordbatch",
  "common-time",
  "common-wal",

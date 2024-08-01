@@ -24,7 +24,9 @@ use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::function::FunctionRef;
 use common_function::function_registry::FUNCTION_REGISTRY;
-use common_function::handlers::{ProcedureServiceHandlerRef, TableMutationHandlerRef};
+use common_function::handlers::{
+    FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
+};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
@@ -103,6 +105,7 @@ impl QueryEngineFactory {
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
         with_dist_planner: bool,
     ) -> Self {
         Self::new_with_plugins(
@@ -110,6 +113,7 @@ impl QueryEngineFactory {
             region_query_handler,
             table_mutation_handler,
             procedure_service_handler,
+            flow_service_handler,
             with_dist_planner,
             Default::default(),
         )
@@ -120,6 +124,7 @@ impl QueryEngineFactory {
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
     ) -> Self {
@@ -128,6 +133,7 @@ impl QueryEngineFactory {
             region_query_handler,
             table_mutation_handler,
             procedure_service_handler,
+            flow_service_handler,
             with_dist_planner,
             plugins.clone(),
         ));
@@ -161,7 +167,7 @@ mod tests {
     #[test]
     fn test_query_engine_factory() {
         let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
-        let factory = QueryEngineFactory::new(catalog_list, None, None, None, false);
+        let factory = QueryEngineFactory::new(catalog_list, None, None, None, None, false);
 
         let engine = factory.query_engine();
 

@@ -30,3 +30,185 @@ select * from pg_catalog.pg_type order by oid;
 | 20  | List      | -1     |
 +-----+-----------+--------+
 
+-- \d
+SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p','v','m','S','f','')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname !~ '^pg_toast'
+      AND n.nspname <> 'information_schema'
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2;
+
++--------+---------+-------+-------+
+| Schema | Name    | Type  | Owner |
++--------+---------+-------+-------+
+| public | numbers | table |       |
++--------+---------+-------+-------+
+
+-- \dt
+SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p','')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname !~ '^pg_toast'
+      AND n.nspname <> 'information_schema'
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2;
+
++--------+---------+-------+-------+
+| Schema | Name    | Type  | Owner |
++--------+---------+-------+-------+
+| public | numbers | table |       |
++--------+---------+-------+-------+
+
+create
+database my_db;
+
+Affected Rows: 1
+
+use my_db;
+
+Affected Rows: 0
+
+create table foo
+(
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+-- show tables in `my_db`
+select relname
+from pg_catalog.pg_class
+where relnamespace = (
+    select oid
+    from pg_catalog.pg_namespace
+    where nspname = 'my_db'
+);
+
++---------+
+| relname |
++---------+
+| foo     |
++---------+
+
+-- \dt
+SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p','')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname !~ '^pg_toast'
+      AND n.nspname <> 'information_schema'
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2;
+
++--------+---------+-------+-------+
+| Schema | Name    | Type  | Owner |
++--------+---------+-------+-------+
+| my_db  | foo     | table |       |
+| public | numbers | table |       |
++--------+---------+-------+-------+
+
+-- show tables in `my_db`, `public`
+select relname
+from pg_catalog.pg_class
+where relnamespace in (
+    select oid
+    from pg_catalog.pg_namespace
+    where nspname = 'my_db' or nspname = 'public'
+)
+order by relname;
+
++---------+
+| relname |
++---------+
+| foo     |
+| numbers |
++---------+
+
+select relname
+from pg_catalog.pg_class
+where relnamespace in (
+    select oid
+    from pg_catalog.pg_namespace
+    where nspname like 'my%'
+);
+
++---------+
+| relname |
++---------+
+| foo     |
++---------+
+
+select relnamespace, relname, relkind
+from pg_catalog.pg_class
+where relnamespace in (
+    select oid
+    from pg_catalog.pg_namespace
+    where nspname <> 'public'
+      and nspname <> 'information_schema'
+      and nspname <> 'pg_catalog'
+)
+order by relnamespace, relname;
+
++--------------+---------+---------+
+| relnamespace | relname | relkind |
++--------------+---------+---------+
+| my_db        | foo     | r       |
++--------------+---------+---------+
+
+use public;
+
+Affected Rows: 0
+
+drop schema my_db;
+
+Affected Rows: 0
+
+use pg_catalog;
+
+Affected Rows: 0
+
+-- pg_class
+desc table pg_class;
+
++--------------+--------+-----+------+---------+---------------+
+| Column       | Type   | Key | Null | Default | Semantic Type |
++--------------+--------+-----+------+---------+---------------+
+| oid          | UInt32 |     | NO   |         | FIELD         |
+| relname      | String |     | NO   |         | FIELD         |
+| relnamespace | String |     | NO   |         | FIELD         |
+| relkind      | String |     | NO   |         | FIELD         |
+| relowner     | UInt32 |     | NO   |         | FIELD         |
++--------------+--------+-----+------+---------+---------------+
+
+desc table pg_namespace;
+
++---------+--------+-----+------+---------+---------------+
+| Column  | Type   | Key | Null | Default | Semantic Type |
++---------+--------+-----+------+---------+---------------+
+| oid     | String |     | NO   |         | FIELD         |
+| nspname | String |     | NO   |         | FIELD         |
++---------+--------+-----+------+---------+---------------+
+
+drop table my_db.foo;
+
+Error: 4001(TableNotFound), Table not found: greptime.my_db.foo
+
+use public;
+
+Affected Rows: 0
+

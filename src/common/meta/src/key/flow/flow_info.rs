@@ -142,6 +142,10 @@ impl FlowInfoValue {
         &self.source_table_ids
     }
 
+    pub fn catalog_name(&self) -> &String {
+        &self.catalog_name
+    }
+
     pub fn flow_name(&self) -> &String {
         &self.flow_name
     }
@@ -160,6 +164,10 @@ impl FlowInfoValue {
 
     pub fn comment(&self) -> &String {
         &self.comment
+    }
+
+    pub fn options(&self) -> &HashMap<String, String> {
+        &self.options
     }
 }
 

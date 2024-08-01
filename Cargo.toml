@@ -119,12 +119,12 @@ etcd-client = { version = "0.13" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "5c801650435d464891114502539b701c77a1b914" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "c437b55725b7f5224fe9d46db21072b4a682ee4b" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "80b72716dcde47ec4161478416a5c6c21343364d" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "049171eb16cb4249d8099751a0c46750d1fe88e7" }
 mockall = "0.11.4"
 moka = "0.12"
 notify = "6.1"
@@ -183,7 +183,7 @@ auth = { path = "src/auth" }
 cache = { path = "src/cache" }
 catalog = { path = "src/catalog" }
 client = { path = "src/client" }
-cmd = { path = "src/cmd" }
+cmd = { path = "src/cmd", default-features = false }
 common-base = { path = "src/common/base" }
 common-catalog = { path = "src/common/catalog" }
 common-config = { path = "src/common/config" }
@@ -213,7 +213,7 @@ datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
 file-engine = { path = "src/file-engine" }
 flow = { path = "src/flow" }
-frontend = { path = "src/frontend" }
+frontend = { path = "src/frontend", default-features = false }
 index = { path = "src/index" }
 log-store = { path = "src/log-store" }
 meta-client = { path = "src/meta-client" }
@@ -238,7 +238,7 @@ table = { path = "src/table" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "80b72716dcde47ec4161478416a5c6c21343364d"
+rev = "049171eb16cb4249d8099751a0c46750d1fe88e7"
 
 [profile.release]
 debug = 1

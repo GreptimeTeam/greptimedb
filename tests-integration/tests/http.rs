@@ -520,7 +520,15 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "error");
+    assert!(prom_resp
+        .error_type
+        .is_some_and(|err| err.eq_ignore_ascii_case("TableNotFound")));
+    assert!(prom_resp
+        .error
+        .is_some_and(|err| err.eq_ignore_ascii_case("Table not found: greptime.public.up")));
 
     // label values
     // should return error if there is no match[]
@@ -528,11 +536,15 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .get("/v1/prometheus/api/v1/label/instance/values")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "error");
-    assert!(prom_resp.error.is_some_and(|err| !err.is_empty()));
-    assert!(prom_resp.error_type.is_some_and(|err| !err.is_empty()));
+    assert!(prom_resp
+        .error
+        .is_some_and(|err| err.eq_ignore_ascii_case("match[] parameter is required")));
+    assert!(prom_resp
+        .error_type
+        .is_some_and(|err| err.eq_ignore_ascii_case("InvalidArguments")));
 
     // single match[]
     let res = client
@@ -839,8 +851,6 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-metadata_cache_size = "32MiB"
-content_cache_size = "32MiB"
 
 [region_engine.mito.fulltext_index]
 create_on_flush = "auto"
@@ -889,6 +899,8 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "vector_cache_size =",
         "page_cache_size =",
         "selector_result_cache_size =",
+        "metadata_cache_size =",
+        "content_cache_size =",
     ];
 
     input

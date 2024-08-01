@@ -54,6 +54,23 @@ CREATE TABLE 'N.~' (i TIMESTAMP TIME INDEX);
 
 Error: 1004(InvalidArguments), Invalid table name: N.~
 
+CREATE TABLE neg_default_value_min(i TIMESTAMP TIME INDEX, j SMALLINT DEFAULT -32768);
+
+Affected Rows: 0
+
+DESC TABLE neg_default_value_min;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| j      | Int16                |     | YES  | -32768  | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+DROP TABLE neg_default_value_min;
+
+Affected Rows: 0
+
 DESC TABLE integers;
 
 +--------+----------------------+-----+------+---------+---------------+

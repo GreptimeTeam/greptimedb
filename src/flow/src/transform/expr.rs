@@ -96,21 +96,15 @@ pub(crate) async fn from_scalar_fn_to_df_fn_impl(
         )
         .await
     ;
-    let expr = df_expr.map_err(|err| {
+    let expr = df_expr.context({
         DatafusionSnafu {
-            raw: err,
             context: "Failed to convert substrait scalar function to datafusion scalar function",
         }
-        .build()
     })?;
     let phy_expr =
         datafusion::physical_expr::create_physical_expr(&expr, &schema, &Default::default())
-            .map_err(|err| {
-                DatafusionSnafu {
-                    raw: err,
-                    context: "Failed to create physical expression from logical expression",
-                }
-                .build()
+            .context(DatafusionSnafu {
+                context: "Failed to create physical expression from logical expression",
             })?;
     Ok(phy_expr)
 }

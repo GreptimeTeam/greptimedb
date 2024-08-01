@@ -165,14 +165,14 @@ impl ExportMetricsTask {
                     msg: "Only `frontend` or `standalone` can use `self_import` as export method."
                 }
             );
-            common_runtime::spawn_bg(write_system_metric_by_handler(
+            common_runtime::spawn_global(write_system_metric_by_handler(
                 self_import.db.clone(),
                 handler.unwrap(),
                 filter,
                 interval,
             ))
         } else if let Some(remote_write) = &self.config.remote_write {
-            common_runtime::spawn_bg(write_system_metric_by_network(
+            common_runtime::spawn_global(write_system_metric_by_network(
                 self.headers.clone(),
                 remote_write.url.clone(),
                 filter,

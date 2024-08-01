@@ -24,6 +24,7 @@ Affected Rows: 3
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 explain analyze SELECT count(*) FROM system_metrics;
 
 +-+-+-+
@@ -35,7 +36,7 @@ explain analyze SELECT count(*) FROM system_metrics;
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[COUNT(system_REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_SeqScan: partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+

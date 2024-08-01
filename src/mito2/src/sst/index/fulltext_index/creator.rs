@@ -57,7 +57,7 @@ impl FulltextIndexer {
         metadata: &RegionMetadataRef,
         compress: bool,
         mem_limit: usize,
-    ) -> Result<Self> {
+    ) -> Result<Option<Self>> {
         let mut creators = HashMap::new();
 
         for column in &metadata.column_metadatas {
@@ -102,11 +102,11 @@ impl FulltextIndexer {
             );
         }
 
-        Ok(Self {
+        Ok((!creators.is_empty()).then(move || Self {
             creators,
             aborted: false,
             stats: Statistics::new(TYPE_FULLTEXT_INDEX),
-        })
+        }))
     }
 
     /// Updates the index with the given batch.
@@ -166,10 +166,6 @@ impl FulltextIndexer {
     /// Returns IDs of columns that the creator is responsible for.
     pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
         self.creators.keys().copied()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.creators.is_empty()
     }
 }
 
@@ -468,6 +464,7 @@ mod tests {
             1024,
         )
         .await
+        .unwrap()
         .unwrap();
 
         let batch = new_batch(rows);
