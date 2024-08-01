@@ -41,14 +41,10 @@ impl<'a, I: Iterator<Item = &'a EntryId>> Iterator for ConvertIndexToRange<'a, I
     type Item = Range<usize>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let (Some(base), Some(val)) = (&self.base, self.iter.next()) {
-            let start = (*val - *base) as usize * self.avg_size;
-            let end = start + self.avg_size + 1;
-
-            Some(start..end)
-        } else {
-            None
-        }
+        let (base, val) = (&self.base?, self.iter.next()?);
+        let start = (*val - *base) as usize * self.avg_size;
+        let end = start + self.avg_size + 1;
+        Some(start..end)
     }
 }
 
@@ -84,22 +80,18 @@ impl<I: Iterator<Item = Range<usize>>> MergeRange<I> {
     /// Calculates the size of the next merged range.
     pub(crate) fn merge(mut self) -> Option<(Range<usize>, usize)> {
         let mut merged_range = self.iter.next();
-        if let Some(this) = merged_range.as_mut() {
-            let mut merged = 1;
-            for other in self.iter {
-                let window = other.start - this.start;
-                if window > self.window_size {
-                    break;
-                } else {
-                    merge(this, &other);
-                    merged += 1;
-                }
+        let this = merged_range.as_mut()?;
+        let mut merged = 1;
+        for next in self.iter {
+            let window = next.start - this.start;
+            if window > self.window_size {
+                break;
+            } else {
+                merge(this, &next);
+                merged += 1;
             }
-
-            merged_range.map(|range| (range, merged))
-        } else {
-            None
         }
+        merged_range.map(|range| (range, merged))
     }
 }
 
