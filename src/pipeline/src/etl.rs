@@ -225,12 +225,12 @@ impl<T> Pipeline<T>
 where
     T: Transformer,
 {
-    fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
-        let mut v = map;
+    fn exec_map<'a>(&self, map: &'a mut Map) -> Result<(), String> {
+        let v = map;
         for processor in self.processors.iter() {
-            v = processor.exec_map(v)?;
+            processor.exec_map(v)?;
         }
-        Ok(v)
+        Ok(())
     }
 
     pub fn exec(&self, mut val: value::Value) -> Result<T::Output, String> {

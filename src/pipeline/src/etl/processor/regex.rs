@@ -304,7 +304,7 @@ mod tests {
 
         let mut map = Map::default();
         map.insert("a", Value::String("123".to_string()));
-        let processed_val = processor.exec_map(&mut map).unwrap();
+        processor.exec_map(&mut map).unwrap();
 
         let v = Map {
             values: vec![
@@ -315,7 +315,7 @@ mod tests {
             .collect(),
         };
 
-        assert_eq!(v, *processed_val);
+        assert_eq!(v, map);
     }
 
     #[test]
@@ -363,9 +363,9 @@ mod tests {
 
             let mut map = Map::default();
             map.insert("breadcrumbs", breadcrumbs.clone());
-            let processed_val = processor.exec_map(&mut map).unwrap();
+            processor.exec_map(&mut map).unwrap();
 
-            assert_eq!(processed_val, &mut temporary_map);
+            assert_eq!(map, temporary_map);
         }
 
         {
@@ -414,10 +414,10 @@ mod tests {
             .collect();
 
             let mut expected_map = temporary_map.clone();
-            let actual_val = processor.exec_map(&mut temporary_map).unwrap();
+            processor.exec_map(&mut temporary_map).unwrap();
             expected_map.extend(Map { values: new_values });
 
-            assert_eq!(&mut expected_map, actual_val);
+            assert_eq!(expected_map, temporary_map);
         }
     }
 }

@@ -201,8 +201,8 @@ fn transform_ndjson_array_factory(
 ) -> Result<Vec<Value>> {
     values
         .into_iter()
-        .try_fold(Vec::with_capacity(100), |mut acc_array, item| {
-            if let Ok(item_value) = item {
+        .try_fold(Vec::with_capacity(100), |mut acc_array, item| match item {
+            Ok(item_value) => {
                 match item_value {
                     Value::Array(item_array) => {
                         acc_array.extend(item_array);
@@ -221,9 +221,9 @@ fn transform_ndjson_array_factory(
                     }
                 }
                 Ok(acc_array)
-            } else if !ignore_error {
-                item.map(|x| vec![x]).context(ParseJsonSnafu)
-            } else {
+            }
+            Err(_) if !ignore_error => item.map(|x| vec![x]).context(ParseJsonSnafu),
+            Err(_) => {
                 warn!("invalid item in array: {:?}", item);
                 Ok(acc_array)
             }

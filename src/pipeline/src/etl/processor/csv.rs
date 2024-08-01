@@ -288,7 +288,7 @@ mod tests {
             .collect();
         let mut m = Map { values };
 
-        let result = processor.exec_map(&mut m).unwrap();
+        processor.exec_map(&mut m).unwrap();
 
         let values = [
             ("data".into(), Value::String("1,2".into())),
@@ -297,9 +297,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let mut expected = Map { values };
+        let expected = Map { values };
 
-        assert_eq!(&mut expected, result);
+        assert_eq!(expected, m);
     }
 
     // test target_fields length larger than the record length
@@ -316,7 +316,7 @@ mod tests {
             let field = "data,, a,b,c".parse().unwrap();
             processor.with_fields(Fields::one(field));
 
-            let result = processor.exec_map(&mut input).unwrap();
+            processor.exec_map(&mut input).unwrap();
 
             let values = [
                 ("data".into(), Value::String("1,2".into())),
@@ -326,9 +326,9 @@ mod tests {
             ]
             .into_iter()
             .collect();
-            let mut expected = Map { values };
+            let expected = Map { values };
 
-            assert_eq!(&mut expected, result);
+            assert_eq!(expected, input);
         }
 
         // with empty value
@@ -338,7 +338,7 @@ mod tests {
             processor.with_fields(Fields::one(field));
             processor.with_empty_value("default".into());
 
-            let result = processor.exec_map(&mut input).unwrap();
+            processor.exec_map(&mut input).unwrap();
 
             let values = [
                 ("data".into(), Value::String("1,2".into())),
@@ -348,9 +348,9 @@ mod tests {
             ]
             .into_iter()
             .collect();
-            let mut expected = Map { values };
+            let expected = Map { values };
 
-            assert_eq!(&mut expected, result);
+            assert_eq!(expected, input);
         }
     }
 
@@ -366,7 +366,7 @@ mod tests {
         let field = "data,,a,b".parse().unwrap();
         processor.with_fields(Fields::one(field));
 
-        let result = processor.exec_map(&mut input).unwrap();
+        processor.exec_map(&mut input).unwrap();
 
         let values = [
             ("data".into(), Value::String("1,2,3".into())),
@@ -375,8 +375,8 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let mut expected = Map { values };
+        let expected = Map { values };
 
-        assert_eq!(&mut expected, result);
+        assert_eq!(expected, input);
     }
 }

@@ -88,7 +88,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 
     /// Execute the processor on a map
     /// and merge the output into the original map
-    fn exec_map<'a>(&self, map: &'a mut Map) -> Result<&'a mut Map, String> {
+    fn exec_map<'a>(&self, map: &'a mut Map) -> Result<(), String> {
         for ff @ Field {
             input_field: field_info,
             ..
@@ -109,7 +109,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
             }
         }
 
-        Ok(map)
+        Ok(())
     }
 }
 
