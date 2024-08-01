@@ -151,19 +151,12 @@ fn extract_hints(metadata: &MetadataMap) -> Vec<(String, String)> {
                 return None;
             };
             let key = key.as_str();
-            if !key.starts_with(GREPTIME_DB_HEADER_HINT_PREFIX) {
-                return None;
-            }
+            let new_key = key.strip_prefix(GREPTIME_DB_HEADER_HINT_PREFIX)?;
             let Ok(value) = value.to_str() else {
                 // Simply return None for non-string values.
                 return None;
             };
-            // Safety: we already checked the prefix.
-            let new_key = key
-                .strip_prefix(GREPTIME_DB_HEADER_HINT_PREFIX)
-                .unwrap()
-                .to_string();
-            Some((new_key, value.trim().to_string()))
+            Some((new_key.to_string(), value.trim().to_string()))
         })
         .collect()
 }
@@ -181,6 +174,7 @@ mod tests {
             "x-greptime-hint-append_mode",
             MetadataValue::from_static("true"),
         );
+        metadata.insert("test-key", MetadataValue::from_static("test-value"));
         assert!(prev.is_none());
         let hints = extract_hints(&metadata);
         assert_eq!(hints, vec![("append_mode".to_string(), "true".to_string())]);
