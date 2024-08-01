@@ -27,8 +27,10 @@ pub mod urlencoding;
 use ahash::{HashSet, HashSetExt};
 use cmcd::CmcdProcessor;
 use csv::CsvProcessor;
+use date::DateProcessor;
 use dissect::DissectProcessor;
 use enum_dispatch::enum_dispatch;
+use epoch::EpochProcessor;
 use gsub::GsubProcessor;
 use itertools::Itertools;
 use join::JoinProcessor;
@@ -123,6 +125,8 @@ pub enum ProcessorKind {
     Regex(RegexProcessor),
     Timestamp(TimestampProcessor),
     UrlEncoding(UrlEncodingProcessor),
+    Epoch(EpochProcessor),
+    Date(DateProcessor),
 }
 
 #[derive(Debug, Default)]
@@ -237,6 +241,8 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind, String> {
         cmcd::PROCESSOR_CMCD => ProcessorKind::Cmcd(CmcdProcessor::try_from(value)?),
         csv::PROCESSOR_CSV => ProcessorKind::Csv(CsvProcessor::try_from(value)?),
         dissect::PROCESSOR_DISSECT => ProcessorKind::Dissect(DissectProcessor::try_from(value)?),
+        epoch::PROCESSOR_EPOCH => ProcessorKind::Epoch(EpochProcessor::try_from(value)?),
+        date::PROCESSOR_DATE => ProcessorKind::Date(DateProcessor::try_from(value)?),
         gsub::PROCESSOR_GSUB => ProcessorKind::Gsub(GsubProcessor::try_from(value)?),
         join::PROCESSOR_JOIN => ProcessorKind::Join(JoinProcessor::try_from(value)?),
         letter::PROCESSOR_LETTER => ProcessorKind::Letter(LetterProcessor::try_from(value)?),
