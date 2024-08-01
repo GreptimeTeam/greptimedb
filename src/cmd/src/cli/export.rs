@@ -532,7 +532,7 @@ mod tests {
             "--output-dir",
             &*output_dir.path().to_string_lossy(),
             "--target",
-            "create-table",
+            "schema",
         ]);
         let mut cli_app = cli.build(LoggingOptions::default()).await?;
         cli_app.start().await?;
