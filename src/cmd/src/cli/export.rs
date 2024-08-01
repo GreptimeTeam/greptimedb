@@ -22,7 +22,7 @@ use base64::Engine;
 use clap::{Parser, ValueEnum};
 use client::DEFAULT_SCHEMA_NAME;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{debug, error, info};
 use serde_json::Value;
 use servers::http::greptime_result_v1::GreptimedbV1Response;
 use servers::http::GreptimeQueryOutput;
