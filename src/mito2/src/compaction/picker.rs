@@ -133,7 +133,9 @@ pub fn new_picker(
         match compaction_options {
             CompactionOptions::Twcs(twcs_opts) => Arc::new(TwcsPicker::new(
                 twcs_opts.max_active_window_runs,
+                twcs_opts.max_active_window_files,
                 twcs_opts.max_inactive_window_runs,
+                twcs_opts.max_inactive_window_files,
                 twcs_opts.time_window_seconds(),
             )) as Arc<_>,
         }
