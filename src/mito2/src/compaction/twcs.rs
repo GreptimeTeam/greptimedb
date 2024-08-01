@@ -14,7 +14,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 
 use common_telemetry::{debug, info};
 use common_time::timestamp::TimeUnit;
