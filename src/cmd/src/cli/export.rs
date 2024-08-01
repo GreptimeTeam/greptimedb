@@ -74,7 +74,7 @@ pub struct ExportCommand {
     max_retry: usize,
 
     /// Things to export
-    #[clap(long, short = 't', value_enum)]
+    #[clap(long, short = 't', value_enum, default_value = "all")]
     target: ExportTarget,
 
     /// A half-open time range: [start_time, end_time).
