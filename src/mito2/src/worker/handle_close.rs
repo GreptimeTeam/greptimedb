@@ -19,7 +19,6 @@ use store_api::region_request::AffectedRows;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
-use crate::metrics::REGION_COUNT;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -31,7 +30,7 @@ impl<S> RegionWorkerLoop<S> {
             return Ok(0);
         };
 
-        info!("Try to close region {}", region_id);
+        info!("Try to close region {}, worker: {}", region_id, self.id);
 
         region.stop().await;
         self.regions.remove_region(region_id);
@@ -40,9 +39,9 @@ impl<S> RegionWorkerLoop<S> {
         // Clean compaction status.
         self.compaction_scheduler.on_region_closed(region_id);
 
-        info!("Region {} closed", region_id);
+        info!("Region {} closed, worker: {}", region_id, self.id);
 
-        REGION_COUNT.dec();
+        self.region_count.dec();
 
         Ok(0)
     }

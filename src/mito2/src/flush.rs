@@ -23,7 +23,7 @@ use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::IntoStaticStr;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::access_layer::{AccessLayerRef, OperationType, SstWriteRequest};
 use crate::cache::CacheManagerRef;
@@ -88,6 +88,9 @@ pub struct WriteBufferManagerImpl {
     memory_used: AtomicUsize,
     /// Memory that hasn't been scheduled to free (e.g. used by mutable memtables).
     memory_active: AtomicUsize,
+    /// Optional notifier.
+    /// The manager can wake up the worker once we free the write buffer.
+    notifier: Option<watch::Sender<()>>,
 }
 
 impl WriteBufferManagerImpl {
@@ -98,7 +101,14 @@ impl WriteBufferManagerImpl {
             mutable_limit: Self::get_mutable_limit(global_write_buffer_size),
             memory_used: AtomicUsize::new(0),
             memory_active: AtomicUsize::new(0),
+            notifier: None,
         }
+    }
+
+    /// Attaches a notifier to the manager.
+    pub fn with_notifier(mut self, notifier: watch::Sender<()>) -> Self {
+        self.notifier = Some(notifier);
+        self
     }
 
     /// Returns memory usage of mutable memtables.
@@ -159,6 +169,12 @@ impl WriteBufferManager for WriteBufferManagerImpl {
 
     fn free_mem(&self, mem: usize) {
         self.memory_used.fetch_sub(mem, Ordering::Relaxed);
+        if let Some(notifier) = &self.notifier {
+            // Notifies the worker after the memory usage is decreased. When we drop the memtable
+            // outside of the worker, the worker may still stall requests because the memory usage
+            // is not updated. So we need to notify the worker to handle stalled requests again.
+            let _ = notifier.send(());
+        }
     }
 
     fn memory_usage(&self) -> usize {
@@ -784,6 +800,18 @@ mod tests {
         assert!(manager.should_flush_engine());
         manager.reserve_mem(100);
         assert!(manager.should_flush_engine());
+    }
+
+    #[test]
+    fn test_manager_notify() {
+        let (sender, receiver) = watch::channel(());
+        let manager = WriteBufferManagerImpl::new(1000).with_notifier(sender);
+        manager.reserve_mem(500);
+        assert!(!receiver.has_changed().unwrap());
+        manager.schedule_free_mem(500);
+        assert!(!receiver.has_changed().unwrap());
+        manager.free_mem(500);
+        assert!(receiver.has_changed().unwrap());
     }
 
     #[tokio::test]

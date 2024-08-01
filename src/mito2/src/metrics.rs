@@ -34,9 +34,13 @@ lazy_static! {
     /// Global memtable dictionary size in bytes.
     pub static ref MEMTABLE_DICT_BYTES: IntGauge =
         register_int_gauge!("greptime_mito_memtable_dict_bytes", "mito memtable dictionary size in bytes").unwrap();
-    /// Gauge for open regions
-    pub static ref REGION_COUNT: IntGauge =
-        register_int_gauge!("greptime_mito_region_count", "mito region count").unwrap();
+    /// Gauge for open regions in each worker.
+    pub static ref REGION_COUNT: IntGaugeVec =
+        register_int_gauge_vec!(
+            "greptime_mito_region_count",
+            "mito region count in each worker",
+            &[WORKER_LABEL],
+        ).unwrap();
     /// Elapsed time to handle requests.
     pub static ref HANDLE_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_handle_request_elapsed",
