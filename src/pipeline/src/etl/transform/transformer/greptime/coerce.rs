@@ -45,7 +45,9 @@ impl TryFrom<Value> for ValueData {
             Value::Boolean(v) => Ok(ValueData::BoolValue(v)),
             Value::String(v) => Ok(ValueData::StringValue(v)),
 
-            Value::Timestamp(Timestamp { nanosecond, .. }) => Ok(ValueData::TimeNanosecondValue(nanosecond)),
+            Value::Timestamp(Timestamp { nanosecond, .. }) => {
+                Ok(ValueData::TimeNanosecondValue(nanosecond))
+            }
 
             Value::Epoch(Epoch::Nanosecond(ns)) => Ok(ValueData::TimestampNanosecondValue(ns)),
             Value::Epoch(Epoch::Microsecond(us)) => Ok(ValueData::TimestampMicrosecondValue(us)),

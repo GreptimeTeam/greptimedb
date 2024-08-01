@@ -156,7 +156,7 @@ impl TimestampProcessor {
 
     fn parse_time_str(&self, val: &str) -> Result<i64, String> {
         for (fmt, tz) in self.formats.iter() {
-            if let Ok(ns) = Self::try_parse(val, fmt, tz.clone()) {
+            if let Ok(ns) = Self::try_parse(val, fmt, *tz) {
                 return Ok(ns);
             }
         }
@@ -238,9 +238,9 @@ fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>,
                 let formatter = iter.next().unwrap();
                 let tz = iter
                     .next()
-                    .map(|tz| tz.parse::<Tz>().ok())
-                    .flatten()
-                    .unwrap_or(Tz::UCT);
+                    .map(|tz| tz.parse::<Tz>())
+                    .unwrap_or(Ok(Tz::UTC))
+                    .map_err(|e| e.to_string())?;
                 formats.push((Arc::new(formatter), tz));
             }
             Ok(formats)
