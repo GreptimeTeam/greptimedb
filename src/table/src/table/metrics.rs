@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, ScopedTimerGuard, Time, Timestamp,
 };
@@ -27,8 +29,10 @@ pub struct StreamMetrics {
     mem_used: Gauge,
     /// Number of rows in output
     output_rows: Count,
-    /// Elapsed time used to poll the stream
+    /// Elapsed time used to `poll` the stream
     poll_elapsed: Time,
+    /// Elapsed time used to `.await`ing the stream
+    await_elapsed: Time,
 }
 
 impl StreamMetrics {
@@ -42,6 +46,7 @@ impl StreamMetrics {
             mem_used: MetricBuilder::new(metrics).mem_used(partition),
             output_rows: MetricBuilder::new(metrics).output_rows(partition),
             poll_elapsed: MetricBuilder::new(metrics).subset_time("elapsed_poll", partition),
+            await_elapsed: MetricBuilder::new(metrics).subset_time("elapsed_await", partition),
         }
     }
 
@@ -63,6 +68,10 @@ impl StreamMetrics {
     /// Return a timer guard that records the time elapsed in poll
     pub fn poll_timer(&self) -> ScopedTimerGuard {
         self.poll_elapsed.timer()
+    }
+
+    pub fn record_await_duration(&self, duration: Duration) {
+        self.await_elapsed.add_duration(duration);
     }
 }
 

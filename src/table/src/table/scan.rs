@@ -16,6 +16,7 @@ use std::any::Any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
@@ -144,6 +145,7 @@ impl ExecutionPlan for RegionScanExec {
             stream,
             metric: stream_metrics,
             span,
+            await_timer: None,
         }))
     }
 
@@ -166,6 +168,7 @@ pub struct StreamWithMetricWrapper {
     stream: SendableRecordBatchStream,
     metric: StreamMetrics,
     span: Span,
+    await_timer: Option<Instant>,
 }
 
 impl Stream for StreamWithMetricWrapper {
@@ -175,24 +178,31 @@ impl Stream for StreamWithMetricWrapper {
         let this = self.get_mut();
         let _enter = this.span.enter();
         let poll_timer = this.metric.poll_timer();
+        this.await_timer.get_or_insert(Instant::now());
         let poll_result = this.stream.poll_next_unpin(cx);
         drop(poll_timer);
         match poll_result {
-            Poll::Ready(Some(result)) => match result {
-                Ok(record_batch) => {
-                    let batch_mem_size = record_batch
-                        .columns()
-                        .iter()
-                        .map(|vec_ref| vec_ref.memory_size())
-                        .sum::<usize>();
-                    // we don't record elapsed time here
-                    // since it's calling storage api involving I/O ops
-                    this.metric.record_mem_usage(batch_mem_size);
-                    this.metric.record_output(record_batch.num_rows());
-                    Poll::Ready(Some(Ok(record_batch.into_df_record_batch())))
+            Poll::Ready(Some(result)) => {
+                if let Some(instant) = this.await_timer.take() {
+                    let elapsed = instant.elapsed();
+                    this.metric.record_await_duration(elapsed);
                 }
-                Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
-            },
+                match result {
+                    Ok(record_batch) => {
+                        let batch_mem_size = record_batch
+                            .columns()
+                            .iter()
+                            .map(|vec_ref| vec_ref.memory_size())
+                            .sum::<usize>();
+                        // we don't record elapsed time here
+                        // since it's calling storage api involving I/O ops
+                        this.metric.record_mem_usage(batch_mem_size);
+                        this.metric.record_output(record_batch.num_rows());
+                        Poll::Ready(Some(Ok(record_batch.into_df_record_batch())))
+                    }
+                    Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
+                }
+            }
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
