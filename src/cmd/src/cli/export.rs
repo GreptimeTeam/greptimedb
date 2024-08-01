@@ -43,9 +43,9 @@ type TableReference = (String, String, String);
 #[derive(Debug, Default, Clone, ValueEnum)]
 enum ExportTarget {
     /// Export all table schemas, corresponding to `SHOW CREATE TABLE`.
-    CreateTable,
+    Schema,
     /// Export all table data, corresponding to `COPY DATABASE TO`.
-    DatabaseData,
+    Data,
     /// Export all table schemas and data at once.
     #[default]
     All,
@@ -440,8 +440,8 @@ impl Export {
 impl Tool for Export {
     async fn do_work(&self) -> Result<()> {
         match self.target {
-            ExportTarget::CreateTable => self.export_create_table().await,
-            ExportTarget::DatabaseData => self.export_database_data().await,
+            ExportTarget::Schema => self.export_create_table().await,
+            ExportTarget::Data => self.export_database_data().await,
             ExportTarget::All => {
                 self.export_create_table().await?;
                 self.export_database_data().await
