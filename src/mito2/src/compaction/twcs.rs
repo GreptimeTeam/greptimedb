@@ -33,21 +33,13 @@ const LEVEL_COMPACTED: Level = 1;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
+#[derive(Debug)]
 pub struct TwcsPicker {
     max_active_window_runs: usize,
     max_active_window_files: usize,
     max_inactive_window_runs: usize,
     max_inactive_window_files: usize,
     time_window_seconds: Option<i64>,
-}
-
-impl Debug for TwcsPicker {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TwcsPicker")
-            .field("max_active_window_runs", &self.max_active_window_runs)
-            .field("max_inactive_window_runs", &self.max_inactive_window_runs)
-            .finish()
-    }
 }
 
 impl TwcsPicker {
@@ -107,6 +99,13 @@ impl TwcsPicker {
                     });
                 }
             } else if files.files.len() > max_files {
+                debug!(
+                    "Enforcing max file num in window: {}, active: {:?}, max: {}, current: {}",
+                    *window,
+                    active_window,
+                    max_files,
+                    files.files.len()
+                );
                 // Files in window exceeds file num limit
                 let to_merge = enforce_file_num(&files.files, max_files);
                 output.push(CompactionOutput {
