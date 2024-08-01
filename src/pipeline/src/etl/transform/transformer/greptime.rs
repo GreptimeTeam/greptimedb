@@ -48,7 +48,7 @@ impl GreptimeTransformer {
             fields,
             type_,
             default,
-            index: Some(Index::TimeIndex),
+            index: Some(Index::Time),
             on_failure: Some(crate::etl::transform::OnFailure::Default),
         }
     }
@@ -138,7 +138,7 @@ impl Transformer for GreptimeTransformer {
             column_names_set.extend(target_fields_set);
 
             if let Some(idx) = transform.index {
-                if idx == Index::TimeIndex {
+                if idx == Index::Time {
                     match transform.fields.len() {
                         1 => timestamp_columns.push(transform.fields.first().unwrap().get_field_name()),
                         _ => return Err(format!(

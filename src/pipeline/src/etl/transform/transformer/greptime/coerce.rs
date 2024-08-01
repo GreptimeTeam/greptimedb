@@ -89,7 +89,7 @@ pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>,
 fn coerce_semantic_type(transform: &Transform) -> SemanticType {
     match transform.index {
         Some(Index::Tag) => SemanticType::Tag,
-        Some(Index::TimeIndex) => SemanticType::Timestamp,
+        Some(Index::Time) => SemanticType::Timestamp,
         Some(Index::Fulltext) | None => SemanticType::Field,
     }
 }

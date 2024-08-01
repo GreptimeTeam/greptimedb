@@ -76,6 +76,8 @@ impl std::ops::Deref for Formats {
     }
 }
 
+/// deprecated it should be removed in the future
+/// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct DateProcessor {
     fields: Fields,
@@ -139,7 +141,7 @@ impl DateProcessor {
 
         for fmt in self.formats.iter() {
             if let Ok(ns) = try_parse(val, fmt, tz) {
-                return Ok(Timestamp::new(ns));
+                return Ok(Timestamp::Nanosecond(ns));
             }
         }
 

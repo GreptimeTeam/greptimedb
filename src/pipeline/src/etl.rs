@@ -20,7 +20,7 @@ pub mod transform;
 pub mod value;
 
 use ahash::HashSet;
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use itertools::{merge, Itertools};
 use processor::Processor;
 use transform::{Transformer, Transforms};
@@ -53,13 +53,17 @@ fn set_processor_keys_index(
                 ))?;
             field.set_input_index(index);
             for (k, v) in field.output_fields_index_mapping.iter_mut() {
-                let index = final_intermediate_keys
-                    .iter()
-                    .position(|r| *r == *k)
-                    .ok_or(format!(
-                    "output field {k} is not found in intermediate keys: {final_intermediate_keys:?} when set processor keys index"
-                ))?;
-                *v = index;
+                let index = final_intermediate_keys.iter().position(|r| *r == *k);
+                match index {
+                    Some(index) => {
+                        *v = index;
+                    }
+                    None => {
+                        warn!(
+                            "output field {k} is not found in intermediate keys: {final_intermediate_keys:?} when set processor keys index"
+                        );
+                    }
+                }
             }
         }
     }
@@ -395,6 +399,92 @@ transform:
                 assert_ne!(*v, 0);
             }
             _ => panic!("expect null value"),
+        }
+    }
+
+    #[test]
+    fn test_dissect_pipeline() {
+        let message = r#"129.37.245.88 - meln1ks [01/Aug/2024:14:22:47 +0800] "PATCH /observability/metrics/production HTTP/1.0" 501 33085"#.to_string();
+        let pipeline_str = r#"processors:
+  - dissect:
+      fields:
+        - message
+      patterns:
+        - "%{ip} %{?ignored} %{username} [%{ts}] \"%{method} %{path} %{proto}\" %{status} %{bytes}"
+  - timestamp:
+      fields:
+        - ts
+      formats:
+        - "%d/%b/%Y:%H:%M:%S %z"
+
+transform:
+  - fields:
+      - ip
+      - username
+      - method
+      - path
+      - proto
+    type: string
+  - fields:
+      - status
+    type: uint16
+  - fields:
+      - bytes
+    type: uint32
+  - field: ts
+    type: timestamp, ns
+    index: time"#;
+        let pipeline: Pipeline<GreptimeTransformer> =
+            parse(&Content::Yaml(pipeline_str.into())).unwrap();
+        let mut payload = pipeline.init_intermediate_state();
+        pipeline
+            .prepare(serde_json::Value::String(message), &mut payload)
+            .unwrap();
+        let result = pipeline.exec_mut(&mut payload).unwrap();
+        let sechema = pipeline.schemas();
+
+        assert_eq!(sechema.len(), result.values.len());
+        let test = vec![
+            (
+                ColumnDataType::Uint32 as i32,
+                Some(ValueData::U32Value(33085)),
+            ),
+            (
+                ColumnDataType::String as i32,
+                Some(ValueData::StringValue("129.37.245.88".into())),
+            ),
+            (
+                ColumnDataType::String as i32,
+                Some(ValueData::StringValue("PATCH".into())),
+            ),
+            (
+                ColumnDataType::String as i32,
+                Some(ValueData::StringValue(
+                    "/observability/metrics/production".into(),
+                )),
+            ),
+            (
+                ColumnDataType::String as i32,
+                Some(ValueData::StringValue("HTTP/1.0".into())),
+            ),
+            (
+                ColumnDataType::Uint16 as i32,
+                Some(ValueData::U16Value(501)),
+            ),
+            (
+                ColumnDataType::TimestampNanosecond as i32,
+                Some(ValueData::TimestampNanosecondValue(1722493367000000000)),
+            ),
+            (
+                ColumnDataType::String as i32,
+                Some(ValueData::StringValue("meln1ks".into())),
+            ),
+        ];
+        for i in 0..sechema.len() {
+            let schema = &sechema[i];
+            let value = &result.values[i];
+            assert_eq!(schema.datatype, test[i].0);
+            assert_eq!(value.value_data, test[i].1);
         }
     }
 

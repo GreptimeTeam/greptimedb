@@ -24,7 +24,7 @@ use crate::etl::value::time::{
     MS_RESOLUTION, NANOSECOND_RESOLUTION, NANO_RESOLUTION, NS_RESOLUTION, SECOND_RESOLUTION,
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
-use crate::etl::value::{Timestamp, Map, Value};
+use crate::etl::value::{Map, Timestamp, Value};
 
 pub(crate) const PROCESSOR_EPOCH: &str = "epoch";
 const RESOLUTION_NAME: &str = "resolution";
@@ -53,6 +53,8 @@ impl TryFrom<&str> for Resolution {
 }
 
 /// support string, integer, float, time, epoch
+/// deprecated it should be removed in the future
+/// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct EpochProcessor {
     fields: Fields,

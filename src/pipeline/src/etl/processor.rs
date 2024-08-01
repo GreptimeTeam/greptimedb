@@ -14,7 +14,9 @@
 
 pub mod cmcd;
 pub mod csv;
+pub mod date;
 pub mod dissect;
+pub mod epoch;
 pub mod gsub;
 pub mod join;
 pub mod letter;

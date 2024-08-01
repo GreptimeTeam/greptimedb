@@ -98,10 +98,7 @@ impl Value {
                         time::VALID_RESOLUTIONS.join(",")
                     )),
                 },
-                _ => Err(format!(
-                    "resolution MUST BE set for epoch type: '{t}'. Available resolutions: {}",
-                    time::VALID_RESOLUTIONS.join(", ")
-                )),
+                _ => Ok(Value::Timestamp(Timestamp::Nanosecond(0))),
             },
 
             "array" => Ok(Value::Array(Array::default())),

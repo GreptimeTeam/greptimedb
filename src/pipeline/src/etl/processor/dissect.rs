@@ -548,7 +548,12 @@ impl DissectProcessor {
             for pattern in self.patterns.iter() {
                 for part in pattern.iter() {
                     if let Part::Name(name) = part {
-                        if !name.is_empty() {
+                        if !name.is_empty()
+                            && !name
+                                .start_modifier
+                                .as_ref()
+                                .is_some_and(|x| *x == StartModifier::NamedSkip)
+                        {
                             fields
                                 .output_fields_index_mapping
                                 .insert(name.to_string(), 0);

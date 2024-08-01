@@ -1035,7 +1035,7 @@ pub async fn test_pipeline_api(store_type: StorageType) {
 
     let body = r#"
 processors:
-  - date:
+  - timestamp:
       field: time
       formats:
         - "%Y-%m-%d %H:%M:%S%.3f"
@@ -1052,8 +1052,8 @@ transform:
       - logger
     type: string
   - field: time
-    type: time
-    index: timestamp
+    type: timestamp, ns
+    index: time
 "#;
 
     // 1. create pipeline
@@ -1156,7 +1156,7 @@ processors:
         - line
       patterns:
         - "%{+ts} %{+ts} %{content}"
-  - date:
+  - timestamp:
       fields:
         - ts
       formats:
@@ -1167,8 +1167,8 @@ transform:
       - content
     type: string
   - field: ts
-    type: time
-    index: timestamp
+    type: timestamp, ns
+    index: time
 "#;
 
     // 1. create pipeline
