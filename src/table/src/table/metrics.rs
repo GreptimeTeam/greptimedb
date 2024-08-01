@@ -13,22 +13,25 @@
 // limitations under the License.
 
 use datafusion::physical_plan::metrics::{
-    Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, Timestamp,
+    Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, ScopedTimerGuard, Time, Timestamp,
 };
 
-/// This metrics struct is used to record and hold memory usage
+/// This metrics struct is used to record and hold metrics like memory usage
 /// of result batch in [`crate::table::scan::StreamWithMetricWrapper`]
-/// during query execution, indicating size of the dataset.
+/// during query execution.
 #[derive(Debug, Clone)]
-pub struct MemoryUsageMetrics {
+pub struct StreamMetrics {
+    /// Timestamp when the stream finished
     end_time: Timestamp,
-    // used memory in bytes
+    /// Used memory in bytes
     mem_used: Gauge,
-    // number of rows in output
+    /// Number of rows in output
     output_rows: Count,
+    /// Elapsed time used to poll the stream
+    poll_elapsed: Time,
 }
 
-impl MemoryUsageMetrics {
+impl StreamMetrics {
     /// Create a new MemoryUsageMetrics structure, and set `start_time` to now
     pub fn new(metrics: &ExecutionPlanMetricsSet, partition: usize) -> Self {
         let start_time = MetricBuilder::new(metrics).start_timestamp(partition);
@@ -38,6 +41,7 @@ impl MemoryUsageMetrics {
             end_time: MetricBuilder::new(metrics).end_timestamp(partition),
             mem_used: MetricBuilder::new(metrics).mem_used(partition),
             output_rows: MetricBuilder::new(metrics).output_rows(partition),
+            poll_elapsed: MetricBuilder::new(metrics).subset_time("elapsed_poll", partition),
         }
     }
 
@@ -55,9 +59,14 @@ impl MemoryUsageMetrics {
             self.end_time.record()
         }
     }
+
+    /// Return a timer guard that records the time elapsed in poll
+    pub fn poll_timer(&self) -> ScopedTimerGuard {
+        self.poll_elapsed.timer()
+    }
 }
 
-impl Drop for MemoryUsageMetrics {
+impl Drop for StreamMetrics {
     fn drop(&mut self) {
         self.try_done()
     }
