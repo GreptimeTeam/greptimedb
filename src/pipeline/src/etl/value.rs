@@ -19,7 +19,7 @@ pub mod time;
 use ahash::{HashMap, HashMapExt};
 pub use array::Array;
 pub use map::Map;
-pub use time::{Epoch, Timestamp};
+pub use time::Timestamp;
 
 /// Value can be used as type
 /// acts as value: the enclosed value is the actual value
@@ -48,7 +48,6 @@ pub enum Value {
     String(String),
 
     Timestamp(Timestamp),
-    Epoch(Epoch),
 
     Array(Array),
     Map(Map),
@@ -80,20 +79,19 @@ impl Value {
             "boolean" => Ok(Value::Boolean(false)),
             "string" => Ok(Value::String("".to_string())),
 
-            "time" => Ok(Value::Timestamp(Timestamp::default())),
-            "epoch" => match tail {
+            "timestamp" => match tail {
                 Some(resolution) if !resolution.is_empty() => match resolution.as_str() {
                     time::NANOSECOND_RESOLUTION | time::NANO_RESOLUTION | time::NS_RESOLUTION => {
-                        Ok(Value::Epoch(Epoch::Nanosecond(0)))
+                        Ok(Value::Timestamp(Timestamp::Nanosecond(0)))
                     }
                     time::MICROSECOND_RESOLUTION | time::MICRO_RESOLUTION | time::US_RESOLUTION => {
-                        Ok(Value::Epoch(Epoch::Microsecond(0)))
+                        Ok(Value::Timestamp(Timestamp::Microsecond(0)))
                     }
                     time::MILLISECOND_RESOLUTION | time::MILLI_RESOLUTION | time::MS_RESOLUTION => {
-                        Ok(Value::Epoch(Epoch::Millisecond(0)))
+                        Ok(Value::Timestamp(Timestamp::Millisecond(0)))
                     }
                     time::SECOND_RESOLUTION | time::SEC_RESOLUTION | time::S_RESOLUTION => {
-                        Ok(Value::Epoch(Epoch::Second(0)))
+                        Ok(Value::Timestamp(Timestamp::Second(0)))
                     }
                     _ => Err(format!(
                         "invalid resolution: '{resolution}'. Available resolutions: {}",
@@ -212,8 +210,7 @@ impl Value {
             Value::Boolean(_) => "boolean",
             Value::String(_) => "string",
 
-            Value::Timestamp(_) => "time",
-            Value::Epoch(_) => "epoch",
+            Value::Timestamp(_) => "epoch",
 
             Value::Array(_) => "array",
             Value::Map(_) => "map",
@@ -244,8 +241,7 @@ impl std::fmt::Display for Value {
             Value::Boolean(v) => format!("boolean({})", v),
             Value::String(v) => format!("string({})", v),
 
-            Value::Timestamp(v) => format!("time({})", v),
-            Value::Epoch(v) => format!("epoch({})", v),
+            Value::Timestamp(v) => format!("epoch({})", v),
 
             Value::Array(v) => format!("{}", v),
             Value::Map(v) => format!("{}", v),

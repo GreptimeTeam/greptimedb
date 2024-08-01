@@ -30,7 +30,7 @@ use crate::etl::value::time::{
     MS_RESOLUTION, NANOSECOND_RESOLUTION, NANO_RESOLUTION, NS_RESOLUTION, SECOND_RESOLUTION,
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
-use crate::etl::value::{Epoch, Map, Value};
+use crate::etl::value::{Map, Timestamp, Value};
 
 pub(crate) const PROCESSOR_TIMESTAMP: &str = "timestamp";
 const RESOLUTION_NAME: &str = "resolution";
@@ -83,7 +83,7 @@ impl TryFrom<&str> for Resolution {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Formats(Vec<(Arc<String>, Tz)>);
 
 impl Formats {
@@ -91,6 +91,12 @@ impl Formats {
         formats.sort_by_key(|(key, _)| key.clone());
         formats.dedup();
         Formats(formats)
+    }
+}
+
+impl Default for Formats {
+    fn default() -> Self {
+        Formats(DEFAULT_FORMATS.clone())
     }
 }
 
@@ -163,7 +169,7 @@ impl TimestampProcessor {
         Err(format!("{} processor: failed to parse {val}", self.kind(),))
     }
 
-    fn parse(&self, val: &Value) -> Result<Epoch, String> {
+    fn parse(&self, val: &Value) -> Result<Timestamp, String> {
         let t: i64 = match val {
             Value::String(s) => {
                 let t = s.parse::<i64>();
@@ -171,7 +177,7 @@ impl TimestampProcessor {
                     Ok(t) => t,
                     Err(_) => {
                         let ns = self.parse_time_str(s)?;
-                        return Ok(Epoch::Nanosecond(ns));
+                        return Ok(Timestamp::Nanosecond(ns));
                     }
                 }
             }
@@ -185,14 +191,7 @@ impl TimestampProcessor {
             Value::Float32(f) => *f as i64,
             Value::Float64(f) => *f as i64,
 
-            Value::Timestamp(t) => match self.resolution {
-                Resolution::Second => t.timestamp(),
-                Resolution::Milli => t.timestamp_millis(),
-                Resolution::Micro => t.timestamp_micros(),
-                Resolution::Nano => t.timestamp_nanos(),
-            },
-
-            Value::Epoch(e) => match self.resolution {
+            Value::Timestamp(e) => match self.resolution {
                 Resolution::Second => e.timestamp(),
                 Resolution::Milli => e.timestamp_millis(),
                 Resolution::Micro => e.timestamp_micros(),
@@ -207,17 +206,17 @@ impl TimestampProcessor {
         };
 
         match self.resolution {
-            Resolution::Second => Ok(Epoch::Second(t)),
-            Resolution::Milli => Ok(Epoch::Millisecond(t)),
-            Resolution::Micro => Ok(Epoch::Microsecond(t)),
-            Resolution::Nano => Ok(Epoch::Nanosecond(t)),
+            Resolution::Second => Ok(Timestamp::Second(t)),
+            Resolution::Milli => Ok(Timestamp::Millisecond(t)),
+            Resolution::Micro => Ok(Timestamp::Microsecond(t)),
+            Resolution::Nano => Ok(Timestamp::Nanosecond(t)),
         }
     }
 
     fn process_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         let key = field.get_target_field();
 
-        Ok(Map::one(key, Value::Epoch(self.parse(val)?)))
+        Ok(Map::one(key, Value::Timestamp(self.parse(val)?)))
     }
 }
 
@@ -353,7 +352,7 @@ mod tests {
     use yaml_rust::YamlLoader;
 
     use super::TimestampProcessor;
-    use crate::etl::value::{Epoch, Value};
+    use crate::etl::value::{Timestamp, Value};
 
     #[test]
     fn test_parse_epoch() {
@@ -373,16 +372,16 @@ formats:
         let values = [
             (
                 Value::String("1573840000".into()),
-                Epoch::Second(1573840000),
+                Timestamp::Second(1573840000),
             ),
-            (Value::Int32(1573840001), Epoch::Second(1573840001)),
-            (Value::Uint64(1573840002), Epoch::Second(1573840002)),
+            (Value::Int32(1573840001), Timestamp::Second(1573840001)),
+            (Value::Uint64(1573840002), Timestamp::Second(1573840002)),
             // float32 has a problem expressing the timestamp.
             // 1573840003.0_f32 as i64 is 1573840000
             //(Value::Float32(1573840003.0), Epoch::Second(1573840003)),
             (
                 Value::String("2019-11-15T17:46:40Z".into()),
-                Epoch::Nanosecond(1573840000000000000),
+                Timestamp::Nanosecond(1573840000000000000),
             ),
         ];
 

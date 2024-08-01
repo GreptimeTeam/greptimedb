@@ -23,7 +23,7 @@ use itertools::Itertools;
 use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transformer, Transforms};
-use crate::etl::value::{Array, Epoch, Map, Value};
+use crate::etl::value::{Array, Map, Timestamp, Value};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 
@@ -38,7 +38,7 @@ pub struct GreptimeTransformer {
 impl GreptimeTransformer {
     fn default_greptime_timestamp_column() -> Transform {
         let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        let type_ = Value::Epoch(Epoch::Nanosecond(ns));
+        let type_ = Value::Timestamp(Timestamp::Nanosecond(ns));
         let default = Some(type_.clone());
         let mut field = Field::new(DEFAULT_GREPTIME_TIMESTAMP_COLUMN);
         field.insert_output_index(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(), 0);

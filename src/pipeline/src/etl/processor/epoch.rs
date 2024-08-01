@@ -24,7 +24,7 @@ use crate::etl::value::time::{
     MS_RESOLUTION, NANOSECOND_RESOLUTION, NANO_RESOLUTION, NS_RESOLUTION, SECOND_RESOLUTION,
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
-use crate::etl::value::{Epoch, Map, Value};
+use crate::etl::value::{Timestamp, Map, Value};
 
 pub(crate) const PROCESSOR_EPOCH: &str = "epoch";
 const RESOLUTION_NAME: &str = "resolution";
@@ -79,7 +79,7 @@ impl EpochProcessor {
         self.ignore_missing = ignore_missing;
     }
 
-    fn parse(&self, val: &Value) -> Result<Epoch, String> {
+    fn parse(&self, val: &Value) -> Result<Timestamp, String> {
         let t: i64 = match val {
             Value::String(s) => s
                 .parse::<i64>()
@@ -101,13 +101,6 @@ impl EpochProcessor {
                 Resolution::Nano => t.timestamp_nanos(),
             },
 
-            Value::Epoch(e) => match self.resolution {
-                Resolution::Second => e.timestamp(),
-                Resolution::Milli => e.timestamp_millis(),
-                Resolution::Micro => e.timestamp_micros(),
-                Resolution::Nano => e.timestamp_nanos(),
-            },
-
             _ => {
                 return Err(format!(
                     "{PROCESSOR_EPOCH} processor: unsupported value {val}"
@@ -116,17 +109,17 @@ impl EpochProcessor {
         };
 
         match self.resolution {
-            Resolution::Second => Ok(Epoch::Second(t)),
-            Resolution::Milli => Ok(Epoch::Millisecond(t)),
-            Resolution::Micro => Ok(Epoch::Microsecond(t)),
-            Resolution::Nano => Ok(Epoch::Nanosecond(t)),
+            Resolution::Second => Ok(Timestamp::Second(t)),
+            Resolution::Milli => Ok(Timestamp::Millisecond(t)),
+            Resolution::Micro => Ok(Timestamp::Microsecond(t)),
+            Resolution::Nano => Ok(Timestamp::Nanosecond(t)),
         }
     }
 
     fn process_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         let key = field.get_target_field();
 
-        Ok(Map::one(key, Value::Epoch(self.parse(val)?)))
+        Ok(Map::one(key, Value::Timestamp(self.parse(val)?)))
     }
 }
 
@@ -242,7 +235,7 @@ mod tests {
 
         for value in values {
             let parsed = processor.parse(&value).unwrap();
-            assert_eq!(parsed, super::Epoch::Second(1573840000));
+            assert_eq!(parsed, super::Timestamp::Second(1573840000));
         }
     }
 }

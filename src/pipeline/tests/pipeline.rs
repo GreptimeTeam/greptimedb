@@ -93,7 +93,7 @@ processors:
         - queryStr
       method: decode
       ignore_missing: true
-  - epoch:
+  - timestamp:
       field: reqTimeSec
       resolution: second
       ignore_missing: true
@@ -189,7 +189,7 @@ transform:
     # index: fulltext
   - field: reqTimeSec, req_time_sec
     # epoch time is special, the resolution MUST BE specified
-    type: epoch, second
+    type: timestamp, second
     index: time
 
   # the following is from cmcd
@@ -487,7 +487,7 @@ transform:
       - content
     type: string
   - field: ts
-    type: time
+    type: timestamp, ns
     index: time
 "#;
 

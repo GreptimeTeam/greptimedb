@@ -36,14 +36,14 @@ processors:
       field: reqTimeSec
       pattern: "\\."
       replacement: ""
-  - epoch:
+  - timestamp:
       field: reqTimeSec
       resolution: millisecond
       ignore_missing: true
 
 transform:
   - field: reqTimeSec
-    type: epoch, millisecond
+    type: timestamp, millisecond
     index: time
 "#;
 

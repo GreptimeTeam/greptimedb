@@ -225,7 +225,7 @@ impl<T> Pipeline<T>
 where
     T: Transformer,
 {
-    fn exec_map<'a>(&self, map: &'a mut Map) -> Result<(), String> {
+    fn exec_map(&self, map: &mut Map) -> Result<(), String> {
         let v = map;
         for processor in self.processors.iter() {
             processor.exec_map(v)?;
@@ -445,13 +445,13 @@ transform:
 description: Pipeline for Apache Tomcat
 
 processors:
-  - date:
+  - timestamp:
       field: test_time
 
 transform:
   - field: test_time
-    type: time
-    index: timestamp
+    type: timestamp, ns
+    index: time
 "#;
 
         let pipeline: Pipeline<GreptimeTransformer> =

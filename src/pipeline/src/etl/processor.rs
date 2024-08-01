@@ -14,9 +14,7 @@
 
 pub mod cmcd;
 pub mod csv;
-pub mod date;
 pub mod dissect;
-pub mod epoch;
 pub mod gsub;
 pub mod join;
 pub mod letter;
@@ -27,10 +25,8 @@ pub mod urlencoding;
 use ahash::{HashSet, HashSetExt};
 use cmcd::CmcdProcessor;
 use csv::CsvProcessor;
-use date::DateProcessor;
 use dissect::DissectProcessor;
 use enum_dispatch::enum_dispatch;
-use epoch::EpochProcessor;
 use gsub::GsubProcessor;
 use itertools::Itertools;
 use join::JoinProcessor;
@@ -88,7 +84,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 
     /// Execute the processor on a map
     /// and merge the output into the original map
-    fn exec_map<'a>(&self, map: &'a mut Map) -> Result<(), String> {
+    fn exec_map(&self, map: &mut Map) -> Result<(), String> {
         for ff @ Field {
             input_field: field_info,
             ..
@@ -118,9 +114,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 pub enum ProcessorKind {
     Cmcd(CmcdProcessor),
     Csv(CsvProcessor),
-    Date(DateProcessor),
     Dissect(DissectProcessor),
-    Epoch(EpochProcessor),
     Gsub(GsubProcessor),
     Join(JoinProcessor),
     Letter(LetterProcessor),
@@ -240,9 +234,7 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind, String> {
     let processor = match str_key {
         cmcd::PROCESSOR_CMCD => ProcessorKind::Cmcd(CmcdProcessor::try_from(value)?),
         csv::PROCESSOR_CSV => ProcessorKind::Csv(CsvProcessor::try_from(value)?),
-        date::PROCESSOR_DATE => ProcessorKind::Date(DateProcessor::try_from(value)?),
         dissect::PROCESSOR_DISSECT => ProcessorKind::Dissect(DissectProcessor::try_from(value)?),
-        epoch::PROCESSOR_EPOCH => ProcessorKind::Epoch(EpochProcessor::try_from(value)?),
         gsub::PROCESSOR_GSUB => ProcessorKind::Gsub(GsubProcessor::try_from(value)?),
         join::PROCESSOR_JOIN => ProcessorKind::Join(JoinProcessor::try_from(value)?),
         letter::PROCESSOR_LETTER => ProcessorKind::Letter(LetterProcessor::try_from(value)?),

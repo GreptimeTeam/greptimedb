@@ -20,7 +20,7 @@ use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{OnFailure, Transform};
-use crate::etl::value::{Epoch, Timestamp, Value};
+use crate::etl::value::{Timestamp, Value};
 
 impl TryFrom<Value> for ValueData {
     type Error = String;
@@ -45,14 +45,16 @@ impl TryFrom<Value> for ValueData {
             Value::Boolean(v) => Ok(ValueData::BoolValue(v)),
             Value::String(v) => Ok(ValueData::StringValue(v)),
 
-            Value::Timestamp(Timestamp { nanosecond, .. }) => {
-                Ok(ValueData::TimeNanosecondValue(nanosecond))
+            Value::Timestamp(Timestamp::Nanosecond(ns)) => {
+                Ok(ValueData::TimestampNanosecondValue(ns))
             }
-
-            Value::Epoch(Epoch::Nanosecond(ns)) => Ok(ValueData::TimestampNanosecondValue(ns)),
-            Value::Epoch(Epoch::Microsecond(us)) => Ok(ValueData::TimestampMicrosecondValue(us)),
-            Value::Epoch(Epoch::Millisecond(ms)) => Ok(ValueData::TimestampMillisecondValue(ms)),
-            Value::Epoch(Epoch::Second(s)) => Ok(ValueData::TimestampSecondValue(s)),
+            Value::Timestamp(Timestamp::Microsecond(us)) => {
+                Ok(ValueData::TimestampMicrosecondValue(us))
+            }
+            Value::Timestamp(Timestamp::Millisecond(ms)) => {
+                Ok(ValueData::TimestampMillisecondValue(ms))
+            }
+            Value::Timestamp(Timestamp::Second(s)) => Ok(ValueData::TimestampSecondValue(s)),
 
             Value::Array(_) => unimplemented!("Array type not supported"),
             Value::Map(_) => unimplemented!("Object type not supported"),
@@ -122,12 +124,10 @@ fn coerce_type(transform: &Transform) -> Result<ColumnDataType, String> {
         Value::Boolean(_) => Ok(ColumnDataType::Boolean),
         Value::String(_) => Ok(ColumnDataType::String),
 
-        Value::Timestamp(_) => Ok(ColumnDataType::TimestampNanosecond),
-
-        Value::Epoch(Epoch::Nanosecond(_)) => Ok(ColumnDataType::TimestampNanosecond),
-        Value::Epoch(Epoch::Microsecond(_)) => Ok(ColumnDataType::TimestampMicrosecond),
-        Value::Epoch(Epoch::Millisecond(_)) => Ok(ColumnDataType::TimestampMillisecond),
-        Value::Epoch(Epoch::Second(_)) => Ok(ColumnDataType::TimestampSecond),
+        Value::Timestamp(Timestamp::Nanosecond(_)) => Ok(ColumnDataType::TimestampNanosecond),
+        Value::Timestamp(Timestamp::Microsecond(_)) => Ok(ColumnDataType::TimestampMicrosecond),
+        Value::Timestamp(Timestamp::Millisecond(_)) => Ok(ColumnDataType::TimestampMillisecond),
+        Value::Timestamp(Timestamp::Second(_)) => Ok(ColumnDataType::TimestampSecond),
 
         Value::Array(_) => unimplemented!("Array"),
         Value::Map(_) => unimplemented!("Object"),
@@ -171,14 +171,16 @@ pub(crate) fn coerce_value(
         Value::Boolean(b) => coerce_bool_value(*b, transform),
         Value::String(s) => coerce_string_value(s, transform),
 
-        Value::Timestamp(Timestamp { nanosecond, .. }) => {
-            Ok(Some(ValueData::TimestampNanosecondValue(*nanosecond)))
+        Value::Timestamp(Timestamp::Nanosecond(ns)) => {
+            Ok(Some(ValueData::TimestampNanosecondValue(*ns)))
         }
-
-        Value::Epoch(Epoch::Nanosecond(ns)) => Ok(Some(ValueData::TimestampNanosecondValue(*ns))),
-        Value::Epoch(Epoch::Microsecond(us)) => Ok(Some(ValueData::TimestampMicrosecondValue(*us))),
-        Value::Epoch(Epoch::Millisecond(ms)) => Ok(Some(ValueData::TimestampMillisecondValue(*ms))),
-        Value::Epoch(Epoch::Second(s)) => Ok(Some(ValueData::TimestampSecondValue(*s))),
+        Value::Timestamp(Timestamp::Microsecond(us)) => {
+            Ok(Some(ValueData::TimestampMicrosecondValue(*us)))
+        }
+        Value::Timestamp(Timestamp::Millisecond(ms)) => {
+            Ok(Some(ValueData::TimestampMillisecondValue(*ms)))
+        }
+        Value::Timestamp(Timestamp::Second(s)) => Ok(Some(ValueData::TimestampSecondValue(*s))),
 
         Value::Array(_) => unimplemented!("Array type not supported"),
         Value::Map(_) => unimplemented!("Object type not supported"),
@@ -204,13 +206,6 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
         Value::String(_) => ValueData::StringValue(b.to_string()),
 
         Value::Timestamp(_) => match transform.on_failure {
-            Some(OnFailure::Ignore) => return Ok(None),
-            Some(OnFailure::Default) => {
-                return Err("default value not supported for Time".to_string())
-            }
-            None => return Err("Boolean type not supported for Time".to_string()),
-        },
-        Value::Epoch(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
                 return Err("default value not supported for Epoch".to_string())
@@ -248,14 +243,6 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
-                return Err("default value not supported for Time".to_string())
-            }
-            None => return Err("Integer type not supported for Time".to_string()),
-        },
-
-        Value::Epoch(_) => match transform.on_failure {
-            Some(OnFailure::Ignore) => return Ok(None),
-            Some(OnFailure::Default) => {
                 return Err("default value not supported for Epoch".to_string())
             }
             None => return Err("Integer type not supported for Epoch".to_string()),
@@ -291,14 +278,6 @@ fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
-                return Err("default value not supported for Time".to_string())
-            }
-            None => return Err("Integer type not supported for Time".to_string()),
-        },
-
-        Value::Epoch(_) => match transform.on_failure {
-            Some(OnFailure::Ignore) => return Ok(None),
-            Some(OnFailure::Default) => {
                 return Err("default value not supported for Epoch".to_string())
             }
             None => return Err("Integer type not supported for Epoch".to_string()),
@@ -332,14 +311,6 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::String(_) => ValueData::StringValue(n.to_string()),
 
         Value::Timestamp(_) => match transform.on_failure {
-            Some(OnFailure::Ignore) => return Ok(None),
-            Some(OnFailure::Default) => {
-                return Err("default value not supported for Time".to_string())
-            }
-            None => return Err("Float type not supported for Time".to_string()),
-        },
-
-        Value::Epoch(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
                 return Err("default value not supported for Epoch".to_string())
@@ -418,12 +389,6 @@ fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<Value
         Value::String(_) => Ok(Some(ValueData::StringValue(s.to_string()))),
 
         Value::Timestamp(_) => match transform.on_failure {
-            Some(OnFailure::Ignore) => Ok(None),
-            Some(OnFailure::Default) => Err("default value not supported for Time".to_string()),
-            None => Err("String type not supported for Time".to_string()),
-        },
-
-        Value::Epoch(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => Ok(None),
             Some(OnFailure::Default) => Err("default value not supported for Epoch".to_string()),
             None => Err("String type not supported for Epoch".to_string()),

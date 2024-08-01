@@ -12,57 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_telemetry::error;
-
 #[derive(Debug, Clone, PartialEq)]
-pub struct Timestamp {
-    pub nanosecond: i64,
-}
-
-impl Timestamp {
-    pub(crate) fn new(nanosecond: i64) -> Self {
-        Timestamp { nanosecond }
-    }
-
-    pub(crate) fn timestamp_nanos(&self) -> i64 {
-        self.nanosecond
-    }
-
-    pub(crate) fn timestamp_micros(&self) -> i64 {
-        self.nanosecond / 1_000
-    }
-
-    pub(crate) fn timestamp_millis(&self) -> i64 {
-        self.nanosecond / 1_000_000
-    }
-
-    pub(crate) fn timestamp(&self) -> i64 {
-        self.nanosecond / 1_000_000_000
-    }
-}
-
-impl Default for Timestamp {
-    fn default() -> Self {
-        let dt = chrono::Utc::now();
-        let ns = match dt.timestamp_nanos_opt() {
-            Some(ns) => ns,
-            None => {
-                error!("failed to get nanosecond from timestamp, use 0 instead");
-                0
-            }
-        };
-        Timestamp::new(ns)
-    }
-}
-
-impl std::fmt::Display for Timestamp {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "ns: {}", self.nanosecond)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Epoch {
+pub enum Timestamp {
     Nanosecond(i64),
     Microsecond(i64),
     Millisecond(i64),
@@ -97,57 +48,57 @@ pub(crate) const VALID_RESOLUTIONS: [&str; 12] = [
     S_RESOLUTION,
 ];
 
-impl Epoch {
+impl Timestamp {
     pub(crate) fn timestamp_nanos(&self) -> i64 {
         match self {
-            Epoch::Nanosecond(v) => *v,
-            Epoch::Microsecond(v) => *v * 1_000,
-            Epoch::Millisecond(v) => *v * 1_000_000,
-            Epoch::Second(v) => *v * 1_000_000_000,
+            Timestamp::Nanosecond(v) => *v,
+            Timestamp::Microsecond(v) => *v * 1_000,
+            Timestamp::Millisecond(v) => *v * 1_000_000,
+            Timestamp::Second(v) => *v * 1_000_000_000,
         }
     }
 
     pub(crate) fn timestamp_micros(&self) -> i64 {
         match self {
-            Epoch::Nanosecond(v) => *v / 1_000,
-            Epoch::Microsecond(v) => *v,
-            Epoch::Millisecond(v) => *v * 1_000,
-            Epoch::Second(v) => *v * 1_000_000,
+            Timestamp::Nanosecond(v) => *v / 1_000,
+            Timestamp::Microsecond(v) => *v,
+            Timestamp::Millisecond(v) => *v * 1_000,
+            Timestamp::Second(v) => *v * 1_000_000,
         }
     }
 
     pub(crate) fn timestamp_millis(&self) -> i64 {
         match self {
-            Epoch::Nanosecond(v) => *v / 1_000_000,
-            Epoch::Microsecond(v) => *v / 1_000,
-            Epoch::Millisecond(v) => *v,
-            Epoch::Second(v) => *v * 1_000,
+            Timestamp::Nanosecond(v) => *v / 1_000_000,
+            Timestamp::Microsecond(v) => *v / 1_000,
+            Timestamp::Millisecond(v) => *v,
+            Timestamp::Second(v) => *v * 1_000,
         }
     }
 
     pub(crate) fn timestamp(&self) -> i64 {
         match self {
-            Epoch::Nanosecond(v) => *v / 1_000_000_000,
-            Epoch::Microsecond(v) => *v / 1_000_000,
-            Epoch::Millisecond(v) => *v / 1_000,
-            Epoch::Second(v) => *v,
+            Timestamp::Nanosecond(v) => *v / 1_000_000_000,
+            Timestamp::Microsecond(v) => *v / 1_000_000,
+            Timestamp::Millisecond(v) => *v / 1_000,
+            Timestamp::Second(v) => *v,
         }
     }
 }
 
-impl Default for Epoch {
+impl Default for Timestamp {
     fn default() -> Self {
-        Epoch::Nanosecond(chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0))
+        Timestamp::Nanosecond(chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0))
     }
 }
 
-impl std::fmt::Display for Epoch {
+impl std::fmt::Display for Timestamp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let (value, resolution) = match self {
-            Epoch::Nanosecond(v) => (v, NANOSECOND_RESOLUTION),
-            Epoch::Microsecond(v) => (v, MICROSECOND_RESOLUTION),
-            Epoch::Millisecond(v) => (v, MILLISECOND_RESOLUTION),
-            Epoch::Second(v) => (v, SECOND_RESOLUTION),
+            Timestamp::Nanosecond(v) => (v, NANOSECOND_RESOLUTION),
+            Timestamp::Microsecond(v) => (v, MICROSECOND_RESOLUTION),
+            Timestamp::Millisecond(v) => (v, MILLISECOND_RESOLUTION),
+            Timestamp::Second(v) => (v, SECOND_RESOLUTION),
         };
 
         write!(f, "{}, resolution: {}", value, resolution)
