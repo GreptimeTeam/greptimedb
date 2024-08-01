@@ -23,7 +23,7 @@ use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_query::OutputData;
 use common_recordbatch::{util, RecordBatch};
 use datafusion::datasource::DefaultTableSource;
-use datafusion_expr::LogicalPlan;
+use datafusion_expr::LogicalPlanBuilder;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::UInt32Vector;
@@ -63,7 +63,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
 
     let limit = 10;
     let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
-    let plan = LogicalPlan::builder::LogicalPlanBuilder::scan(
+    let plan = LogicalPlanBuilder::scan(
         "numbers",
         Arc::new(DefaultTableSource { table_provider }),
         None,

@@ -408,9 +408,8 @@ impl StatementExecutor {
         // are altered.
         let plan_columns: Vec<_> = logical_plan
             .schema()
-            .context(error::GetSchemaSnafu)?
-            .column_schemas()
-            .iter()
+            .columns()
+            .into_iter()
             .map(|c| c.name.clone())
             .collect();
 
@@ -434,9 +433,8 @@ impl StatementExecutor {
 
         // Extract the table names from the original plan
         // and rewrite them as fully qualified names.
-        let (table_names, plan) =
-            extract_and_rewrite_full_table_names(logical_plan.unwrap_df_plan(), ctx.clone())
-                .context(ExtractTableNamesSnafu)?;
+        let (table_names, plan) = extract_and_rewrite_full_table_names(logical_plan, ctx.clone())
+            .context(ExtractTableNamesSnafu)?;
 
         let table_names = table_names.into_iter().map(|t| t.into()).collect();
 

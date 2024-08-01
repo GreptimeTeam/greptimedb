@@ -25,7 +25,7 @@ use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_telemetry::{debug, error, tracing, warn};
-use datafusion_expr::LogicalPlan;
+use datafusion::logical_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
 use opensrv_mysql::{
@@ -175,7 +175,7 @@ impl MysqlInstanceShim {
         let params = if let Some(plan) = &plan {
             prepared_params(
                 &plan
-                    .get_param_types()
+                    .get_parameter_types()
                     .context(error::GetPreparedStmtParamsSnafu)?,
             )?
         } else {

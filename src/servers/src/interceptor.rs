@@ -21,7 +21,7 @@ use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use datafusion_expr::LogicalPlan;
+use datafusion::logical_expr::LogicalPlan;
 use query::parser::PromQuery;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;

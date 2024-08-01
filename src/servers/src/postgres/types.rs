@@ -22,8 +22,8 @@ use std::ops::Deref;
 
 use chrono::{NaiveDate, NaiveDateTime};
 use common_time::Interval;
+use datafusion::logical_expr::LogicalPlan;
 use datafusion_common::ScalarValue;
-use datafusion_expr::LogicalPlan;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
 use datatypes::types::TimestampType;
@@ -31,7 +31,6 @@ use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::api::Type;
 use pgwire::error::{PgWireError, PgWireResult};
-use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use session::session_config::PGByteaOutputValue;
 

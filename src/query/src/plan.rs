@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Debug, Display};
+use std::fmt::Display;
 
 use common_query::prelude::ScalarValue;
 use datafusion::datasource::DefaultTableSource;

@@ -610,7 +610,7 @@ mod test {
         QueryEngineFactory::new(catalog_list, None, None, None, None, false).query_engine()
     }
 
-    async fn do_query(sql: &str) -> Result<crate::plan::LogicalPlan> {
+    async fn do_query(sql: &str) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_test_engine().await;
         engine.planner().plan(stmt, QueryContext::arc()).await
