@@ -79,7 +79,7 @@ impl Value {
             "boolean" => Ok(Value::Boolean(false)),
             "string" => Ok(Value::String("".to_string())),
 
-            "timestamp" | "epoch" => match tail {
+            "timestamp" | "epoch" | "time" => match tail {
                 Some(resolution) if !resolution.is_empty() => match resolution.as_str() {
                     time::NANOSECOND_RESOLUTION | time::NANO_RESOLUTION | time::NS_RESOLUTION => {
                         Ok(Value::Timestamp(Timestamp::Nanosecond(0)))
