@@ -42,12 +42,12 @@ fn set_processor_keys_index(
     processors: &mut processor::Processors,
     final_intermediate_keys: &Vec<String>,
 ) -> Result<(), String> {
+    let key_index = final_intermediate_keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (k.as_str(), i))
+        .collect::<HashMap<_, _>>();
     for processor in processors.iter_mut() {
-        let key_index = final_intermediate_keys
-            .iter()
-            .enumerate()
-            .map(|(i, k)| (k.as_str(), i))
-            .collect::<HashMap<_, _>>();
         for field in processor.fields_mut().iter_mut() {
             let index = key_index.get(field.input_field.name.as_str()).ok_or(format!(
                     "input field {} is not found in intermediate keys: {final_intermediate_keys:?} when set processor keys index",
