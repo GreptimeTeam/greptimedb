@@ -42,20 +42,20 @@ fn set_processor_keys_index(
     processors: &mut processor::Processors,
     final_intermediate_keys: &Vec<String>,
 ) -> Result<(), String> {
-    let key_index = final_intermediate_keys
+    let final_intermediate_key_index = final_intermediate_keys
         .iter()
         .enumerate()
         .map(|(i, k)| (k.as_str(), i))
         .collect::<HashMap<_, _>>();
     for processor in processors.iter_mut() {
         for field in processor.fields_mut().iter_mut() {
-            let index = key_index.get(field.input_field.name.as_str()).ok_or(format!(
+            let index = final_intermediate_key_index.get(field.input_field.name.as_str()).ok_or(format!(
                     "input field {} is not found in intermediate keys: {final_intermediate_keys:?} when set processor keys index",
                     field.input_field.name
                 ))?;
             field.set_input_index(*index);
             for (k, v) in field.output_fields_index_mapping.iter_mut() {
-                let index = key_index.get(k.as_str());
+                let index = final_intermediate_key_index.get(k.as_str());
                 match index {
                     Some(index) => {
                         *v = *index;
@@ -77,21 +77,28 @@ fn set_transform_keys_index(
     final_intermediate_keys: &[String],
     output_keys: &[String],
 ) -> Result<(), String> {
+    let final_intermediate_key_index = final_intermediate_keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (k.as_str(), i))
+        .collect::<HashMap<_, _>>();
+    let output_key_index = output_keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (k.as_str(), i))
+        .collect::<HashMap<_, _>>();
     for transform in transforms.iter_mut() {
         for field in transform.fields.iter_mut() {
-            let index = final_intermediate_keys
-                .iter()
-                .position(|r| *r == field.input_field.name)
-                .ok_or(format!(
+            let index = final_intermediate_key_index.get(field.input_field.name.as_str()).ok_or(format!(
                     "input field {} is not found in intermediate keys: {final_intermediate_keys:?} when set transform keys index",
                     field.input_field.name
                 ))?;
-            field.set_input_index(index);
+            field.set_input_index(*index);
             for (k, v) in field.output_fields_index_mapping.iter_mut() {
-                let index = output_keys.iter().position(|r| *r == *k).ok_or(format!(
+                let index = output_key_index.get(k.as_str()).ok_or(format!(
                     "output field {k} is not found in output keys: {final_intermediate_keys:?} when set transform keys index"
                 ))?;
-                *v = index;
+                *v = *index;
             }
         }
     }
