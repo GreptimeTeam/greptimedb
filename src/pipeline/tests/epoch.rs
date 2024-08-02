@@ -242,7 +242,7 @@ transform:
 
     let output = common::parse_and_exec(test_input, pipeline_yaml);
     assert_eq!(output.schema, expected_schema);
-    // this is acutally wrong
+    // this is actually wrong
     // TODO(shuiyisong): add check for type when converting epoch
     assert_eq!(
         output.rows[0].values[0].value_data,
