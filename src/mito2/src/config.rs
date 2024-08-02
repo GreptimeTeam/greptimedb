@@ -43,6 +43,8 @@ const SST_META_CACHE_SIZE_FACTOR: u64 = 32;
 const INDEX_CONTENT_CACHE_SIZE_FACTOR: u64 = 32;
 /// Use `1/MEM_CACHE_SIZE_FACTOR` of OS memory size as mem cache size in default mode
 const MEM_CACHE_SIZE_FACTOR: u64 = 16;
+/// Use `1/PAGE_CACHE_SIZE_FACTOR` of OS memory size as page cache size in default mode
+const PAGE_CACHE_SIZE_FACTOR: u64 = 8;
 /// Use `1/INDEX_CREATE_MEM_THRESHOLD_FACTOR` of OS memory size as mem threshold for creating index
 const INDEX_CREATE_MEM_THRESHOLD_FACTOR: u64 = 16;
 
@@ -236,12 +238,13 @@ impl MitoConfig {
         );
         // shouldn't be greater than 512MB in default mode.
         let mem_cache_size = cmp::min(sys_memory / MEM_CACHE_SIZE_FACTOR, ReadableSize::mb(512));
+        let page_cache_size = sys_memory / PAGE_CACHE_SIZE_FACTOR;
 
         self.global_write_buffer_size = global_write_buffer_size;
         self.global_write_buffer_reject_size = global_write_buffer_reject_size;
         self.sst_meta_cache_size = sst_meta_cache_size;
         self.vector_cache_size = mem_cache_size;
-        self.page_cache_size = mem_cache_size;
+        self.page_cache_size = page_cache_size;
         self.selector_result_cache_size = mem_cache_size;
     }
 
