@@ -544,22 +544,29 @@ impl DissectProcessor {
     }
 
     fn update_output_keys(&mut self) {
-        for fields in self.fields.iter_mut() {
-            for pattern in self.patterns.iter() {
-                for part in pattern.iter() {
-                    if let Part::Name(name) = part {
-                        if !name.is_empty()
-                            && !name
-                                .start_modifier
-                                .as_ref()
-                                .is_some_and(|x| *x == StartModifier::NamedSkip)
-                        {
-                            fields
-                                .output_fields_index_mapping
-                                .insert(name.to_string(), 0);
-                        }
+        let output_keys = self
+            .patterns
+            .iter()
+            .flat_map(|pattern| pattern.iter())
+            .filter_map(|p| match p {
+                Part::Name(name) => {
+                    if !name.is_empty()
+                        && !name
+                            .start_modifier
+                            .as_ref()
+                            .is_some_and(|x| *x == StartModifier::NamedSkip)
+                    {
+                        Some(name)
+                    } else {
+                        None
                     }
                 }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for field in self.fields.iter_mut() {
+            for k in &output_keys {
+                field.output_fields_index_mapping.insert(k.to_string(), 0);
             }
         }
     }

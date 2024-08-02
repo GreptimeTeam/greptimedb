@@ -19,7 +19,7 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
-use ahash::HashSet;
+use ahash::{HashMap, HashSet};
 use common_telemetry::{debug, warn};
 use itertools::{merge, Itertools};
 use processor::Processor;
@@ -43,20 +43,22 @@ fn set_processor_keys_index(
     final_intermediate_keys: &Vec<String>,
 ) -> Result<(), String> {
     for processor in processors.iter_mut() {
+        let key_index = final_intermediate_keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.as_str(), i))
+            .collect::<HashMap<_, _>>();
         for field in processor.fields_mut().iter_mut() {
-            let index = final_intermediate_keys
-                .iter()
-                .position(|r| *r == field.input_field.name)
-                .ok_or(format!(
+            let index = key_index.get(field.input_field.name.as_str()).ok_or(format!(
                     "input field {} is not found in intermediate keys: {final_intermediate_keys:?} when set processor keys index",
                     field.input_field.name
                 ))?;
-            field.set_input_index(index);
+            field.set_input_index(*index);
             for (k, v) in field.output_fields_index_mapping.iter_mut() {
-                let index = final_intermediate_keys.iter().position(|r| *r == *k);
+                let index = key_index.get(k.as_str());
                 match index {
                     Some(index) => {
-                        *v = index;
+                        *v = *index;
                     }
                     None => {
                         warn!(
@@ -237,31 +239,31 @@ where
         Ok(())
     }
 
-    pub fn exec(&self, mut val: value::Value) -> Result<T::Output, String> {
+    pub fn exec(&self, mut val: Value) -> Result<T::Output, String> {
         let result = match val {
-            value::Value::Map(ref mut map) => {
+            Value::Map(ref mut map) => {
                 self.exec_map(map)?;
                 val
             }
-            value::Value::Array(arr) => arr
+            Value::Array(arr) => arr
                 .values
                 .into_iter()
                 .map(|mut v| match v {
-                    value::Value::Map(ref mut map) => {
+                    Value::Map(ref mut map) => {
                         self.exec_map(map)?;
                         Ok(v)
                     }
                     _ => Err(format!("expected a map, but got {}", v)),
                 })
-                .collect::<Result<Vec<value::Value>, String>>()
-                .map(|values| value::Value::Array(value::Array { values }))?,
+                .collect::<Result<Vec<Value>, String>>()
+                .map(|values| Value::Array(value::Array { values }))?,
             _ => return Err(format!("expected a map or array, but got {}", val)),
         };
 
         self.transformer.transform(result)
     }
 
-    pub fn exec_mut(&self, val: &mut Vec<value::Value>) -> Result<T::VecOutput, String> {
+    pub fn exec_mut(&self, val: &mut Vec<Value>) -> Result<T::VecOutput, String> {
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
         }
