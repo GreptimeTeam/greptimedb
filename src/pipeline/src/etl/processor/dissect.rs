@@ -543,7 +543,9 @@ impl DissectProcessor {
         Err("No matching pattern found".to_string())
     }
 
+    /// Update the output keys for each field.
     fn update_output_keys(&mut self) {
+        // every pattern had been checked, so we can get all the output keys
         let output_keys = self
             .patterns
             .iter()
@@ -551,10 +553,9 @@ impl DissectProcessor {
             .filter_map(|p| match p {
                 Part::Name(name) => {
                     if !name.is_empty()
-                        && !name
-                            .start_modifier
-                            .as_ref()
-                            .is_some_and(|x| *x == StartModifier::NamedSkip)
+                        && !name.start_modifier.as_ref().is_some_and(|x| {
+                            *x == StartModifier::NamedSkip || *x == StartModifier::MapVal
+                        })
                     {
                         Some(name)
                     } else {
