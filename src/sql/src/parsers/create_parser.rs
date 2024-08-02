@@ -950,7 +950,7 @@ fn ensure_exprs_are_binary(exprs: &[Expr], columns: &[&Column]) -> Result<()> {
             ensure_one_expr(right, columns)?;
         } else {
             return error::InvalidSqlSnafu {
-                msg: format!("Partition rule expr {:?} is not a binary expr!", expr),
+                msg: format!("Partition rule expr {:?} is not a binary expr", expr),
             }
             .fail();
         }
@@ -974,7 +974,7 @@ fn ensure_one_expr(expr: &Expr, columns: &[&Column]) -> Result<()> {
                 columns.iter().any(|c| &c.name().value == column_name),
                 error::InvalidSqlSnafu {
                     msg: format!(
-                        "Column {:?} in rule expr is not referenced in PARTITION ON!",
+                        "Column {:?} in rule expr is not referenced in PARTITION ON",
                         column_name
                     ),
                 }
@@ -987,7 +987,7 @@ fn ensure_one_expr(expr: &Expr, columns: &[&Column]) -> Result<()> {
             Ok(())
         }
         _ => error::InvalidSqlSnafu {
-            msg: format!("Partition rule expr {:?} is not a binary expr!", expr),
+            msg: format!("Partition rule expr {:?} is not a binary expr", expr),
         }
         .fail(),
     }
@@ -1002,13 +1002,14 @@ fn ensure_partition_columns_defined<'a>(
         .column_list
         .iter()
         .map(|x| {
+            let x = ParserContext::canonicalize_identifier(x.clone());
             // Normally the columns in "create table" won't be too many,
             // a linear search to find the target every time is fine.
             columns
                 .iter()
-                .find(|c| c.name() == x)
+                .find(|c| *c.name().value == x.value)
                 .context(error::InvalidSqlSnafu {
-                    msg: format!("Partition column {:?} not defined!", x.value),
+                    msg: format!("Partition column {:?} not defined", x.value),
                 })
         })
         .collect::<Result<Vec<&Column>>>()
@@ -1320,7 +1321,7 @@ ENGINE=mito";
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("Partition column \"x\" not defined!"));
+            .contains("Partition column \"x\" not defined"));
     }
 
     #[test]
@@ -1445,6 +1446,30 @@ ENGINE=mito";
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_parse_create_table_with_quoted_partitions() {
+        let sql = r"
+CREATE TABLE monitor (
+  `host_id`    INT,
+  idc        STRING,
+  ts         TIMESTAMP,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  TIME INDEX (ts),
+  PRIMARY KEY (host),
+)
+PARTITION ON COLUMNS(IdC, host_id) (
+  idc <= 'hz' AND host_id < 1000,
+  idc > 'hz' AND idc <= 'sh' AND host_id < 2000,
+  idc > 'sh' AND host_id < 3000,
+  idc > 'sh' AND host_id >= 3000,
+)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(result.len(), 1);
     }
 
     #[test]
@@ -1728,7 +1753,7 @@ ENGINE=mito";
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert_eq!(
             result.unwrap_err().output_msg(),
-            "Invalid SQL, error: Column \"b\" in rule expr is not referenced in PARTITION ON!"
+            "Invalid SQL, error: Column \"b\" in rule expr is not referenced in PARTITION ON"
         );
     }
 
@@ -1744,7 +1769,7 @@ ENGINE=mito";
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert_eq!(
             result.unwrap_err().output_msg(),
-            "Invalid SQL, error: Partition rule expr Identifier(Ident { value: \"b\", quote_style: None }) is not a binary expr!"
+            "Invalid SQL, error: Partition rule expr Identifier(Ident { value: \"b\", quote_style: None }) is not a binary expr"
         );
     }
 
