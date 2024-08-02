@@ -1321,7 +1321,7 @@ ENGINE=mito";
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("Partition column \"x\" not defined!"));
+            .contains("Partition column \"x\" not defined"));
     }
 
     #[test]
@@ -1753,7 +1753,7 @@ ENGINE=mito";
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert_eq!(
             result.unwrap_err().output_msg(),
-            "Invalid SQL, error: Column \"b\" in rule expr is not referenced in PARTITION ON!"
+            "Invalid SQL, error: Column \"b\" in rule expr is not referenced in PARTITION ON"
         );
     }
 
@@ -1769,7 +1769,7 @@ ENGINE=mito";
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert_eq!(
             result.unwrap_err().output_msg(),
-            "Invalid SQL, error: Partition rule expr Identifier(Ident { value: \"b\", quote_style: None }) is not a binary expr!"
+            "Invalid SQL, error: Partition rule expr Identifier(Ident { value: \"b\", quote_style: None }) is not a binary expr"
         );
     }
 
