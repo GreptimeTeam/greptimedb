@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
+use common_telemetry::debug;
 use datafusion::config::ConfigOptions;
 use datafusion::error::DataFusionError;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
@@ -64,7 +65,9 @@ pub async fn apply_df_optimizer(
         Arc::new(TypeCoercion::new()),
     ]);
     let plan = analyzer
-        .execute_and_check(plan, &cfg, |_p, _r| {})
+        .execute_and_check(plan, &cfg, |p, r| {
+            debug!("After apply rule {}, get plan: \n{:?}", r.name(), p);
+        })
         .context(DatafusionSnafu {
             context: "Fail to apply analyzer",
         })?;
@@ -360,36 +363,39 @@ fn expand_tumble_analyzer(
         if let datafusion_expr::LogicalPlan::Aggregate(aggr) = proj.input.as_ref() {
             let mut new_group_expr = vec![];
             let mut alias_to_expand = HashMap::new();
+            let mut encountered_tumble = false;
             for expr in aggr.group_expr.iter() {
                 match expr {
-                    datafusion_expr::Expr::ScalarFunction(func) => {
-                        if func.name() == "tumble" {
-                            let tumble_start = TumbleExpand::new("tumble_start");
-                            let tumble_start = datafusion_expr::expr::ScalarFunction::new_udf(
-                                Arc::new(tumble_start.into()),
-                                func.args.clone(),
-                            );
-                            let tumble_start = datafusion_expr::Expr::ScalarFunction(tumble_start);
-                            let start_col_name = tumble_start.name_for_alias()?;
-                            new_group_expr.push(tumble_start);
+                    datafusion_expr::Expr::ScalarFunction(func) if func.name() == "tumble" => {
+                        encountered_tumble = true;
 
-                            let tumble_end = TumbleExpand::new("tumble_end");
-                            let tumble_end = datafusion_expr::expr::ScalarFunction::new_udf(
-                                Arc::new(tumble_end.into()),
-                                func.args.clone(),
-                            );
-                            let tumble_end = datafusion_expr::Expr::ScalarFunction(tumble_end);
-                            let end_col_name = tumble_end.name_for_alias()?;
-                            new_group_expr.push(tumble_end);
+                        let tumble_start = TumbleExpand::new("tumble_start");
+                        let tumble_start = datafusion_expr::expr::ScalarFunction::new_udf(
+                            Arc::new(tumble_start.into()),
+                            func.args.clone(),
+                        );
+                        let tumble_start = datafusion_expr::Expr::ScalarFunction(tumble_start);
+                        let start_col_name = tumble_start.name_for_alias()?;
+                        new_group_expr.push(tumble_start);
 
-                            alias_to_expand
-                                .insert(expr.name_for_alias()?, (start_col_name, end_col_name));
-                        }
+                        let tumble_end = TumbleExpand::new("tumble_end");
+                        let tumble_end = datafusion_expr::expr::ScalarFunction::new_udf(
+                            Arc::new(tumble_end.into()),
+                            func.args.clone(),
+                        );
+                        let tumble_end = datafusion_expr::Expr::ScalarFunction(tumble_end);
+                        let end_col_name = tumble_end.name_for_alias()?;
+                        new_group_expr.push(tumble_end);
+
+                        alias_to_expand
+                            .insert(expr.name_for_alias()?, (start_col_name, end_col_name));
                     }
                     _ => new_group_expr.push(expr.clone()),
                 }
             }
-
+            if !encountered_tumble {
+                return Ok(Transformed::no(plan));
+            }
             let mut new_aggr = aggr.clone();
             new_aggr.group_expr = new_group_expr;
             let new_aggr = datafusion_expr::LogicalPlan::Aggregate(new_aggr).recompute_schema()?;
