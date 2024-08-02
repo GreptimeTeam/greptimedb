@@ -64,9 +64,7 @@ pub async fn apply_df_optimizer(
         Arc::new(TypeCoercion::new()),
     ]);
     let plan = analyzer
-        .execute_and_check(plan, &cfg, |p, r| {
-            dbg!("rule applied", r.name(), p);
-        })
+        .execute_and_check(plan, &cfg, |_p, _r| {})
         .context(DatafusionSnafu {
             context: "Fail to apply analyzer",
         })?;

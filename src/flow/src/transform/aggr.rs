@@ -277,7 +277,7 @@ impl TypedPlan {
             let mut output_names = Vec::new();
 
             // first append group_expr as key, then aggr_expr as value
-            for (_idx, expr) in group_exprs.iter().enumerate() {
+            for expr in group_exprs.iter() {
                 output_types.push(expr.typ.clone());
                 let col_name = match &expr.expr {
                     ScalarExpr::Column(col) => input.schema.get_name(*col).clone(),
