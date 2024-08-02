@@ -39,13 +39,13 @@ admin flush_flow('test_numbers_df_func');
 | 1                                        |
 +------------------------------------------+
 
-SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+SELECT "SUM(abs(numbers_input_df_func.number))", window_start, window_end FROM out_num_cnt_df_func;
 
-+-------+---------------------+---------------------+
-| col_0 | window_start        | window_end          |
-+-------+---------------------+---------------------+
-| 42    | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
-+-------+---------------------+---------------------+
++----------------------------------------+---------------------+---------------------+
+| SUM(abs(numbers_input_df_func.number)) | window_start        | window_end          |
++----------------------------------------+---------------------+---------------------+
+| 42                                     | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
++----------------------------------------+---------------------+---------------------+
 
 admin flush_flow('test_numbers_df_func');
 
@@ -70,14 +70,14 @@ admin flush_flow('test_numbers_df_func');
 | 1                                        |
 +------------------------------------------+
 
-SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+SELECT "SUM(abs(numbers_input_df_func.number))", window_start, window_end FROM out_num_cnt_df_func;
 
-+-------+---------------------+---------------------+
-| col_0 | window_start        | window_end          |
-+-------+---------------------+---------------------+
-| 42    | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
-| 47    | 2021-07-01T00:00:01 | 2021-07-01T00:00:02 |
-+-------+---------------------+---------------------+
++----------------------------------------+---------------------+---------------------+
+| SUM(abs(numbers_input_df_func.number)) | window_start        | window_end          |
++----------------------------------------+---------------------+---------------------+
+| 42                                     | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
+| 47                                     | 2021-07-01T00:00:01 | 2021-07-01T00:00:02 |
++----------------------------------------+---------------------+---------------------+
 
 DROP FLOW test_numbers_df_func;
 
@@ -132,13 +132,13 @@ admin flush_flow('test_numbers_df_func');
 | 1                                        |
 +------------------------------------------+
 
-SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+SELECT "abs(SUM(numbers_input_df_func.number))", window_start, window_end FROM out_num_cnt_df_func;
 
-+-------+---------------------+---------------------+
-| col_0 | window_start        | window_end          |
-+-------+---------------------+---------------------+
-| 2     | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
-+-------+---------------------+---------------------+
++----------------------------------------+---------------------+---------------------+
+| abs(SUM(numbers_input_df_func.number)) | window_start        | window_end          |
++----------------------------------------+---------------------+---------------------+
+| 2                                      | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
++----------------------------------------+---------------------+---------------------+
 
 admin flush_flow('test_numbers_df_func');
 
@@ -163,14 +163,14 @@ admin flush_flow('test_numbers_df_func');
 | 1                                        |
 +------------------------------------------+
 
-SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+SELECT "abs(SUM(numbers_input_df_func.number))", window_start, window_end FROM out_num_cnt_df_func;
 
-+-------+---------------------+---------------------+
-| col_0 | window_start        | window_end          |
-+-------+---------------------+---------------------+
-| 2     | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
-| 1     | 2021-07-01T00:00:01 | 2021-07-01T00:00:02 |
-+-------+---------------------+---------------------+
++----------------------------------------+---------------------+---------------------+
+| abs(SUM(numbers_input_df_func.number)) | window_start        | window_end          |
++----------------------------------------+---------------------+---------------------+
+| 2                                      | 2021-07-01T00:00:00 | 2021-07-01T00:00:01 |
+| 1                                      | 2021-07-01T00:00:01 | 2021-07-01T00:00:02 |
++----------------------------------------+---------------------+---------------------+
 
 DROP FLOW test_numbers_df_func;
 
@@ -196,8 +196,8 @@ Affected Rows: 0
 
 CREATE FLOW test_numbers_df_func
 SINK TO out_num_cnt_df_func
-AS
-SELECT max(number) - min(number), date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond) FROM numbers_input_df_func GROUP BY date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond);
+AS 
+SELECT max(number) - min(number) as maxmin, date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond) as time_window FROM numbers_input_df_func GROUP BY date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond);
 
 Affected Rows: 0
 
@@ -224,13 +224,13 @@ admin flush_flow('test_numbers_df_func');
 | 1                                        |
 +------------------------------------------+
 
-SELECT col_0, col_1 FROM out_num_cnt_df_func;
+SELECT maxmin, time_window FROM out_num_cnt_df_func;
 
-+-------+---------------------+
-| col_0 | col_1               |
-+-------+---------------------+
-| 2     | 2021-07-01T00:00:00 |
-+-------+---------------------+
++--------+---------------------+
+| maxmin | time_window         |
++--------+---------------------+
+| 2      | 2021-07-01T00:00:00 |
++--------+---------------------+
 
 admin flush_flow('test_numbers_df_func');
 
@@ -255,14 +255,14 @@ admin flush_flow('test_numbers_df_func');
 | 1                                        |
 +------------------------------------------+
 
-SELECT col_0, col_1 FROM out_num_cnt_df_func;
+SELECT maxmin, time_window FROM out_num_cnt_df_func;
 
-+-------+---------------------+
-| col_0 | col_1               |
-+-------+---------------------+
-| 2     | 2021-07-01T00:00:00 |
-| 1     | 2021-07-01T00:00:01 |
-+-------+---------------------+
++--------+---------------------+
+| maxmin | time_window         |
++--------+---------------------+
+| 2      | 2021-07-01T00:00:00 |
+| 1      | 2021-07-01T00:00:01 |
++--------+---------------------+
 
 DROP FLOW test_numbers_df_func;
 
@@ -288,8 +288,8 @@ Affected Rows: 0
 
 CREATE FLOW test_numbers_df_func
 SINK TO out_num_cnt
-AS
-SELECT date_trunc('second', ts), sum(number) FROM numbers_input_df_func GROUP BY date_trunc('second', ts);
+AS 
+SELECT date_trunc('second', ts) as time_window, sum(number) as sum_num FROM numbers_input_df_func GROUP BY date_trunc('second', ts);
 
 Affected Rows: 0
 
@@ -316,13 +316,13 @@ admin flush_flow('test_numbers_df_func');
 | 1                                        |
 +------------------------------------------+
 
-SELECT col_0, col_1 FROM out_num_cnt;
+SELECT time_window, sum_num FROM out_num_cnt;
 
-+---------------------+-------+
-| col_0               | col_1 |
-+---------------------+-------+
-| 2021-07-01T00:00:00 | 42    |
-+---------------------+-------+
++---------------------+---------+
+| time_window         | sum_num |
++---------------------+---------+
+| 2021-07-01T00:00:00 | 42      |
++---------------------+---------+
 
 admin flush_flow('test_numbers_df_func');
 
@@ -347,14 +347,14 @@ admin flush_flow('test_numbers_df_func');
 | 1                                        |
 +------------------------------------------+
 
-SELECT col_0, col_1 FROM out_num_cnt;
+SELECT time_window, sum_num FROM out_num_cnt;
 
-+---------------------+-------+
-| col_0               | col_1 |
-+---------------------+-------+
-| 2021-07-01T00:00:00 | 42    |
-| 2021-07-01T00:00:01 | 47    |
-+---------------------+-------+
++---------------------+---------+
+| time_window         | sum_num |
++---------------------+---------+
+| 2021-07-01T00:00:00 | 42      |
+| 2021-07-01T00:00:01 | 47      |
++---------------------+---------+
 
 DROP FLOW test_numbers_df_func;
 

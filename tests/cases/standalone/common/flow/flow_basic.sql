@@ -22,7 +22,7 @@ VALUES
 
 admin flush_flow('test_numbers_basic');
 
-SELECT col_0, window_start, window_end FROM out_num_cnt_basic;
+SELECT "SUM(numbers_input_basic.number)", window_start, window_end FROM out_num_cnt_basic;
 
 admin flush_flow('test_numbers_basic');
 
@@ -33,7 +33,7 @@ VALUES
 
 admin flush_flow('test_numbers_basic');
 
-SELECT col_0, window_start, window_end FROM out_num_cnt_basic;
+SELECT "SUM(numbers_input_basic.number)", window_start, window_end FROM out_num_cnt_basic;
 
 DROP FLOW test_numbers_basic;
 DROP TABLE numbers_input_basic;
@@ -67,8 +67,9 @@ CREATE TABLE bytes_log (
     TIME INDEX(ts)
 );
 
+-- TODO(discord9): remove this after auto infer table's time index is impl
 CREATE TABLE approx_rate (
-    rate FLOAT,
+    rate DOUBLE,
     time_window TIMESTAMP,
     update_at TIMESTAMP,
     TIME INDEX(time_window)
@@ -77,7 +78,7 @@ CREATE TABLE approx_rate (
 CREATE FLOW find_approx_rate
 SINK TO approx_rate
 AS
-SELECT CAST((max(byte) - min(byte)) AS FLOAT)/30.0, date_bin(INTERVAL '30 second', ts) as time_window from bytes_log GROUP BY time_window;
+SELECT CAST((max(byte) - min(byte)) AS FLOAT)/30.0 as rate, date_bin(INTERVAL '30 second', ts) as time_window from bytes_log GROUP BY time_window;
 
 INSERT INTO bytes_log VALUES
 (101, '2025-01-01 00:00:01'),
