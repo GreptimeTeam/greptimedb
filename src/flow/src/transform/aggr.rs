@@ -1484,7 +1484,7 @@ mod test {
     #[tokio::test]
     async fn test_cast_max_min() {
         let engine = create_test_query_engine();
-        let sql = "SELECT CAST((max(number) - min(number)) AS FLOAT)/30.0, date_bin(INTERVAL '30 second', CAST(ts AS TimestampMillisecond)) as time_window from numbers_with_ts GROUP BY time_window";
+        let sql = "SELECT (max(number) - min(number))/30.0, date_bin(INTERVAL '30 second', CAST(ts AS TimestampMillisecond)) as time_window from numbers_with_ts GROUP BY time_window";
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
@@ -1599,7 +1599,6 @@ mod test {
                     .map(vec![
                         ScalarExpr::Column(1)
                             .call_binary(ScalarExpr::Column(2), BinaryFunc::SubUInt32)
-                            .cast(CDT::float32_datatype())
                             .cast(CDT::float64_datatype())
                             .call_binary(
                                 ScalarExpr::Literal(Value::from(30.0f64), CDT::float64_datatype()),

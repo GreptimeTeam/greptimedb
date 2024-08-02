@@ -78,7 +78,7 @@ CREATE TABLE approx_rate (
 CREATE FLOW find_approx_rate
 SINK TO approx_rate
 AS
-SELECT CAST((max(byte) - min(byte)) AS FLOAT)/30.0 as rate, date_bin(INTERVAL '30 second', ts) as time_window from bytes_log GROUP BY time_window;
+SELECT (max(byte) - min(byte))/30.0 as rate, date_bin(INTERVAL '30 second', ts) as time_window from bytes_log GROUP BY time_window;
 
 INSERT INTO bytes_log VALUES
 (101, '2025-01-01 00:00:01'),
