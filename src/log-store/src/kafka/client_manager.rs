@@ -23,12 +23,11 @@ use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
 use tokio::sync::{Mutex, RwLock};
 
-use super::collector::{GlobalIndexCollector, NoopCollector};
-use super::producer::OrderedBatchProducer;
 use crate::error::{
     BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
 };
-use crate::kafka::producer::OrderedBatchProducerRef;
+use crate::kafka::index::{GlobalIndexCollector, NoopCollector};
+use crate::kafka::producer::{OrderedBatchProducer, OrderedBatchProducerRef};
 
 // Each topic only has one partition for now.
 // The `DEFAULT_PARTITION` refers to the index of the partition.

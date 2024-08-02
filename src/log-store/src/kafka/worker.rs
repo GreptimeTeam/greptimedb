@@ -31,7 +31,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot::{self};
 
 use crate::error::{self, NoMaxValueSnafu, Result};
-use crate::kafka::collector::IndexCollector;
+use crate::kafka::index::IndexCollector;
 use crate::kafka::producer::ProducerClient;
 
 pub(crate) enum WorkerRequest {

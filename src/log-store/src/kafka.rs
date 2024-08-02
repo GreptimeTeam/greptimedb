@@ -15,7 +15,6 @@
 pub(crate) mod client_manager;
 // TODO(weny): remove it
 #[allow(dead_code)]
-pub(crate) mod collector;
 pub(crate) mod consumer;
 #[allow(unused)]
 pub(crate) mod index;

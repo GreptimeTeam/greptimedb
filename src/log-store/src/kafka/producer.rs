@@ -22,8 +22,8 @@ use store_api::logstore::provider::KafkaProvider;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Sender};
 
-use super::collector::IndexCollector;
 use crate::error::{self, Result};
+use crate::kafka::index::IndexCollector;
 use crate::kafka::worker::{BackgroundProducerWorker, ProduceResultHandle, WorkerRequest};
 
 pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer>;
@@ -142,7 +142,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::kafka::collector::NoopCollector;
+    use crate::kafka::index::NoopCollector;
     use crate::kafka::producer::OrderedBatchProducer;
 
     #[derive(Debug)]
