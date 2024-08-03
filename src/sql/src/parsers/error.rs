@@ -31,4 +31,12 @@ pub enum TQLError {
 
     #[snafu(display("Failed to evaluate TQL expression: {}", msg))]
     Evaluation { msg: String },
+
+    #[snafu(display("Failed to convert TQL expression to logical expression"))]
+    ConvertToLogicalExpression {
+        #[snafu(source)]
+        error: Box<crate::error::Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
