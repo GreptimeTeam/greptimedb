@@ -164,8 +164,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
                 ..Default::default()
             };
 
-            let mut builder = Gcs::default();
-            builder
+            let builder = Gcs::default()
                 .root(&gcs_config.root)
                 .bucket(&gcs_config.bucket)
                 .scope(&gcs_config.scope)
@@ -186,8 +185,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
                 ..Default::default()
             };
 
-            let mut builder = Azblob::default();
-            let _ = builder
+            let mut builder = Azblob::default()
                 .root(&azblob_config.root)
                 .endpoint(&azblob_config.endpoint)
                 .account_name(azblob_config.account_name.expose_secret())
@@ -195,8 +193,8 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
                 .container(&azblob_config.container);
 
             if let Ok(sas_token) = env::var("GT_AZBLOB_SAS_TOKEN") {
-                let _ = builder.sas_token(&sas_token);
-            }
+                builder = builder.sas_token(&sas_token);
+            };
 
             let config = ObjectStoreConfig::Azblob(azblob_config);
 
@@ -214,8 +212,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
                 ..Default::default()
             };
 
-            let mut builder = Oss::default();
-            let _ = builder
+            let builder = Oss::default()
                 .root(&oss_config.root)
                 .endpoint(&oss_config.endpoint)
                 .access_key_id(oss_config.access_key_id.expose_secret())
@@ -235,19 +232,18 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
                 s3_config.cache.cache_path = Some("/tmp/greptimedb_cache".to_string());
             }
 
-            let mut builder = S3::default();
-            let _ = builder
+            let mut builder = S3::default()
                 .root(&s3_config.root)
                 .access_key_id(s3_config.access_key_id.expose_secret())
                 .secret_access_key(s3_config.secret_access_key.expose_secret())
                 .bucket(&s3_config.bucket);
 
             if s3_config.endpoint.is_some() {
-                let _ = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
-            }
+                builder = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
+            };
             if s3_config.region.is_some() {
-                let _ = builder.region(s3_config.region.as_ref().unwrap());
-            }
+                builder = builder.region(s3_config.region.as_ref().unwrap());
+            };
 
             let config = ObjectStoreConfig::S3(s3_config);
 

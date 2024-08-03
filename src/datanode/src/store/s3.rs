@@ -30,8 +30,7 @@ pub(crate) async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectSt
         s3_config.bucket, &root
     );
 
-    let mut builder = S3::default();
-    let _ = builder
+    let mut builder = S3::default()
         .root(&root)
         .bucket(&s3_config.bucket)
         .access_key_id(s3_config.access_key_id.expose_secret())
@@ -39,11 +38,11 @@ pub(crate) async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectSt
         .http_client(build_http_client()?);
 
     if s3_config.endpoint.is_some() {
-        let _ = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
-    }
+        builder = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
+    };
     if s3_config.region.is_some() {
-        let _ = builder.region(s3_config.region.as_ref().unwrap());
-    }
+        builder = builder.region(s3_config.region.as_ref().unwrap());
+    };
 
     Ok(ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?

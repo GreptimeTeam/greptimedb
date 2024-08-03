@@ -382,8 +382,7 @@ mod tests {
     use super::*;
 
     fn new_fs_store(path: &str) -> ObjectStore {
-        let mut builder = Fs::default();
-        builder.root(path);
+        let builder = Fs::default().root(path);
         ObjectStore::new(builder).unwrap().finish()
     }
 

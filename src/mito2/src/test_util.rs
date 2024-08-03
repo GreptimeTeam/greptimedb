@@ -365,8 +365,7 @@ impl TestEnv {
                 .display()
                 .to_string();
             let mut builder = Fs::default();
-            builder.root(&data_path);
-            let object_store = ObjectStore::new(builder).unwrap().finish();
+            let object_store = ObjectStore::new(builder.root(&data_path)).unwrap().finish();
             object_store_manager.add(storage_name, object_store);
         }
         let object_store_manager = Arc::new(object_store_manager);
@@ -553,8 +552,7 @@ impl TestEnv {
     fn create_object_store_manager(&self) -> ObjectStoreManager {
         let data_home = self.data_home.path();
         let data_path = data_home.join("data").as_path().display().to_string();
-        let mut builder = Fs::default();
-        builder.root(&data_path);
+        let builder = Fs::default().root(&data_path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
         ObjectStoreManager::new("default", object_store)
     }
@@ -570,9 +568,10 @@ impl TestEnv {
         let data_home = self.data_home.path();
         let manifest_dir = data_home.join("manifest").as_path().display().to_string();
 
-        let mut builder = Fs::default();
-        builder.root(&manifest_dir);
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let builder = Fs::default();
+        let object_store = ObjectStore::new(builder.root(&manifest_dir))
+            .unwrap()
+            .finish();
 
         // The "manifest_dir" here should be the relative path from the `object_store`'s root.
         // Otherwise the OpenDal's list operation would fail with "StripPrefixError". This is

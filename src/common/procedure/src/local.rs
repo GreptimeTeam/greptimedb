@@ -680,9 +680,8 @@ pub(crate) mod test_util {
 
     pub(crate) fn new_object_store(dir: &TempDir) -> ObjectStore {
         let store_dir = dir.path().to_str().unwrap();
-        let mut builder = Builder::default();
-        let _ = builder.root(store_dir);
-        ObjectStore::new(builder).unwrap().finish()
+        let builder = Builder::default();
+        ObjectStore::new(builder.root(store_dir)).unwrap().finish()
     }
 }
 

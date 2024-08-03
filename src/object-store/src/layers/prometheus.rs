@@ -552,11 +552,12 @@ impl<R: oio::BlockingRead> oio::BlockingRead for PrometheusMetricWrapper<R> {
 }
 
 impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
-    async fn write(&mut self, bs: Buffer) -> Result<usize> {
+    async fn write(&mut self, bs: Buffer) -> Result<()> {
+        let bytes = bs.len();
         match self.inner.write(bs).await {
-            Ok(n) => {
-                self.bytes += n as u64;
-                Ok(n)
+            Ok(_) => {
+                self.bytes += bytes as u64;
+                Ok(())
             }
             Err(err) => {
                 increment_errors_total(self.op, err.kind());
@@ -581,12 +582,12 @@ impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
 }
 
 impl<R: oio::BlockingWrite> oio::BlockingWrite for PrometheusMetricWrapper<R> {
-    fn write(&mut self, bs: Buffer) -> Result<usize> {
+    fn write(&mut self, bs: Buffer) -> Result<()> {
+        let bytes = bs.len();
         self.inner
             .write(bs)
-            .map(|n| {
-                self.bytes += n as u64;
-                n
+            .map(|_| {
+                self.bytes += bytes as u64;
             })
             .map_err(|err| {
                 increment_errors_total(self.op, err.kind());

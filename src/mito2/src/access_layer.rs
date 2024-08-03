@@ -212,8 +212,7 @@ pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
     let atomic_write_dir = join_dir(root, ".tmp/");
     clean_dir(&atomic_write_dir).await?;
 
-    let mut builder = Fs::default();
-    builder.root(root).atomic_write_dir(&atomic_write_dir);
+    let builder = Fs::default().root(root).atomic_write_dir(&atomic_write_dir);
     let store = ObjectStore::new(builder).context(OpenDalSnafu)?.finish();
 
     Ok(with_instrument_layers(store, false))

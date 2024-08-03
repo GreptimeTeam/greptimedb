@@ -114,8 +114,7 @@ mod tests {
 
         let dir = create_temp_dir("file-purge");
         let dir_path = dir.path().display().to_string();
-        let mut builder = Fs::default();
-        builder.root(&dir_path);
+        let builder = Fs::default().root(&dir_path);
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
         let path = location::sst_file_path(sst_dir, sst_file_id);
@@ -171,8 +170,7 @@ mod tests {
 
         let dir = create_temp_dir("file-purge");
         let dir_path = dir.path().display().to_string();
-        let mut builder = Fs::default();
-        builder.root(&dir_path);
+        let builder = Fs::default().root(&dir_path);
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
 

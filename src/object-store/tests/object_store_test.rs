@@ -95,8 +95,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 async fn test_fs_backend() -> Result<()> {
     let data_dir = create_temp_dir("test_fs_backend");
     let tmp_dir = create_temp_dir("test_fs_backend");
-    let mut builder = Fs::default();
-    let _ = builder
+    let builder = Fs::default()
         .root(&data_dir.path().to_string_lossy())
         .atomic_write_dir(&tmp_dir.path().to_string_lossy());
 
@@ -117,8 +116,7 @@ async fn test_s3_backend() -> Result<()> {
 
             let root = uuid::Uuid::new_v4().to_string();
 
-            let mut builder = S3::default();
-            let _ = builder
+            let builder = S3::default()
                 .root(&root)
                 .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
                 .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
@@ -146,8 +144,7 @@ async fn test_oss_backend() -> Result<()> {
 
             let root = uuid::Uuid::new_v4().to_string();
 
-            let mut builder = Oss::default();
-            let _ = builder
+            let builder = Oss::default()
                 .root(&root)
                 .access_key_id(&env::var("GT_OSS_ACCESS_KEY_ID")?)
                 .access_key_secret(&env::var("GT_OSS_ACCESS_KEY")?)
@@ -174,8 +171,7 @@ async fn test_azblob_backend() -> Result<()> {
 
             let root = uuid::Uuid::new_v4().to_string();
 
-            let mut builder = Azblob::default();
-            let _ = builder
+            let builder = Azblob::default()
                 .root(&root)
                 .account_name(&env::var("GT_AZBLOB_ACCOUNT_NAME")?)
                 .account_key(&env::var("GT_AZBLOB_ACCOUNT_KEY")?)
@@ -199,8 +195,7 @@ async fn test_gcs_backend() -> Result<()> {
         if !container.is_empty() {
             info!("Running azblob test.");
 
-            let mut builder = Gcs::default();
-            builder
+            let builder = Gcs::default()
                 .root(&uuid::Uuid::new_v4().to_string())
                 .bucket(&env::var("GT_GCS_BUCKET").unwrap())
                 .scope(&env::var("GT_GCS_SCOPE").unwrap())
@@ -224,8 +219,7 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
 
     let data_dir = create_temp_dir("test_file_backend_with_lru_cache");
     let tmp_dir = create_temp_dir("test_file_backend_with_lru_cache");
-    let mut builder = Fs::default();
-    let _ = builder
+    let builder = Fs::default()
         .root(&data_dir.path().to_string_lossy())
         .atomic_write_dir(&tmp_dir.path().to_string_lossy());
 
@@ -233,8 +227,7 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
 
     let cache_dir = create_temp_dir("test_file_backend_with_lru_cache");
     let cache_layer = {
-        let mut builder = Fs::default();
-        let _ = builder
+        let builder = Fs::default()
             .root(&cache_dir.path().to_string_lossy())
             .atomic_write_dir(&cache_dir.path().to_string_lossy());
         let file_cache = Arc::new(builder.build().unwrap());
@@ -307,8 +300,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     // create file cache layer
     let cache_dir = create_temp_dir("test_object_store_cache_policy_cache");
     let atomic_temp_dir = create_temp_dir("test_object_store_cache_policy_cache_tmp");
-    let mut builder = Fs::default();
-    let _ = builder
+    let builder = Fs::default()
         .root(&cache_dir.path().to_string_lossy())
         .atomic_write_dir(&atomic_temp_dir.path().to_string_lossy());
     let file_cache = Arc::new(builder.build().unwrap());

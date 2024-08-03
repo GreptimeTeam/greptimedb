@@ -307,8 +307,7 @@ mod test {
         env.init_metric_region().await;
         let region_id = to_metadata_region_id(env.default_physical_region_id());
 
-        let mut builder = Fs::default();
-        builder.root(&env.data_home());
+        let builder = Fs::default().root(&env.data_home());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let region_dir = "test_metric_region";

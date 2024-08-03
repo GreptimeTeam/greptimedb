@@ -61,8 +61,7 @@ mod tests {
 
     fn new_object_store(dir: &TempDir) -> ObjectStore {
         let store_dir = dir.path().to_str().unwrap();
-        let mut builder = Builder::default();
-        let _ = builder.root(store_dir);
+        let builder = Builder::default().root(store_dir);
         ObjectStore::new(builder).unwrap().finish()
     }
 
