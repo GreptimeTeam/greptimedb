@@ -378,15 +378,15 @@ global_write_buffer_reject_size = "2GB"
 
 ## Cache size for SST metadata. Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
-sst_meta_cache_size = "128MB"
+##sst_meta_cache_size = "128MB"
 
 ## Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
-vector_cache_size = "512MB"
+##vector_cache_size = "512MB"
 
 ## Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
-## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
-page_cache_size = "512MB"
+## If not set, it's default to 1/8 of OS memory.
+##page_cache_size = "512MB"
 
 ## Whether to enable the experimental write cache.
 enable_experimental_write_cache = false
