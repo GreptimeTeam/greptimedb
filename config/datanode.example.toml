@@ -241,11 +241,11 @@ type = "File"
 ## Cache configuration for object storage such as 'S3' etc.
 ## The local file cache directory.
 ## +toml2docs:none-default
-cache_path = "/path/local_cache"
+## cache_path = "/path/local_cache"
 
 ## The local file cache capacity in bytes.
 ## +toml2docs:none-default
-cache_capacity = "256MB"
+## cache_capacity = "256MB"
 
 ## The S3 bucket name.
 ## **It's only used when the storage type is `S3`, `Oss` and `Gcs`**.
@@ -348,22 +348,22 @@ max_background_jobs = 4
 auto_flush_interval = "1h"
 
 ## Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
-global_write_buffer_size = "1GB"
+## global_write_buffer_size = "1GB"
 
 ## Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`
-global_write_buffer_reject_size = "2GB"
+## global_write_buffer_reject_size = "2GB"
 
 ## Cache size for SST metadata. Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
-##sst_meta_cache_size = "128MB"
+## sst_meta_cache_size = "128MB"
 
 ## Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
-##vector_cache_size = "512MB"
+## vector_cache_size = "512MB"
 
 ## Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/8 of OS memory.
-##page_cache_size = "512MB"
+## page_cache_size = "512MB"
 
 ## Whether to enable the experimental write cache.
 enable_experimental_write_cache = false
