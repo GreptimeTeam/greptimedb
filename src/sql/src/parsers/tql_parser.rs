@@ -31,6 +31,7 @@ const VERBOSE: &str = "VERBOSE";
 
 use sqlparser::parser::Parser;
 
+use super::error::ConvertToLogicalExpressionSnafu;
 use crate::dialect::GreptimeDbDialect;
 use crate::parsers::error::{EvaluationSnafu, ParserSnafu, TQLError};
 
@@ -182,7 +183,9 @@ impl<'a> ParserContext<'a> {
 
     fn parse_tokens(tokens: Vec<Token>) -> std::result::Result<String, TQLError> {
         let parser_expr = Self::parse_to_expr(tokens)?;
-        let lit = utils::parser_expr_to_scalar_value(parser_expr).unwrap();
+        let lit = utils::parser_expr_to_scalar_value(parser_expr)
+            .map_err(Box::new)
+            .context(ConvertToLogicalExpressionSnafu)?;
 
         let second = match lit {
             ScalarValue::TimestampNanosecond(ts_nanos, _)
