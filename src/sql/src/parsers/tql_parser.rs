@@ -273,6 +273,11 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        let sql = "TQL EVAL (now(), now()-'5m', '30s') http_requests_total";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
     }
 
     #[test]
