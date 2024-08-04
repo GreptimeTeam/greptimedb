@@ -25,10 +25,17 @@ use common_telemetry::info;
 use read_cache::ReadCache;
 
 /// An opendal layer with local LRU file cache supporting.
-#[derive(Clone)]
 pub struct LruCacheLayer<C: Access> {
     // The read cache
     read_cache: ReadCache<C>,
+}
+
+impl<C: Access> Clone for LruCacheLayer<C> {
+    fn clone(&self) -> Self {
+        Self {
+            read_cache: self.read_cache.clone(),
+        }
+    }
 }
 
 impl<C: Access> LruCacheLayer<C> {

@@ -19,9 +19,8 @@ use snafu::ResultExt;
 use crate::error::{BuildBackendSnafu, Result};
 
 pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
-    let mut builder = Fs::default();
-    let _ = builder.root(root);
-    let object_store = ObjectStore::new(builder)
+    let builder = Fs::default();
+    let object_store = ObjectStore::new(builder.root(root))
         .context(BuildBackendSnafu)?
         .layer(
             object_store::layers::LoggingLayer::default()

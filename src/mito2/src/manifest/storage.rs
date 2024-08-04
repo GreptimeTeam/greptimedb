@@ -642,8 +642,7 @@ mod tests {
     fn new_test_manifest_store() -> ManifestObjectStore {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_manifest_log_store");
-        let mut builder = Fs::default();
-        let _ = builder.root(&tmp_dir.path().to_string_lossy());
+        let builder = Fs::default().root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
         ManifestObjectStore::new(
             "/",
