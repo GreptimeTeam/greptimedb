@@ -61,3 +61,37 @@ transform:
         Some(TimestampMillisecondValue(1573840000000))
     );
 }
+
+#[test]
+fn test_ignore_missing() {
+    let empty_string = r#"{}"#;
+
+    let pipeline_yaml = r#"
+processors:
+  - gsub:
+      field: reqTimeSec
+      pattern: "\\."
+      replacement: ""
+      ignore_missing: true
+  - epoch:
+      field: reqTimeSec
+      resolution: millisecond
+      ignore_missing: true
+
+transform:
+  - field: reqTimeSec
+    type: epoch, millisecond
+    index: timestamp
+"#;
+
+    let output = common::parse_and_exec(empty_string, pipeline_yaml);
+
+    let expected_schema = vec![common::make_column_schema(
+        "reqTimeSec".to_string(),
+        ColumnDataType::TimestampMillisecond,
+        SemanticType::Timestamp,
+    )];
+
+    assert_eq!(output.schema, expected_schema);
+    assert_eq!(output.rows[0].values[0].value_data, None);
+}

@@ -14,8 +14,25 @@
 
 mod common;
 
+use api::v1::ColumnSchema;
 use greptime_proto::v1::value::ValueData::StringValue;
 use greptime_proto::v1::{ColumnDataType, SemanticType};
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref EXPECTED_SCHEMA: Vec<ColumnSchema> = vec![
+        common::make_column_schema(
+            "str_id".to_string(),
+            ColumnDataType::String,
+            SemanticType::Field,
+        ),
+        common::make_column_schema(
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
+        ),
+    ];
+}
 
 #[test]
 fn test_regex_pattern() {
@@ -41,20 +58,7 @@ transform:
 
     let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
-    let expected_schema = vec![
-        common::make_column_schema(
-            "str_id".to_string(),
-            ColumnDataType::String,
-            SemanticType::Field,
-        ),
-        common::make_column_schema(
-            "greptime_timestamp".to_string(),
-            ColumnDataType::TimestampNanosecond,
-            SemanticType::Timestamp,
-        ),
-    ];
-
-    assert_eq!(output.schema, expected_schema);
+    assert_eq!(output.schema, *EXPECTED_SCHEMA);
 
     assert_eq!(
         output.rows[0].values[0].value_data,
@@ -87,23 +91,34 @@ transform:
 
     let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
-    let expected_schema = vec![
-        common::make_column_schema(
-            "str_id".to_string(),
-            ColumnDataType::String,
-            SemanticType::Field,
-        ),
-        common::make_column_schema(
-            "greptime_timestamp".to_string(),
-            ColumnDataType::TimestampNanosecond,
-            SemanticType::Timestamp,
-        ),
-    ];
-
-    assert_eq!(output.schema, expected_schema);
+    assert_eq!(output.schema, *EXPECTED_SCHEMA);
 
     assert_eq!(
         output.rows[0].values[0].value_data,
         Some(StringValue("123".to_string()))
     );
+}
+
+#[test]
+fn test_ignore_missing() {
+    let input_value_str = r#"{}"#;
+
+    let pipeline_yaml = r#"
+processors:
+  - regex:
+      fields: 
+        - str
+      pattern: "(?<id>\\d+)"
+      ignore_missing: true
+
+transform:
+  - field: str_id
+    type: string
+"#;
+
+    let output = common::parse_and_exec(input_value_str, pipeline_yaml);
+
+    assert_eq!(output.schema, *EXPECTED_SCHEMA);
+
+    assert_eq!(output.rows[0].values[0].value_data, None);
 }

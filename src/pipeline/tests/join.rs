@@ -117,3 +117,41 @@ fn test_float() {
         Some(StringValue("1.1-1.2-1.3".to_string()))
     );
 }
+
+#[test]
+fn test_mix_type() {
+    let input_value_str = r#"
+    [
+      {
+        "join_test": [1, true, "a", 1.1]
+      }
+    ]
+"#;
+    let output = common::parse_and_exec(input_value_str, PIPELINE_YAML);
+
+    assert_eq!(output.schema, *EXPECTED_SCHEMA);
+    assert_eq!(
+        output.rows[0].values[0].value_data,
+        Some(StringValue("1-true-a-1.1".to_string()))
+    );
+}
+
+#[test]
+fn test_ignore_missing() {
+    let empty_string = r#"{}"#;
+    let pipeline_yaml = r#"
+processors:
+  - join:
+      field: join_test
+      separator: "-"
+      ignore_missing: true
+
+transform:
+  - field: join_test
+    type: string
+"#;
+    let output = common::parse_and_exec(empty_string, pipeline_yaml);
+
+    assert_eq!(output.schema, *EXPECTED_SCHEMA);
+    assert_eq!(output.rows[0].values[0].value_data, None);
+}
