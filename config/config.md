@@ -145,7 +145,7 @@
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `None` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
@@ -230,7 +230,7 @@
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `None` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
@@ -292,7 +292,7 @@
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `None` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
@@ -432,7 +432,7 @@
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `None` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
@@ -477,7 +477,7 @@
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `None` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
