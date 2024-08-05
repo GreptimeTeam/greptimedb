@@ -33,7 +33,7 @@ use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
 use prost::Message;
 use query::query_engine::DefaultSerializer;
-use snafu::{location, Location, OptionExt, ResultExt};
+use snafu::{location, OptionExt, ResultExt};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio_stream::StreamExt;
 

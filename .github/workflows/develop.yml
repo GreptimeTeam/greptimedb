@@ -285,7 +285,7 @@ jobs:
     strategy:
       matrix:
         target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
-        mode: 
+        mode:
           - name: "Remote WAL"
             minio: true
             kafka: true

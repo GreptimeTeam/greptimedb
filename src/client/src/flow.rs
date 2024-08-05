@@ -16,7 +16,7 @@ use api::v1::flow::{FlowRequest, FlowResponse};
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
 use common_meta::node_manager::Flownode;
-use snafu::{location, Location, ResultExt};
+use snafu::{location, ResultExt};
 
 use crate::error::Result;
 use crate::Client;
