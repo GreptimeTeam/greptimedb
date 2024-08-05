@@ -88,7 +88,7 @@ pub trait Configurable: Serialize + DeserializeOwned + Default + Sized {
 
     /// Serialize the configuration to a TOML string.
     fn to_toml(&self) -> Result<String> {
-        toml::to_string(self).context(TomlFormatSnafu)
+        toml::to_string(&self).context(TomlFormatSnafu)
     }
 }
 
