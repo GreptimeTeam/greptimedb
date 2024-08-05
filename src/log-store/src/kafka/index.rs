@@ -12,5 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod range;
-pub(crate) mod record;
+mod iterator;
+
+pub(crate) use iterator::{
+    MultipleRegionWalIndexIterator, NextBatchHint, RegionWalIndexIterator, RegionWalRange,
+    RegionWalVecIndex,
+};
