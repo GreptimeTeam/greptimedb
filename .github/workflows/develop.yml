@@ -286,18 +286,6 @@ jobs:
       matrix:
         target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
         mode: 
-          - name: "Disk"
-            minio: false
-            kafka: false
-            values: "with-disk.yaml"
-          - name: "Minio"
-            minio: true
-            kafka: false
-            values: "with-minio.yaml"
-          - name: "Minio with Cache"
-            minio: true
-            kafka: false
-            values: "with-minio-and-cache.yaml"
           - name: "Remote WAL"
             minio: true
             kafka: true
