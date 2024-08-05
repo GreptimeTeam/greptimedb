@@ -14,6 +14,7 @@ SELECT sum(number) FROM numbers_input_basic GROUP BY tumble(ts, '1 second', '202
 -- because flush_flow result is at most 1
 select flush_flow('test_numbers_basic')<=1;
 
+-- SQLNESS ARG restart=true
 INSERT INTO numbers_input_basic 
 VALUES
     (20, "2021-07-01 00:00:00.200"),

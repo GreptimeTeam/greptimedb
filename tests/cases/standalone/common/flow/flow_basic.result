@@ -24,6 +24,7 @@ select flush_flow('test_numbers_basic')<=1;
 | true                                               |
 +----------------------------------------------------+
 
+-- SQLNESS ARG restart=true
 INSERT INTO numbers_input_basic 
 VALUES
     (20, "2021-07-01 00:00:00.200"),
