@@ -293,8 +293,6 @@ impl FlownodeBuilder {
             common_telemetry::error!("failed to recover flows: {:?}", err);
         }
 
-        self.recover_flows(&manager).await?;
-
         let server = FlownodeServer::new(FlowService::new(manager.clone()));
 
         let heartbeat_task = self.heartbeat_task;
@@ -315,7 +313,7 @@ impl FlownodeBuilder {
     /// TODO(discord9): persisent flow tasks with internal state
     async fn recover_flows(&self, manager: &FlowWorkerManagerRef) -> Result<usize, Error> {
         let nodeid = self.opts.node_id;
-        let to_be_recover: Vec<_> = if let Some(nodeid) = nodeid {
+        let to_be_recovered: Vec<_> = if let Some(nodeid) = nodeid {
             let to_be_recover = self
                 .flow_metadata_manager
                 .flownode_flow_manager()
@@ -347,8 +345,10 @@ impl FlownodeBuilder {
             }
             all_flow_ids
         };
-        let cnt = to_be_recover.len();
-        for flow_id in to_be_recover {
+        let cnt = to_be_recovered.len();
+
+        // TODO(discord9): recover in parallel
+        for flow_id in to_be_recovered {
             let info = self
                 .flow_metadata_manager
                 .flow_info_manager()
