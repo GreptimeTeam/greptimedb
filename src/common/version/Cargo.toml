@@ -14,8 +14,8 @@ codec = ["dep:serde", "dep:schemars"]
 const_format = "0.2"
 schemars = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
-shadow-rs = "0.29"
+shadow-rs.workspace = true
 
 [build-dependencies]
 build-data = "0.2"
-shadow-rs = "0.29"
+shadow-rs.workspace = true
