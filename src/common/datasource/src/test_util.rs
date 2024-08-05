@@ -47,19 +47,15 @@ pub fn format_schema(schema: Schema) -> Vec<String> {
 }
 
 pub fn test_store(root: &str) -> ObjectStore {
-    let mut builder = Fs::default();
-    let _ = builder.root(root);
-
-    ObjectStore::new(builder).unwrap().finish()
+    let builder = Fs::default();
+    ObjectStore::new(builder.root(root)).unwrap().finish()
 }
 
 pub fn test_tmp_store(root: &str) -> (ObjectStore, TempDir) {
     let dir = create_temp_dir(root);
 
-    let mut builder = Fs::default();
-    let _ = builder.root("/");
-
-    (ObjectStore::new(builder).unwrap().finish(), dir)
+    let builder = Fs::default();
+    (ObjectStore::new(builder.root("/")).unwrap().finish(), dir)
 }
 
 pub fn test_basic_schema() -> SchemaRef {

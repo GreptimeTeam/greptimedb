@@ -53,13 +53,6 @@ pub enum Error {
         source: common_grpc::Error,
     },
 
-    #[snafu(display("Column datatype error"))]
-    ColumnDataType {
-        #[snafu(implicit)]
-        location: Location,
-        source: api::error::Error,
-    },
-
     #[snafu(display("Illegal GRPC client state: {}", err_msg))]
     IllegalGrpcClientState {
         err_msg: String,
@@ -129,6 +122,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to parse ascii string: {}", value))]
+    InvalidAscii {
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -137,7 +137,6 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::IllegalFlightMessages { .. }
-            | Error::ColumnDataType { .. }
             | Error::MissingField { .. }
             | Error::IllegalDatabaseResponse { .. }
             | Error::ClientStreaming { .. } => StatusCode::Internal,
@@ -151,6 +150,8 @@ impl ErrorExt for Error {
             | Error::ConvertFlightData { source, .. }
             | Error::CreateTlsChannel { source, .. } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
+
+            Error::InvalidAscii { .. } => StatusCode::InvalidArguments,
         }
     }
 

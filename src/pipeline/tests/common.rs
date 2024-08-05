@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use greptime_proto::v1::Rows;
+use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
 use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Value};
 
 /// test util function to parse and execute pipeline
@@ -27,4 +27,18 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
         parse(&yaml_content).expect("failed to parse pipeline");
 
     pipeline.exec(input_value).expect("failed to exec pipeline")
+}
+
+/// test util function to create column schema
+pub fn make_column_schema(
+    column_name: String,
+    datatype: ColumnDataType,
+    semantic_type: SemanticType,
+) -> ColumnSchema {
+    ColumnSchema {
+        column_name,
+        datatype: datatype.into(),
+        semantic_type: semantic_type.into(),
+        ..Default::default()
+    }
 }

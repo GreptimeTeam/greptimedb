@@ -187,6 +187,39 @@ fn split_row_to_key_val(
     }
 }
 
+/// split a row into key and val by evaluate the key and val plan
+fn batch_split_rows_to_key_val(
+    rows: impl IntoIterator<Item = DiffRow>,
+    key_val_plan: KeyValPlan,
+    err_collector: ErrCollector,
+) -> impl IntoIterator<Item = KeyValDiffRow> {
+    let mut row_buf = Row::new(vec![]);
+    rows.into_iter().filter_map(
+        move |(mut row, sys_time, diff): DiffRow| -> Option<KeyValDiffRow> {
+            err_collector.run(|| {
+                let len = row.len();
+                if let Some(key) = key_val_plan
+                    .key_plan
+                    .evaluate_into(&mut row.inner, &mut row_buf)?
+                {
+                    // reuse the row as buffer
+                    row.inner.resize(len, Value::Null);
+                    // val_plan is not supported to carry any filter predicate,
+                    let val = key_val_plan
+                        .val_plan
+                        .evaluate_into(&mut row.inner, &mut row_buf)?
+                        .context(InternalSnafu {
+                            reason: "val_plan should not contain any filter predicate",
+                        })?;
+                    Ok(Some(((key, val), sys_time, diff)))
+                } else {
+                    Ok(None)
+                }
+            })?
+        },
+    )
+}
+
 /// reduce subgraph, reduce the input data into a single row
 /// output is concat from key and val
 fn reduce_subgraph(
@@ -204,13 +237,7 @@ fn reduce_subgraph(
         send,
     }: SubgraphArg,
 ) {
-    let mut row_buf = Row::empty();
-    let key_val = data.into_iter().filter_map(|(row, sys_time, diff)| {
-        // error is collected and then the row is skipped
-        err_collector
-            .run(|| split_row_to_key_val(row, sys_time, diff, key_val_plan, &mut row_buf))
-            .flatten()
-    });
+    let key_val = batch_split_rows_to_key_val(data, key_val_plan.clone(), err_collector.clone());
     // from here for distinct reduce and accum reduce, things are drastically different
     // for distinct reduce the arrange store the output,
     // but for accum reduce the arrange store the accum state, and output is

@@ -93,6 +93,19 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
                 Value::Map(map) => {
                     values.push(self.exec_map(map)?);
                 }
+                Value::String(_) => {
+                    let fields = self.fields();
+                    if fields.len() != 1 {
+                        return Err(format!(
+                            "{} processor: expected fields length 1 when processing line input, but got {}",
+                            self.kind(),
+                            fields.len()
+                        ));
+                    }
+                    let field = fields.first().unwrap();
+
+                    values.push(self.exec_field(&val, field).map(Value::Map)?);
+                }
                 _ if self.ignore_processor_array_failure() => {
                     warn!("expected a map, but got {val}")
                 }

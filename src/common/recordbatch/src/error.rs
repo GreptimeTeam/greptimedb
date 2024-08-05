@@ -73,6 +73,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Create physical expr error"))]
+    PhysicalExpr {
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Fail to format record batch"))]
     Format {
         #[snafu(source)]
@@ -167,9 +175,12 @@ impl ErrorExt for Error {
             | Error::PollStream { .. }
             | Error::Format { .. }
             | Error::ToArrowScalar { .. }
-            | Error::ColumnNotExists { .. }
             | Error::ProjectArrowRecordBatch { .. }
-            | Error::ArrowCompute { .. } => StatusCode::Internal,
+            | Error::PhysicalExpr { .. } => StatusCode::Internal,
+
+            Error::ArrowCompute { .. } => StatusCode::IllegalState,
+
+            Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
 
             Error::External { source, .. } => source.status_code(),
 

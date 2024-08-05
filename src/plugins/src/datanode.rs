@@ -16,8 +16,13 @@ use common_base::Plugins;
 use datanode::config::DatanodeOptions;
 use datanode::error::Result;
 
-pub async fn setup_datanode_plugins(_opts: &mut DatanodeOptions) -> Result<Plugins> {
-    Ok(Plugins::new())
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+pub async fn setup_datanode_plugins(
+    plugins: &mut Plugins,
+    dn_opts: &DatanodeOptions,
+) -> Result<()> {
+    Ok(())
 }
 
 pub async fn start_datanode_plugins(_plugins: Plugins) -> Result<()> {

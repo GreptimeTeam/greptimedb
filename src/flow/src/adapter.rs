@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use common_config::Configurable;
@@ -26,7 +26,7 @@ use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, info, trace};
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
@@ -51,7 +51,7 @@ use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 use crate::expr::GlobalId;
-use crate::repr::{self, DiffRow, Row};
+use crate::repr::{self, DiffRow, Row, BATCH_SIZE};
 use crate::transform::sql_to_flow_plan;
 
 mod flownode_impl;
@@ -67,7 +67,7 @@ mod table_source;
 use crate::error::Error;
 use crate::FrontendInvoker;
 
-// TODO(discord9): replace this with `GREPTIME_TIMESTAMP` before v0.9
+// `GREPTIME_TIMESTAMP` is not used to distinguish when table is created automatically by flow
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 
 pub const UPDATE_AT_TS_COL: &str = "update_at";
@@ -129,6 +129,10 @@ pub struct FlowWorkerManager {
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
     node_id: Option<u32>,
+    /// Lock for flushing, will be `read` by `handle_inserts` and `write` by `flush_flow`
+    ///
+    /// So that a series of event like `inserts -> flush` can be handled correctly
+    flush_lock: RwLock<()>,
 }
 
 /// Building FlownodeManager
@@ -161,6 +165,7 @@ impl FlowWorkerManager {
             src_send_buf_lens: Default::default(),
             tick_manager,
             node_id,
+            flush_lock: RwLock::new(()),
         }
     }
 
@@ -212,8 +217,6 @@ pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
 
 /// This impl block contains methods to send writeback requests to frontend
 impl FlowWorkerManager {
-    /// TODO(discord9): merge all same type of diff row into one requests
-    ///
     /// Return the number of requests it made
     pub async fn send_writeback_requests(&self) -> Result<usize, Error> {
         let all_reqs = self.generate_writeback_request().await;
@@ -464,8 +467,7 @@ impl FlowWorkerManager {
         shutdown: Option<broadcast::Receiver<()>>,
     ) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
-        // TODO(discord9): add heartbeat tasks here
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             self.run(shutdown).await;
         })
     }
@@ -484,21 +486,31 @@ impl FlowWorkerManager {
         }
     }
 
+    async fn get_buf_size(&self) -> usize {
+        self.node_context.read().await.get_send_buf_size().await
+    }
+
     /// Trigger dataflow running, and then send writeback request to the source sender
     ///
     /// note that this method didn't handle input mirror request, as this should be handled by grpc server
     pub async fn run(&self, mut shutdown: Option<broadcast::Receiver<()>>) {
         debug!("Starting to run");
+        let default_interval = Duration::from_secs(1);
+        let mut avg_spd = 0; // rows/sec
+        let mut since_last_run = tokio::time::Instant::now();
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
-            if let Err(err) = self.run_available(true).await {
+            let row_cnt = self.run_available(true).await.unwrap_or_else(|err| {
                 common_telemetry::error!(err;"Run available errors");
-            }
-            // TODO(discord9): error handling
+                0
+            });
+
             if let Err(err) = self.send_writeback_requests().await {
                 common_telemetry::error!(err;"Send writeback request errors");
             };
             self.log_all_errors().await;
+
+            // determine if need to shutdown
             match &shutdown.as_mut().map(|s| s.try_recv()) {
                 Some(Ok(())) => {
                     info!("Shutdown flow's main loop");
@@ -515,7 +527,25 @@ impl FlowWorkerManager {
                 }
                 None => (),
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            // for now we want to batch rows until there is around `BATCH_SIZE` rows in send buf
+            // before trigger a run of flow's worker
+            // (plus one for prevent div by zero)
+            let wait_for = since_last_run.elapsed();
+
+            let cur_spd = row_cnt * 1000 / wait_for.as_millis().max(1) as usize;
+            // rapid increase, slow decay
+            avg_spd = if cur_spd > avg_spd {
+                cur_spd
+            } else {
+                (9 * avg_spd + cur_spd) / 10
+            };
+            trace!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
+            let new_wait = BATCH_SIZE * 1000 / avg_spd.max(1); //in ms
+            let new_wait = Duration::from_millis(new_wait as u64).min(default_interval);
+            trace!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
+            since_last_run = tokio::time::Instant::now();
+            tokio::time::sleep(new_wait).await;
         }
         // flow is now shutdown, drop frontend_invoker early so a ref cycle(in standalone mode) can be prevent:
         // FlowWorkerManager.frontend_invoker -> FrontendInvoker.inserter
@@ -528,46 +558,46 @@ impl FlowWorkerManager {
     ///
     /// set `blocking` to true to wait until lock is acquired
     /// and false to return immediately if lock is not acquired
+    /// return numbers of rows send to worker
     /// TODO(discord9): add flag for subgraph that have input since last run
-    pub async fn run_available(&self, blocking: bool) -> Result<(), Error> {
+    pub async fn run_available(&self, blocking: bool) -> Result<usize, Error> {
+        let mut row_cnt = 0;
         loop {
             let now = self.tick_manager.tick();
             for worker in self.worker_handles.iter() {
                 // TODO(discord9): consider how to handle error in individual worker
                 if blocking {
-                    worker.lock().await.run_available(now).await?;
+                    worker.lock().await.run_available(now, blocking).await?;
                 } else if let Ok(worker) = worker.try_lock() {
-                    worker.run_available(now).await?;
+                    worker.run_available(now, blocking).await?;
                 } else {
-                    return Ok(());
+                    return Ok(row_cnt);
                 }
             }
-            // first check how many inputs were sent
+            // check row send and rows remain in send buf
             let (flush_res, buf_len) = if blocking {
                 let ctx = self.node_context.read().await;
                 (ctx.flush_all_sender().await, ctx.get_send_buf_size().await)
             } else {
                 match self.node_context.try_read() {
                     Ok(ctx) => (ctx.flush_all_sender().await, ctx.get_send_buf_size().await),
-                    Err(_) => return Ok(()),
+                    Err(_) => return Ok(row_cnt),
                 }
             };
             match flush_res {
-                Ok(_) => (),
+                Ok(r) => row_cnt += r,
                 Err(err) => {
                     common_telemetry::error!("Flush send buf errors: {:?}", err);
                     break;
                 }
             };
-            // if no thing in send buf then break
-            if buf_len == 0 {
+            // if not enough rows, break
+            if buf_len < BATCH_SIZE {
                 break;
-            } else {
-                debug!("Send buf len = {}", buf_len);
             }
         }
 
-        Ok(())
+        Ok(row_cnt)
     }
 
     /// send write request to related source sender
@@ -583,8 +613,6 @@ impl FlowWorkerManager {
         );
         let table_id = region_id.table_id();
         self.node_context.read().await.send(table_id, rows).await?;
-        // TODO(discord9): put it in a background task?
-        // self.run_available(false).await?;
         Ok(())
     }
 }

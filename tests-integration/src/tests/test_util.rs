@@ -21,6 +21,7 @@ use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::warn;
 use common_test_util::find_workspace_path;
+use common_wal::config::kafka::common::KafkaTopicConfig;
 use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use frontend::instance::Instance;
@@ -231,8 +232,11 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
-            topic_name_prefix: test_name.to_string(),
-            num_topics: 3,
+            kafka_topic: KafkaTopicConfig {
+                topic_name_prefix: test_name.to_string(),
+                num_topics: 3,
+                ..Default::default()
+            },
             ..Default::default()
         }));
     let instance = TestContext::new(MockInstanceBuilder::Standalone(builder)).await;
@@ -261,8 +265,11 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
-            topic_name_prefix: test_name.to_string(),
-            num_topics: 3,
+            kafka_topic: KafkaTopicConfig {
+                topic_name_prefix: test_name.to_string(),
+                num_topics: 3,
+                ..Default::default()
+            },
             ..Default::default()
         }));
     let instance = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;

@@ -461,7 +461,7 @@ impl LocalManager {
 
         let tracing_context = TracingContext::from_current_span();
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_global(async move {
             // Run the root procedure.
             // The task was moved to another runtime for execution.
             // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
@@ -593,7 +593,7 @@ impl ProcedureManager for LocalManager {
         let task_inner = self.build_remove_outdated_meta_task();
 
         task_inner
-            .start(common_runtime::bg_runtime())
+            .start(common_runtime::global_runtime())
             .context(StartRemoveOutdatedMetaTaskSnafu)?;
 
         *task = Some(task_inner);
@@ -680,9 +680,8 @@ pub(crate) mod test_util {
 
     pub(crate) fn new_object_store(dir: &TempDir) -> ObjectStore {
         let store_dir = dir.path().to_str().unwrap();
-        let mut builder = Builder::default();
-        let _ = builder.root(store_dir);
-        ObjectStore::new(builder).unwrap().finish()
+        let builder = Builder::default();
+        ObjectStore::new(builder.root(store_dir)).unwrap().finish()
     }
 }
 

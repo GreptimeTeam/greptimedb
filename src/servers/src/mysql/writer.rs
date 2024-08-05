@@ -15,6 +15,7 @@
 use std::ops::Deref;
 
 use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::{debug, error};
@@ -49,6 +50,29 @@ pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
         result_writer.finish().await?;
     }
     Ok(())
+}
+
+/// Handle GreptimeDB error, convert it to MySQL error
+pub fn handle_err(e: impl ErrorExt, query_ctx: QueryContextRef) -> (ErrorKind, String) {
+    let status_code = e.status_code();
+    let kind = mysql_error_kind(&status_code);
+
+    if status_code.should_log_error() {
+        let root_error = e.root_cause().unwrap_or(&e);
+        error!(e; "Failed to handle mysql query, code: {}, error: {}, db: {}", status_code, root_error.to_string(), query_ctx.get_db_string());
+    } else {
+        debug!(
+            "Failed to handle mysql query, code: {}, db: {}, error: {:?}",
+            status_code,
+            query_ctx.get_db_string(),
+            e
+        );
+    };
+    let msg = e.output_msg();
+    // Inline the status code to output message for MySQL
+    let err_msg = format!("({status_code}): {msg}");
+
+    (kind, err_msg)
 }
 
 struct QueryResult {
@@ -103,7 +127,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     )));
                 }
             },
-            Err(error) => Self::write_query_error(error, self.writer).await?,
+            Err(error) => Self::write_query_error(error, self.writer, self.query_context).await?,
         }
         Ok(None)
     }
@@ -148,15 +172,9 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                             .await?
                         }
                         Err(e) => {
-                            if e.status_code().should_log_error() {
-                                error!(e; "Failed to handle mysql query");
-                            } else {
-                                debug!("Failed to handle mysql query, error: {e:?}");
-                            }
-                            let err = e.output_msg();
-                            row_writer
-                                .finish_error(ErrorKind::ER_INTERNAL_ERROR, &err.as_bytes())
-                                .await?;
+                            let (kind, err) = handle_err(e, query_context);
+                            debug!("Failed to get result, kind: {:?}, err: {}", kind, err);
+                            row_writer.finish_error(kind, &err.as_bytes()).await?;
 
                             return Ok(());
                         }
@@ -165,7 +183,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                 row_writer.finish().await?;
                 Ok(())
             }
-            Err(error) => Self::write_query_error(error, writer).await,
+            Err(error) => Self::write_query_error(error, writer, query_context).await,
         }
     }
 
@@ -219,20 +237,18 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         Ok(())
     }
 
-    async fn write_query_error(error: impl ErrorExt, w: QueryResultWriter<'a, W>) -> Result<()> {
+    async fn write_query_error(
+        error: impl ErrorExt,
+        w: QueryResultWriter<'a, W>,
+        query_context: QueryContextRef,
+    ) -> Result<()> {
         METRIC_ERROR_COUNTER
             .with_label_values(&[METRIC_ERROR_COUNTER_LABEL_MYSQL])
             .inc();
 
-        if error.status_code().should_log_error() {
-            error!(error; "Failed to handle mysql query");
-        } else {
-            debug!("Failed to handle mysql query, error: {error:?}");
-        }
-
-        let kind = ErrorKind::ER_INTERNAL_ERROR;
-        let error = error.output_msg();
-        w.error(kind, error.as_bytes()).await?;
+        let (kind, err) = handle_err(error, query_context);
+        debug!("Write query error, kind: {:?}, err: {}", kind, err);
+        w.error(kind, err.as_bytes()).await?;
         Ok(())
     }
 }
@@ -297,4 +313,47 @@ pub fn create_mysql_column_def(schema: &SchemaRef) -> Result<Vec<Column>> {
         .iter()
         .map(|column_schema| create_mysql_column(&column_schema.data_type, &column_schema.name))
         .collect()
+}
+
+fn mysql_error_kind(status_code: &StatusCode) -> ErrorKind {
+    match status_code {
+        StatusCode::Success => ErrorKind::ER_YES,
+        StatusCode::Unknown => ErrorKind::ER_UNKNOWN_ERROR,
+        StatusCode::Unsupported => ErrorKind::ER_NOT_SUPPORTED_YET,
+        StatusCode::Cancelled => ErrorKind::ER_QUERY_INTERRUPTED,
+        StatusCode::RuntimeResourcesExhausted => ErrorKind::ER_OUT_OF_RESOURCES,
+        StatusCode::InvalidSyntax => ErrorKind::ER_SYNTAX_ERROR,
+        StatusCode::RegionAlreadyExists | StatusCode::TableAlreadyExists => {
+            ErrorKind::ER_TABLE_EXISTS_ERROR
+        }
+        StatusCode::RegionNotFound | StatusCode::TableNotFound => ErrorKind::ER_NO_SUCH_TABLE,
+        StatusCode::RegionReadonly => ErrorKind::ER_READ_ONLY_MODE,
+        StatusCode::DatabaseNotFound => ErrorKind::ER_WRONG_DB_NAME,
+        StatusCode::UserNotFound => ErrorKind::ER_NO_SUCH_USER,
+        StatusCode::UnsupportedPasswordType => ErrorKind::ER_PASSWORD_FORMAT,
+        StatusCode::PermissionDenied | StatusCode::AccessDenied => {
+            ErrorKind::ER_ACCESS_DENIED_ERROR
+        }
+        StatusCode::UserPasswordMismatch => ErrorKind::ER_DBACCESS_DENIED_ERROR,
+        StatusCode::InvalidAuthHeader | StatusCode::AuthHeaderNotFound => {
+            ErrorKind::ER_NOT_SUPPORTED_AUTH_MODE
+        }
+        StatusCode::Unexpected
+        | StatusCode::Internal
+        | StatusCode::IllegalState
+        | StatusCode::PlanQuery
+        | StatusCode::EngineExecuteQuery
+        | StatusCode::RegionNotReady
+        | StatusCode::RegionBusy
+        | StatusCode::TableUnavailable
+        | StatusCode::StorageUnavailable
+        | StatusCode::RequestOutdated => ErrorKind::ER_INTERNAL_ERROR,
+        StatusCode::InvalidArguments => ErrorKind::ER_WRONG_ARGUMENTS,
+        StatusCode::TableColumnNotFound => ErrorKind::ER_BAD_FIELD_ERROR,
+        StatusCode::TableColumnExists => ErrorKind::ER_DUP_FIELDNAME,
+        StatusCode::DatabaseAlreadyExists => ErrorKind::ER_DB_CREATE_EXISTS,
+        StatusCode::RateLimited => ErrorKind::ER_TOO_MANY_CONCURRENT_TRXS,
+        StatusCode::FlowAlreadyExists => ErrorKind::ER_TABLE_EXISTS_ERROR,
+        StatusCode::FlowNotFound => ErrorKind::ER_NO_SUCH_TABLE,
+    }
 }

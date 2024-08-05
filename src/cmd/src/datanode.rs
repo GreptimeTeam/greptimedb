@@ -18,6 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
+use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::logging::TracingOptions;
 use common_telemetry::{info, warn};
@@ -266,13 +267,14 @@ impl StartCommand {
             &opts.component.tracing,
             opts.component.node_id.map(|x| x.to_string()),
         );
-        log_versions(version!(), short_version!());
+        log_versions(version(), short_version());
 
         info!("Datanode start command: {:#?}", self);
         info!("Datanode options: {:#?}", opts);
 
-        let mut opts = opts.component;
-        let plugins = plugins::setup_datanode_plugins(&mut opts)
+        let opts = opts.component;
+        let mut plugins = Plugins::new();
+        plugins::setup_datanode_plugins(&mut plugins, &opts)
             .await
             .context(StartDatanodeSnafu)?;
 
@@ -338,7 +340,7 @@ mod tests {
             mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
-            
+
             rpc_addr = "127.0.0.1:4001"
             rpc_hostname = "192.168.0.1"
             [grpc]
@@ -365,7 +367,7 @@ mod tests {
             mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
-            
+
             [grpc]
             addr = "127.0.0.1:3001"
             hostname = "127.0.0.1"

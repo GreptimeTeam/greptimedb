@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -45,8 +45,10 @@ use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
 use crate::sst::file::{overlaps, FileHandle, FileMeta};
-use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
-use crate::sst::index::inverted_index::applier::SstIndexApplierRef;
+use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
+use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
+use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::FileRange;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
@@ -165,6 +167,8 @@ pub(crate) struct ScanRegion {
     parallelism: ScanParallism,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
+    /// Whether to ignore fulltext index.
+    ignore_fulltext_index: bool,
     /// Start time of the scan task.
     start_time: Option<Instant>,
 }
@@ -184,6 +188,7 @@ impl ScanRegion {
             cache_manager,
             parallelism: ScanParallism::default(),
             ignore_inverted_index: false,
+            ignore_fulltext_index: false,
             start_time: None,
         }
     }
@@ -195,9 +200,17 @@ impl ScanRegion {
         self
     }
 
+    /// Sets whether to ignore inverted index.
     #[must_use]
     pub(crate) fn with_ignore_inverted_index(mut self, ignore: bool) -> Self {
         self.ignore_inverted_index = ignore;
+        self
+    }
+
+    /// Sets whether to ignore fulltext index.
+    #[must_use]
+    pub(crate) fn with_ignore_fulltext_index(mut self, ignore: bool) -> Self {
+        self.ignore_fulltext_index = ignore;
         self
     }
 
@@ -209,8 +222,8 @@ impl ScanRegion {
 
     /// Returns a [Scanner] to scan the region.
     pub(crate) fn scanner(self) -> Result<Scanner> {
-        if self.version.options.append_mode {
-            // If table uses append mode, we use unordered scan in query.
+        if self.version.options.append_mode && self.request.series_row_selector.is_none() {
+            // If table is append only and there is no series row selector, we use unordered scan in query.
             // We still use seq scan in compaction.
             self.unordered_scan().map(Scanner::Unordered)
         } else {
@@ -278,7 +291,8 @@ impl ScanRegion {
             self.version.options.append_mode,
         );
 
-        let index_applier = self.build_index_applier();
+        let inverted_index_applier = self.build_invereted_index_applier();
+        let fulltext_index_applier = self.build_fulltext_index_applier();
         let predicate = Predicate::new(self.request.filters.clone());
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
@@ -292,13 +306,14 @@ impl ScanRegion {
             .with_memtables(memtables)
             .with_files(files)
             .with_cache(self.cache_manager)
-            .with_index_applier(index_applier)
+            .with_inverted_index_applier(inverted_index_applier)
+            .with_fulltext_index_applier(fulltext_index_applier)
             .with_parallelism(self.parallelism)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
-            .with_series_row_selector(self.request.series_row_selector.clone());
+            .with_series_row_selector(self.request.series_row_selector);
         Ok(input)
     }
 
@@ -318,8 +333,8 @@ impl ScanRegion {
         )
     }
 
-    /// Use the latest schema to build the index applier.
-    fn build_index_applier(&self) -> Option<SstIndexApplierRef> {
+    /// Use the latest schema to build the inveretd index applier.
+    fn build_invereted_index_applier(&self) -> Option<InvertedIndexApplierRef> {
         if self.ignore_inverted_index {
             return None;
         }
@@ -337,7 +352,7 @@ impl ScanRegion {
             .and_then(|c| c.index_cache())
             .cloned();
 
-        SstIndexApplierBuilder::new(
+        InvertedIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
             file_cache,
@@ -354,7 +369,26 @@ impl ScanRegion {
             self.access_layer.puffin_manager_factory().clone(),
         )
         .build(&self.request.filters)
-        .inspect_err(|err| warn!(err; "Failed to build index applier"))
+        .inspect_err(|err| warn!(err; "Failed to build invereted index applier"))
+        .ok()
+        .flatten()
+        .map(Arc::new)
+    }
+
+    /// Use the latest schema to build the fulltext index applier.
+    fn build_fulltext_index_applier(&self) -> Option<FulltextIndexApplierRef> {
+        if self.ignore_fulltext_index {
+            return None;
+        }
+
+        FulltextIndexApplierBuilder::new(
+            self.access_layer.region_dir().to_string(),
+            self.access_layer.object_store().clone(),
+            self.access_layer.puffin_manager_factory().clone(),
+            self.version.metadata.as_ref(),
+        )
+        .build(&self.request.filters)
+        .inspect_err(|err| warn!(err; "Failed to build fulltext index applier"))
         .ok()
         .flatten()
         .map(Arc::new)
@@ -401,8 +435,9 @@ pub(crate) struct ScanInput {
     ignore_file_not_found: bool,
     /// Parallelism to scan data.
     pub(crate) parallelism: ScanParallism,
-    /// Index applier.
-    index_applier: Option<SstIndexApplierRef>,
+    /// Index appliers.
+    inverted_index_applier: Option<InvertedIndexApplierRef>,
+    fulltext_index_applier: Option<FulltextIndexApplierRef>,
     /// Start time of the query.
     pub(crate) query_start: Option<Instant>,
     /// The region is using append mode.
@@ -429,7 +464,8 @@ impl ScanInput {
             cache_manager: None,
             ignore_file_not_found: false,
             parallelism: ScanParallism::default(),
-            index_applier: None,
+            inverted_index_applier: None,
+            fulltext_index_applier: None,
             query_start: None,
             append_mode: false,
             filter_deleted: true,
@@ -487,10 +523,23 @@ impl ScanInput {
         self
     }
 
-    /// Sets index applier.
+    /// Sets invereted index applier.
     #[must_use]
-    pub(crate) fn with_index_applier(mut self, index_applier: Option<SstIndexApplierRef>) -> Self {
-        self.index_applier = index_applier;
+    pub(crate) fn with_inverted_index_applier(
+        mut self,
+        applier: Option<InvertedIndexApplierRef>,
+    ) -> Self {
+        self.inverted_index_applier = applier;
+        self
+    }
+
+    /// Sets fulltext index applier.
+    #[must_use]
+    pub(crate) fn with_fulltext_index_applier(
+        mut self,
+        applier: Option<FulltextIndexApplierRef>,
+    ) -> Self {
+        self.fulltext_index_applier = applier;
         self
     }
 
@@ -558,7 +607,9 @@ impl ScanInput {
         &self,
         collector: &mut impl FileRangeCollector,
     ) -> Result<()> {
+        let mut file_prune_cost = Duration::ZERO;
         for file in &self.files {
+            let prune_start = Instant::now();
             let res = self
                 .access_layer
                 .read_sst(file.clone())
@@ -566,10 +617,12 @@ impl ScanInput {
                 .time_range(self.time_range)
                 .projection(Some(self.mapper.column_ids().to_vec()))
                 .cache(self.cache_manager.clone())
-                .index_applier(self.index_applier.clone())
+                .inverted_index_applier(self.inverted_index_applier.clone())
+                .fulltext_index_applier(self.fulltext_index_applier.clone())
                 .expected_metadata(Some(self.mapper.metadata().clone()))
                 .build_reader_input()
                 .await;
+            file_prune_cost += prune_start.elapsed();
             let (mut file_range_ctx, row_groups) = match res {
                 Ok(x) => x,
                 Err(e) => {
@@ -605,6 +658,13 @@ impl ScanInput {
 
         READ_SST_COUNT.observe(self.files.len() as f64);
 
+        common_telemetry::debug!(
+            "Region {} prune {} files, cost is {:?}",
+            self.mapper.metadata().region_id,
+            self.files.len(),
+            file_prune_cost
+        );
+
         Ok(())
     }
 
@@ -615,7 +675,7 @@ impl ScanInput {
         semaphore: Arc<Semaphore>,
         sender: mpsc::Sender<Result<Batch>>,
     ) {
-        common_runtime::spawn_read(async move {
+        common_runtime::spawn_global(async move {
             loop {
                 // We release the permit before sending result to avoid the task waiting on
                 // the channel with the permit held.
@@ -663,7 +723,7 @@ pub(crate) type FileRangesGroup = SmallVec<[Vec<FileRange>; 4]>;
 
 /// A partition of a scanner to read.
 /// It contains memtables and file ranges to scan.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ScanPart {
     /// Memtable ranges to scan.
     pub(crate) memtable_ranges: Vec<MemtableRange>,
@@ -795,10 +855,10 @@ impl ScanPartList {
 pub(crate) struct StreamContext {
     /// Input memtables and files.
     pub(crate) input: ScanInput,
-    /// Parts to scan.
+    /// Parts to scan and the cost to build parts.
     /// The scanner builds parts to scan from the input lazily.
     /// The mutex is used to ensure the parts are only built once.
-    pub(crate) parts: Mutex<ScanPartList>,
+    pub(crate) parts: Mutex<(ScanPartList, Duration)>,
 
     // Metrics:
     /// The start time of the query.
@@ -812,25 +872,33 @@ impl StreamContext {
 
         Self {
             input,
-            parts: Mutex::new(ScanPartList::default()),
+            parts: Mutex::new((ScanPartList::default(), Duration::default())),
             query_start,
         }
     }
 
-    /// Format parts for explain.
-    pub(crate) fn format_parts(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+    /// Format the context for explain.
+    pub(crate) fn format_for_explain(
+        &self,
+        t: DisplayFormatType,
+        f: &mut fmt::Formatter,
+    ) -> fmt::Result {
         match self.parts.try_lock() {
             Ok(inner) => match t {
                 DisplayFormatType::Default => write!(
                     f,
                     "partition_count={} ({} memtable ranges, {} file ranges)",
-                    inner.len(),
-                    inner.num_mem_ranges(),
-                    inner.num_file_ranges()
-                ),
-                DisplayFormatType::Verbose => write!(f, "{:?}", &*inner),
+                    inner.0.len(),
+                    inner.0.num_mem_ranges(),
+                    inner.0.num_file_ranges()
+                )?,
+                DisplayFormatType::Verbose => write!(f, "{:?}", inner.0)?,
             },
-            Err(_) => write!(f, "<locked>"),
+            Err(_) => write!(f, "<locked>")?,
         }
+        if let Some(selector) = &self.input.series_row_selector {
+            write!(f, ", selector={}", selector)?;
+        }
+        Ok(())
     }
 }

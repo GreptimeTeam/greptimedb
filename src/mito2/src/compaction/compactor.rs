@@ -334,7 +334,7 @@ impl Compactor for DefaultCompactor {
                 Vec::with_capacity(crate::compaction::task::MAX_PARALLEL_COMPACTION);
             for _ in 0..crate::compaction::task::MAX_PARALLEL_COMPACTION {
                 if let Some(task) = futs.pop() {
-                    task_chunk.push(common_runtime::spawn_bg(task));
+                    task_chunk.push(common_runtime::spawn_compact(task));
                 }
             }
             let metas = futures::future::try_join_all(task_chunk)

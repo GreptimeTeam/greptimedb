@@ -87,10 +87,8 @@ impl ErrorExt for Error {
             Error::UnknownPlan { .. } | Error::EncodeRel { .. } | Error::DecodeRel { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::DFInternal { .. }
-            | Error::Internal { .. }
-            | Error::EncodeDfPlan { .. }
-            | Error::DecodeDfPlan { .. } => StatusCode::Internal,
+            Error::DFInternal { .. } | Error::Internal { .. } => StatusCode::Internal,
+            Error::EncodeDfPlan { .. } | Error::DecodeDfPlan { .. } => StatusCode::Unexpected,
         }
     }
 

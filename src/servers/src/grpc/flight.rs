@@ -167,7 +167,7 @@ impl FlightCraft for GreptimeRequestHandler {
             request_type = get_request_type(&request)
         );
         async {
-            let output = self.handle_request(request).await?;
+            let output = self.handle_request(request, Default::default()).await?;
             let stream: Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync>> =
                 to_flight_data_stream(output, TracingContext::from_current_span());
             Ok(Response::new(stream))

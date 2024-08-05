@@ -37,6 +37,7 @@ use super::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusResponse,
 };
 use crate::error::{CollectRecordbatchSnafu, Result, UnexpectedResultSnafu};
+use crate::http::error_result::status_code_to_http_status;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PrometheusJsonResponse {
@@ -50,6 +51,8 @@ pub struct PrometheusJsonResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
 
+    #[serde(skip)]
+    pub status_code: Option<StatusCode>,
     // placeholder for header value
     #[serde(skip)]
     #[serde(default)]
@@ -64,7 +67,13 @@ impl IntoResponse for PrometheusJsonResponse {
             serde_json::to_string(&self.resp_metrics).ok()
         };
 
+        let http_code = self.status_code.map(|c| status_code_to_http_status(&c));
+
         let mut resp = Json(self).into_response();
+
+        if let Some(http_code) = http_code {
+            *resp.status_mut() = http_code;
+        }
 
         if let Some(m) = metrics.and_then(|m| HeaderValue::from_str(&m).ok()) {
             resp.headers_mut().insert(&GREPTIME_DB_HEADER_METRICS, m);
@@ -75,18 +84,18 @@ impl IntoResponse for PrometheusJsonResponse {
 }
 
 impl PrometheusJsonResponse {
-    pub fn error<S1, S2>(error_type: S1, reason: S2) -> Self
+    pub fn error<S1>(error_type: StatusCode, reason: S1) -> Self
     where
         S1: Into<String>,
-        S2: Into<String>,
     {
         PrometheusJsonResponse {
             status: "error".to_string(),
             data: PrometheusResponse::default(),
             error: Some(reason.into()),
-            error_type: Some(error_type.into()),
+            error_type: Some(error_type.to_string()),
             warnings: None,
             resp_metrics: Default::default(),
+            status_code: Some(error_type),
         }
     }
 
@@ -98,6 +107,7 @@ impl PrometheusJsonResponse {
             error_type: None,
             warnings: None,
             resp_metrics: Default::default(),
+            status_code: None,
         }
     }
 
@@ -124,9 +134,10 @@ impl PrometheusJsonResponse {
                             result_type,
                         )?)
                     }
-                    OutputData::AffectedRows(_) => {
-                        Self::error("Unexpected", "expected data result, but got affected rows")
-                    }
+                    OutputData::AffectedRows(_) => Self::error(
+                        StatusCode::Unexpected,
+                        "expected data result, but got affected rows",
+                    ),
                 };
 
             if let Some(physical_plan) = result.meta.plan {
@@ -158,7 +169,7 @@ impl PrometheusJsonResponse {
                         ..Default::default()
                     }))
                 } else {
-                    Self::error(err.status_code().to_string(), err.output_msg())
+                    Self::error(err.status_code(), err.output_msg())
                 }
             }
         }

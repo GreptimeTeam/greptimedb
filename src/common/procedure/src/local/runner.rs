@@ -393,7 +393,7 @@ impl Runner {
         // Add the id of the subprocedure to the metadata.
         self.meta.push_child(procedure_id);
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_global(async move {
             // Run the root procedure.
             runner.run().await
         });

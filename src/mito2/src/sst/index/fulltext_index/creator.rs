@@ -36,9 +36,10 @@ use crate::sst::index::fulltext_index::INDEX_BLOB_TYPE;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
+use crate::sst::index::TYPE_FULLTEXT_INDEX;
 
-/// `SstIndexCreator` is responsible for creating fulltext indexes for SST files.
-pub struct SstIndexCreator {
+/// `FulltextIndexer` is responsible for creating fulltext indexes for SST files.
+pub struct FulltextIndexer {
     /// Creators for each column.
     creators: HashMap<ColumnId, SingleCreator>,
     /// Whether the index creation was aborted.
@@ -47,8 +48,8 @@ pub struct SstIndexCreator {
     stats: Statistics,
 }
 
-impl SstIndexCreator {
-    /// Creates a new `SstIndexCreator`.
+impl FulltextIndexer {
+    /// Creates a new `FulltextIndexer`.
     pub async fn new(
         region_id: &RegionId,
         sst_file_id: &FileId,
@@ -56,7 +57,7 @@ impl SstIndexCreator {
         metadata: &RegionMetadataRef,
         compress: bool,
         mem_limit: usize,
-    ) -> Result<Self> {
+    ) -> Result<Option<Self>> {
         let mut creators = HashMap::new();
 
         for column in &metadata.column_metadatas {
@@ -101,11 +102,11 @@ impl SstIndexCreator {
             );
         }
 
-        Ok(Self {
+        Ok((!creators.is_empty()).then(move || Self {
             creators,
             aborted: false,
-            stats: Statistics::default(),
-        })
+            stats: Statistics::new(TYPE_FULLTEXT_INDEX),
+        }))
     }
 
     /// Updates the index with the given batch.
@@ -166,13 +167,9 @@ impl SstIndexCreator {
     pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
         self.creators.keys().copied()
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.creators.is_empty()
-    }
 }
 
-impl SstIndexCreator {
+impl FulltextIndexer {
     async fn do_update(&mut self, batch: &Batch) -> Result<()> {
         let mut guard = self.stats.record_update();
         guard.inc_row_count(batch.num_rows());
@@ -292,5 +289,268 @@ impl SingleCreator {
 
 #[cfg(test)]
 mod tests {
-    // TODO(zhongzc): After search is implemented, add tests for full-text indexer.
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use api::v1::SemanticType;
+    use datatypes::data_type::DataType;
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
+    use datatypes::vectors::{UInt64Vector, UInt8Vector};
+    use futures::future::BoxFuture;
+    use futures::FutureExt;
+    use index::fulltext_index::search::RowId;
+    use object_store::services::Memory;
+    use object_store::ObjectStore;
+    use puffin::puffin_manager::PuffinManager;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+    use store_api::storage::{ConcreteDataType, RegionId};
+
+    use super::*;
+    use crate::read::{Batch, BatchColumn};
+    use crate::sst::file::FileId;
+    use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
+    use crate::sst::location;
+
+    fn mock_object_store() -> ObjectStore {
+        ObjectStore::new(Memory::default()).unwrap().finish()
+    }
+
+    async fn new_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {
+        IntermediateManager::init_fs(path).await.unwrap()
+    }
+
+    fn mock_region_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "text_english_case_sensitive",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                )
+                .with_fulltext_options(FulltextOptions {
+                    enable: true,
+                    analyzer: FulltextAnalyzer::English,
+                    case_sensitive: true,
+                })
+                .unwrap(),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "text_english_case_insensitive",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                )
+                .with_fulltext_options(FulltextOptions {
+                    enable: true,
+                    analyzer: FulltextAnalyzer::English,
+                    case_sensitive: false,
+                })
+                .unwrap(),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "text_chinese",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                )
+                .with_fulltext_options(FulltextOptions {
+                    enable: true,
+                    analyzer: FulltextAnalyzer::Chinese,
+                    case_sensitive: false,
+                })
+                .unwrap(),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 4,
+            });
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn new_batch(
+        rows: &[(
+            Option<&str>, // text_english_case_sensitive
+            Option<&str>, // text_english_case_insensitive
+            Option<&str>, // text_chinese
+        )],
+    ) -> Batch {
+        let mut vec_english_sensitive =
+            ConcreteDataType::string_datatype().create_mutable_vector(0);
+        let mut vec_english_insensitive =
+            ConcreteDataType::string_datatype().create_mutable_vector(0);
+        let mut vec_chinese = ConcreteDataType::string_datatype().create_mutable_vector(0);
+
+        for (text_english_case_sensitive, text_english_case_insensitive, text_chinese) in rows {
+            match text_english_case_sensitive {
+                Some(s) => vec_english_sensitive.push_value_ref((*s).into()),
+                None => vec_english_sensitive.push_null(),
+            }
+            match text_english_case_insensitive {
+                Some(s) => vec_english_insensitive.push_value_ref((*s).into()),
+                None => vec_english_insensitive.push_null(),
+            }
+            match text_chinese {
+                Some(s) => vec_chinese.push_value_ref((*s).into()),
+                None => vec_chinese.push_null(),
+            }
+        }
+
+        let num_rows = vec_english_sensitive.len();
+        Batch::new(
+            vec![],
+            Arc::new(UInt64Vector::from_iter_values(
+                (0..num_rows).map(|n| n as u64),
+            )),
+            Arc::new(UInt64Vector::from_iter_values(
+                std::iter::repeat(0).take(num_rows),
+            )),
+            Arc::new(UInt8Vector::from_iter_values(
+                std::iter::repeat(1).take(num_rows),
+            )),
+            vec![
+                BatchColumn {
+                    column_id: 1,
+                    data: vec_english_sensitive.to_vector(),
+                },
+                BatchColumn {
+                    column_id: 2,
+                    data: vec_english_insensitive.to_vector(),
+                },
+                BatchColumn {
+                    column_id: 3,
+                    data: vec_chinese.to_vector(),
+                },
+            ],
+        )
+        .unwrap()
+    }
+
+    async fn build_applier_factory(
+        prefix: &str,
+        rows: &[(
+            Option<&str>, // text_english_case_sensitive
+            Option<&str>, // text_english_case_insensitive
+            Option<&str>, // text_chinese
+        )],
+    ) -> impl Fn(Vec<(ColumnId, &str)>) -> BoxFuture<'static, BTreeSet<RowId>> {
+        let (d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
+        let region_dir = "region0".to_string();
+        let sst_file_id = FileId::random();
+        let file_path = location::index_file_path(&region_dir, sst_file_id);
+        let object_store = mock_object_store();
+        let region_metadata = mock_region_metadata();
+        let intm_mgr = new_intm_mgr(d.path().to_string_lossy()).await;
+
+        let mut indexer = FulltextIndexer::new(
+            &region_metadata.region_id,
+            &sst_file_id,
+            &intm_mgr,
+            &region_metadata,
+            true,
+            1024,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let batch = new_batch(rows);
+        indexer.update(&batch).await.unwrap();
+
+        let puffin_manager = factory.build(object_store.clone());
+        let mut writer = puffin_manager.writer(&file_path).await.unwrap();
+        let _ = indexer.finish(&mut writer).await.unwrap();
+        writer.finish().await.unwrap();
+
+        move |queries| {
+            let _d = &d;
+            let applier = FulltextIndexApplier::new(
+                region_dir.clone(),
+                object_store.clone(),
+                queries
+                    .into_iter()
+                    .map(|(a, b)| (a, b.to_string()))
+                    .collect(),
+                factory.clone(),
+            );
+
+            async move { applier.apply(sst_file_id).await.unwrap() }.boxed()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fulltext_index_basic() {
+        let applier_factory = build_applier_factory(
+            "test_fulltext_index_basic_",
+            &[
+                (Some("hello"), None, Some("你好")),
+                (Some("world"), Some("world"), None),
+                (None, Some("World"), Some("世界")),
+                (
+                    Some("Hello, World"),
+                    Some("Hello, World"),
+                    Some("你好，世界"),
+                ),
+            ],
+        )
+        .await;
+
+        let row_ids = applier_factory(vec![(1, "hello")]).await;
+        assert_eq!(row_ids, vec![0].into_iter().collect());
+
+        let row_ids = applier_factory(vec![(1, "world")]).await;
+        assert_eq!(row_ids, vec![1].into_iter().collect());
+
+        let row_ids = applier_factory(vec![(2, "hello")]).await;
+        assert_eq!(row_ids, vec![3].into_iter().collect());
+
+        let row_ids = applier_factory(vec![(2, "world")]).await;
+        assert_eq!(row_ids, vec![1, 2, 3].into_iter().collect());
+
+        let row_ids = applier_factory(vec![(3, "你好")]).await;
+        assert_eq!(row_ids, vec![0, 3].into_iter().collect());
+
+        let row_ids = applier_factory(vec![(3, "世界")]).await;
+        assert_eq!(row_ids, vec![2, 3].into_iter().collect());
+    }
+
+    #[tokio::test]
+    async fn test_fulltext_index_multi_columns() {
+        let applier_factory = build_applier_factory(
+            "test_fulltext_index_multi_columns_",
+            &[
+                (Some("hello"), None, Some("你好")),
+                (Some("world"), Some("world"), None),
+                (None, Some("World"), Some("世界")),
+                (
+                    Some("Hello, World"),
+                    Some("Hello, World"),
+                    Some("你好，世界"),
+                ),
+            ],
+        )
+        .await;
+
+        let row_ids = applier_factory(vec![(1, "hello"), (3, "你好")]).await;
+        assert_eq!(row_ids, vec![0].into_iter().collect());
+
+        let row_ids = applier_factory(vec![(1, "world"), (3, "世界")]).await;
+        assert_eq!(row_ids, vec![].into_iter().collect());
+
+        let row_ids = applier_factory(vec![(2, "world"), (3, "世界")]).await;
+        assert_eq!(row_ids, vec![2, 3].into_iter().collect());
+    }
 }

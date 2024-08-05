@@ -125,7 +125,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
-| logical_plan after OrderHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesNormalize: offset=[0], time index=[j], filter NaN: [false]_|
 |_|_PromSeriesDivide: tags=["k"]_|

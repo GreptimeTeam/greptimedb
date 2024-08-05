@@ -21,8 +21,8 @@ use object_store::{FuturesAsyncReader, FuturesAsyncWriter, ObjectStore};
 use puffin::error::{self as puffin_error, Result as PuffinResult};
 use puffin::puffin_manager::file_accessor::PuffinFileAccessor;
 use puffin::puffin_manager::fs_puffin_manager::FsPuffinManager;
-use puffin::puffin_manager::stager::{BoundedStager, FsBlobGuard};
-use puffin::puffin_manager::{BlobGuard, PuffinManager};
+use puffin::puffin_manager::stager::BoundedStager;
+use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 
 use crate::error::{PuffinInitStagerSnafu, Result};
@@ -35,10 +35,13 @@ use crate::sst::index::store::{self, InstrumentedStore};
 type InstrumentedAsyncRead = store::InstrumentedAsyncRead<'static, FuturesAsyncReader>;
 type InstrumentedAsyncWrite = store::InstrumentedAsyncWrite<'static, FuturesAsyncWriter>;
 
-pub(crate) type BlobReader = <Arc<FsBlobGuard> as BlobGuard>::Reader;
-pub(crate) type SstPuffinWriter = <SstPuffinManager as PuffinManager>::Writer;
 pub(crate) type SstPuffinManager =
     FsPuffinManager<Arc<BoundedStager>, ObjectStorePuffinFileAccessor>;
+pub(crate) type SstPuffinReader = <SstPuffinManager as PuffinManager>::Reader;
+pub(crate) type SstPuffinWriter = <SstPuffinManager as PuffinManager>::Writer;
+pub(crate) type SstPuffinBlob = <SstPuffinReader as PuffinReader>::Blob;
+pub(crate) type SstPuffinDir = <SstPuffinReader as PuffinReader>::Dir;
+pub(crate) type BlobReader = <SstPuffinBlob as BlobGuard>::Reader;
 
 const STAGING_DIR: &str = "staging";
 
@@ -92,7 +95,7 @@ impl PuffinManagerFactory {
         let tempdir = common_test_util::temp_dir::create_temp_dir(prefix);
 
         let f = Self::new(tempdir.path().to_path_buf(), 1024, None);
-        let factory = common_runtime::block_on_bg(f).unwrap();
+        let factory = common_runtime::block_on_global(f).unwrap();
 
         (tempdir, factory)
     }

@@ -13,6 +13,7 @@ Affected Rows: 3
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 10, '5s') test;
 
 +-+-+-+
@@ -31,7 +32,7 @@ TQL ANALYZE (0, 10, '5s') test;
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: j@1 >= -300000 AND j@1 <= 310000 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_SeqScan: partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -43,6 +44,7 @@ TQL ANALYZE (0, 10, '5s') test;
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 10, '1s', '2s') test;
 
 +-+-+-+
@@ -61,7 +63,7 @@ TQL ANALYZE (0, 10, '1s', '2s') test;
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: j@1 >= -2000 AND j@1 <= 12000 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_SeqScan: partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -72,6 +74,7 @@ TQL ANALYZE (0, 10, '1s', '2s') test;
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '10 seconds'::interval, '5s') test;
 
 +-+-+-+
@@ -90,7 +93,7 @@ TQL ANALYZE ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: j@1 >= -300000 AND j@1 <= 310000 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_SeqScan: partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -103,6 +106,7 @@ TQL ANALYZE ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (Duration.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE VERBOSE (0, 10, '5s') test;
 
 +-+-+-+
@@ -121,7 +125,7 @@ TQL ANALYZE VERBOSE (0, 10, '5s') test;
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: j@1 >= -300000 AND j@1 <= 310000 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_SeqScan: partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+

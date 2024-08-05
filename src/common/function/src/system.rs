@@ -14,6 +14,7 @@
 
 mod build;
 mod database;
+mod pg_catalog;
 mod procedure_state;
 mod timezone;
 mod version;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 
 use build::BuildFunction;
 use database::DatabaseFunction;
+use pg_catalog::PGCatalogFunction;
 use procedure_state::ProcedureStateFunction;
 use timezone::TimezoneFunction;
 use version::VersionFunction;
@@ -37,5 +39,6 @@ impl SystemFunction {
         registry.register(Arc::new(DatabaseFunction));
         registry.register(Arc::new(TimezoneFunction));
         registry.register(Arc::new(ProcedureStateFunction));
+        PGCatalogFunction::register(registry);
     }
 }

@@ -1,12 +1,4 @@
 -- From: https://github.com/duckdb/duckdb/blob/main/test/sql/catalog/view/test_view.test --
-CREATE DATABASE schema_for_view_test;
-
-Affected Rows: 1
-
-USE schema_for_view_test;
-
-Affected Rows: 0
-
 CREATE TABLE t1(i TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
@@ -58,13 +50,47 @@ Error: 1004(InvalidArguments), Invalid SQL, error: column count mismatch, column
 
 CREATE VIEW v1 AS SELECT * FROM dontexist;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.schema_for_view_test.dontexist
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.dontexist
 
-USE public;
+SHOW VIEWS;
+
++-------+
+| Views |
++-------+
+| v1    |
++-------+
+
+DROP VIEW v1;
 
 Affected Rows: 0
 
-DROP DATABASE schema_for_view_test;
+SELECT * FROM v1;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.v1
+
+--- view not exists ---
+DROP VIEW v2;
+
+Error: 4001(TableNotFound), Table not found: greptime.public.v2
+
+DROP VIEW IF EXISTS v2;
 
 Affected Rows: 0
+
+DROP TABLE t1;
+
+Affected Rows: 0
+
+SHOW TABLES;
+
++---------+
+| Tables  |
++---------+
+| numbers |
++---------+
+
+SHOW VIEWS;
+
+++
+++
 

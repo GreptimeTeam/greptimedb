@@ -17,7 +17,7 @@ futures.workspace = true
 lazy_static.workspace = true
 md5 = "0.7"
 moka = { workspace = true, features = ["future"] }
-opendal = { version = "0.47", features = [
+opendal = { version = "0.48", features = [
     "layers-tracing",
     "services-azblob",
     "services-fs",

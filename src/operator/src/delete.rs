@@ -134,7 +134,7 @@ impl Deleter {
             .map(|(peer, deletes)| {
                 let request = request_factory.build_delete(deletes);
                 let node_manager = self.node_manager.clone();
-                common_runtime::spawn_write(async move {
+                common_runtime::spawn_global(async move {
                     node_manager
                         .datanode(&peer)
                         .await

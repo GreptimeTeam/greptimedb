@@ -20,14 +20,14 @@ use axum::http;
 use http_body::Body;
 use hyper::{Request, StatusCode};
 use servers::http::authorize::inner_auth;
-use session::context::QueryContextRef;
+use session::context::QueryContext;
 
 #[tokio::test]
 async fn test_http_auth() {
     // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
     let req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
     let req = inner_auth(None, req).await.unwrap();
-    let ctx: &QueryContextRef = req.extensions().get().unwrap();
+    let ctx: &QueryContext = req.extensions().get().unwrap();
     let user_info = ctx.current_user();
     let default = auth::userinfo_by_name(None);
     assert_eq!(default.username(), user_info.username());
@@ -38,7 +38,7 @@ async fn test_http_auth() {
     // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
     let req = mock_http_request(Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="), None).unwrap();
     let req = inner_auth(mock_user_provider.clone(), req).await.unwrap();
-    let ctx: &QueryContextRef = req.extensions().get().unwrap();
+    let ctx: &QueryContext = req.extensions().get().unwrap();
     let user_info = ctx.current_user();
     let default = auth::userinfo_by_name(None);
     assert_eq!(default.username(), user_info.username());
@@ -79,7 +79,7 @@ async fn test_schema_validating() {
     )
     .unwrap();
     let req = inner_auth(mock_user_provider.clone(), req).await.unwrap();
-    let ctx: &QueryContextRef = req.extensions().get().unwrap();
+    let ctx: &QueryContext = req.extensions().get().unwrap();
     let user_info = ctx.current_user();
     let default = auth::userinfo_by_name(None);
     assert_eq!(default.username(), user_info.username());

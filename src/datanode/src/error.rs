@@ -78,13 +78,6 @@ pub enum Error {
         source: common_query::error::Error,
     },
 
-    #[snafu(display("Incorrect internal state: {}", state))]
-    IncorrectInternalState {
-        state: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Catalog not found: {}", name))]
     CatalogNotFound {
         name: String,
@@ -436,6 +429,10 @@ impl ErrorExt for Error {
             | MissingNodeId { .. }
             | ColumnNoneDefaultValue { .. }
             | MissingWalDirConfig { .. }
+            | Catalog { .. }
+            | MissingRequiredField { .. }
+            | RegionEngineNotFound { .. }
+            | ParseAddr { .. }
             | MissingKvBackend { .. }
             | TomlFormat { .. } => StatusCode::InvalidArguments,
 
@@ -445,17 +442,9 @@ impl ErrorExt for Error {
 
             AsyncTaskExecute { source, .. } => source.status_code(),
 
-            // TODO(yingwen): Further categorize http error.
-            ParseAddr { .. }
-            | CreateDir { .. }
-            | RemoveDir { .. }
-            | Catalog { .. }
-            | MissingRequiredField { .. }
-            | IncorrectInternalState { .. }
-            | ShutdownInstance { .. }
-            | RegionEngineNotFound { .. }
-            | UnsupportedOutput { .. }
-            | DataFusion { .. } => StatusCode::Internal,
+            CreateDir { .. } | RemoveDir { .. } | ShutdownInstance { .. } | DataFusion { .. } => {
+                StatusCode::Internal
+            }
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,
@@ -468,9 +457,9 @@ impl ErrorExt for Error {
             OpenLogStore { source, .. } => source.status_code(),
             RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
             MetaClientInit { source, .. } => source.status_code(),
-            TableIdProviderNotFound { .. } | UnsupportedGrpcRequest { .. } => {
-                StatusCode::Unsupported
-            }
+            UnsupportedOutput { .. }
+            | TableIdProviderNotFound { .. }
+            | UnsupportedGrpcRequest { .. } => StatusCode::Unsupported,
             HandleRegionRequest { source, .. }
             | GetRegionMetadata { source, .. }
             | HandleBatchOpenRequest { source, .. } => source.status_code(),

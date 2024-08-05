@@ -23,29 +23,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Builder, JoinHandle, Runtime};
 
-const READ_WORKERS: usize = 8;
-const WRITE_WORKERS: usize = 8;
-const BG_WORKERS: usize = 4;
+const GLOBAL_WORKERS: usize = 8;
+const COMPACT_WORKERS: usize = 4;
 const HB_WORKERS: usize = 2;
 
 /// The options for the global runtimes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeOptions {
-    /// The number of threads to execute the runtime for global read operations.
-    pub read_rt_size: usize,
-    /// The number of threads to execute the runtime for global write operations.
-    pub write_rt_size: usize,
-    /// The number of threads to execute the runtime for global background operations.
-    pub bg_rt_size: usize,
+    /// The number of threads for the global default runtime.
+    pub global_rt_size: usize,
+    /// The number of threads to execute the runtime for compact operations.
+    pub compact_rt_size: usize,
 }
 
 impl Default for RuntimeOptions {
     fn default() -> Self {
         let cpus = num_cpus::get();
         Self {
-            read_rt_size: cpus,
-            write_rt_size: cpus,
-            bg_rt_size: usize::max(cpus / 2, 1),
+            global_rt_size: cpus,
+            compact_rt_size: usize::max(cpus / 2, 1),
         }
     }
 }
@@ -61,9 +57,8 @@ pub fn create_runtime(runtime_name: &str, thread_name: &str, worker_threads: usi
 }
 
 struct GlobalRuntimes {
-    read_runtime: Runtime,
-    write_runtime: Runtime,
-    bg_runtime: Runtime,
+    global_runtime: Runtime,
+    compact_runtime: Runtime,
     hb_runtime: Runtime,
 }
 
@@ -95,48 +90,38 @@ macro_rules! define_spawn {
 }
 
 impl GlobalRuntimes {
-    define_spawn!(read);
-    define_spawn!(write);
-    define_spawn!(bg);
+    define_spawn!(global);
+    define_spawn!(compact);
     define_spawn!(hb);
 
-    fn new(
-        read: Option<Runtime>,
-        write: Option<Runtime>,
-        background: Option<Runtime>,
-        heartbeat: Option<Runtime>,
-    ) -> Self {
+    fn new(global: Option<Runtime>, compact: Option<Runtime>, heartbeat: Option<Runtime>) -> Self {
         Self {
-            read_runtime: read
-                .unwrap_or_else(|| create_runtime("global-read", "read-worker", READ_WORKERS)),
-            write_runtime: write
-                .unwrap_or_else(|| create_runtime("global-write", "write-worker", WRITE_WORKERS)),
-            bg_runtime: background
-                .unwrap_or_else(|| create_runtime("global-bg", "bg-worker", BG_WORKERS)),
+            global_runtime: global
+                .unwrap_or_else(|| create_runtime("global", "global-worker", GLOBAL_WORKERS)),
+            compact_runtime: compact
+                .unwrap_or_else(|| create_runtime("compact", "compact-worker", COMPACT_WORKERS)),
             hb_runtime: heartbeat
-                .unwrap_or_else(|| create_runtime("global-hb", "hb-worker", HB_WORKERS)),
+                .unwrap_or_else(|| create_runtime("heartbeat", "hb-worker", HB_WORKERS)),
         }
     }
 }
 
 #[derive(Default)]
 struct ConfigRuntimes {
-    read_runtime: Option<Runtime>,
-    write_runtime: Option<Runtime>,
-    bg_runtime: Option<Runtime>,
+    global_runtime: Option<Runtime>,
+    compact_runtime: Option<Runtime>,
     hb_runtime: Option<Runtime>,
     already_init: bool,
 }
 
 static GLOBAL_RUNTIMES: Lazy<GlobalRuntimes> = Lazy::new(|| {
     let mut c = CONFIG_RUNTIMES.lock().unwrap();
-    let read = c.read_runtime.take();
-    let write = c.write_runtime.take();
-    let background = c.bg_runtime.take();
+    let global = c.global_runtime.take();
+    let compact = c.compact_runtime.take();
     let heartbeat = c.hb_runtime.take();
     c.already_init = true;
 
-    GlobalRuntimes::new(read, write, background, heartbeat)
+    GlobalRuntimes::new(global, compact, heartbeat)
 });
 
 static CONFIG_RUNTIMES: Lazy<Mutex<ConfigRuntimes>> =
@@ -152,22 +137,17 @@ pub fn init_global_runtimes(options: &RuntimeOptions) {
     START.call_once(move || {
         let mut c = CONFIG_RUNTIMES.lock().unwrap();
         assert!(!c.already_init, "Global runtimes already initialized");
-        c.read_runtime = Some(create_runtime(
-            "global-read",
-            "global-read-worker",
-            options.read_rt_size,
+        c.global_runtime = Some(create_runtime(
+            "global",
+            "global-worker",
+            options.global_rt_size,
         ));
-        c.write_runtime = Some(create_runtime(
-            "global-write",
-            "global-write-worker",
-            options.write_rt_size,
+        c.compact_runtime = Some(create_runtime(
+            "compact",
+            "compact-worker",
+            options.compact_rt_size,
         ));
-        c.bg_runtime = Some(create_runtime(
-            "global-bg",
-            "global-bg-worker",
-            options.bg_rt_size,
-        ));
-        c.hb_runtime = Some(create_runtime("global-hb", "global-hb-worker", HB_WORKERS));
+        c.hb_runtime = Some(create_runtime("hreartbeat", "hb-worker", HB_WORKERS));
     });
 }
 
@@ -205,9 +185,8 @@ macro_rules! define_global_runtime_spawn {
     };
 }
 
-define_global_runtime_spawn!(read);
-define_global_runtime_spawn!(write);
-define_global_runtime_spawn!(bg);
+define_global_runtime_spawn!(global);
+define_global_runtime_spawn!(compact);
 define_global_runtime_spawn!(hb);
 
 #[cfg(test)]
@@ -218,16 +197,13 @@ mod tests {
 
     #[test]
     fn test_spawn_block_on() {
-        let handle = spawn_read(async { 1 + 1 });
-        assert_eq!(2, block_on_read(handle).unwrap());
+        let handle = spawn_global(async { 1 + 1 });
+        assert_eq!(2, block_on_global(handle).unwrap());
 
-        let handle = spawn_write(async { 2 + 2 });
-        assert_eq!(4, block_on_write(handle).unwrap());
+        let handle = spawn_compact(async { 2 + 2 });
+        assert_eq!(4, block_on_compact(handle).unwrap());
 
-        let handle = spawn_bg(async { 3 + 3 });
-        assert_eq!(6, block_on_bg(handle).unwrap());
-
-        let handle = spawn_bg(async { 4 + 4 });
+        let handle = spawn_hb(async { 4 + 4 });
         assert_eq!(8, block_on_hb(handle).unwrap());
     }
 
@@ -253,8 +229,7 @@ mod tests {
         };
     }
 
-    define_spawn_blocking_test!(read);
-    define_spawn_blocking_test!(write);
-    define_spawn_blocking_test!(bg);
+    define_spawn_blocking_test!(global);
+    define_spawn_blocking_test!(compact);
     define_spawn_blocking_test!(hb);
 }

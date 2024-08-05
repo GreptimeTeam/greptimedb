@@ -20,7 +20,9 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::function::FunctionRef;
-use common_function::handlers::{ProcedureServiceHandlerRef, TableMutationHandlerRef};
+use common_function::handlers::{
+    FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
+};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::state::FunctionState;
 use common_query::prelude::ScalarUdf;
@@ -42,9 +44,9 @@ use table::TableRef;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
-use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
+use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::ExtensionAnalyzerRule;
@@ -83,6 +85,7 @@ impl QueryEngineState {
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
     ) -> Self {
@@ -109,7 +112,7 @@ impl QueryEngineState {
         }
 
         let mut optimizer = Optimizer::new();
-        optimizer.rules.push(Arc::new(OrderHintRule));
+        optimizer.rules.push(Arc::new(ScanHintRule));
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
@@ -138,6 +141,7 @@ impl QueryEngineState {
             function_state: Arc::new(FunctionState {
                 table_mutation_handler,
                 procedure_service_handler,
+                flow_service_handler,
             }),
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,

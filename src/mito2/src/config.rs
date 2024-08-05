@@ -39,8 +39,12 @@ const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 const GLOBAL_WRITE_BUFFER_SIZE_FACTOR: u64 = 8;
 /// Use `1/SST_META_CACHE_SIZE_FACTOR` of OS memory size as SST meta cache size in default mode
 const SST_META_CACHE_SIZE_FACTOR: u64 = 32;
+/// Use `1/INDEX_CONTENT_CACHE_SIZE_FACTOR` of OS memory size for inverted index file content cache by default.
+const INDEX_CONTENT_CACHE_SIZE_FACTOR: u64 = 32;
 /// Use `1/MEM_CACHE_SIZE_FACTOR` of OS memory size as mem cache size in default mode
 const MEM_CACHE_SIZE_FACTOR: u64 = 16;
+/// Use `1/PAGE_CACHE_SIZE_FACTOR` of OS memory size as page cache size in default mode
+const PAGE_CACHE_SIZE_FACTOR: u64 = 8;
 /// Use `1/INDEX_CREATE_MEM_THRESHOLD_FACTOR` of OS memory size as mem threshold for creating index
 const INDEX_CREATE_MEM_THRESHOLD_FACTOR: u64 = 16;
 
@@ -84,6 +88,8 @@ pub struct MitoConfig {
     pub vector_cache_size: ReadableSize,
     /// Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
     pub page_cache_size: ReadableSize,
+    /// Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.
+    pub selector_result_cache_size: ReadableSize,
     /// Whether to enable the experimental write cache.
     pub enable_experimental_write_cache: bool,
     /// File system path for write cache, defaults to `{data_home}/write_cache`.
@@ -133,6 +139,7 @@ impl Default for MitoConfig {
             sst_meta_cache_size: ReadableSize::mb(128),
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
+            selector_result_cache_size: ReadableSize::mb(512),
             enable_experimental_write_cache: false,
             experimental_write_cache_path: String::new(),
             experimental_write_cache_size: ReadableSize::mb(512),
@@ -231,12 +238,14 @@ impl MitoConfig {
         );
         // shouldn't be greater than 512MB in default mode.
         let mem_cache_size = cmp::min(sys_memory / MEM_CACHE_SIZE_FACTOR, ReadableSize::mb(512));
+        let page_cache_size = sys_memory / PAGE_CACHE_SIZE_FACTOR;
 
         self.global_write_buffer_size = global_write_buffer_size;
         self.global_write_buffer_reject_size = global_write_buffer_reject_size;
         self.sst_meta_cache_size = sst_meta_cache_size;
         self.vector_cache_size = mem_cache_size;
-        self.page_cache_size = mem_cache_size;
+        self.page_cache_size = page_cache_size;
+        self.selector_result_cache_size = mem_cache_size;
     }
 
     /// Enable experimental write cache.
@@ -371,9 +380,6 @@ pub struct InvertedIndexConfig {
     /// Memory threshold for performing an external sort during index creation.
     pub mem_threshold_on_create: MemoryThreshold,
 
-    /// Whether to compress the index data.
-    pub compress: bool,
-
     #[deprecated = "use [IndexConfig::aux_path] instead"]
     #[serde(skip_serializing)]
     pub intermediate_path: String,
@@ -388,20 +394,35 @@ pub struct InvertedIndexConfig {
     pub content_cache_size: ReadableSize,
 }
 
+impl InvertedIndexConfig {
+    /// Adjusts the cache size of [InvertedIndexConfig] according to system memory size.
+    fn adjust_cache_size(&mut self, sys_memory: ReadableSize) {
+        let content_cache_size = cmp::min(
+            sys_memory / INDEX_CONTENT_CACHE_SIZE_FACTOR,
+            ReadableSize::mb(128),
+        );
+        self.content_cache_size = content_cache_size;
+    }
+}
+
 impl Default for InvertedIndexConfig {
     #[allow(deprecated)]
     fn default() -> Self {
-        Self {
+        let mut index_config = Self {
             create_on_flush: Mode::Auto,
             create_on_compaction: Mode::Auto,
             apply_on_query: Mode::Auto,
             mem_threshold_on_create: MemoryThreshold::Auto,
-            compress: true,
             write_buffer_size: ReadableSize::mb(8),
             intermediate_path: String::new(),
-            metadata_cache_size: ReadableSize::mb(32),
-            content_cache_size: ReadableSize::mb(32),
+            metadata_cache_size: ReadableSize::mb(64),
+            content_cache_size: ReadableSize::mb(128),
+        };
+
+        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+            index_config.adjust_cache_size(sys_memory);
         }
+        index_config
     }
 }
 

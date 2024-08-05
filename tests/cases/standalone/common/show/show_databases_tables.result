@@ -5,6 +5,7 @@ SHOW DATABASES;
 +--------------------+
 | greptime_private   |
 | information_schema |
+| pg_catalog         |
 | public             |
 +--------------------+
 
@@ -15,6 +16,7 @@ SHOW FULL DATABASES;
 +--------------------+---------+
 | greptime_private   |         |
 | information_schema |         |
+| pg_catalog         |         |
 | public             |         |
 +--------------------+---------+
 
@@ -39,6 +41,7 @@ SHOW TABLES;
 | engines                               |
 | events                                |
 | files                                 |
+| flows                                 |
 | global_status                         |
 | key_column_usage                      |
 | optimizer_trace                       |
@@ -56,6 +59,7 @@ SHOW TABLES;
 | table_privileges                      |
 | tables                                |
 | triggers                              |
+| views                                 |
 +---------------------------------------+
 
 SHOW TABLES LIKE 'tables';
@@ -83,6 +87,7 @@ SHOW FULL TABLES;
 | engines                               | LOCAL TEMPORARY |
 | events                                | LOCAL TEMPORARY |
 | files                                 | LOCAL TEMPORARY |
+| flows                                 | LOCAL TEMPORARY |
 | global_status                         | LOCAL TEMPORARY |
 | key_column_usage                      | LOCAL TEMPORARY |
 | optimizer_trace                       | LOCAL TEMPORARY |
@@ -100,71 +105,78 @@ SHOW FULL TABLES;
 | table_privileges                      | LOCAL TEMPORARY |
 | tables                                | LOCAL TEMPORARY |
 | triggers                              | LOCAL TEMPORARY |
+| views                                 | LOCAL TEMPORARY |
 +---------------------------------------+-----------------+
 
--- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
+-- SQLNESS REPLACE [\u0020\-]+
 SHOW TABLE STATUS;
 
-+---------------------------------------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
-| Name                                  | Engine | Version | Row_format | Rows | Avg_row_length | Data_length | Max_data_length | Index_length | Data_free | Auto_increment | Create_time             | Update_time | Check_time | Collation | Checksum | Create_options | Comment |
-+---------------------------------------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
-| build_info                            |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| character_sets                        |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| check_constraints                     |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| cluster_info                          |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| collation_character_set_applicability |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| collations                            |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| column_privileges                     |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| column_statistics                     |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| columns                               |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| engines                               |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| events                                |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| files                                 |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| global_status                         |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| key_column_usage                      |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| optimizer_trace                       |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| parameters                            |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| partitions                            |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| profiling                             |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| referential_constraints               |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| region_peers                          |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| routines                              |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| runtime_metrics                       |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| schema_privileges                     |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| schemata                              |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| session_status                        |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| table_constraints                     |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| table_privileges                      |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| tables                                |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-| triggers                              |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-+---------------------------------------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
++++++++++++++++++++
+|Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
++++++++++++++++++++
+|build_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|character_sets||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|check_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|cluster_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|collation_character_set_applicability||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|collations||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|column_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|column_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|columns||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|engines||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|events||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|files||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|flows||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|global_status||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|key_column_usage||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|optimizer_trace||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|parameters||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|partitions||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|profiling||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|referential_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|region_peers||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|routines||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|runtime_metrics||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|schema_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|schemata||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|session_status||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|table_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|table_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|triggers||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|views||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
++++++++++++++++++++
 
--- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
+-- SQLNESS REPLACE [\u0020\-]+
 SHOW TABLE STATUS LIKE 'tables';
 
-+--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
-| Name   | Engine | Version | Row_format | Rows | Avg_row_length | Data_length | Max_data_length | Index_length | Data_free | Auto_increment | Create_time             | Update_time | Check_time | Collation | Checksum | Create_options | Comment |
-+--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
-| tables |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-+--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
++++++++++++++++++++
+|Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
++++++++++++++++++++
+|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
++++++++++++++++++++
 
--- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
+-- SQLNESS REPLACE [\u0020\-]+
 SHOW TABLE STATUS WHERE Name = 'tables';
 
-+--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
-| Name   | Engine | Version | Row_format | Rows | Avg_row_length | Data_length | Max_data_length | Index_length | Data_free | Auto_increment | Create_time             | Update_time | Check_time | Collation | Checksum | Create_options | Comment |
-+--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
-| tables |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-+--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
++++++++++++++++++++
+|Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
++++++++++++++++++++
+|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
++++++++++++++++++++
 
--- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
+-- SQLNESS REPLACE [\u0020\-]+
 SHOW TABLE STATUS from public;
 
-+---------+-------------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
-| Name    | Engine      | Version | Row_format | Rows | Avg_row_length | Data_length | Max_data_length | Index_length | Data_free | Auto_increment | Create_time             | Update_time | Check_time | Collation | Checksum | Create_options | Comment |
-+---------+-------------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
-| numbers | test_engine | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
-+---------+-------------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
++++++++++++++++++++
+|Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
++++++++++++++++++++
+|numbers|test_engine|11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
++++++++++++++++++++
 
 USE public;
 

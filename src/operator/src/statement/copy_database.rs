@@ -244,8 +244,7 @@ mod tests {
     async fn test_list_files_and_parse_table_name() {
         let dir = common_test_util::temp_dir::create_temp_dir("test_list_files_to_copy");
         let store_dir = normalize_dir(dir.path().to_str().unwrap());
-        let mut builder = Fs::default();
-        let _ = builder.root(&store_dir);
+        let builder = Fs::default().root(&store_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
         object_store.write("a.parquet", "").await.unwrap();
         object_store.write("b.parquet", "").await.unwrap();

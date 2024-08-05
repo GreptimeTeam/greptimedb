@@ -888,7 +888,6 @@ impl ErrorExt for Error {
             | Error::LockNotConfig { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
-            | Error::SchemaAlreadyExists { .. }
             | Error::PusherNotFound { .. }
             | Error::PushMessage { .. }
             | Error::MailboxClosed { .. }
@@ -903,8 +902,12 @@ impl ErrorExt for Error {
             | Error::Join { .. }
             | Error::WeightArray { .. }
             | Error::NotSetWeightArray { .. }
-            | Error::Unsupported { .. }
             | Error::PeerUnavailable { .. } => StatusCode::Internal,
+
+            Error::Unsupported { .. } => StatusCode::Unsupported,
+
+            Error::SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
+
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }

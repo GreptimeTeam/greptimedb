@@ -43,3 +43,29 @@ pub fn new_file_handle(
         file_purger,
     )
 }
+
+pub(crate) fn new_file_handles(file_specs: &[(i64, i64, u64)]) -> Vec<FileHandle> {
+    let file_purger = new_noop_file_purger();
+    file_specs
+        .iter()
+        .map(|(start, end, size)| {
+            FileHandle::new(
+                FileMeta {
+                    region_id: 0.into(),
+                    file_id: FileId::random(),
+                    time_range: (
+                        Timestamp::new_millisecond(*start),
+                        Timestamp::new_millisecond(*end),
+                    ),
+                    level: 0,
+                    file_size: *size,
+                    available_indexes: Default::default(),
+                    index_file_size: 0,
+                    num_rows: 0,
+                    num_row_groups: 0,
+                },
+                file_purger.clone(),
+            )
+        })
+        .collect()
+}

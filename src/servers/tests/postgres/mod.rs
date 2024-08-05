@@ -43,13 +43,11 @@ fn create_postgres_server(
     auth_info: Option<DatabaseAuthInfo>,
 ) -> Result<Box<dyn Server>> {
     let instance = Arc::new(create_testing_instance(table));
-    let io_runtime = Arc::new(
-        RuntimeBuilder::default()
-            .worker_threads(4)
-            .thread_name("postgres-io-handlers")
-            .build()
-            .unwrap(),
-    );
+    let io_runtime = RuntimeBuilder::default()
+        .worker_threads(4)
+        .thread_name("postgres-io-handlers")
+        .build()
+        .unwrap();
     let user_provider: Option<UserProviderRef> = if check_pwd {
         let mut provider = MockUserProvider::default();
         if let Some(info) = auth_info {

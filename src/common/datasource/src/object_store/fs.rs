@@ -19,9 +19,8 @@ use snafu::ResultExt;
 use crate::error::{BuildBackendSnafu, Result};
 
 pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
-    let mut builder = Fs::default();
-    let _ = builder.root(root);
-    let object_store = ObjectStore::new(builder)
+    let builder = Fs::default();
+    let object_store = ObjectStore::new(builder.root(root))
         .context(BuildBackendSnafu)?
         .layer(
             object_store::layers::LoggingLayer::default()
@@ -31,7 +30,7 @@ pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
                 .expect("input error level must be valid"),
         )
         .layer(object_store::layers::TracingLayer)
-        .layer(object_store::layers::PrometheusMetricsLayer)
+        .layer(object_store::layers::PrometheusMetricsLayer::new(true))
         .finish();
     Ok(object_store)
 }

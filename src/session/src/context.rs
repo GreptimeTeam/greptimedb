@@ -25,7 +25,7 @@ use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
 use common_time::timezone::parse_timezone;
 use common_time::Timezone;
 use derive_builder::Builder;
-use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
+use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
 use crate::MutableInner;
@@ -47,6 +47,9 @@ pub struct QueryContext {
     // The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
+    // Track which protocol the query comes from.
+    #[builder(default)]
+    channel: Channel,
 }
 
 impl Display for QueryContext {
@@ -94,7 +97,8 @@ impl From<&RegionRequestHeader> for QueryContext {
                 .current_catalog(ctx.current_catalog.clone())
                 .current_schema(ctx.current_schema.clone())
                 .timezone(parse_timezone(Some(&ctx.timezone)))
-                .extensions(ctx.extensions.clone());
+                .extensions(ctx.extensions.clone())
+                .channel(ctx.channel.into());
         }
         builder.build()
     }
@@ -107,6 +111,7 @@ impl From<api::v1::QueryContext> for QueryContext {
             .current_schema(ctx.current_schema)
             .timezone(parse_timezone(Some(&ctx.timezone)))
             .extensions(ctx.extensions)
+            .channel(ctx.channel.into())
             .build()
     }
 }
@@ -117,6 +122,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             current_catalog,
             mutable_inner,
             extensions,
+            channel,
             ..
         }: QueryContext,
     ) -> Self {
@@ -126,6 +132,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             current_schema: mutable_inner.schema.clone(),
             timezone: mutable_inner.timezone.to_string(),
             extensions,
+            channel: channel as u32,
         }
     }
 }
@@ -139,6 +146,14 @@ impl QueryContext {
         QueryContextBuilder::default()
             .current_catalog(catalog.to_string())
             .current_schema(schema.to_string())
+            .build()
+    }
+
+    pub fn with_channel(catalog: &str, schema: &str, channel: Channel) -> QueryContext {
+        QueryContextBuilder::default()
+            .current_catalog(catalog.to_string())
+            .current_schema(schema.to_string())
+            .channel(channel)
             .build()
     }
 
@@ -170,6 +185,10 @@ impl QueryContext {
 
     pub fn current_catalog(&self) -> &str {
         &self.current_catalog
+    }
+
+    pub fn set_current_catalog(&mut self, new_catalog: &str) {
+        self.current_catalog = new_catalog.to_string();
     }
 
     pub fn sql_dialect(&self) -> &(dyn Dialect + Send + Sync) {
@@ -224,6 +243,14 @@ impl QueryContext {
     pub fn configuration_parameter(&self) -> &ConfigurationVariables {
         &self.configuration_parameter
     }
+
+    pub fn channel(&self) -> Channel {
+        self.channel
+    }
+
+    pub fn set_channel(&mut self, channel: Channel) {
+        self.channel = channel;
+    }
 }
 
 impl QueryContextBuilder {
@@ -238,6 +265,7 @@ impl QueryContextBuilder {
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
             extensions: self.extensions.unwrap_or_default(),
             configuration_parameter: self.configuration_parameter.unwrap_or_default(),
+            channel: self.channel.unwrap_or_default(),
         }
     }
 
@@ -246,17 +274,6 @@ impl QueryContextBuilder {
             .get_or_insert_with(HashMap::new)
             .insert(key, value);
         self
-    }
-
-    pub fn from_existing(context: &QueryContext) -> QueryContextBuilder {
-        QueryContextBuilder {
-            current_catalog: Some(context.current_catalog.clone()),
-            // note that this is a shallow copy
-            mutable_inner: Some(context.mutable_inner.clone()),
-            sql_dialect: Some(context.sql_dialect.clone()),
-            extensions: Some(context.extensions.clone()),
-            configuration_parameter: Some(context.configuration_parameter.clone()),
-        }
     }
 }
 
@@ -289,10 +306,37 @@ impl ConnInfo {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default, Clone, Copy)]
+#[repr(u8)]
 pub enum Channel {
-    Mysql,
-    Postgres,
+    #[default]
+    Unknown = 0,
+
+    Mysql = 1,
+    Postgres = 2,
+    Http = 3,
+    Prometheus = 4,
+    Otlp = 5,
+    Grpc = 6,
+    Influx = 7,
+    Opentsdb = 8,
+}
+
+impl From<u32> for Channel {
+    fn from(value: u32) -> Self {
+        match value {
+            1 => Self::Mysql,
+            2 => Self::Postgres,
+            3 => Self::Http,
+            4 => Self::Prometheus,
+            5 => Self::Otlp,
+            6 => Self::Grpc,
+            7 => Self::Influx,
+            8 => Self::Opentsdb,
+
+            _ => Self::Unknown,
+        }
+    }
 }
 
 impl Channel {
@@ -300,6 +344,7 @@ impl Channel {
         match self {
             Channel::Mysql => Arc::new(MySqlDialect {}),
             Channel::Postgres => Arc::new(PostgreSqlDialect {}),
+            _ => Arc::new(GenericDialect {}),
         }
     }
 }
@@ -309,6 +354,13 @@ impl Display for Channel {
         match self {
             Channel::Mysql => write!(f, "mysql"),
             Channel::Postgres => write!(f, "postgres"),
+            Channel::Http => write!(f, "http"),
+            Channel::Prometheus => write!(f, "prometheus"),
+            Channel::Otlp => write!(f, "otlp"),
+            Channel::Grpc => write!(f, "grpc"),
+            Channel::Influx => write!(f, "influx"),
+            Channel::Opentsdb => write!(f, "opentsdb"),
+            Channel::Unknown => write!(f, "unknown"),
         }
     }
 }

@@ -17,7 +17,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
-use crate::config::kafka::common::{backoff_prefix, BackoffConfig};
+use crate::config::kafka::common::{backoff_prefix, BackoffConfig, KafkaTopicConfig};
 use crate::BROKER_ENDPOINT;
 
 /// Kafka wal configurations for datanode.
@@ -36,6 +36,9 @@ pub struct DatanodeKafkaConfig {
     /// The backoff config.
     #[serde(flatten, with = "backoff_prefix")]
     pub backoff: BackoffConfig,
+    /// The kafka topic config.
+    #[serde(flatten)]
+    pub kafka_topic: KafkaTopicConfig,
 }
 
 impl Default for DatanodeKafkaConfig {
@@ -46,6 +49,7 @@ impl Default for DatanodeKafkaConfig {
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig::default(),
+            kafka_topic: KafkaTopicConfig::default(),
         }
     }
 }

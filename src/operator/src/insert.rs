@@ -270,7 +270,12 @@ impl Inserter {
         requests: RegionInsertRequests,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
-        let write_cost = write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
+        let write_cost = write_meter!(
+            ctx.current_catalog(),
+            ctx.current_schema(),
+            requests,
+            ctx.channel() as u8
+        );
         let request_factory = RegionRequestFactory::new(RegionRequestHeader {
             tracing_context: TracingContext::from_current_span().to_w3c(),
             dbname: ctx.get_db_string(),
@@ -283,7 +288,7 @@ impl Inserter {
                 let node_manager = self.node_manager.clone();
                 let flow_tasks = flow_requests.into_iter().map(|(peer, inserts)| {
                     let node_manager = node_manager.clone();
-                    common_runtime::spawn_bg(async move {
+                    common_runtime::spawn_global(async move {
                         node_manager
                             .flownode(&peer)
                             .await
@@ -320,7 +325,7 @@ impl Inserter {
             .map(|(peer, inserts)| {
                 let node_manager = self.node_manager.clone();
                 let request = request_factory.build_insert(inserts);
-                common_runtime::spawn_write(async move {
+                common_runtime::spawn_global(async move {
                     node_manager
                         .datanode(&peer)
                         .await
@@ -358,7 +363,6 @@ impl Inserter {
                 // already know this is not source table
                 Some(None) => continue,
                 _ => {
-                    // TODO(discord9): query metasrv for actual peer address
                     let peers = self
                         .table_flownode_set_cache
                         .get(table_id)
@@ -645,9 +649,18 @@ impl Inserter {
         statement_executor: &StatementExecutor,
         create_type: AutoCreateTableType,
     ) -> Result<TableRef> {
+        let mut hint_options = vec![];
         let options: &[(&str, &str)] = match create_type {
             AutoCreateTableType::Logical(_) => unreachable!(),
-            AutoCreateTableType::Physical => &[],
+            AutoCreateTableType::Physical => {
+                if let Some(append_mode) = ctx.extension(APPEND_MODE_KEY) {
+                    hint_options.push((APPEND_MODE_KEY, append_mode));
+                }
+                if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
+                    hint_options.push((MERGE_MODE_KEY, merge_mode));
+                }
+                hint_options.as_slice()
+            }
             // Set append_mode to true for log table.
             // because log tables should keep rows with the same ts and tags.
             AutoCreateTableType::Log => &[(APPEND_MODE_KEY, "true")],

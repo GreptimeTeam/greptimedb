@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::information_schema::{
-    columns, key_column_usage, schemata, tables, CHARACTER_SETS, COLLATIONS, COLUMNS,
-    KEY_COLUMN_USAGE, SCHEMATA, TABLES,
+    columns, flows, key_column_usage, schemata, tables, CHARACTER_SETS, COLLATIONS, COLUMNS, FLOWS,
+    KEY_COLUMN_USAGE, SCHEMATA, TABLES, VIEWS,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
@@ -54,7 +54,8 @@ use sql::ast::Ident;
 use sql::parser::ParserContext;
 use sql::statements::create::{CreateFlow, CreateView, Partitions};
 use sql::statements::show::{
-    ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTableStatus, ShowTables, ShowVariables,
+    ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowTableStatus, ShowTables,
+    ShowVariables, ShowViews,
 };
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
@@ -69,6 +70,8 @@ use crate::QueryEngineRef;
 const SCHEMAS_COLUMN: &str = "Database";
 const OPTIONS_COLUMN: &str = "Options";
 const TABLES_COLUMN: &str = "Tables";
+const VIEWS_COLUMN: &str = "Views";
+const FLOWS_COLUMN: &str = "Flows";
 const FIELD_COLUMN: &str = "Field";
 const TABLE_TYPE_COLUMN: &str = "Table_type";
 const COLUMN_NAME_COLUMN: &str = "Column";
@@ -723,6 +726,69 @@ pub fn show_create_view(
         .context(error::CreateRecordBatchSnafu)?;
 
     Ok(Output::new_with_record_batches(records))
+}
+
+/// Execute [`ShowViews`] statement and return the [`Output`] if success.
+pub async fn show_views(
+    stmt: ShowViews,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let schema_name = if let Some(database) = stmt.database {
+        database
+    } else {
+        query_ctx.current_schema()
+    };
+
+    let projects = vec![(tables::TABLE_NAME, VIEWS_COLUMN)];
+    let filters = vec![
+        col(tables::TABLE_SCHEMA).eq(lit(schema_name.clone())),
+        col(tables::TABLE_CATALOG).eq(lit(query_ctx.current_catalog())),
+    ];
+    let like_field = Some(tables::TABLE_NAME);
+    let sort = vec![col(tables::TABLE_NAME).sort(true, true)];
+
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        VIEWS,
+        vec![],
+        projects,
+        filters,
+        like_field,
+        sort,
+        stmt.kind,
+    )
+    .await
+}
+
+/// Execute [`ShowFlows`] statement and return the [`Output`] if success.
+pub async fn show_flows(
+    stmt: ShowFlows,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let projects = vec![(flows::FLOW_NAME, FLOWS_COLUMN)];
+    let filters = vec![col(flows::TABLE_CATALOG).eq(lit(query_ctx.current_catalog()))];
+    let like_field = Some(flows::FLOW_NAME);
+    let sort = vec![col(flows::FLOW_NAME).sort(true, true)];
+
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        FLOWS,
+        vec![],
+        projects,
+        filters,
+        like_field,
+        sort,
+        stmt.kind,
+    )
+    .await
 }
 
 pub fn show_create_flow(

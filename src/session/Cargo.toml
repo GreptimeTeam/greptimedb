@@ -20,5 +20,6 @@ common-macro.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 derive_builder.workspace = true
+meter-core.workspace = true
 snafu.workspace = true
 sql.workspace = true

@@ -36,6 +36,8 @@ pub enum StatusCode {
     InvalidArguments = 1004,
     /// The task is cancelled.
     Cancelled = 1005,
+    /// Illegal state, can be exposed to users.
+    IllegalState = 1006,
     // ====== End of common status code ================
 
     // ====== Begin of SQL related status code =========
@@ -53,24 +55,34 @@ pub enum StatusCode {
     // ====== Begin of catalog related status code =====
     /// Table already exists.
     TableAlreadyExists = 4000,
+    /// Table not found.
     TableNotFound = 4001,
+    /// Table column not found.
     TableColumnNotFound = 4002,
+    /// Table column already exists.
     TableColumnExists = 4003,
+    /// Database not found.
     DatabaseNotFound = 4004,
+    /// Region not found.
     RegionNotFound = 4005,
+    /// Region already exists.
     RegionAlreadyExists = 4006,
+    /// Region is read-only in current state.
     RegionReadonly = 4007,
     /// Region is not in a proper state to handle specific request.
     RegionNotReady = 4008,
-    // If mutually exclusive operations are reached at the same time,
-    // only one can be executed, another one will get region busy.
+    /// Region is temporarily in busy state.
     RegionBusy = 4009,
+    /// Table is temporarily unable to handle the request.
+    TableUnavailable = 4010,
+    /// Database already exists.
+    DatabaseAlreadyExists = 4011,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
-    /// Storage is temporarily unable to handle the request
+    /// Storage is temporarily unable to handle the request.
     StorageUnavailable = 5000,
-    /// Request is outdated, e.g., version mismatch
+    /// Request is outdated, e.g., version mismatch.
     RequestOutdated = 5001,
     // ====== End of storage related status code =======
 
@@ -78,24 +90,24 @@ pub enum StatusCode {
     /// Runtime resources exhausted, like creating threads failed.
     RuntimeResourcesExhausted = 6000,
 
-    /// Rate limit exceeded
+    /// Rate limit exceeded.
     RateLimited = 6001,
     // ====== End of server related status code =======
 
     // ====== Begin of auth related status code =====
-    /// User not exist
+    /// User not exist.
     UserNotFound = 7000,
-    /// Unsupported password type
+    /// Unsupported password type.
     UnsupportedPasswordType = 7001,
-    /// Username and password does not match
+    /// Username and password does not match.
     UserPasswordMismatch = 7002,
-    /// Not found http authorization header
+    /// Not found http authorization header.
     AuthHeaderNotFound = 7003,
-    /// Invalid http authorization header
+    /// Invalid http authorization header.
     InvalidAuthHeader = 7004,
-    /// Illegal request to connect catalog-schema
+    /// Illegal request to connect catalog-schema.
     AccessDenied = 7005,
-    /// User is not authorized to perform the operation
+    /// User is not authorized to perform the operation.
     PermissionDenied = 7006,
     // ====== End of auth related status code =====
 
@@ -118,15 +130,18 @@ impl StatusCode {
             | StatusCode::RuntimeResourcesExhausted
             | StatusCode::Internal
             | StatusCode::RegionNotReady
+            | StatusCode::TableUnavailable
             | StatusCode::RegionBusy => true,
 
             StatusCode::Success
             | StatusCode::Unknown
             | StatusCode::Unsupported
+            | StatusCode::IllegalState
             | StatusCode::Unexpected
             | StatusCode::InvalidArguments
             | StatusCode::Cancelled
             | StatusCode::InvalidSyntax
+            | StatusCode::DatabaseAlreadyExists
             | StatusCode::PlanQuery
             | StatusCode::EngineExecuteQuery
             | StatusCode::TableAlreadyExists
@@ -159,6 +174,7 @@ impl StatusCode {
             | StatusCode::Unexpected
             | StatusCode::Internal
             | StatusCode::Cancelled
+            | StatusCode::IllegalState
             | StatusCode::EngineExecuteQuery
             | StatusCode::StorageUnavailable
             | StatusCode::RuntimeResourcesExhausted => true,
@@ -181,6 +197,8 @@ impl StatusCode {
             | StatusCode::DatabaseNotFound
             | StatusCode::RateLimited
             | StatusCode::UserNotFound
+            | StatusCode::TableUnavailable
+            | StatusCode::DatabaseAlreadyExists
             | StatusCode::UnsupportedPasswordType
             | StatusCode::UserPasswordMismatch
             | StatusCode::AuthHeaderNotFound
@@ -241,6 +259,7 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         StatusCode::Unknown => Code::Unknown,
         StatusCode::Unsupported => Code::Unimplemented,
         StatusCode::Unexpected
+        | StatusCode::IllegalState
         | StatusCode::Internal
         | StatusCode::PlanQuery
         | StatusCode::EngineExecuteQuery => Code::Internal,
@@ -251,6 +270,7 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         StatusCode::TableAlreadyExists
         | StatusCode::TableColumnExists
         | StatusCode::RegionAlreadyExists
+        | StatusCode::DatabaseAlreadyExists
         | StatusCode::FlowAlreadyExists => Code::AlreadyExists,
         StatusCode::TableNotFound
         | StatusCode::RegionNotFound
@@ -258,7 +278,9 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::DatabaseNotFound
         | StatusCode::UserNotFound
         | StatusCode::FlowNotFound => Code::NotFound,
-        StatusCode::StorageUnavailable | StatusCode::RegionNotReady => Code::Unavailable,
+        StatusCode::TableUnavailable
+        | StatusCode::StorageUnavailable
+        | StatusCode::RegionNotReady => Code::Unavailable,
         StatusCode::RuntimeResourcesExhausted
         | StatusCode::RateLimited
         | StatusCode::RegionBusy => Code::ResourceExhausted,

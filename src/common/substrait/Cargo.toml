@@ -23,7 +23,7 @@ snafu.workspace = true
 
 [dependencies.substrait_proto]
 package = "substrait"
-version = "0.17"
+version = "0.37"
 
 [dev-dependencies]
 datatypes.workspace = true

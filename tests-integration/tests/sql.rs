@@ -213,15 +213,14 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .fetch_all(&pool)
         .await;
     assert!(query_re.is_err());
+    let err = query_re.unwrap_err();
+    common_telemetry::info!("Error is {}", err);
     assert_eq!(
-        query_re
-            .err()
-            .unwrap()
-            .into_database_error()
+        err.into_database_error()
             .unwrap()
             .downcast::<MySqlDatabaseError>()
-            .code(),
-        Some("22007")
+            .number(),
+        1210,
     );
 
     let _ = sqlx::query("delete from demo")
@@ -470,7 +469,7 @@ pub async fn test_postgres_bytea(store_type: StorageType) {
         .await
         .unwrap();
     let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
-        match &mess[0] {
+        match &mess[1] {
             SimpleQueryMessage::Row(row) => row.get(0).unwrap().to_string(),
             _ => unreachable!(),
         }
@@ -596,9 +595,9 @@ pub async fn test_postgres_datestyle(store_type: StorageType) {
         .expect("INSERT INTO dt_test ERROR");
 
     let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
-        match &mess[0] {
+        match &mess[1] {
             SimpleQueryMessage::Row(row) => row.get(0).unwrap().to_string(),
-            _ => unreachable!(),
+            _ => unreachable!("Unexpected messages: {:?}", mess),
         }
     };
 
@@ -760,7 +759,7 @@ pub async fn test_postgres_timezone(store_type: StorageType) {
     });
 
     let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
-        match &mess[0] {
+        match &mess[1] {
             SimpleQueryMessage::Row(row) => row.get(0).unwrap().to_string(),
             _ => unreachable!(),
         }

@@ -28,16 +28,17 @@ use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
-use crate::error::{ApplyIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
+use crate::error::{ApplyInvertedIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::FileId;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
+use crate::sst::index::TYPE_INVERTED_INDEX;
 use crate::sst::location;
 
-/// The [`SstIndexApplier`] is responsible for applying predicates to the provided SST files
+/// `InvertedIndexApplier` is responsible for applying predicates to the provided SST files
 /// and returning the relevant row group ids for further scan.
-pub(crate) struct SstIndexApplier {
+pub(crate) struct InvertedIndexApplier {
     /// The root directory of the region.
     region_dir: String,
 
@@ -61,10 +62,10 @@ pub(crate) struct SstIndexApplier {
     inverted_index_cache: Option<InvertedIndexCacheRef>,
 }
 
-pub(crate) type SstIndexApplierRef = Arc<SstIndexApplier>;
+pub(crate) type InvertedIndexApplierRef = Arc<InvertedIndexApplier>;
 
-impl SstIndexApplier {
-    /// Creates a new [`SstIndexApplier`].
+impl InvertedIndexApplier {
+    /// Creates a new `InvertedIndexApplier`.
     pub fn new(
         region_dir: String,
         region_id: RegionId,
@@ -89,7 +90,9 @@ impl SstIndexApplier {
 
     /// Applies predicates to the provided SST file id and returns the relevant row group ids
     pub async fn apply(&self, file_id: FileId) -> Result<ApplyOutput> {
-        let _timer = INDEX_APPLY_ELAPSED.start_timer();
+        let _timer = INDEX_APPLY_ELAPSED
+            .with_label_values(&[TYPE_INVERTED_INDEX])
+            .start_timer();
 
         let context = SearchContext {
             // Encountering a non-existing column indicates that it doesn't match predicates.
@@ -115,13 +118,13 @@ impl SstIndexApplier {
             self.index_applier
                 .apply(context, &mut index_reader)
                 .await
-                .context(ApplyIndexSnafu)
+                .context(ApplyInvertedIndexSnafu)
         } else {
             let mut index_reader = InvertedIndexBlobReader::new(blob);
             self.index_applier
                 .apply(context, &mut index_reader)
                 .await
-                .context(ApplyIndexSnafu)
+                .context(ApplyInvertedIndexSnafu)
         }
     }
 
@@ -169,7 +172,7 @@ impl SstIndexApplier {
     }
 }
 
-impl Drop for SstIndexApplier {
+impl Drop for InvertedIndexApplier {
     fn drop(&mut self) {
         INDEX_APPLY_MEMORY_USAGE.sub(self.index_applier.memory_usage() as i64);
     }
@@ -212,7 +215,7 @@ mod tests {
             })
         });
 
-        let sst_index_applier = SstIndexApplier::new(
+        let sst_index_applier = InvertedIndexApplier::new(
             region_dir.clone(),
             RegionId::new(0, 0),
             object_store,
@@ -254,7 +257,7 @@ mod tests {
         mock_index_applier.expect_memory_usage().returning(|| 100);
         mock_index_applier.expect_apply().never();
 
-        let sst_index_applier = SstIndexApplier::new(
+        let sst_index_applier = InvertedIndexApplier::new(
             region_dir.clone(),
             RegionId::new(0, 0),
             object_store,
