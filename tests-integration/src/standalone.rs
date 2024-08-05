@@ -156,6 +156,7 @@ impl GreptimeDbStandaloneBuilder {
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
+            flow_metadata_manager.clone(),
         );
         let flownode = Arc::new(flow_builder.build().await.unwrap());
 
