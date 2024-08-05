@@ -2,21 +2,6 @@
 ## +toml2docs:none-default
 default_timezone = "UTC"
 
-## The runtime options.
-[runtime]
-## The number of threads to execute the runtime for global read operations.
-global_rt_size = 8
-## The number of threads to execute the runtime for global write operations.
-compact_rt_size = 4
-
-## The heartbeat options.
-[heartbeat]
-## Interval for sending heartbeat messages to the metasrv.
-interval = "18s"
-
-## Interval for retrying to send heartbeat messages to the metasrv.
-retry_interval = "3s"
-
 ## The HTTP server options.
 [http]
 ## The address to bind the HTTP server.
@@ -127,6 +112,21 @@ enable = true
 enable = true
 ## Whether to store the data from Prometheus remote write in metric engine.
 with_metric_engine = true
+
+## The runtime options.
+[runtime]
+## The number of threads to execute the runtime for global read operations.
+global_rt_size = 8
+## The number of threads to execute the runtime for global write operations.
+compact_rt_size = 4
+
+## The heartbeat options.
+[heartbeat]
+## Interval for sending heartbeat messages to the metasrv.
+interval = "18s"
+
+## Interval for retrying to send heartbeat messages to the metasrv.
+retry_interval = "3s"
 
 ## The metasrv client options.
 [meta_client]

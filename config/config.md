@@ -169,12 +169,6 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `default_timezone` | String | `None` | The default timezone of the server. |
-| `runtime` | -- | -- | The runtime options. |
-| `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
-| `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
-| `heartbeat` | -- | -- | The heartbeat options. |
-| `heartbeat.interval` | String | `18s` | Interval for sending heartbeat messages to the metasrv. |
-| `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `30s` | HTTP request timeout. Set to 0 to disable timeout. |
@@ -213,6 +207,12 @@
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
+| `runtime` | -- | -- | The runtime options. |
+| `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
+| `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
+| `heartbeat` | -- | -- | The heartbeat options. |
+| `heartbeat.interval` | String | `18s` | Interval for sending heartbeat messages to the metasrv. |
+| `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
@@ -324,6 +324,10 @@
 | `rpc_runtime_size` | Integer | `None` | Deprecated, use `grpc.runtime_size` instead. |
 | `rpc_max_recv_message_size` | String | `None` | Deprecated, use `grpc.rpc_max_recv_message_size` instead. |
 | `rpc_max_send_message_size` | String | `None` | Deprecated, use `grpc.rpc_max_send_message_size` instead. |
+| `http` | -- | -- | The HTTP server options. |
+| `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
+| `http.timeout` | String | `30s` | HTTP request timeout. Set to 0 to disable timeout. |
+| `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:3001` | The address to bind the gRPC server. |
 | `grpc.hostname` | String | `127.0.0.1` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |

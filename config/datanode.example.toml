@@ -39,6 +39,17 @@ rpc_max_recv_message_size = "512MB"
 ## +toml2docs:none-default
 rpc_max_send_message_size = "512MB"
 
+## The HTTP server options.
+[http]
+## The address to bind the HTTP server.
+addr = "127.0.0.1:4000"
+## HTTP request timeout. Set to 0 to disable timeout.
+timeout = "30s"
+## HTTP request body limit.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Set to 0 to disable limit.
+body_limit = "64MB"
+
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.
