@@ -469,7 +469,7 @@ pub async fn test_postgres_bytea(store_type: StorageType) {
         .await
         .unwrap();
     let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
-        match &mess[0] {
+        match &mess[1] {
             SimpleQueryMessage::Row(row) => row.get(0).unwrap().to_string(),
             _ => unreachable!(),
         }
@@ -595,9 +595,9 @@ pub async fn test_postgres_datestyle(store_type: StorageType) {
         .expect("INSERT INTO dt_test ERROR");
 
     let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
-        match &mess[0] {
+        match &mess[1] {
             SimpleQueryMessage::Row(row) => row.get(0).unwrap().to_string(),
-            _ => unreachable!(),
+            _ => unreachable!("Unexpected messages: {:?}", mess),
         }
     };
 
@@ -759,7 +759,7 @@ pub async fn test_postgres_timezone(store_type: StorageType) {
     });
 
     let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
-        match &mess[0] {
+        match &mess[1] {
             SimpleQueryMessage::Row(row) => row.get(0).unwrap().to_string(),
             _ => unreachable!(),
         }
