@@ -290,7 +290,7 @@ impl FlownodeBuilder {
         );
 
         if let Err(err) = self.recover_flows(&manager).await {
-            common_telemetry::error!("failed to recover flows: {:?}", err);
+            common_telemetry::error!(err; "Failed to recover flows");
         }
 
         let server = FlownodeServer::new(FlowService::new(manager.clone()));
