@@ -19,6 +19,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_config::define_mem_size_enum;
 use common_telemetry::warn;
 use object_store::util::join_dir;
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,30 @@ const MEM_CACHE_SIZE_FACTOR: u64 = 16;
 const PAGE_CACHE_SIZE_FACTOR: u64 = 8;
 /// Use `1/INDEX_CREATE_MEM_THRESHOLD_FACTOR` of OS memory size as mem threshold for creating index
 const INDEX_CREATE_MEM_THRESHOLD_FACTOR: u64 = 16;
+
+define_mem_size_enum!(
+    /// Global write buffer size threshold to trigger flush.
+    GlobalWriteBufferSize, GLOBAL_WRITE_BUFFER_SIZE_FACTOR, ReadableSize::gb(1), Some(ReadableSize::gb(1)));
+
+define_mem_size_enum!(
+    /// Global write buffer size threshold to reject write requests.
+    GlobalWriteBufferRejectSize, GLOBAL_WRITE_BUFFER_SIZE_FACTOR/2, ReadableSize::gb(2), Some(ReadableSize::gb(2)));
+
+define_mem_size_enum!(
+    /// Cache size for SST metadata.
+    SstMetaCacheSize, SST_META_CACHE_SIZE_FACTOR, ReadableSize::mb(128), Some(ReadableSize::mb(128)));
+
+define_mem_size_enum!(
+    /// Cache size for vectors and arrow arrays.
+    VectorCacheSize, MEM_CACHE_SIZE_FACTOR, ReadableSize::mb(512), Some(ReadableSize::mb(512)));
+
+define_mem_size_enum!(
+    /// Cache size for time series selector (e.g. `last_value()`).
+    SelectorResultCacheSize, MEM_CACHE_SIZE_FACTOR, ReadableSize::mb(512), Some(ReadableSize::mb(512)));
+
+define_mem_size_enum!(
+    /// Cache size for pages of SST row groups.
+    PageCacheSize, PAGE_CACHE_SIZE_FACTOR, ReadableSize::mb(512), None::<ReadableSize>);
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -77,19 +102,19 @@ pub struct MitoConfig {
     #[serde(with = "humantime_serde")]
     pub auto_flush_interval: Duration,
     /// Global write buffer size threshold to trigger flush.
-    pub global_write_buffer_size: ReadableSize,
+    pub global_write_buffer_size: GlobalWriteBufferSize,
     /// Global write buffer size threshold to reject write requests.
-    pub global_write_buffer_reject_size: ReadableSize,
+    pub global_write_buffer_reject_size: GlobalWriteBufferRejectSize,
 
     // Cache configs:
     /// Cache size for SST metadata. Setting it to 0 to disable the cache.
-    pub sst_meta_cache_size: ReadableSize,
+    pub sst_meta_cache_size: SstMetaCacheSize,
     /// Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
-    pub vector_cache_size: ReadableSize,
+    pub vector_cache_size: VectorCacheSize,
     /// Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
-    pub page_cache_size: ReadableSize,
+    pub page_cache_size: PageCacheSize,
     /// Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.
-    pub selector_result_cache_size: ReadableSize,
+    pub selector_result_cache_size: SelectorResultCacheSize,
     /// Whether to enable the experimental write cache.
     pub enable_experimental_write_cache: bool,
     /// File system path for write cache, defaults to `{data_home}/write_cache`.
@@ -126,7 +151,7 @@ pub struct MitoConfig {
 
 impl Default for MitoConfig {
     fn default() -> Self {
-        let mut mito_config = MitoConfig {
+        Self {
             num_workers: divide_num_cpus(2),
             worker_channel_size: 128,
             worker_request_batch_size: 64,
@@ -134,12 +159,12 @@ impl Default for MitoConfig {
             compress_manifest: false,
             max_background_jobs: DEFAULT_MAX_BG_JOB,
             auto_flush_interval: Duration::from_secs(30 * 60),
-            global_write_buffer_size: ReadableSize::gb(1),
-            global_write_buffer_reject_size: ReadableSize::gb(2),
-            sst_meta_cache_size: ReadableSize::mb(128),
-            vector_cache_size: ReadableSize::mb(512),
-            page_cache_size: ReadableSize::mb(512),
-            selector_result_cache_size: ReadableSize::mb(512),
+            global_write_buffer_size: GlobalWriteBufferSize::default(),
+            global_write_buffer_reject_size: GlobalWriteBufferRejectSize::default(),
+            sst_meta_cache_size: SstMetaCacheSize::default(),
+            vector_cache_size: VectorCacheSize::default(),
+            page_cache_size: PageCacheSize::default(),
+            selector_result_cache_size: SelectorResultCacheSize::default(),
             enable_experimental_write_cache: false,
             experimental_write_cache_path: String::new(),
             experimental_write_cache_size: ReadableSize::mb(512),
@@ -152,14 +177,7 @@ impl Default for MitoConfig {
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),
             memtable: MemtableConfig::default(),
-        };
-
-        // Adjust buffer and cache size according to system memory if we can.
-        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
-            mito_config.adjust_buffer_and_cache_size(sys_memory);
         }
-
-        mito_config
     }
 }
 
@@ -184,8 +202,11 @@ impl MitoConfig {
             self.max_background_jobs = DEFAULT_MAX_BG_JOB;
         }
 
-        if self.global_write_buffer_reject_size <= self.global_write_buffer_size {
-            self.global_write_buffer_reject_size = self.global_write_buffer_size * 2;
+        if self.global_write_buffer_reject_size.as_bytes()
+            <= self.global_write_buffer_size.as_bytes()
+        {
+            self.global_write_buffer_reject_size =
+                ReadableSize(self.global_write_buffer_size.as_bytes() * 2).into();
             warn!(
                 "Sanitize global write buffer reject size to {}",
                 self.global_write_buffer_reject_size
@@ -221,31 +242,6 @@ impl MitoConfig {
         self.index.sanitize(data_home, &self.inverted_index)?;
 
         Ok(())
-    }
-
-    fn adjust_buffer_and_cache_size(&mut self, sys_memory: ReadableSize) {
-        // shouldn't be greater than 1G in default mode.
-        let global_write_buffer_size = cmp::min(
-            sys_memory / GLOBAL_WRITE_BUFFER_SIZE_FACTOR,
-            ReadableSize::gb(1),
-        );
-        // Use 2x of global write buffer size as global write buffer reject size.
-        let global_write_buffer_reject_size = global_write_buffer_size * 2;
-        // shouldn't be greater than 128MB in default mode.
-        let sst_meta_cache_size = cmp::min(
-            sys_memory / SST_META_CACHE_SIZE_FACTOR,
-            ReadableSize::mb(128),
-        );
-        // shouldn't be greater than 512MB in default mode.
-        let mem_cache_size = cmp::min(sys_memory / MEM_CACHE_SIZE_FACTOR, ReadableSize::mb(512));
-        let page_cache_size = sys_memory / PAGE_CACHE_SIZE_FACTOR;
-
-        self.global_write_buffer_size = global_write_buffer_size;
-        self.global_write_buffer_reject_size = global_write_buffer_reject_size;
-        self.sst_meta_cache_size = sst_meta_cache_size;
-        self.vector_cache_size = mem_cache_size;
-        self.page_cache_size = page_cache_size;
-        self.selector_result_cache_size = mem_cache_size;
     }
 
     /// Enable experimental write cache.
@@ -351,19 +347,9 @@ impl Mode {
     }
 }
 
-/// Memory threshold for performing certain actions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryThreshold {
-    /// Automatically determine the threshold based on internal criteria.
-    #[default]
-    Auto,
-    /// Unlimited memory.
-    Unlimited,
-    /// Fixed memory threshold.
-    #[serde(untagged)]
-    Size(ReadableSize),
-}
+define_mem_size_enum!(
+    /// Memory threshold for performing certain actions.
+    MemoryThreshold, INDEX_CREATE_MEM_THRESHOLD_FACTOR, ReadableSize::mb(64), None::<ReadableSize>);
 
 /// Configuration options for the inverted index.
 #[serde_as]
@@ -426,22 +412,6 @@ impl Default for InvertedIndexConfig {
     }
 }
 
-impl InvertedIndexConfig {
-    pub fn mem_threshold_on_create(&self) -> Option<usize> {
-        match self.mem_threshold_on_create {
-            MemoryThreshold::Auto => {
-                if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
-                    Some((sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as usize)
-                } else {
-                    Some(ReadableSize::mb(64).as_bytes() as usize)
-                }
-            }
-            MemoryThreshold::Unlimited => None,
-            MemoryThreshold::Size(size) => Some(size.as_bytes() as usize),
-        }
-    }
-}
-
 /// Configuration options for the full-text index.
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -467,22 +437,6 @@ impl Default for FulltextIndexConfig {
             apply_on_query: Mode::Auto,
             mem_threshold_on_create: MemoryThreshold::Auto,
             compress: true,
-        }
-    }
-}
-
-impl FulltextIndexConfig {
-    pub fn mem_threshold_on_create(&self) -> usize {
-        match self.mem_threshold_on_create {
-            MemoryThreshold::Auto => {
-                if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
-                    (sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as _
-                } else {
-                    ReadableSize::mb(64).as_bytes() as _
-                }
-            }
-            MemoryThreshold::Unlimited => usize::MAX,
-            MemoryThreshold::Size(size) => size.as_bytes() as _,
         }
     }
 }

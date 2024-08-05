@@ -14,6 +14,7 @@
 
 pub mod config;
 pub mod error;
+pub mod macros;
 pub mod utils;
 
 use common_base::readable_size::ReadableSize;

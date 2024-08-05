@@ -228,7 +228,7 @@ impl<'a> IndexerBuilder<'a> {
             self.file_id,
             self.metadata,
             self.intermediate_manager.clone(),
-            self.inverted_index_config.mem_threshold_on_create(),
+            self.inverted_index_config.mem_threshold_on_create.into(),
             segment_row_count,
             &self.index_options.inverted_index.ignore_column_ids,
         );
@@ -250,7 +250,7 @@ impl<'a> IndexerBuilder<'a> {
             return None;
         }
 
-        let mem_limit = self.fulltext_index_config.mem_threshold_on_create();
+        let mem_limit = self.fulltext_index_config.mem_threshold_on_create.into();
         let creator = FulltextIndexer::new(
             &self.metadata.region_id,
             &self.file_id,

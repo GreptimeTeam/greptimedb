@@ -178,6 +178,13 @@ impl Configurable for StandaloneOptions {
     }
 }
 
+#[allow(clippy::from_over_into)]
+impl Into<FrontendOptions> for StandaloneOptions {
+    fn into(self) -> FrontendOptions {
+        self.frontend_options()
+    }
+}
+
 impl StandaloneOptions {
     pub fn frontend_options(&self) -> FrontendOptions {
         let cloned_opts = self.clone();
@@ -510,7 +517,7 @@ impl StartCommand {
                 .build(),
         );
         let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            opts.wal.into(),
+            opts.wal.clone().into(),
             kv_backend.clone(),
         ));
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
@@ -561,7 +568,7 @@ impl StartCommand {
 
         let (tx, _rx) = broadcast::channel(1);
 
-        let servers = Services::new(fe_opts, Arc::new(frontend.clone()), plugins)
+        let servers = Services::new(opts, Arc::new(frontend.clone()), plugins)
             .build()
             .await
             .context(StartFrontendSnafu)?;
@@ -878,6 +885,9 @@ mod tests {
         let options =
             StandaloneOptions::load_layered_options(None, "GREPTIMEDB_STANDALONE").unwrap();
         let default_options = StandaloneOptions::default();
+        let json_str = serde_json::to_string(&default_options).unwrap();
+        let default_options: StandaloneOptions = serde_json::from_str(&json_str).unwrap();
+
         assert_eq!(options.mode, default_options.mode);
         assert_eq!(options.enable_telemetry, default_options.enable_telemetry);
         assert_eq!(options.http, default_options.http);

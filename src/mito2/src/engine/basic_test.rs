@@ -634,7 +634,7 @@ async fn test_cache_null_primary_key() {
     let mut env = TestEnv::new();
     let engine = env
         .create_engine(MitoConfig {
-            vector_cache_size: ReadableSize::mb(32),
+            vector_cache_size: ReadableSize::mb(32).into(),
             ..Default::default()
         })
         .await;
