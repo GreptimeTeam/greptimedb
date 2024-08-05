@@ -89,7 +89,7 @@ CREATE TABLE numbers_input_df_func (
 CREATE FLOW test_numbers_df_func
 SINK TO out_num_cnt_df_func
 AS 
-SELECT max(number) - min(number) as maxmin, date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond) as time_window FROM numbers_input_df_func GROUP BY date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond);
+SELECT max(number) - min(number) as maxmin, date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::Timestamp) as time_window FROM numbers_input_df_func GROUP BY time_window;
 
 admin flush_flow('test_numbers_df_func');
 
