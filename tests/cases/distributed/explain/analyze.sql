@@ -20,6 +20,7 @@ VALUES
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 explain analyze SELECT count(*) FROM system_metrics;
 
 drop table system_metrics;

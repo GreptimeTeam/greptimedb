@@ -16,13 +16,14 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use common_telemetry::debug;
 use datatypes::value::Value;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 
 use crate::error::{Error, InvalidQuerySnafu};
-use crate::expr::error::EvalError;
+use crate::expr::error::{EvalError, InternalSnafu};
 use crate::expr::{Id, InvalidArgumentSnafu, LocalId, ScalarExpr};
 use crate::repr::{self, value_to_internal_ts, Diff, Row};
 
@@ -587,6 +588,10 @@ pub struct MfpPlan {
 }
 
 impl MfpPlan {
+    /// Indicates if the `MfpPlan` contains temporal predicates. That is have outputs that may occur in future.
+    pub fn is_temporal(&self) -> bool {
+        !self.lower_bounds.is_empty() || !self.upper_bounds.is_empty()
+    }
     /// find `now` in `predicates` and put them into lower/upper temporal bounds for temporal filter to use
     pub fn create_from(mut mfp: MapFilterProject) -> Result<Self, Error> {
         let mut lower_bounds = Vec::new();
@@ -705,6 +710,18 @@ impl MfpPlan {
         }
 
         if Some(lower_bound) != upper_bound && !null_eval {
+            if self.mfp.mfp.projection.iter().any(|c| values.len() <= *c) {
+                debug!("values={:?}, mfp={:?}", &values, &self.mfp.mfp);
+                let err = InternalSnafu {
+                    reason: format!(
+                        "Index out of bound for mfp={:?} and values={:?}",
+                        &self.mfp.mfp, &values
+                    ),
+                }
+                .build();
+                return ret_err(err);
+            }
+            // safety: already checked that `projection` is not out of bound
             let res_row = Row::pack(self.mfp.mfp.projection.iter().map(|c| values[*c].clone()));
             let upper_opt =
                 upper_bound.map(|upper_bound| Ok((res_row.clone(), upper_bound, -diff)));

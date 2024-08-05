@@ -16,8 +16,10 @@
 
 pub mod compat;
 pub mod dedup;
+pub mod last_row;
 pub mod merge;
 pub mod projection;
+pub(crate) mod prune;
 pub(crate) mod scan_region;
 pub(crate) mod seq_scan;
 pub(crate) mod unordered_scan;
@@ -53,7 +55,7 @@ use crate::error::{
 };
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
-use crate::sst::parquet::reader::RowGroupReader;
+use crate::read::prune::PruneReader;
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -374,6 +376,19 @@ impl Batch {
         self.take_in_place(&indices)
     }
 
+    /// Returns the estimated memory size of the batch.
+    pub fn memory_size(&self) -> usize {
+        let mut size = std::mem::size_of::<Self>();
+        size += self.primary_key.len();
+        size += self.timestamps.memory_size();
+        size += self.sequences.memory_size();
+        size += self.op_types.memory_size();
+        for batch_column in &self.fields {
+            size += batch_column.data.memory_size();
+        }
+        size
+    }
+
     /// Returns ids and datatypes of fields in the [Batch] after applying the `projection`.
     pub(crate) fn projected_fields(
         metadata: &RegionMetadata,
@@ -672,8 +687,8 @@ pub enum Source {
     Iter(BoxedBatchIterator),
     /// Source from a [BoxedBatchStream].
     Stream(BoxedBatchStream),
-    /// Source from a [RowGroupReader].
-    RowGroupReader(RowGroupReader),
+    /// Source from a [PruneReader].
+    PruneReader(PruneReader),
 }
 
 impl Source {
@@ -683,7 +698,7 @@ impl Source {
             Source::Reader(reader) => reader.next_batch().await,
             Source::Iter(iter) => iter.next().transpose(),
             Source::Stream(stream) => stream.try_next().await,
-            Source::RowGroupReader(reader) => reader.next_batch().await,
+            Source::PruneReader(reader) => reader.next_batch().await,
         }
     }
 }
@@ -723,10 +738,14 @@ pub(crate) struct ScannerMetrics {
     prepare_scan_cost: Duration,
     /// Duration to build parts.
     build_parts_cost: Duration,
+    /// Duration to build the (merge) reader.
+    build_reader_cost: Duration,
     /// Duration to scan data.
     scan_cost: Duration,
     /// Duration to convert batches.
     convert_cost: Duration,
+    /// Duration while waiting for `yield`.
+    yield_cost: Duration,
     /// Duration of the scan.
     total_cost: Duration,
     /// Number of batches returned.
@@ -752,11 +771,17 @@ impl ScannerMetrics {
     /// Observes metrics on scanner finish.
     fn observe_metrics_on_finish(&self) {
         READ_STAGE_ELAPSED
+            .with_label_values(&["build_reader"])
+            .observe(self.build_reader_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
             .with_label_values(&["convert_rb"])
             .observe(self.convert_cost.as_secs_f64());
         READ_STAGE_ELAPSED
             .with_label_values(&["scan"])
             .observe(self.scan_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["yield"])
+            .observe(self.yield_cost.as_secs_f64());
         READ_STAGE_ELAPSED
             .with_label_values(&["total"])
             .observe(self.total_cost.as_secs_f64());

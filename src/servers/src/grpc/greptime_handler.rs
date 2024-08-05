@@ -14,7 +14,6 @@
 
 //! Handler for Greptime Database service. It's implemented by frontend.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use api::helper::request_type;
@@ -42,14 +41,14 @@ use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 pub struct GreptimeRequestHandler {
     handler: ServerGrpcQueryHandlerRef,
     user_provider: Option<UserProviderRef>,
-    runtime: Option<Arc<Runtime>>,
+    runtime: Option<Runtime>,
 }
 
 impl GreptimeRequestHandler {
     pub fn new(
         handler: ServerGrpcQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
-        runtime: Option<Arc<Runtime>>,
+        runtime: Option<Runtime>,
     ) -> Self {
         Self {
             handler,
@@ -59,13 +58,17 @@ impl GreptimeRequestHandler {
     }
 
     #[tracing::instrument(skip_all, fields(protocol = "grpc", request_type = get_request_type(&request)))]
-    pub(crate) async fn handle_request(&self, request: GreptimeRequest) -> Result<Output> {
+    pub(crate) async fn handle_request(
+        &self,
+        request: GreptimeRequest,
+        hints: Vec<(String, String)>,
+    ) -> Result<Output> {
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
 
         let header = request.header.as_ref();
-        let query_ctx = create_query_context(header);
+        let query_ctx = create_query_context(header, hints);
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
@@ -84,7 +87,8 @@ impl GreptimeRequestHandler {
                 .await
                 .map_err(|e| {
                     if e.status_code().should_log_error() {
-                        error!(e; "Failed to handle request");
+                        let root_error = e.root_cause().unwrap_or(&e);
+                        error!(e; "Failed to handle request, error: {}", root_error.to_string());
                     } else {
                         // Currently, we still print a debug log.
                         debug!("Failed to handle request, err: {:?}", e);
@@ -164,7 +168,10 @@ pub(crate) async fn auth(
     })
 }
 
-pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
+pub(crate) fn create_query_context(
+    header: Option<&RequestHeader>,
+    extensions: Vec<(String, String)>,
+) -> QueryContextRef {
     let (catalog, schema) = header
         .map(|header| {
             // We provide dbname field in newer versions of protos/sdks
@@ -193,12 +200,14 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
             )
         });
     let timezone = parse_timezone(header.map(|h| h.timezone.as_str()));
-    QueryContextBuilder::default()
+    let mut ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog)
         .current_schema(schema)
-        .timezone(timezone)
-        .build()
-        .into()
+        .timezone(timezone);
+    for (key, value) in extensions {
+        ctx_builder = ctx_builder.set_extension(key, value);
+    }
+    ctx_builder.build().into()
 }
 
 /// Histogram timer for handling gRPC request.

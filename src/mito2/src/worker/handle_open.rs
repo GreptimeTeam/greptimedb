@@ -26,7 +26,6 @@ use store_api::storage::RegionId;
 use crate::error::{
     ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionNotFoundSnafu, Result,
 };
-use crate::metrics::REGION_COUNT;
 use crate::region::opener::RegionOpener;
 use crate::request::OptionOutputTx;
 use crate::wal::entry_distributor::WalEntryReceiver;
@@ -56,7 +55,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .context(OpenDalSnafu)?
         {
             let result = remove_region_dir_once(&request.region_dir, object_store).await;
-            info!("Region {} is dropped, result: {:?}", region_id, result);
+            info!(
+                "Region {} is dropped, worker: {}, result: {:?}",
+                region_id, self.id, result
+            );
             return RegionNotFoundSnafu { region_id }.fail();
         }
 
@@ -84,7 +86,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             sender.send(Err(err));
             return;
         }
-        info!("Try to open region {}", region_id);
+        info!("Try to open region {}, worker: {}", region_id, self.id);
 
         // Open region from specific region dir.
         let opener = match RegionOpener::new(
@@ -112,12 +114,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let wal = self.wal.clone();
         let config = self.config.clone();
         let opening_regions = self.opening_regions.clone();
+        let region_count = self.region_count.clone();
+        let worker_id = self.id;
         opening_regions.insert_sender(region_id, sender);
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             match opener.open(&config, &wal).await {
                 Ok(region) => {
-                    info!("Region {} is opened", region_id);
-                    REGION_COUNT.inc();
+                    info!("Region {} is opened, worker: {}", region_id, worker_id);
+                    region_count.inc();
 
                     // Insert the Region into the RegionMap.
                     regions.insert_region(Arc::new(region));

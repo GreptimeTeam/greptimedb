@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::info;
+use common_time::util::current_time_millis;
 use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
@@ -36,7 +37,7 @@ use tests_fuzz::generator::create_expr::{
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    generate_random_timestamp_for_mysql, generate_random_value, replace_default,
+    generate_random_value, generate_unique_timestamp_for_mysql, replace_default,
     sort_by_primary_keys, CreateTableExpr, InsertIntoExpr,
 };
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
@@ -119,7 +120,7 @@ fn generate_insert_expr<R: Rng + 'static>(
         .table_ctx(table_ctx)
         .rows(rows)
         .value_generator(Box::new(generate_random_value))
-        .ts_value_generator(Box::new(generate_random_timestamp_for_mysql))
+        .ts_value_generator(generate_unique_timestamp_for_mysql(current_time_millis()))
         .build()
         .unwrap();
     insert_generator.generate(rng)
@@ -287,7 +288,7 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
 fuzz_target!(|input: FuzzInput| {
     common_telemetry::init_default_ut_logging();
-    common_runtime::block_on_write(async {
+    common_runtime::block_on_global(async {
         let Connections { mysql } = init_greptime_connections_via_env().await;
         let ctx = FuzzContext {
             greptime: mysql.expect("mysql connection init must be succeed"),

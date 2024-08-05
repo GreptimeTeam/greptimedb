@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use greptime_proto::v1::value::ValueData::{U16Value, U8Value};
-use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
+use greptime_proto::v1::{ColumnDataType, SemanticType};
 
 mod common;
 
@@ -40,20 +40,16 @@ transform:
     let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
     let expected_schema = vec![
-        ColumnSchema {
-            column_name: "version".to_string(),
-            datatype: ColumnDataType::Uint8.into(),
-            semantic_type: SemanticType::Field.into(),
-            datatype_extension: None,
-            options: None,
-        },
-        ColumnSchema {
-            column_name: "greptime_timestamp".to_string(),
-            datatype: ColumnDataType::TimestampNanosecond.into(),
-            semantic_type: SemanticType::Timestamp.into(),
-            datatype_extension: None,
-            options: None,
-        },
+        common::make_column_schema(
+            "version".to_string(),
+            ColumnDataType::Uint8,
+            SemanticType::Field,
+        ),
+        common::make_column_schema(
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
+        ),
     ];
 
     assert_eq!(output.schema, expected_schema);
@@ -85,20 +81,16 @@ transform:
     let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
     let expected_schema = vec![
-        ColumnSchema {
-            column_name: "version".to_string(),
-            datatype: ColumnDataType::Uint8.into(),
-            semantic_type: SemanticType::Field.into(),
-            datatype_extension: None,
-            options: None,
-        },
-        ColumnSchema {
-            column_name: "greptime_timestamp".to_string(),
-            datatype: ColumnDataType::TimestampNanosecond.into(),
-            semantic_type: SemanticType::Timestamp.into(),
-            datatype_extension: None,
-            options: None,
-        },
+        common::make_column_schema(
+            "version".to_string(),
+            ColumnDataType::Uint8,
+            SemanticType::Field,
+        ),
+        common::make_column_schema(
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
+        ),
     ];
 
     assert_eq!(output.schema, expected_schema);
@@ -125,20 +117,16 @@ transform:
     let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
     let expected_schema = vec![
-        ColumnSchema {
-            column_name: "version".to_string(),
-            datatype: ColumnDataType::Uint8.into(),
-            semantic_type: SemanticType::Field.into(),
-            datatype_extension: None,
-            options: None,
-        },
-        ColumnSchema {
-            column_name: "greptime_timestamp".to_string(),
-            datatype: ColumnDataType::TimestampNanosecond.into(),
-            semantic_type: SemanticType::Timestamp.into(),
-            datatype_extension: None,
-            options: None,
-        },
+        common::make_column_schema(
+            "version".to_string(),
+            ColumnDataType::Uint8,
+            SemanticType::Field,
+        ),
+        common::make_column_schema(
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
+        ),
     ];
 
     assert_eq!(output.schema, expected_schema);
@@ -176,27 +164,21 @@ transform:
     let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
     let expected_schema = vec![
-        ColumnSchema {
-            column_name: "version".to_string(),
-            datatype: ColumnDataType::Uint8.into(),
-            semantic_type: SemanticType::Field.into(),
-            datatype_extension: None,
-            options: None,
-        },
-        ColumnSchema {
-            column_name: "spec_version".to_string(),
-            datatype: ColumnDataType::Uint16.into(),
-            semantic_type: SemanticType::Field.into(),
-            datatype_extension: None,
-            options: None,
-        },
-        ColumnSchema {
-            column_name: "greptime_timestamp".to_string(),
-            datatype: ColumnDataType::TimestampNanosecond.into(),
-            semantic_type: SemanticType::Timestamp.into(),
-            datatype_extension: None,
-            options: None,
-        },
+        common::make_column_schema(
+            "version".to_string(),
+            ColumnDataType::Uint8,
+            SemanticType::Field,
+        ),
+        common::make_column_schema(
+            "spec_version".to_string(),
+            ColumnDataType::Uint16,
+            SemanticType::Field,
+        ),
+        common::make_column_schema(
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
+        ),
     ];
 
     assert_eq!(output.schema, expected_schema);

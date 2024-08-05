@@ -16,8 +16,12 @@ use common_base::Plugins;
 use meta_srv::error::Result;
 use meta_srv::metasrv::MetasrvOptions;
 
-pub async fn setup_metasrv_plugins(_opts: &mut MetasrvOptions) -> Result<Plugins> {
-    Ok(Plugins::new())
+#[allow(unused_variables)]
+pub async fn setup_metasrv_plugins(
+    _plugins: &mut Plugins,
+    metasrv_opts: &MetasrvOptions,
+) -> Result<()> {
+    Ok(())
 }
 
 pub async fn start_metasrv_plugins(_plugins: Plugins) -> Result<()> {

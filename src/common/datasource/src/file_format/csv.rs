@@ -185,7 +185,7 @@ impl FileFormat for CsvFormat {
         let schema_infer_max_record = self.schema_infer_max_record;
         let has_header = self.has_header;
 
-        common_runtime::spawn_blocking_read(move || {
+        common_runtime::spawn_blocking_global(move || {
             let reader = SyncIoBridge::new(decoded);
 
             let (schema, _records_read) =

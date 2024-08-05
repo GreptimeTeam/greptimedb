@@ -123,6 +123,7 @@ pub fn prepare_wal_options(
 
 #[cfg(test)]
 mod tests {
+    use common_wal::config::kafka::common::KafkaTopicConfig;
     use common_wal::config::kafka::MetasrvKafkaConfig;
     use common_wal::test_util::run_test_with_kafka_wal;
 
@@ -160,9 +161,13 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 // Creates a topic manager.
-                let config = MetasrvKafkaConfig {
+                let kafka_topic = KafkaTopicConfig {
                     replication_factor: broker_endpoints.len() as i16,
+                    ..Default::default()
+                };
+                let config = MetasrvKafkaConfig {
                     broker_endpoints,
+                    kafka_topic,
                     ..Default::default()
                 };
                 let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;

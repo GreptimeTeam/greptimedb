@@ -19,7 +19,7 @@ use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
-use common_telemetry::tracing;
+use common_telemetry::{debug, error, tracing};
 use datatypes::schema::SchemaRef;
 use futures::{future, stream, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
@@ -95,11 +95,24 @@ fn output_to_query_response<'a>(
                 )
             }
         },
-        Err(e) => Ok(Response::Error(Box::new(ErrorInfo::new(
-            "ERROR".to_string(),
-            "XX000".to_string(),
-            e.output_msg(),
-        )))),
+        Err(e) => {
+            let status_code = e.status_code();
+
+            if status_code.should_log_error() {
+                let root_error = e.root_cause().unwrap_or(&e);
+                error!(e; "Failed to handle postgres query, code: {}, db: {}, error: {}", status_code, query_ctx.get_db_string(), root_error.to_string());
+            } else {
+                debug!(
+                    "Failed to handle postgres query, code: {}, db: {}, error: {:?}",
+                    status_code,
+                    query_ctx.get_db_string(),
+                    e
+                );
+            };
+            Ok(Response::Error(Box::new(
+                PgErrorCode::from(status_code).to_err_info(e.output_msg()),
+            )))
+        }
     }
 }
 
@@ -169,10 +182,8 @@ impl QueryParser for DefaultQueryParser {
             ParserContext::create_with_dialect(sql, &PostgreSqlDialect {}, ParseOptions::default())
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         if stmts.len() != 1 {
-            Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                "ERROR".to_owned(),
-                "42P14".to_owned(),
-                "invalid_prepared_statement_definition".to_owned(),
+            Err(PgWireError::UserError(Box::new(ErrorInfo::from(
+                PgErrorCode::Ec42P14,
             ))))
         } else {
             let stmt = stmts.remove(0);

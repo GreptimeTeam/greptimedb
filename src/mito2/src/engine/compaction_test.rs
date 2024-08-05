@@ -220,7 +220,9 @@ async fn test_compaction_region_with_overlapping_delete_all() {
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
         .insert_option("compaction.twcs.max_active_window_runs", "2")
+        .insert_option("compaction.twcs.max_active_window_files", "2")
         .insert_option("compaction.twcs.max_inactive_window_runs", "2")
+        .insert_option("compaction.twcs.max_inactive_window_files", "2")
         .insert_option("compaction.twcs.time_window", "1h")
         .build();
 

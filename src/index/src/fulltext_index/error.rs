@@ -40,6 +40,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Tantivy parser error"))]
+    TantivyParser {
+        #[snafu(source)]
+        error: tantivy::query::QueryParserError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Operate on a finished creator"))]
     Finished {
         #[snafu(implicit)]
@@ -60,6 +68,8 @@ impl ErrorExt for Error {
 
         match self {
             Tantivy { .. } => StatusCode::Internal,
+            TantivyParser { .. } => StatusCode::InvalidSyntax,
+
             Io { .. } | Finished { .. } => StatusCode::Unexpected,
 
             External { source, .. } => source.status_code(),

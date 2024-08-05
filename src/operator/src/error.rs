@@ -153,6 +153,12 @@ pub enum Error {
         view_name: String,
         expected: usize,
         actual: usize,
+    },
+
+    #[snafu(display("Invalid view \"{view_name}\": {msg}"))]
+    InvalidView {
+        msg: String,
+        view_name: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -748,6 +754,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Create physical expr error"))]
+    PhysicalExpr {
+        #[snafu(source)]
+        error: common_recordbatch::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -777,11 +790,13 @@ impl ErrorExt for Error {
             | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. }
             | Error::InvalidViewName { .. }
+            | Error::InvalidView { .. }
             | Error::InvalidExpr { .. }
             | Error::ViewColumnsMismatch { .. }
             | Error::InvalidViewStmt { .. }
             | Error::ConvertIdentifier { .. }
-            | Error::InvalidPartition { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidPartition { .. }
+            | Error::PhysicalExpr { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists

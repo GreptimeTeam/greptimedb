@@ -33,6 +33,7 @@ use crate::ddl::create_view::CreateViewProcedure;
 use crate::ddl::drop_database::DropDatabaseProcedure;
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
+use crate::ddl::drop_view::DropViewProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{utils, DdlContext, ExecutorContext, ProcedureExecutor};
 use crate::error::{
@@ -50,8 +51,8 @@ use crate::rpc::ddl::DdlTask::{
 };
 use crate::rpc::ddl::{
     AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, CreateViewTask,
-    DropDatabaseTask, DropFlowTask, DropTableTask, QueryContext, SubmitDdlTaskRequest,
-    SubmitDdlTaskResponse, TruncateTableTask,
+    DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask, QueryContext,
+    SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
@@ -131,7 +132,8 @@ impl DdlManager {
             DropFlowProcedure,
             TruncateTableProcedure,
             CreateDatabaseProcedure,
-            DropDatabaseProcedure
+            DropDatabaseProcedure,
+            DropViewProcedure
         );
 
         for (type_name, loader_factory) in loaders {
@@ -306,8 +308,8 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
-    #[tracing::instrument(skip_all)]
     /// Submits and executes a drop flow task.
+    #[tracing::instrument(skip_all)]
     pub async fn submit_drop_flow_task(
         &self,
         cluster_id: ClusterId,
@@ -315,6 +317,20 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = DropFlowProcedure::new(cluster_id, drop_flow, context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    /// Submits and executes a drop view task.
+    #[tracing::instrument(skip_all)]
+    pub async fn submit_drop_view_task(
+        &self,
+        cluster_id: ClusterId,
+        drop_view: DropViewTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = DropViewProcedure::new(cluster_id, drop_view, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.submit_procedure(procedure_with_id).await
@@ -599,6 +615,28 @@ async fn handle_drop_flow_task(
     })
 }
 
+async fn handle_drop_view_task(
+    ddl_manager: &DdlManager,
+    cluster_id: ClusterId,
+    drop_view_task: DropViewTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let (id, _) = ddl_manager
+        .submit_drop_view_task(cluster_id, drop_view_task.clone())
+        .await?;
+
+    let procedure_id = id.to_string();
+    info!(
+        "View {}({}) is dropped via procedure_id {id:?}",
+        drop_view_task.table_ref(),
+        drop_view_task.view_id,
+    );
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
+        ..Default::default()
+    })
+}
+
 async fn handle_create_flow_task(
     ddl_manager: &DdlManager,
     cluster_id: ClusterId,
@@ -750,8 +788,8 @@ impl ProcedureExecutor for DdlManager {
                 CreateView(create_view_task) => {
                     handle_create_view_task(self, cluster_id, create_view_task).await
                 }
-                DropView(_create_view_task) => {
-                    todo!("implemented in the following PR");
+                DropView(drop_view_task) => {
+                    handle_drop_view_task(self, cluster_id, drop_view_task).await
                 }
             }
         }

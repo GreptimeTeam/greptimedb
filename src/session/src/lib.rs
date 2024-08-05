@@ -79,6 +79,7 @@ impl Session {
             .mutable_inner(self.mutable_inner.clone())
             .sql_dialect(self.conn_info.channel.dialect())
             .configuration_parameter(self.configuration_variables.clone())
+            .channel(self.conn_info.channel)
             .build()
             .into()
     }

@@ -2,7 +2,7 @@ name: Setup Etcd cluster
 description: Deploy Etcd cluster on Kubernetes
 inputs:
   etcd-replicas:
-    default: 3
+    default: 1
     description: "Etcd replicas"
   namespace:
     default: "etcd-cluster"

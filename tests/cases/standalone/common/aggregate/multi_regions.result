@@ -1,0 +1,108 @@
+create table t (
+    ts timestamp time index,
+    val double,
+    host string,
+    idc string,
+    primary key (host, idc),
+)
+partition on columns (host) (
+    host < '1024',
+    host >= '1024'
+);
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+explain analyze
+select sum(val) from t group by host;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[SUM(t.val)@1 as SUM(t.val)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[SUM(t.val)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[SUM(t.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file ranges) REDACTED
+|_|_|_|
+| 1_| 1_|_ProjectionExec: expr=[SUM(t.val)@1 as SUM(t.val)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[SUM(t.val)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[SUM(t.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+explain analyze
+select sum(val) from t;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[SUM(t.val)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[SUM(t.val)] REDACTED
+|_|_|_ProjectionExec: expr=[val@1 as val] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file ranges) REDACTED
+|_|_|_|
+| 1_| 1_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+explain analyze
+select sum(val) from t group by idc;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[SUM(t.val)@1 as SUM(t.val)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[SUM(t.val)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[idc@1 as idc], aggr=[SUM(t.val)] REDACTED
+|_|_|_ProjectionExec: expr=[val@1 as val, idc@3 as idc] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file ranges) REDACTED
+|_|_|_|
+| 1_| 1_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+drop table t;
+
+Affected Rows: 0
+

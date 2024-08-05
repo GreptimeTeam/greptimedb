@@ -96,12 +96,8 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     }
                 }
                 let all = prev_avail.chain(to_send).collect_vec();
-                if !all.is_empty() || !to_arrange.is_empty() {
-                    debug!(
-                        "Rendered Source All send: {} rows, not yet send: {} rows",
-                        all.len(),
-                        to_arrange.len()
-                    );
+                if !to_arrange.is_empty() {
+                    debug!("Source Operator buffered {} rows", to_arrange.len());
                 }
                 err_collector.run(|| arranged.apply_updates(now, to_arrange));
                 send.give(all);
@@ -133,9 +129,14 @@ impl<'referred, 'df> Context<'referred, 'df> {
             collection.into_inner(),
             move |_ctx, recv| {
                 let data = recv.take_inner();
+                debug!(
+                    "render_unbounded_sink: send {} rows",
+                    data.iter().map(|i| i.len()).sum::<usize>()
+                );
                 for row in data.into_iter().flat_map(|i| i.into_iter()) {
                     // if the sender is closed, stop sending
                     if sender.is_closed() {
+                        common_telemetry::error!("UnboundedSink is closed");
                         break;
                     }
                     // TODO(discord9): handling tokio error

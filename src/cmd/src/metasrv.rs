@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
+use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
@@ -233,13 +234,14 @@ impl StartCommand {
             &opts.component.tracing,
             None,
         );
-        log_versions(version!(), short_version!());
+        log_versions(version(), short_version());
 
         info!("Metasrv start command: {:#?}", self);
         info!("Metasrv options: {:#?}", opts);
 
-        let mut opts = opts.component;
-        let plugins = plugins::setup_metasrv_plugins(&mut opts)
+        let opts = opts.component;
+        let mut plugins = Plugins::new();
+        plugins::setup_metasrv_plugins(&mut plugins, &opts)
             .await
             .context(StartMetaServerSnafu)?;
 
@@ -296,7 +298,7 @@ mod tests {
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"
-            
+
             [failure_detector]
             threshold = 8.0
             min_std_deviation = "100ms"

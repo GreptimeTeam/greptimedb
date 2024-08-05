@@ -109,7 +109,7 @@ pub struct MysqlServer {
 
 impl MysqlServer {
     pub fn create_server(
-        io_runtime: Arc<Runtime>,
+        io_runtime: Runtime,
         spawn_ref: Arc<MysqlSpawnRef>,
         spawn_config: Arc<MysqlSpawnConfig>,
     ) -> Box<dyn Server> {
@@ -120,18 +120,14 @@ impl MysqlServer {
         })
     }
 
-    fn accept(
-        &self,
-        io_runtime: Arc<Runtime>,
-        stream: AbortableStream,
-    ) -> impl Future<Output = ()> {
+    fn accept(&self, io_runtime: Runtime, stream: AbortableStream) -> impl Future<Output = ()> {
         let spawn_ref = self.spawn_ref.clone();
         let spawn_config = self.spawn_config.clone();
 
         stream.for_each(move |tcp_stream| {
-            let io_runtime = io_runtime.clone();
             let spawn_ref = spawn_ref.clone();
             let spawn_config = spawn_config.clone();
+            let io_runtime = io_runtime.clone();
 
             async move {
                 match tcp_stream {
@@ -140,11 +136,13 @@ impl MysqlServer {
                         if let Err(e) = io_stream.set_nodelay(true) {
                             warn!(e; "Failed to set TCP nodelay");
                         }
-                        if let Err(error) =
-                            Self::handle(io_stream, io_runtime, spawn_ref, spawn_config).await
-                        {
-                            warn!(error; "Unexpected error when handling TcpStream");
-                        };
+                        io_runtime.spawn(async move {
+                            if let Err(error) =
+                                Self::handle(io_stream, spawn_ref, spawn_config).await
+                            {
+                                warn!(error; "Unexpected error when handling TcpStream");
+                            };
+                        });
                     }
                 };
             }
@@ -153,24 +151,23 @@ impl MysqlServer {
 
     async fn handle(
         stream: TcpStream,
-        io_runtime: Arc<Runtime>,
         spawn_ref: Arc<MysqlSpawnRef>,
         spawn_config: Arc<MysqlSpawnConfig>,
     ) -> Result<()> {
         debug!("MySQL connection coming from: {}", stream.peer_addr()?);
-        let _handle = io_runtime.spawn(async move {
-            crate::metrics::METRIC_MYSQL_CONNECTIONS.inc();
-            if let Err(e) = Self::do_handle(stream, spawn_ref, spawn_config).await {
-                if let Error::InternalIo { error } = &e && error.kind() == std::io::ErrorKind::ConnectionAborted {
-                    // This is a client-side error, we don't need to log it.
-                } else {
-                    // TODO(LFC): Write this error to client as well, in MySQL text protocol.
-                    // Looks like we have to expose opensrv-mysql's `PacketWriter`?
-                    warn!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time");
-                }
+        crate::metrics::METRIC_MYSQL_CONNECTIONS.inc();
+        if let Err(e) = Self::do_handle(stream, spawn_ref, spawn_config).await {
+            if let Error::InternalIo { error } = &e
+                && error.kind() == std::io::ErrorKind::ConnectionAborted
+            {
+                // This is a client-side error, we don't need to log it.
+            } else {
+                // TODO(LFC): Write this error to client as well, in MySQL text protocol.
+                // Looks like we have to expose opensrv-mysql's `PacketWriter`?
+                warn!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time");
             }
-            crate::metrics::METRIC_MYSQL_CONNECTIONS.dec();
-        });
+        }
+        crate::metrics::METRIC_MYSQL_CONNECTIONS.dec();
 
         Ok(())
     }
@@ -221,7 +218,7 @@ impl Server for MysqlServer {
         let (stream, addr) = self.base_server.bind(listening).await?;
         let io_runtime = self.base_server.io_runtime();
 
-        let join_handle = common_runtime::spawn_read(self.accept(io_runtime, stream));
+        let join_handle = common_runtime::spawn_global(self.accept(io_runtime, stream));
         self.base_server.start_with(join_handle).await?;
         Ok(addr)
     }

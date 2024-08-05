@@ -225,7 +225,7 @@ impl ChannelManager {
         }
 
         let pool = self.pool.clone();
-        let _handle = common_runtime::spawn_bg(async {
+        let _handle = common_runtime::spawn_global(async {
             recycle_channel_in_loop(pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
         });
         info!(

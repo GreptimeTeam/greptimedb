@@ -15,7 +15,7 @@
 //! Format to store in parquet.
 //!
 //! We store three internal columns in parquet:
-//! - `__primary_key`, the primary key of the row (tags). Type: dictionary(uint16, binary)
+//! - `__primary_key`, the primary key of the row (tags). Type: dictionary(uint32, binary)
 //! - `__sequence`, the sequence number of a row. Type: uint64
 //! - `__op_type`, the op type of the row. Type: uint8
 //!
@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use datafusion_common::ScalarValue;
-use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt16Array, UInt64Array};
-use datatypes::arrow::datatypes::{SchemaRef, UInt16Type};
+use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt32Array, UInt64Array};
+use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
 use datatypes::vectors::{Helper, Vector};
@@ -49,6 +49,9 @@ use crate::error::{
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 use crate::sst::to_sst_arrow_schema;
+
+/// Arrow array type for the primary key dictionary.
+pub(crate) type PrimaryKeyArray = DictionaryArray<UInt32Type>;
 
 /// Number of columns that have fixed positions.
 ///
@@ -230,7 +233,7 @@ impl ReadFormat {
         // Compute primary key offsets.
         let pk_dict_array = pk_array
             .as_any()
-            .downcast_ref::<DictionaryArray<UInt16Type>>()
+            .downcast_ref::<PrimaryKeyArray>()
             .with_context(|| InvalidRecordBatchSnafu {
                 reason: format!("primary key array should not be {:?}", pk_array.data_type()),
             })?;
@@ -255,7 +258,7 @@ impl ReadFormat {
             let end = offsets[i + 1];
             let rows_in_batch = end - start;
             let dict_key = keys.value(*start);
-            let primary_key = pk_values.value(dict_key.into()).to_vec();
+            let primary_key = pk_values.value(dict_key as usize).to_vec();
 
             let mut builder = BatchBuilder::new(primary_key);
             builder
@@ -524,7 +527,7 @@ impl ReadFormat {
 }
 
 /// Compute offsets of different primary keys in the array.
-fn primary_key_offsets(pk_dict_array: &DictionaryArray<UInt16Type>) -> Result<Vec<usize>> {
+fn primary_key_offsets(pk_dict_array: &PrimaryKeyArray) -> Result<Vec<usize>> {
     if pk_dict_array.is_empty() {
         return Ok(Vec::new());
     }
@@ -549,7 +552,7 @@ fn primary_key_offsets(pk_dict_array: &DictionaryArray<UInt16Type>) -> Result<Ve
 /// Creates a new array for specific `primary_key`.
 fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
     let values = Arc::new(BinaryArray::from_iter_values([primary_key]));
-    let keys = UInt16Array::from_value(0, num_rows);
+    let keys = UInt32Array::from_value(0, num_rows);
 
     // Safety: The key index is valid.
     Arc::new(DictionaryArray::new(keys, values))
@@ -627,7 +630,7 @@ mod tests {
             Field::new(
                 "__primary_key",
                 ArrowDataType::Dictionary(
-                    Box::new(ArrowDataType::UInt16),
+                    Box::new(ArrowDataType::UInt32),
                     Box::new(ArrowDataType::Binary),
                 ),
                 false,
@@ -674,15 +677,15 @@ mod tests {
         assert_eq!(&expect, &array);
     }
 
-    fn build_test_pk_array(pk_row_nums: &[(Vec<u8>, usize)]) -> Arc<DictionaryArray<UInt16Type>> {
+    fn build_test_pk_array(pk_row_nums: &[(Vec<u8>, usize)]) -> Arc<PrimaryKeyArray> {
         let values = Arc::new(BinaryArray::from_iter_values(
             pk_row_nums.iter().map(|v| &v.0),
         ));
         let mut keys = vec![];
         for (index, num_rows) in pk_row_nums.iter().map(|v| v.1).enumerate() {
-            keys.extend(std::iter::repeat(index as u16).take(num_rows));
+            keys.extend(std::iter::repeat(index as u32).take(num_rows));
         }
-        let keys = UInt16Array::from(keys);
+        let keys = UInt32Array::from(keys);
         Arc::new(DictionaryArray::new(keys, values))
     }
 

@@ -14,7 +14,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 
 use common_telemetry::{debug, info};
 use common_time::timestamp::TimeUnit;
@@ -24,7 +24,7 @@ use common_time::Timestamp;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
-use crate::compaction::run::{find_sorted_runs, reduce_runs};
+use crate::compaction::run::{find_sorted_runs, reduce_runs, Item};
 use crate::compaction::{get_expired_ssts, CompactionOutput};
 use crate::sst::file::{overlaps, FileHandle, FileId, Level};
 use crate::sst::version::LevelMeta;
@@ -33,31 +33,29 @@ const LEVEL_COMPACTED: Level = 1;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
+#[derive(Debug)]
 pub struct TwcsPicker {
     max_active_window_runs: usize,
+    max_active_window_files: usize,
     max_inactive_window_runs: usize,
+    max_inactive_window_files: usize,
     time_window_seconds: Option<i64>,
-}
-
-impl Debug for TwcsPicker {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TwcsPicker")
-            .field("max_active_window_runs", &self.max_active_window_runs)
-            .field("max_inactive_window_runs", &self.max_inactive_window_runs)
-            .finish()
-    }
 }
 
 impl TwcsPicker {
     pub fn new(
         max_active_window_runs: usize,
+        max_active_window_files: usize,
         max_inactive_window_runs: usize,
+        max_inactive_window_files: usize,
         time_window_seconds: Option<i64>,
     ) -> Self {
         Self {
             max_inactive_window_runs,
             max_active_window_runs,
             time_window_seconds,
+            max_active_window_files,
+            max_inactive_window_files,
         }
     }
 
@@ -73,12 +71,15 @@ impl TwcsPicker {
         for (window, files) in time_windows {
             let sorted_runs = find_sorted_runs(&mut files.files);
 
-            let max_runs = if let Some(active_window) = active_window
+            let (max_runs, max_files) = if let Some(active_window) = active_window
                 && *window == active_window
             {
-                self.max_active_window_runs
+                (self.max_active_window_runs, self.max_active_window_files)
             } else {
-                self.max_inactive_window_runs
+                (
+                    self.max_inactive_window_runs,
+                    self.max_inactive_window_files,
+                )
             };
 
             // we only remove deletion markers once no file in current window overlaps with any other window.
@@ -87,22 +88,64 @@ impl TwcsPicker {
 
             if found_runs > max_runs {
                 let files_to_compact = reduce_runs(sorted_runs, max_runs);
-                info!("Building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, output size: {}", active_window, *window,max_runs, found_runs, files_to_compact.len());
+                info!("Building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, output size: {}, remove deletion markers: {}", active_window, *window,max_runs, found_runs, files_to_compact.len(), filter_deleted);
                 for inputs in files_to_compact {
                     output.push(CompactionOutput {
                         output_file_id: FileId::random(),
                         output_level: LEVEL_COMPACTED, // always compact to l1
                         inputs,
                         filter_deleted,
-                        output_time_range: None, // we do not enforce output time range in twcs compactions.});
+                        output_time_range: None, // we do not enforce output time range in twcs compactions.
                     });
                 }
+            } else if files.files.len() > max_files {
+                debug!(
+                    "Enforcing max file num in window: {}, active: {:?}, max: {}, current: {}",
+                    *window,
+                    active_window,
+                    max_files,
+                    files.files.len()
+                );
+                // Files in window exceeds file num limit
+                let to_merge = enforce_file_num(&files.files, max_files);
+                output.push(CompactionOutput {
+                    output_file_id: FileId::random(),
+                    output_level: LEVEL_COMPACTED, // always compact to l1
+                    inputs: to_merge,
+                    filter_deleted,
+                    output_time_range: None,
+                });
             } else {
                 debug!("Skip building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, ", active_window, *window, max_runs, found_runs);
             }
         }
         output
     }
+}
+
+/// Merges consecutive files so that file num does not exceed `max_file_num`, and chooses
+/// the solution with minimum overhead according to files sizes to be merged.
+/// `enforce_file_num` only merges consecutive files so that it won't create overlapping outputs.
+/// `runs` must be sorted according to time ranges.
+fn enforce_file_num<T: Item>(files: &[T], max_file_num: usize) -> Vec<T> {
+    debug_assert!(files.len() > max_file_num);
+    let to_merge = files.len() - max_file_num + 1;
+    let mut min_penalty = usize::MAX;
+    let mut min_idx = 0;
+
+    for idx in 0..=(files.len() - to_merge) {
+        let current_penalty: usize = files
+            .iter()
+            .skip(idx)
+            .take(to_merge)
+            .map(|f| f.size())
+            .sum();
+        if current_penalty < min_penalty {
+            min_penalty = current_penalty;
+            min_idx = idx;
+        }
+    }
+    files.iter().skip(min_idx).take(to_merge).cloned().collect()
 }
 
 impl Picker for TwcsPicker {
@@ -264,7 +307,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::compaction::test_util::new_file_handle;
+    use crate::compaction::test_util::{new_file_handle, new_file_handles};
     use crate::sst::file::Level;
 
     #[test]
@@ -482,7 +525,8 @@ mod tests {
             let mut windows = assign_to_windows(self.input_files.iter(), self.window_size);
             let active_window =
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
-            let output = TwcsPicker::new(4, 1, None).build_output(&mut windows, active_window);
+            let output = TwcsPicker::new(4, usize::MAX, 1, usize::MAX, None)
+                .build_output(&mut windows, active_window);
 
             let output = output
                 .iter()
@@ -512,6 +556,43 @@ mod tests {
     struct ExpectedOutput {
         input_files: Vec<usize>,
         output_level: Level,
+    }
+
+    fn check_enforce_file_num(
+        input_files: &[(i64, i64, u64)],
+        max_file_num: usize,
+        files_to_merge: &[(i64, i64)],
+    ) {
+        let mut files = new_file_handles(input_files);
+        // ensure sorted
+        find_sorted_runs(&mut files);
+        let mut to_merge = enforce_file_num(&files, max_file_num);
+        to_merge.sort_unstable_by_key(|f| f.time_range().0);
+        assert_eq!(
+            files_to_merge.to_vec(),
+            to_merge
+                .iter()
+                .map(|f| {
+                    let (start, end) = f.time_range();
+                    (start.value(), end.value())
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_enforce_file_num() {
+        check_enforce_file_num(
+            &[(0, 300, 2), (100, 200, 1), (200, 400, 1)],
+            2,
+            &[(100, 200), (200, 400)],
+        );
+
+        check_enforce_file_num(
+            &[(0, 300, 200), (100, 200, 100), (200, 400, 100)],
+            1,
+            &[(0, 300), (100, 200), (200, 400)],
+        );
     }
 
     #[test]

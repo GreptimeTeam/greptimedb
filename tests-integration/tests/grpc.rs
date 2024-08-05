@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::v1::alter_expr::Kind;
 use api::v1::promql_request::Promql;
 use api::v1::{
@@ -73,6 +71,7 @@ macro_rules! grpc_tests {
 
                 test_invalid_dbname,
                 test_auto_create_table,
+                test_auto_create_table_with_hints,
                 test_insert_and_select,
                 test_dbname,
                 test_grpc_message_size_ok,
@@ -279,6 +278,17 @@ pub async fn test_auto_create_table(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_auto_create_table_with_hints(store_type: StorageType) {
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server(store_type, "auto_create_table_with_hints").await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
+    insert_with_hints_and_assert(&db).await;
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
 fn expect_data() -> (Column, Column, Column, Column) {
     // testing data:
     let expected_host_col = Column {
@@ -377,6 +387,62 @@ pub async fn test_insert_and_select(store_type: StorageType) {
 
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
+}
+
+async fn insert_with_hints_and_assert(db: &Database) {
+    // testing data:
+    let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
+
+    let request = InsertRequest {
+        table_name: "demo".to_string(),
+        columns: vec![
+            expected_host_col.clone(),
+            expected_cpu_col.clone(),
+            expected_mem_col.clone(),
+            expected_ts_col.clone(),
+        ],
+        row_count: 4,
+    };
+    let result = db
+        .insert_with_hints(
+            InsertRequests {
+                inserts: vec![request],
+            },
+            &[("append_mode", "true")],
+        )
+        .await;
+    assert_eq!(result.unwrap(), 4);
+
+    // show table
+    let output = db.sql("SHOW CREATE TABLE demo;").await.unwrap();
+
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+
+    let pretty = record_batches.pretty_print().unwrap();
+    let expected = "\
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS \"demo\" ( |
+|       |   \"host\" STRING NULL,               |
+|       |   \"cpu\" DOUBLE NULL,                |
+|       |   \"memory\" DOUBLE NULL,             |
+|       |   \"ts\" TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX (\"ts\"),                |
+|       |   PRIMARY KEY (\"host\")              |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+\
+";
+    assert_eq!(pretty, expected);
 }
 
 async fn insert_and_assert(db: &Database) {
@@ -579,6 +645,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         error_type: None,
         warnings: None,
         resp_metrics: Default::default(),
+        status_code: None,
     };
     assert_eq!(instant_query_result, expected);
 
@@ -630,6 +697,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         error_type: None,
         warnings: None,
         resp_metrics: Default::default(),
+        status_code: None,
     };
     assert_eq!(range_query_result, expected);
 
@@ -662,6 +730,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         error_type: None,
         warnings: None,
         resp_metrics: Default::default(),
+        status_code: None,
     };
     assert_eq!(range_query_result, expected);
 
@@ -790,7 +859,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
             max_send_message_size: 1024,
             tls,
         };
-        let runtime = Arc::new(Runtime::builder().build().unwrap());
+        let runtime = Runtime::builder().build().unwrap();
         let grpc_builder =
             GrpcServerBuilder::new(config.clone(), runtime).with_tls_config(config.tls);
         assert!(grpc_builder.is_err());

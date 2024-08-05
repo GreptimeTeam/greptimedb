@@ -22,11 +22,11 @@ use datafusion::arrow::array::{TimestampNanosecondArray, UInt64Builder};
 use datatypes::arrow;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryBuilder, DictionaryArray, RecordBatch, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array,
-    UInt8Array, UInt8Builder,
+    TimestampMillisecondArray, TimestampSecondArray, UInt32Array, UInt64Array, UInt8Array,
+    UInt8Builder,
 };
 use datatypes::arrow::compute::TakeOptions;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, SchemaRef, UInt16Type};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, SchemaRef};
 use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
@@ -40,6 +40,7 @@ use crate::error::{ComputeArrowSnafu, EncodeMemtableSnafu, NewRecordBatchSnafu, 
 use crate::memtable::key_values::KeyValuesRef;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
+use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::to_sst_arrow_schema;
 
 #[derive(Debug)]
@@ -344,17 +345,17 @@ fn timestamp_array_to_iter(
 }
 
 /// Converts a **sorted** [BinaryArray] to [DictionaryArray].
-fn binary_array_to_dictionary(input: &BinaryArray) -> Result<DictionaryArray<UInt16Type>> {
+fn binary_array_to_dictionary(input: &BinaryArray) -> Result<PrimaryKeyArray> {
     if input.is_empty() {
         return Ok(DictionaryArray::new(
-            UInt16Array::from(Vec::<u16>::new()),
+            UInt32Array::from(Vec::<u32>::new()),
             Arc::new(BinaryArray::from_vec(vec![])) as ArrayRef,
         ));
     }
     let mut keys = Vec::with_capacity(16);
     let mut values = BinaryBuilder::new();
     let mut prev: usize = 0;
-    keys.push(prev as u16);
+    keys.push(prev as u32);
     values.append_value(input.value(prev));
 
     for current_bytes in input.iter().skip(1) {
@@ -365,11 +366,11 @@ fn binary_array_to_dictionary(input: &BinaryArray) -> Result<DictionaryArray<UIn
             values.append_value(current_bytes);
             prev += 1;
         }
-        keys.push(prev as u16);
+        keys.push(prev as u32);
     }
 
     Ok(DictionaryArray::new(
-        UInt16Array::from(keys),
+        UInt32Array::from(keys),
         Arc::new(values.finish()) as ArrayRef,
     ))
 }
@@ -387,7 +388,7 @@ mod tests {
 
     fn check_binary_array_to_dictionary(
         input: &[&[u8]],
-        expected_keys: &[u16],
+        expected_keys: &[u32],
         expected_values: &[&[u8]],
     ) {
         let input = BinaryArray::from_iter_values(input.iter());

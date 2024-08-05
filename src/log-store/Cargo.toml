@@ -26,7 +26,9 @@ common-time.workspace = true
 common-wal.workspace = true
 futures.workspace = true
 futures-util.workspace = true
+itertools.workspace = true
 lazy_static.workspace = true
+pin-project.workspace = true
 prometheus.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
 raft-engine.workspace = true

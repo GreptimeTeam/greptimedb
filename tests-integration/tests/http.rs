@@ -78,6 +78,7 @@ macro_rules! http_tests {
                 test_vm_proto_remote_write,
 
                 test_pipeline_api,
+                test_plain_text_ingestion,
             );
         )*
     };
@@ -263,7 +264,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert!(body.error().contains("Table not found"));
-    assert_eq!(body.code(), ErrorCode::PlanQuery as u32);
+    assert_eq!(body.code(), ErrorCode::TableNotFound as u32);
 
     // test database given
     let res = client
@@ -519,7 +520,15 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "error");
+    assert!(prom_resp
+        .error_type
+        .is_some_and(|err| err.eq_ignore_ascii_case("TableNotFound")));
+    assert!(prom_resp
+        .error
+        .is_some_and(|err| err.eq_ignore_ascii_case("Table not found: greptime.public.up")));
 
     // label values
     // should return error if there is no match[]
@@ -527,11 +536,15 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .get("/v1/prometheus/api/v1/label/instance/values")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "error");
-    assert!(prom_resp.error.is_some_and(|err| !err.is_empty()));
-    assert!(prom_resp.error_type.is_some_and(|err| !err.is_empty()));
+    assert!(prom_resp
+        .error
+        .is_some_and(|err| err.eq_ignore_ascii_case("match[] parameter is required")));
+    assert!(prom_resp
+        .error_type
+        .is_some_and(|err| err.eq_ignore_ascii_case("InvalidArguments")));
 
     // single match[]
     let res = client
@@ -838,9 +851,6 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-compress = true
-metadata_cache_size = "32MiB"
-content_cache_size = "32MiB"
 
 [region_engine.mito.fulltext_index]
 create_on_flush = "auto"
@@ -888,6 +898,9 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "sst_meta_cache_size =",
         "vector_cache_size =",
         "page_cache_size =",
+        "selector_result_cache_size =",
+        "metadata_cache_size =",
+        "content_cache_size =",
     ];
 
     input
@@ -1125,6 +1138,106 @@ transform:
         .await;
     // todo(shuiyisong): refactor http error handling
     assert_ne!(res.status(), StatusCode::OK);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_plain_text_ingestion(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
+
+    // handshake
+    let client = TestClient::new(app);
+
+    let body = r#"
+processors:
+  - dissect:
+      fields:
+        - line
+      patterns:
+        - "%{+ts} %{+ts} %{content}"
+  - date:
+      fields:
+        - ts
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+
+transform:
+  - fields:
+      - content
+    type: string
+  - field: ts
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(body)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let content = res.text().await;
+
+    let content = serde_json::from_str(&content);
+    assert!(content.is_ok());
+    //  {"execution_time_ms":13,"pipelines":[{"name":"test","version":"2024-07-04 08:31:00.987136"}]}
+    let content: Value = content.unwrap();
+
+    let version_str = content
+        .get("pipelines")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .get("version")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!version_str.is_empty());
+
+    // 2. write data
+    let data_body = r#"
+2024-05-25 20:16:37.217 hello
+2024-05-25 20:16:37.218 hello world
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "text/plain")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 3. select data
+    let res = client.get("/v1/sql?sql=select * from logs1").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+
+    let resp: Value = serde_json::from_str(&resp).unwrap();
+    let v = resp
+        .get("output")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .get("records")
+        .unwrap()
+        .get("rows")
+        .unwrap()
+        .to_string();
+
+    assert_eq!(
+        v,
+        r#"[["hello",1716668197217000000],["hello world",1716668197218000000]]"#,
+    );
 
     guard.remove_all().await;
 }

@@ -132,7 +132,7 @@ Affected Rows: 0
 
 SELECT * FROM test_public_schema.hello;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.test_public_schema.hello
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.test_public_schema.hello
 
 USE public;
 

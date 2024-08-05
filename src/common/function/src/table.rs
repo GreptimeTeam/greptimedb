@@ -22,6 +22,7 @@ use flush_compact_region::{CompactRegionFunction, FlushRegionFunction};
 use flush_compact_table::{CompactTableFunction, FlushTableFunction};
 use migrate_region::MigrateRegionFunction;
 
+use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
 
 /// Table functions
@@ -35,5 +36,6 @@ impl TableFunction {
         registry.register(Arc::new(CompactRegionFunction));
         registry.register(Arc::new(FlushTableFunction));
         registry.register(Arc::new(CompactTableFunction));
+        registry.register(Arc::new(FlushFlowFunction));
     }
 }

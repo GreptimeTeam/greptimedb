@@ -55,6 +55,12 @@ pub fn region_storage_path(catalog: &str, schema: &str) -> String {
     format!("{}/{}", catalog, schema)
 }
 
+/// Extracts catalog and schema from the path that created by [region_storage_path].
+pub fn get_catalog_and_schema(path: &str) -> Option<(String, String)> {
+    let mut split = path.split('/');
+    Some((split.next()?.to_string(), split.next()?.to_string()))
+}
+
 pub async fn check_and_get_physical_table_id(
     table_metadata_manager: &TableMetadataManagerRef,
     tasks: &[CreateTableTask],
@@ -144,4 +150,19 @@ pub fn convert_region_routes_to_detecting_regions(
                 .map(|peer| (cluster_id, peer.id, route.region.id))
         })
         .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_catalog_and_schema() {
+        let test_catalog = "my_catalog";
+        let test_schema = "my_schema";
+        let path = region_storage_path(test_catalog, test_schema);
+        let (catalog, schema) = get_catalog_and_schema(&path).unwrap();
+        assert_eq!(catalog, test_catalog);
+        assert_eq!(schema, test_schema);
+    }
 }

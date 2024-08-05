@@ -421,13 +421,11 @@ async fn build_datanode_clients(
 async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
     let (client, server) = tokio::io::duplex(1024);
 
-    let runtime = Arc::new(
-        RuntimeBuilder::default()
-            .worker_threads(2)
-            .thread_name("grpc-handlers")
-            .build()
-            .unwrap(),
-    );
+    let runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("grpc-handlers")
+        .build()
+        .unwrap();
 
     let flight_handler = FlightCraftWrapper(datanode.region_server());
 

@@ -102,7 +102,8 @@ fn create_test_engine() -> TimeRangeTester {
     };
     let _ = catalog_manager.register_table_sync(req).unwrap();
 
-    let engine = QueryEngineFactory::new(catalog_manager, None, None, None, false).query_engine();
+    let engine =
+        QueryEngineFactory::new(catalog_manager, None, None, None, None, false).query_engine();
     TimeRangeTester { engine, filter }
 }
 

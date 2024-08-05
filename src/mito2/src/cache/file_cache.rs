@@ -199,7 +199,9 @@ impl FileCache {
             .metakey(Metakey::ContentLength)
             .await
             .context(OpenDalSnafu)?;
-        let (mut total_size, mut total_keys) = (0, 0);
+        // Use i64 for total_size to reduce the risk of overflow.
+        // It is possible that the total size of the cache is larger than i32::MAX.
+        let (mut total_size, mut total_keys) = (0i64, 0);
         while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
             let meta = entry.metadata();
             if !meta.is_file() {
@@ -212,13 +214,11 @@ impl FileCache {
             self.memory_index
                 .insert(key, IndexValue { file_size })
                 .await;
-            total_size += file_size;
+            total_size += i64::from(file_size);
             total_keys += 1;
         }
         // The metrics is a signed int gauge so we can updates it finally.
-        CACHE_BYTES
-            .with_label_values(&[FILE_TYPE])
-            .add(total_size.into());
+        CACHE_BYTES.with_label_values(&[FILE_TYPE]).add(total_size);
 
         info!(
             "Recovered file cache, num_keys: {}, num_bytes: {}, cost: {:?}",
@@ -382,8 +382,7 @@ mod tests {
     use super::*;
 
     fn new_fs_store(path: &str) -> ObjectStore {
-        let mut builder = Fs::default();
-        builder.root(path);
+        let builder = Fs::default().root(path);
         ObjectStore::new(builder).unwrap().finish()
     }
 

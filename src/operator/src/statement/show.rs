@@ -23,8 +23,8 @@ use snafu::{OptionExt, ResultExt};
 use sql::ast::Ident;
 use sql::statements::create::Partitions;
 use sql::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowIndex, ShowKind,
-    ShowTableStatus, ShowTables, ShowVariables,
+    ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind,
+    ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use table::metadata::TableType;
 use table::table_name::TableName;
@@ -150,6 +150,28 @@ impl StatementExecutor {
 
         query::sql::show_create_view(show.view_name, &view_info.definition, query_ctx)
             .context(error::ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub(super) async fn show_views(
+        &self,
+        stmt: ShowViews,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_views(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub(super) async fn show_flows(
+        &self,
+        stmt: ShowFlows,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_flows(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(ExecuteStatementSnafu)
     }
 
     #[tracing::instrument(skip_all)]

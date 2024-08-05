@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode as HttpStatusCode;
@@ -20,7 +21,7 @@ use axum::{Extension, Json};
 use common_error::ext::ErrorExt;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContext};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -74,7 +75,7 @@ pub enum OpentsdbPutResponse {
 pub async fn put(
     State(opentsdb_handler): State<OpentsdbProtocolHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
-    Extension(ctx): Extension<QueryContextRef>,
+    Extension(mut ctx): Extension<QueryContext>,
     RawBody(body): RawBody,
 ) -> Result<(HttpStatusCode, Json<OpentsdbPutResponse>)> {
     let summary = params.contains_key("summary");
@@ -85,6 +86,9 @@ pub async fn put(
         .iter()
         .map(|point| point.clone().into())
         .collect::<Vec<_>>();
+
+    ctx.set_channel(Channel::Opentsdb);
+    let ctx = Arc::new(ctx);
 
     let response = if !summary && !details {
         if let Err(e) = opentsdb_handler.exec(data_points, ctx.clone()).await {

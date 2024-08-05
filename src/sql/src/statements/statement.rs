@@ -25,14 +25,14 @@ use crate::statements::create::{
 };
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
-use crate::statements::drop::{DropDatabase, DropFlow, DropTable};
+use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
 use crate::statements::explain::Explain;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
 use crate::statements::set_variables::SetVariables;
 use crate::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowCreateView, ShowDatabases, ShowIndex,
-    ShowKind, ShowStatus, ShowTableStatus, ShowTables, ShowVariables,
+    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowCreateView, ShowDatabases, ShowFlows,
+    ShowIndex, ShowKind, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::tql::Tql;
 use crate::statements::truncate::TruncateTable;
@@ -55,14 +55,16 @@ pub enum Statement {
     CreateTableLike(CreateTableLike),
     // CREATE FLOW
     CreateFlow(CreateFlow),
-    // DROP FLOW
-    DropFlow(DropFlow),
     // CREATE VIEW ... AS
     CreateView(CreateView),
     // DROP TABLE
     DropTable(DropTable),
     // DROP DATABASE
     DropDatabase(DropDatabase),
+    // DROP FLOW
+    DropFlow(DropFlow),
+    // DROP View
+    DropView(DropView),
     // CREATE DATABASE
     CreateDatabase(CreateDatabase),
     /// ALTER TABLE
@@ -85,10 +87,14 @@ pub enum Statement {
     ShowCreateTable(ShowCreateTable),
     // SHOW CREATE FLOW
     ShowCreateFlow(ShowCreateFlow),
+    /// SHOW FLOWS
+    ShowFlows(ShowFlows),
     // SHOW CREATE VIEW
     ShowCreateView(ShowCreateView),
     // SHOW STATUS
     ShowStatus(ShowStatus),
+    // SHOW VIEWS
+    ShowViews(ShowViews),
     // DESCRIBE TABLE
     DescribeTable(DescribeTable),
     // EXPLAIN QUERY
@@ -119,6 +125,7 @@ impl Display for Statement {
             Statement::DropFlow(s) => s.fmt(f),
             Statement::DropTable(s) => s.fmt(f),
             Statement::DropDatabase(s) => s.fmt(f),
+            Statement::DropView(s) => s.fmt(f),
             Statement::CreateDatabase(s) => s.fmt(f),
             Statement::Alter(s) => s.fmt(f),
             Statement::ShowDatabases(s) => s.fmt(f),
@@ -128,7 +135,9 @@ impl Display for Statement {
             Statement::ShowIndex(s) => s.fmt(f),
             Statement::ShowCreateTable(s) => s.fmt(f),
             Statement::ShowCreateFlow(s) => s.fmt(f),
+            Statement::ShowFlows(s) => s.fmt(f),
             Statement::ShowCreateView(s) => s.fmt(f),
+            Statement::ShowViews(s) => s.fmt(f),
             Statement::ShowStatus(s) => s.fmt(f),
             Statement::DescribeTable(s) => s.fmt(f),
             Statement::Explain(s) => s.fmt(f),

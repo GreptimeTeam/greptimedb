@@ -18,6 +18,35 @@ use common_time::Timestamp;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::Expr;
 use datafusion_expr::{and, binary_expr, Operator};
+use datatypes::data_type::DataType;
+use datatypes::schema::ColumnSchema;
+use datatypes::value::Value;
+
+/// Builds a filter for a timestamp column with the same type as the timestamp column.
+/// Returns [None] if time range is [None] or full time range.
+pub fn build_same_type_ts_filter(
+    ts_schema: &ColumnSchema,
+    time_range: Option<TimestampRange>,
+) -> Option<Expr> {
+    let ts_type = ts_schema.data_type.clone();
+    let time_range = time_range?;
+    let start = time_range
+        .start()
+        .and_then(|start| ts_type.try_cast(Value::Timestamp(start)));
+    let end = time_range
+        .end()
+        .and_then(|end| ts_type.try_cast(Value::Timestamp(end)));
+
+    let time_range = match (start, end) {
+        (Some(Value::Timestamp(start)), Some(Value::Timestamp(end))) => {
+            TimestampRange::new(start, end)
+        }
+        (Some(Value::Timestamp(start)), None) => Some(TimestampRange::from_start(start)),
+        (None, Some(Value::Timestamp(end))) => Some(TimestampRange::until_end(end, false)),
+        _ => return None,
+    };
+    build_filter_from_timestamp(&ts_schema.name, time_range.as_ref())
+}
 
 /// Builds an `Expr` that filters timestamp column from given timestamp range.
 /// Returns [None] if time range is [None] or full time range.

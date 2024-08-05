@@ -57,7 +57,7 @@ impl<S> RegionWorkerLoop<S> {
         let request_sender = self.sender.clone();
         // Now the region is in editing state.
         // Updates manifest in background.
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             let result = edit_region(&region, edit.clone()).await;
             let notify = WorkerRequest::Background {
                 region_id,
@@ -125,7 +125,7 @@ impl<S> RegionWorkerLoop<S> {
         let manifest_ctx = region.manifest_ctx.clone();
 
         // Updates manifest in background.
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             // Write region truncated to manifest.
             let action_list =
                 RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
@@ -167,7 +167,7 @@ impl<S> RegionWorkerLoop<S> {
 
         let request_sender = self.sender.clone();
         // Now the region is in altering state.
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             let new_meta = change.metadata.clone();
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
 

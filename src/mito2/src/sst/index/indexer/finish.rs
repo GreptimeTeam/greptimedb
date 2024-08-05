@@ -15,8 +15,8 @@
 use common_telemetry::{debug, warn};
 use puffin::puffin_manager::{PuffinManager, PuffinWriter};
 
-use crate::sst::index::fulltext_index::creator::SstIndexCreator as FulltextIndexer;
-use crate::sst::index::inverted_index::creator::SstIndexCreator as InvertedIndexer;
+use crate::sst::index::fulltext_index::creator::FulltextIndexer;
+use crate::sst::index::inverted_index::creator::InvertedIndexer;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount};
 use crate::sst::index::{FulltextIndexOutput, IndexOutput, Indexer, InvertedIndexOutput};

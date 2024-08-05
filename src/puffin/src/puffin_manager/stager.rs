@@ -42,19 +42,19 @@ pub type DirWriterProviderRef = Box<dyn DirWriterProvider + Send>;
 ///
 /// `Stager` will provide a `BoxWriter` that the caller of `get_blob`
 /// can use to write the blob into the staging area.
-pub trait InitBlobFn = Fn(BoxWriter) -> WriteResult;
+pub trait InitBlobFn = FnOnce(BoxWriter) -> WriteResult;
 
 /// Function that initializes a directory.
 ///
 /// `Stager` will provide a `DirWriterProvider` that the caller of `get_dir`
 /// can use to write files inside the directory into the staging area.
-pub trait InitDirFn = Fn(DirWriterProviderRef) -> WriteResult;
+pub trait InitDirFn = FnOnce(DirWriterProviderRef) -> WriteResult;
 
 /// `Stager` manages the staging area for the puffin files.
 #[async_trait]
 #[auto_impl::auto_impl(Arc)]
 pub trait Stager: Send + Sync {
-    type Blob: BlobGuard;
+    type Blob: BlobGuard + Sync;
     type Dir: DirGuard;
 
     /// Retrieves a blob, initializing it if necessary using the provided `init_fn`.

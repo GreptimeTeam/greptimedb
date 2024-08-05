@@ -21,7 +21,7 @@ use cmd::{cli, datanode, flownode, frontend, metasrv, standalone, App};
 use common_version::version;
 
 #[derive(Parser)]
-#[command(name = "greptime", author, version, long_version = version!(), about)]
+#[command(name = "greptime", author, version, long_version = version(), about)]
 #[command(propagate_version = true)]
 pub(crate) struct Command {
     #[clap(subcommand)]

@@ -52,8 +52,7 @@ impl SchedulerEnv {
     pub(crate) async fn new() -> SchedulerEnv {
         let path = create_temp_dir("");
         let path_str = path.path().display().to_string();
-        let mut builder = Fs::default();
-        builder.root(&path_str);
+        let builder = Fs::default().root(&path_str);
 
         let index_aux_path = path.path().join("index_aux");
         let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)

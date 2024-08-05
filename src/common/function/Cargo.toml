@@ -31,6 +31,7 @@ serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
 snafu.workspace = true
+sql.workspace = true
 statrs = "0.16"
 store-api.workspace = true
 table.workspace = true

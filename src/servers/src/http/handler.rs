@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::env;
+use std::sync::Arc;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
@@ -30,7 +30,7 @@ use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContext, QueryContextRef};
 
 use super::header::collect_plan_metrics;
 use crate::http::arrow_result::ArrowResponse;
@@ -71,12 +71,15 @@ pub struct SqlQuery {
 pub async fn sql(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<SqlQuery>,
 ) -> HttpResponse {
     let start = Instant::now();
     let sql_handler = &state.sql_handler;
     let db = query_ctx.get_db_string();
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
 
     let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
         .with_label_values(&[db.as_str()])
@@ -233,11 +236,14 @@ impl From<PromqlQuery> for PromQuery {
 pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
 ) -> Response {
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
 
     let _timer = crate::metrics::METRIC_HTTP_PROMQL_ELAPSED
         .with_label_values(&[db.as_str()])
@@ -311,13 +317,14 @@ pub async fn status() -> Json<StatusResponse<'static>> {
     let hostname = hostname::get()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
+    let build_info = common_version::build_info();
     Json(StatusResponse {
-        source_time: env!("SOURCE_TIMESTAMP"),
-        commit: env!("GIT_COMMIT"),
-        branch: env!("GIT_BRANCH"),
-        rustc_version: env!("RUSTC_VERSION"),
+        source_time: build_info.source_time,
+        commit: build_info.commit,
+        branch: build_info.branch,
+        rustc_version: build_info.rustc,
         hostname,
-        version: env!("CARGO_PKG_VERSION"),
+        version: build_info.version,
     })
 }
 

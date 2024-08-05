@@ -187,7 +187,7 @@ impl RegionAliveKeeper {
             let running = self.started.clone();
 
             // Watches changes
-            common_runtime::spawn_bg(async move {
+            common_runtime::spawn_global(async move {
                 loop {
                     if !running.load(Ordering::Relaxed) {
                         info!("RegionAliveKeeper stopped! Quits the watch loop!");
@@ -286,7 +286,7 @@ impl CountdownTaskHandle {
             region_id,
             rx,
         };
-        let handler = common_runtime::spawn_bg(async move {
+        let handler = common_runtime::spawn_hb(async move {
             countdown_task.run().await;
         });
 

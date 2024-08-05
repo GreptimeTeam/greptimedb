@@ -274,6 +274,7 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "python")]
     #[snafu(display("Failed to start script manager"))]
     StartScriptManager {
         #[snafu(implicit)]
@@ -413,10 +414,11 @@ impl ErrorExt for Error {
 
             Error::RequestQuery { source, .. } => source.status_code(),
 
-            Error::FindDatanode { .. }
-            | Error::VectorToGrpcColumn { .. }
-            | Error::InvalidRegionRequest { .. }
-            | Error::CacheRequired { .. } => StatusCode::Internal,
+            Error::FindDatanode { .. } => StatusCode::RegionNotReady,
+
+            Error::VectorToGrpcColumn { .. } | Error::CacheRequired { .. } => StatusCode::Internal,
+
+            Error::InvalidRegionRequest { .. } => StatusCode::IllegalState,
 
             Error::ContextValueNotFound { .. } => StatusCode::Unexpected,
 
@@ -437,6 +439,7 @@ impl ErrorExt for Error {
             Error::External { source, .. } => source.status_code(),
             Error::FindTableRoute { source, .. } => source.status_code(),
 
+            #[cfg(feature = "python")]
             Error::StartScriptManager { source, .. } => source.status_code(),
 
             Error::TableOperation { source, .. } => source.status_code(),

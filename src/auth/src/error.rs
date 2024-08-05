@@ -38,10 +38,11 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Auth failed"))]
+    #[snafu(display("Authentication source failure"))]
     AuthBackend {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
         source: BoxedError,
     },
 
@@ -87,7 +88,7 @@ impl ErrorExt for Error {
             Error::IllegalParam { .. } => StatusCode::InvalidArguments,
             Error::FileWatch { .. } => StatusCode::InvalidArguments,
             Error::InternalState { .. } => StatusCode::Unexpected,
-            Error::Io { .. } => StatusCode::Internal,
+            Error::Io { .. } => StatusCode::StorageUnavailable,
             Error::AuthBackend { .. } => StatusCode::Internal,
 
             Error::UserNotFound { .. } => StatusCode::UserNotFound,

@@ -24,7 +24,6 @@ use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
-use puffin::blob_metadata::CompressionCodec;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -44,6 +43,7 @@ use crate::sst::index::inverted_index::creator::temp_provider::TempFileProvider;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
+use crate::sst::index::TYPE_INVERTED_INDEX;
 
 /// The minimum memory usage threshold for one column.
 const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
@@ -51,8 +51,8 @@ const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
 
-/// Creates SST index.
-pub struct SstIndexCreator {
+/// `InvertedIndexer` creates inverted index for SST files.
+pub struct InvertedIndexer {
     /// The index creator.
     index_creator: Box<dyn InvertedIndexCreator>,
     /// The provider of intermediate files.
@@ -71,15 +71,12 @@ pub struct SstIndexCreator {
     /// The memory usage of the index creator.
     memory_usage: Arc<AtomicUsize>,
 
-    /// Whether to compress the index data.
-    compress: bool,
-
     /// Ids of indexed columns.
     column_ids: HashSet<ColumnId>,
 }
 
-impl SstIndexCreator {
-    /// Creates a new `SstIndexCreator`.
+impl InvertedIndexer {
+    /// Creates a new `InvertedIndexer`.
     /// Should ensure that the number of tag columns is greater than 0.
     pub fn new(
         sst_file_id: FileId,
@@ -87,7 +84,6 @@ impl SstIndexCreator {
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
         segment_row_count: NonZeroUsize,
-        compress: bool,
         ignore_column_ids: &[ColumnId],
     ) -> Self {
         let temp_file_provider = Arc::new(TempFileProvider::new(
@@ -119,10 +115,9 @@ impl SstIndexCreator {
             index_creator,
             temp_file_provider,
             value_buf: vec![],
-            stats: Statistics::default(),
+            stats: Statistics::new(TYPE_INVERTED_INDEX),
             aborted: false,
             memory_usage,
-            compress,
             column_ids,
         }
     }
@@ -242,12 +237,9 @@ impl SstIndexCreator {
         let (tx, rx) = duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
         let mut index_writer = InvertedIndexBlobWriter::new(tx.compat_write());
 
-        let put_options = PutOptions {
-            compression: self.compress.then_some(CompressionCodec::Zstd),
-        };
         let (index_finish, puffin_add_blob) = futures::join!(
             self.index_creator.finish(&mut index_writer),
-            puffin_writer.put_blob(INDEX_BLOB_TYPE, rx.compat(), put_options)
+            puffin_writer.put_blob(INDEX_BLOB_TYPE, rx.compat(), PutOptions::default())
         );
 
         match (
@@ -306,7 +298,7 @@ mod tests {
     use super::*;
     use crate::cache::index::InvertedIndexCache;
     use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
-    use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
+    use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
 
@@ -392,13 +384,12 @@ mod tests {
         let memory_threshold = None;
         let segment_row_count = 2;
 
-        let mut creator = SstIndexCreator::new(
+        let mut creator = InvertedIndexer::new(
             sst_file_id,
             &region_metadata,
             intm_mgr,
             memory_threshold,
             NonZeroUsize::new(segment_row_count).unwrap(),
-            false,
             &[],
         );
 
@@ -416,7 +407,7 @@ mod tests {
         move |expr| {
             let _d = &d;
             let cache = Arc::new(InvertedIndexCache::new(10, 10));
-            let applier = SstIndexApplierBuilder::new(
+            let applier = InvertedIndexApplierBuilder::new(
                 region_dir.clone(),
                 object_store.clone(),
                 None,

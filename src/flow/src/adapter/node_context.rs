@@ -14,7 +14,7 @@
 
 //! Node context, prone to change with every incoming requests
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use common_telemetry::debug;
@@ -65,54 +65,64 @@ pub struct FlownodeContext {
 /// backpressure and adjust dataflow running duration to avoid blocking
 #[derive(Debug)]
 pub struct SourceSender {
+    // TODO(discord9): make it all Vec<DiffRow>?
     sender: broadcast::Sender<DiffRow>,
-    send_buf: RwLock<VecDeque<DiffRow>>,
+    send_buf_tx: mpsc::UnboundedSender<Vec<DiffRow>>,
+    send_buf_rx: RwLock<mpsc::UnboundedReceiver<Vec<DiffRow>>>,
 }
 
 impl Default for SourceSender {
     fn default() -> Self {
+        let (send_buf_tx, send_buf_rx) = mpsc::unbounded_channel();
         Self {
             // TODO(discord9): found a better way then increase this to prevent lagging and hence missing input data
             sender: broadcast::Sender::new(BROADCAST_CAP * 2),
-            send_buf: Default::default(),
+            send_buf_tx,
+            send_buf_rx: RwLock::new(send_buf_rx),
         }
     }
 }
 
 impl SourceSender {
+    /// max number of iterations to try flush send buf
+    const MAX_ITERATIONS: usize = 16;
     pub fn get_receiver(&self) -> broadcast::Receiver<DiffRow> {
         self.sender.subscribe()
     }
 
     /// send as many as possible rows from send buf
     /// until send buf is empty or broadchannel is full
-    pub async fn try_send_all(&self) -> Result<usize, Error> {
+    pub async fn try_flush(&self) -> Result<usize, Error> {
         let mut row_cnt = 0;
-        loop {
-            let mut send_buf = self.send_buf.write().await;
+        let mut iterations = 0;
+        while iterations < Self::MAX_ITERATIONS {
+            let mut send_buf = self.send_buf_rx.write().await;
             // if inner sender channel is empty or send buf is empty, there
             // is nothing to do for now, just break
             if self.sender.len() >= BROADCAST_CAP || send_buf.is_empty() {
                 break;
             }
-            if let Some(row) = send_buf.pop_front() {
-                self.sender
-                    .send(row)
-                    .map_err(|err| {
-                        InternalSnafu {
-                            reason: format!("Failed to send row, error = {:?}", err),
-                        }
-                        .build()
-                    })
-                    .with_context(|_| EvalSnafu)?;
-                row_cnt += 1;
+            if let Some(rows) = send_buf.recv().await {
+                for row in rows {
+                    self.sender
+                        .send(row)
+                        .map_err(|err| {
+                            InternalSnafu {
+                                reason: format!("Failed to send row, error = {:?}", err),
+                            }
+                            .build()
+                        })
+                        .with_context(|_| EvalSnafu)?;
+                    row_cnt += 1;
+                }
             }
+            iterations += 1;
         }
         if row_cnt > 0 {
             debug!("Send {} rows", row_cnt);
             debug!(
                 "Remaining Send buf.len() = {}",
-                self.send_buf.read().await.len()
+                self.send_buf_rx.read().await.len()
             );
         }
 
@@ -121,11 +131,14 @@ impl SourceSender {
 
     /// return number of rows it actual send(including what's in the buffer)
     pub async fn send_rows(&self, rows: Vec<DiffRow>) -> Result<usize, Error> {
-        self.send_buf.write().await.extend(rows);
+        self.send_buf_tx.send(rows).map_err(|e| {
+            crate::error::InternalSnafu {
+                reason: format!("Failed to send row, error = {:?}", e),
+            }
+            .build()
+        })?;
 
-        let row_cnt = self.try_send_all().await?;
-
-        Ok(row_cnt)
+        Ok(0)
     }
 }
 
@@ -150,7 +163,7 @@ impl FlownodeContext {
     pub async fn flush_all_sender(&self) -> Result<usize, Error> {
         let mut sum = 0;
         for sender in self.source_sender.values() {
-            sender.try_send_all().await.inspect(|x| sum += x)?;
+            sender.try_flush().await.inspect(|x| sum += x)?;
         }
         Ok(sum)
     }
@@ -159,7 +172,7 @@ impl FlownodeContext {
     pub async fn get_send_buf_size(&self) -> usize {
         let mut sum = 0;
         for sender in self.source_sender.values() {
-            sum += sender.send_buf.read().await.len();
+            sum += sender.send_buf_rx.read().await.len();
         }
         sum
     }

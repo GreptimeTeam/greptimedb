@@ -13,6 +13,9 @@
 // limitations under the License.
 
 pub(crate) mod client_manager;
+pub(crate) mod consumer;
+#[allow(unused)]
+pub(crate) mod index;
 pub mod log_store;
 pub(crate) mod producer;
 pub(crate) mod util;

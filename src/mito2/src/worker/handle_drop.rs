@@ -22,26 +22,29 @@ use futures::TryStreamExt;
 use object_store::util::join_path;
 use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
+use store_api::logstore::LogStore;
 use store_api::region_request::AffectedRows;
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
 use crate::error::{OpenDalSnafu, Result};
-use crate::metrics::REGION_COUNT;
 use crate::region::{RegionMapRef, RegionState};
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
 const MAX_RETRY_TIMES: u64 = 288; // 24 hours (5m * 288)
 
-impl<S> RegionWorkerLoop<S> {
+impl<S> RegionWorkerLoop<S>
+where
+    S: LogStore,
+{
     pub(crate) async fn handle_drop_request(
         &mut self,
         region_id: RegionId,
     ) -> Result<AffectedRows> {
         let region = self.regions.writable_region(region_id)?;
 
-        info!("Try to drop region: {}", region_id);
+        info!("Try to drop region: {}, worker: {}", region_id, self.id);
 
         // Marks the region as dropping.
         region.set_dropping()?;
@@ -58,7 +61,7 @@ impl<S> RegionWorkerLoop<S> {
                 error!(e; "Failed to write the drop marker file for region {}", region_id);
 
                 // Sets the state back to writable. It's possible that the marker file has been written.
-                // We sets the state back to writable so we can retry the drop operation.
+                // We set the state back to writable so we can retry the drop operation.
                 region.switch_state_to_writable(RegionState::Dropping);
             })?;
 
@@ -66,6 +69,15 @@ impl<S> RegionWorkerLoop<S> {
         // Removes this region from region map to prevent other requests from accessing this region
         self.regions.remove_region(region_id);
         self.dropping_regions.insert_region(region.clone());
+
+        // Delete region data in WAL.
+        self.wal
+            .obsolete(
+                region_id,
+                region.version_control.current().last_entry_id,
+                &region.provider,
+            )
+            .await?;
         // Notifies flush scheduler.
         self.flush_scheduler.on_region_dropped(region_id);
         // Notifies compaction scheduler.
@@ -80,14 +92,14 @@ impl<S> RegionWorkerLoop<S> {
             region_id
         );
 
-        REGION_COUNT.dec();
+        self.region_count.dec();
 
         // Detaches a background task to delete the region dir
         let region_dir = region.access_layer.region_dir().to_owned();
         let object_store = region.access_layer.object_store().clone();
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_global(async move {
             let gc_duration = listener
                 .on_later_drop_begin(region_id)
                 .unwrap_or(Duration::from_secs(GC_TASK_INTERVAL_SEC));

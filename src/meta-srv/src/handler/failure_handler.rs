@@ -31,7 +31,7 @@ impl RegionFailureHandler {
         heartbeat_acceptor: HeartbeatAcceptor,
     ) -> Self {
         info!("Starting region supervisor");
-        common_runtime::spawn_bg(async move { region_supervisor.run().await });
+        common_runtime::spawn_global(async move { region_supervisor.run().await });
         Self { heartbeat_acceptor }
     }
 }

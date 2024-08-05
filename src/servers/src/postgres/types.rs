@@ -14,6 +14,7 @@
 
 mod bytea;
 mod datetime;
+mod error;
 mod interval;
 
 use std::collections::HashMap;
@@ -28,15 +29,16 @@ use datatypes::types::TimestampType;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::api::Type;
-use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::error::{PgWireError, PgWireResult};
 use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use session::session_config::PGByteaOutputValue;
 
 use self::bytea::{EscapeOutputBytea, HexOutputBytea};
 use self::datetime::{StylingDate, StylingDateTime};
+pub use self::error::PgErrorCode;
 use self::interval::PgInterval;
-use crate::error::{self, Error, Result};
+use crate::error::{self as server_error, Error, Result};
 use crate::SqlPlan;
 
 pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Vec<FieldInfo>> {
@@ -154,7 +156,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC),
         &ConcreteDataType::Duration(_)
         | &ConcreteDataType::List(_)
-        | &ConcreteDataType::Dictionary(_) => error::UnsupportedDataTypeSnafu {
+        | &ConcreteDataType::Dictionary(_) => server_error::UnsupportedDataTypeSnafu {
             data_type: origin,
             reason: "not implemented",
         }
@@ -177,7 +179,7 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         )),
         &Type::DATE => Ok(ConcreteDataType::date_datatype()),
         &Type::TIME => Ok(ConcreteDataType::datetime_datatype()),
-        _ => error::InternalSnafu {
+        _ => server_error::InternalSnafu {
             err_msg: format!("unimplemented datatype {origin:?}"),
         }
         .fail(),
@@ -236,7 +238,7 @@ pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWir
 }
 
 pub(super) fn invalid_parameter_error(msg: &str, detail: Option<&str>) -> PgWireError {
-    let mut error_info = ErrorInfo::new("ERROR".to_owned(), "22023".to_owned(), msg.to_owned());
+    let mut error_info = PgErrorCode::Ec22023.to_err_info(msg.to_string());
     error_info.detail = detail.map(|s| s.to_owned());
     PgWireError::UserError(Box::new(error_info))
 }
@@ -827,6 +829,20 @@ mod test {
             _ => {
                 unreachable!()
             }
+        }
+    }
+
+    #[test]
+    fn test_invalid_parameter() {
+        // test for refactor with PgErrorCode
+        let msg = "invalid_parameter_count";
+        let error = invalid_parameter_error(msg, None);
+        if let PgWireError::UserError(value) = error {
+            assert_eq!("ERROR", value.severity);
+            assert_eq!("22023", value.code);
+            assert_eq!(msg, value.message);
+        } else {
+            panic!("test_invalid_parameter failed");
         }
     }
 }

@@ -78,7 +78,7 @@ impl PrometheusGateway for PrometheusGatewayService {
         };
 
         let header = inner.header.as_ref();
-        let query_ctx = create_query_context(header);
+        let query_ctx = create_query_context(header, Default::default());
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
@@ -124,10 +124,7 @@ impl PrometheusGatewayService {
             match retrieve_metric_name_and_result_type(&query.query) {
                 Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
                 Err(err) => {
-                    return PrometheusJsonResponse::error(
-                        err.status_code().to_string(),
-                        err.output_msg(),
-                    )
+                    return PrometheusJsonResponse::error(err.status_code(), err.output_msg())
                 }
             };
         // range query only returns matrix

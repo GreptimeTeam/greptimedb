@@ -33,9 +33,12 @@ use common_telemetry::tracing_context::W3cTrace;
 use futures_util::StreamExt;
 use prost::Message;
 use snafu::{ensure, ResultExt};
+use tonic::metadata::AsciiMetadataKey;
 use tonic::transport::Channel;
 
-use crate::error::{ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu, ServerSnafu};
+use crate::error::{
+    ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu, InvalidAsciiSnafu, ServerSnafu,
+};
 use crate::{from_grpc_response, Client, Result};
 
 #[derive(Clone, Debug, Default)]
@@ -128,6 +131,36 @@ impl Database {
 
     pub async fn insert(&self, requests: InsertRequests) -> Result<u32> {
         self.handle(Request::Inserts(requests)).await
+    }
+
+    pub async fn insert_with_hints(
+        &self,
+        requests: InsertRequests,
+        hints: &[(&str, &str)],
+    ) -> Result<u32> {
+        let mut client = make_database_client(&self.client)?.inner;
+        let request = self.to_rpc_request(Request::Inserts(requests));
+
+        let mut request = tonic::Request::new(request);
+        let metadata = request.metadata_mut();
+        for (key, value) in hints {
+            let key = AsciiMetadataKey::from_bytes(format!("x-greptime-hint-{}", key).as_bytes())
+                .map_err(|_| {
+                InvalidAsciiSnafu {
+                    value: key.to_string(),
+                }
+                .build()
+            })?;
+            let value = value.parse().map_err(|_| {
+                InvalidAsciiSnafu {
+                    value: value.to_string(),
+                }
+                .build()
+            })?;
+            metadata.insert(key, value);
+        }
+        let response = client.handle(request).await?.into_inner();
+        from_grpc_response(response)
     }
 
     async fn handle(&self, request: Request) -> Result<u32> {

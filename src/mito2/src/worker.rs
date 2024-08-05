@@ -51,7 +51,7 @@ use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
-use crate::metrics::WRITE_STALL_TOTAL;
+use crate::metrics::{REGION_COUNT, WRITE_STALL_TOTAL};
 use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
@@ -130,9 +130,11 @@ impl WorkerGroup {
         object_store_manager: ObjectStoreManagerRef,
         plugins: Plugins,
     ) -> Result<WorkerGroup> {
-        let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
-            config.global_write_buffer_size.as_bytes() as usize,
-        ));
+        let (flush_sender, flush_receiver) = watch::channel(());
+        let write_buffer_manager = Arc::new(
+            WriteBufferManagerImpl::new(config.global_write_buffer_size.as_bytes() as usize)
+                .with_notifier(flush_sender.clone()),
+        );
         let puffin_manager_factory = PuffinManagerFactory::new(
             &config.index.aux_path,
             config.index.staging_size.as_bytes(),
@@ -158,13 +160,13 @@ impl WorkerGroup {
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
+                .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
                 .index_metadata_size(config.inverted_index.metadata_cache_size.as_bytes())
                 .index_content_size(config.inverted_index.content_cache_size.as_bytes())
                 .write_cache(write_cache)
                 .build(),
         );
         let time_provider = Arc::new(StdTimeProvider);
-        let (flush_sender, flush_receiver) = watch::channel(());
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -264,10 +266,12 @@ impl WorkerGroup {
         listener: Option<crate::engine::listener::EventListenerRef>,
         time_provider: TimeProviderRef,
     ) -> Result<WorkerGroup> {
+        let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
-            Arc::new(WriteBufferManagerImpl::new(
-                config.global_write_buffer_size.as_bytes() as usize,
-            ))
+            Arc::new(
+                WriteBufferManagerImpl::new(config.global_write_buffer_size.as_bytes() as usize)
+                    .with_notifier(flush_sender.clone()),
+            )
         });
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
@@ -292,10 +296,10 @@ impl WorkerGroup {
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
+                .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
                 .write_cache(write_cache)
                 .build(),
         );
-        let (flush_sender, flush_receiver) = watch::channel(());
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -399,6 +403,7 @@ impl<S: LogStore> WorkerStarter<S> {
 
         let running = Arc::new(AtomicBool::new(true));
         let now = self.time_provider.current_time_millis();
+        let id_string = self.id.to_string();
         let mut worker_thread = RegionWorkerLoop {
             id: self.id,
             config: self.config.clone(),
@@ -434,9 +439,10 @@ impl<S: LogStore> WorkerStarter<S> {
             last_periodical_check_millis: now,
             flush_sender: self.flush_sender,
             flush_receiver: self.flush_receiver,
-            stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&self.id.to_string()]),
+            stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&id_string]),
+            region_count: REGION_COUNT.with_label_values(&[&id_string]),
         };
-        let handle = common_runtime::spawn_write(async move {
+        let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
         });
 
@@ -621,6 +627,8 @@ struct RegionWorkerLoop<S> {
     flush_receiver: watch::Receiver<()>,
     /// Gauge of stalled request count.
     stalled_count: IntGauge,
+    /// Gauge of regions in the worker.
+    region_count: IntGauge,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -828,7 +836,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ) {
         if let Some(region) = self.regions.get_region(region_id) {
             // We need to do this in background as we need the manifest lock.
-            common_runtime::spawn_bg(async move {
+            common_runtime::spawn_global(async move {
                 region.set_readonly_gracefully().await;
 
                 let last_entry_id = region.version_control.current().last_entry_id;

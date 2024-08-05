@@ -40,7 +40,7 @@ use crate::{
 #[tokio::test]
 async fn test_sql_not_provided() {
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
-    let ctx = QueryContext::arc();
+    let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
     let api_state = ApiState {
         sql_handler,
@@ -74,7 +74,7 @@ async fn test_sql_output_rows() {
 
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
 
-    let ctx = QueryContext::arc();
+    let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
     let api_state = ApiState {
         sql_handler,
@@ -180,7 +180,7 @@ async fn test_sql_output_rows() {
 #[tokio::test]
 async fn test_dashboard_sql_limit() {
     let sql_handler = create_testing_sql_query_handler(MemTable::specified_numbers_table(2000));
-    let ctx = QueryContext::arc();
+    let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
     let api_state = ApiState {
         sql_handler,
@@ -226,7 +226,7 @@ async fn test_sql_form() {
 
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
 
-    let ctx = QueryContext::arc();
+    let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
     let api_state = ApiState {
         sql_handler,
@@ -568,13 +568,14 @@ async fn test_status() {
     let hostname = hostname::get()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
+    let build_info = common_version::build_info();
     let expected_json = http_handler::StatusResponse {
-        source_time: env!("SOURCE_TIMESTAMP"),
-        commit: env!("GIT_COMMIT"),
-        branch: env!("GIT_BRANCH"),
-        rustc_version: env!("RUSTC_VERSION"),
+        source_time: build_info.source_time,
+        commit: build_info.commit,
+        branch: build_info.branch,
+        rustc_version: build_info.rustc,
         hostname,
-        version: env!("CARGO_PKG_VERSION"),
+        version: build_info.version,
     };
 
     let Json(json) = http_handler::status().await;

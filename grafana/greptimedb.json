@@ -622,6 +622,448 @@
         "x": 0,
         "y": 11
       },
+      "id": 34,
+      "interval": "1s",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_promql_elapsed_bucket[$__rate_interval])))",
+          "fullMetaSearch": false,
+          "includeNullMetadata": false,
+          "instant": false,
+          "legendFormat": "promql-{{db}}-p95",
+          "range": true,
+          "refId": "PromQL P95",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_promql_elapsed_bucket[$__rate_interval])))",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": false,
+          "instant": false,
+          "legendFormat": "promql-{{db}}-p99",
+          "range": true,
+          "refId": "PromQL P99",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_sql_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "sql-{{db}}-p95",
+          "range": true,
+          "refId": "SQL P95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_sql_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "sql-{{db}}-p99",
+          "range": true,
+          "refId": "SQL P99"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_prometheus_read_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "promstore-read-{{db}}-p95",
+          "range": true,
+          "refId": "PromStore Read P95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_prometheus_read_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "promstore-read-{{db}}-p99",
+          "range": true,
+          "refId": "PromStore Read P99"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, db, method) (rate(greptime_servers_http_prometheus_promql_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "prom-promql-{{db}}-{{method}}-p95",
+          "range": true,
+          "refId": "Prometheus PromQL P95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, db, method) (rate(greptime_servers_http_prometheus_promql_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "prom-promql-{{db}}-{{method}}-p99",
+          "range": true,
+          "refId": "Prometheus PromQL P99"
+        }
+      ],
+      "title": "HTTP query elapsed",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS-1}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "id": 35,
+      "interval": "1s",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_influxdb_write_elapsed_bucket[$__rate_interval])))",
+          "fullMetaSearch": false,
+          "includeNullMetadata": false,
+          "instant": false,
+          "legendFormat": "influx-{{db}}-p95",
+          "range": true,
+          "refId": "InfluxDB Line Protocol P95",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_influxdb_write_elapsed_bucket[$__rate_interval])))",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": false,
+          "instant": false,
+          "legendFormat": "influx-{{db}}-p99",
+          "range": true,
+          "refId": "InfluxDB Line Protocol P99",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_prometheus_write_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "promstore-{{db}}-p95",
+          "range": true,
+          "refId": "PromStore Write P95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_prometheus_write_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "promstore-{{db}}-p99",
+          "range": true,
+          "refId": "PromStore Write P99"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_otlp_metrics_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "otlp-metric-{{db}}-p95",
+          "range": true,
+          "refId": "OTLP Metric P95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_otlp_metrics_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "otlp-metric-{{db}}-p99",
+          "range": true,
+          "refId": "OTLP Metric P99"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_otlp_traces_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "otlp-trace-{{db}}-p95",
+          "range": true,
+          "refId": "OTLP Trace P95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_otlp_traces_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "otlp-trace-{{db}}-p99",
+          "range": true,
+          "refId": "OTLP Trace P99"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_logs_transform_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "log-transform-{{db}}-p95",
+          "range": true,
+          "refId": "Log Transform P95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_logs_transform_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "log-transform-{{db}}-p99",
+          "range": true,
+          "refId": "Log Transform P99"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_logs_ingestion_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "log-ingest-{{db}}-p99",
+          "range": true,
+          "refId": "Log Ingest P95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_logs_ingestion_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "log-ingest-{{db}}-p99",
+          "range": true,
+          "refId": "Log Ingest P99"
+        }
+      ],
+      "title": "HTTP write elapsed",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS-1}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
       "id": 13,
       "interval": "1s",
       "options": {
@@ -644,11 +1086,11 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_frontend_handle_sql_elapsed_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_grpc_requests_elapsed_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
-          "legendFormat": "{{label_name}}-p95",
+          "legendFormat": "{{db}}-p95",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -660,12 +1102,12 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_frontend_handle_sql_elapsed_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_grpc_requests_elapsed_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": false,
           "instant": false,
-          "legendFormat": "{{label_name}}-p99",
+          "legendFormat": "{{db}}-p99",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -737,126 +1179,9 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 11
-      },
-      "id": 20,
-      "interval": "1s",
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS-1}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_prometheus_write_elapsed_bucket[$__rate_interval])))",
-          "fullMetaSearch": false,
-          "includeNullMetadata": false,
-          "instant": false,
-          "legendFormat": "{{label_name}}-p95",
-          "range": true,
-          "refId": "A",
-          "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS-1}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_prometheus_write_elapsed_bucket[$__rate_interval])))",
-          "fullMetaSearch": false,
-          "hide": false,
-          "includeNullMetadata": false,
-          "instant": false,
-          "legendFormat": "{{label_name}}-p99",
-          "range": true,
-          "refId": "B",
-          "useBackend": false
-        }
-      ],
-      "title": "PromStore write elapsed",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS-1}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
         "y": 18
       },
-      "id": 34,
+      "id": 36,
       "interval": "1s",
       "options": {
         "legend": {
@@ -878,60 +1203,17 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by(le, db) (rate(greptime_servers_http_promql_instant_query_elapsed_bucket[$__rate_interval])))",
+          "expr": "sum by(db) (rate(greptime_servers_http_logs_ingestion_counter[$__rate_interval]))",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
-          "legendFormat": "instant-{{label_name}}-p95",
+          "legendFormat": "{{db}}",
           "range": true,
           "refId": "A",
           "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS-1}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_promql_instant_query_elapsed_bucket[$__rate_interval])))",
-          "fullMetaSearch": false,
-          "hide": false,
-          "includeNullMetadata": false,
-          "instant": false,
-          "legendFormat": "instant-{{label_name}}-p99",
-          "range": true,
-          "refId": "B",
-          "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS-1}"
-          },
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_promql_range_query_elapsed_bucket[$__rate_interval])))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "range-{{label_name}}-p95",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS-1}"
-          },
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le, db) (rate(greptime_servers_http_promql_range_query_elapsed_bucket[$__rate_interval])))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "range-{{label_name}}-p99",
-          "range": true,
-          "refId": "C"
         }
       ],
-      "title": "HTTP PromQL elapsed",
+      "title": "Logs ingest rate (number of lines)",
       "type": "timeseries"
     },
     {
@@ -1034,11 +1316,11 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by(le, type, group) (rate(greptime_mito_handle_request_elapsed_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by(le, type) (rate(greptime_mito_handle_request_elapsed_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
-          "legendFormat": "{{group}}-{{type}}-p95",
+          "legendFormat": "{{type}}-p95",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1050,12 +1332,12 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le, type, group) (rate(greptime_mito_handle_request_elapsed_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le, type) (rate(greptime_mito_handle_request_elapsed_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": false,
           "instant": false,
-          "legendFormat": "{{group}}-{{type}}-p99",
+          "legendFormat": "{{type}}-p99",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -1441,7 +1723,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 6,
+        "h": 7,
         "w": 12,
         "x": 0,
         "y": 40
@@ -1554,7 +1836,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 6,
+        "h": 7,
         "w": 12,
         "x": 12,
         "y": 40
@@ -1613,7 +1895,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 46
+        "y": 47
       },
       "id": 26,
       "panels": [],
@@ -1680,10 +1962,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 6,
+        "h": 7,
         "w": 12,
         "x": 0,
-        "y": 47
+        "y": 48
       },
       "id": 22,
       "interval": "1s",
@@ -1793,10 +2075,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 6,
+        "h": 7,
         "w": 12,
         "x": 12,
-        "y": 47
+        "y": 48
       },
       "id": 33,
       "interval": "1s",
@@ -1852,7 +2134,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 55
       },
       "id": 21,
       "panels": [],
@@ -1923,7 +2205,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 54
+        "y": 56
       },
       "id": 18,
       "interval": "1s",
@@ -2024,7 +2306,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 54
+        "y": 56
       },
       "id": 2,
       "options": {
@@ -2115,8 +2397,7 @@
                 "value": 80
               }
             ]
-          },
-          "unit": "none"
+          }
         },
         "overrides": []
       },
@@ -2124,9 +2405,9 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 61
+        "y": 63
       },
-      "id": 17,
+      "id": 10,
       "interval": "1s",
       "options": {
         "legend": {
@@ -2146,19 +2427,29 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS-1}"
           },
-          "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(raft_engine_sync_log_duration_seconds_count[2s])",
-          "fullMetaSearch": false,
-          "includeNullMetadata": false,
+          "expr": "histogram_quantile(0.99, sum by(le,logstore,optype) (rate(greptime_logstore_op_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "{{logstore}}-{{optype}}-p95",
           "range": true,
-          "refId": "A",
-          "useBackend": false
+          "refId": "Log Store P95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le,logstore,optype) (rate(greptime_logstore_op_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "{{logstore}}-{{optype}}-p99",
+          "range": true,
+          "refId": "Log Store P99"
         }
       ],
-      "title": "raft engine sync count",
+      "title": "Log Store op duration seconds",
       "type": "timeseries"
     },
     {
@@ -2217,7 +2508,7 @@
               }
             ]
           },
-          "unit": "bytes"
+          "unit": "none"
         },
         "overrides": []
       },
@@ -2225,7 +2516,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 61
+        "y": 63
       },
       "id": 19,
       "interval": "1s",
@@ -2249,99 +2540,15 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(greptime_mito_read_row_groups_total[2s])",
+          "expr": "histogram_quantile(0.95, sum by(le, type) (rate(greptime_index_apply_elapsed_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "apply-{{type}}-p95",
           "range": true,
-          "refId": "A",
+          "refId": "Apply P95",
           "useBackend": false
-        }
-      ],
-      "title": "index",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS-1}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
         },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 68
-      },
-      "id": 10,
-      "interval": "1s",
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
@@ -2349,13 +2556,14 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by(le, group) (rate(raft_engine_write_duration_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le, type) (rate(greptime_index_apply_elapsed_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
+          "hide": false,
           "includeNullMetadata": false,
           "instant": false,
-          "legendFormat": "{{group}}-p95",
+          "legendFormat": "apply-{{type}}-p95",
           "range": true,
-          "refId": "A",
+          "refId": "Apply P99",
           "useBackend": false
         },
         {
@@ -2364,19 +2572,36 @@
             "uid": "${DS_PROMETHEUS-1}"
           },
           "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "histogram_quantile(0.99, sum by(le, group) (rate(raft_engine_write_duration_seconds_bucket[$__rate_interval])))",
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by(le, type) (rate(greptime_index_create_elapsed_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": false,
           "instant": false,
-          "legendFormat": "{{group}}-p99",
+          "legendFormat": "create-{{type}}-p95",
           "range": true,
-          "refId": "B",
+          "refId": "Create P95",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le, type) (rate(greptime_index_create_elapsed_bucket[$__rate_interval])))",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": false,
+          "instant": false,
+          "legendFormat": "create-{{type}}-p95",
+          "range": true,
+          "refId": "Create P99",
           "useBackend": false
         }
       ],
-      "title": "raft engine write duration seconds",
+      "title": "Index elapsed",
       "type": "timeseries"
     },
     {
@@ -2443,7 +2668,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 68
+        "y": 70
       },
       "id": 12,
       "interval": "1s",
@@ -2481,6 +2706,23 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS-1}"
           },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by(le) (rate(raft_engine_write_size_bucket[$__rate_interval])))",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": false,
+          "instant": false,
+          "legendFormat": "req-size-p99",
+          "range": true,
+          "refId": "C",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
           "editorMode": "code",
           "expr": "rate(raft_engine_write_size_sum[$__rate_interval])",
           "hide": false,
@@ -2508,6 +2750,6 @@
   "timezone": "",
   "title": "GreptimeDB",
   "uid": "e7097237-669b-4f8d-b751-13067afbfb68",
-  "version": 12,
+  "version": 14,
   "weekStart": ""
 }

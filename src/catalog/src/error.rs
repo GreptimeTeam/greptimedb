@@ -18,6 +18,7 @@ use std::fmt::Debug;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_query::error::datafusion_status_code;
 use datafusion::error::DataFusionError;
 use snafu::{Location, Snafu};
 
@@ -54,6 +55,31 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
+    },
+
+    #[snafu(display("Failed to list flows in catalog {catalog}"))]
+    ListFlows {
+        #[snafu(implicit)]
+        location: Location,
+        catalog: String,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Flow info not found: {flow_name} in catalog {catalog_name}"))]
+    FlowInfoNotFound {
+        flow_name: String,
+        catalog_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Can't convert value to json, input={input}"))]
+    Json {
+        input: String,
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to re-compile script due to internal error"))]
@@ -253,11 +279,14 @@ impl ErrorExt for Error {
             | Error::FindPartitions { .. }
             | Error::FindRegionRoutes { .. }
             | Error::CacheNotFound { .. }
-            | Error::CastManager { .. } => StatusCode::Unexpected,
+            | Error::CastManager { .. }
+            | Error::Json { .. } => StatusCode::Unexpected,
 
             Error::ViewPlanColumnsChanged { .. } => StatusCode::InvalidArguments,
 
             Error::ViewInfoNotFound { .. } => StatusCode::TableNotFound,
+
+            Error::FlowInfoNotFound { .. } => StatusCode::FlowNotFound,
 
             Error::SystemCatalog { .. } => StatusCode::StorageUnavailable,
 
@@ -269,7 +298,8 @@ impl ErrorExt for Error {
             Error::ListCatalogs { source, .. }
             | Error::ListNodes { source, .. }
             | Error::ListSchemas { source, .. }
-            | Error::ListTables { source, .. } => source.status_code(),
+            | Error::ListTables { source, .. }
+            | Error::ListFlows { source, .. } => source.status_code(),
 
             Error::CreateTable { source, .. } => source.status_code(),
 
@@ -282,9 +312,8 @@ impl ErrorExt for Error {
             }
 
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
-            Error::ProjectViewColumns { .. } | Error::Datafusion { .. } => {
-                StatusCode::EngineExecuteQuery
-            }
+            Error::Datafusion { error, .. } => datafusion_status_code::<Self>(error, None),
+            Error::ProjectViewColumns { .. } => StatusCode::EngineExecuteQuery,
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::GetViewCache { source, .. } | Error::GetTableCache { source, .. } => {
                 source.status_code()
@@ -299,7 +328,7 @@ impl ErrorExt for Error {
 
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> Self {
-        DataFusionError::Internal(e.to_string())
+        DataFusionError::External(Box::new(e))
     }
 }
 
@@ -338,7 +367,7 @@ mod tests {
         }
         .into();
         match e {
-            DataFusionError::Internal(_) => {}
+            DataFusionError::External(_) => {}
             _ => {
                 panic!("catalog error should be converted to DataFusionError::Internal")
             }

@@ -20,6 +20,7 @@ use cache::{build_fundamental_cache_registry, with_default_composite_cache_regis
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::NodeClients;
+use common_base::Plugins;
 use common_config::Configurable;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -242,10 +243,11 @@ impl StartCommand {
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs
                 .clone_from(metasrv_addrs);
-            opts.mode = Mode::Distributed;
         }
 
-        opts.user_provider.clone_from(&self.user_provider);
+        if let Some(user_provider) = &self.user_provider {
+            opts.user_provider = Some(user_provider.clone());
+        }
 
         Ok(())
     }
@@ -259,14 +261,14 @@ impl StartCommand {
             &opts.component.tracing,
             opts.component.node_id.clone(),
         );
-        log_versions(version!(), short_version!());
+        log_versions(version(), short_version());
 
         info!("Frontend start command: {:#?}", self);
         info!("Frontend options: {:#?}", opts);
 
-        let mut opts = opts.component;
-        #[allow(clippy::unnecessary_mut_passed)]
-        let plugins = plugins::setup_frontend_plugins(&mut opts)
+        let opts = opts.component;
+        let mut plugins = Plugins::new();
+        plugins::setup_frontend_plugins(&mut plugins, &opts)
             .await
             .context(StartFrontendSnafu)?;
 
@@ -314,7 +316,7 @@ impl StartCommand {
         );
 
         let catalog_manager = KvBackendCatalogManager::new(
-            opts.mode,
+            Mode::Distributed,
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
@@ -445,7 +447,6 @@ mod tests {
 
         let fe_opts = command.load_options(&Default::default()).unwrap().component;
 
-        assert_eq!(Mode::Distributed, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(30), fe_opts.http.timeout);
 
@@ -458,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let mut fe_opts = frontend::frontend::FrontendOptions {
+        let fe_opts = frontend::frontend::FrontendOptions {
             http: HttpOptions {
                 disable_dashboard: false,
                 ..Default::default()
@@ -467,8 +468,10 @@ mod tests {
             ..Default::default()
         };
 
-        #[allow(clippy::unnecessary_mut_passed)]
-        let plugins = plugins::setup_frontend_plugins(&mut fe_opts).await.unwrap();
+        let mut plugins = Plugins::new();
+        plugins::setup_frontend_plugins(&mut plugins, &fe_opts)
+            .await
+            .unwrap();
 
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider

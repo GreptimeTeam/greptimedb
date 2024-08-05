@@ -29,8 +29,7 @@ pub(crate) async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<Objec
         gcs_config.bucket, &root
     );
 
-    let mut builder = Gcs::default();
-    builder
+    let builder = Gcs::default()
         .root(&root)
         .bucket(&gcs_config.bucket)
         .scope(&gcs_config.scope)

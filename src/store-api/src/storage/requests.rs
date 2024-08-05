@@ -14,9 +14,10 @@
 
 use common_recordbatch::OrderOption;
 use datafusion_expr::expr::Expr;
+use strum::Display;
 
 /// A hint on how to select rows from a time-series.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
 pub enum TimeSeriesRowSelector {
     /// Only keep the last row of each time-series.
     LastRow,

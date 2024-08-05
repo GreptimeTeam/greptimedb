@@ -34,7 +34,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::CacheRequired { .. } => StatusCode::Internal,
+            Error::CacheRequired { .. } => StatusCode::Unexpected,
         }
     }
 
