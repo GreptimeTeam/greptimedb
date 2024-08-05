@@ -5816,6 +5816,7 @@ dependencies = [
  "common-time",
  "common-wal",
  "delta-encoding",
+ "derive_builder 0.12.0",
  "futures",
  "futures-util",
  "itertools 0.10.5",
