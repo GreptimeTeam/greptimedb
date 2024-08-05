@@ -53,7 +53,7 @@ transform:
     ];
 
     assert_eq!(output.schema, expected_schema);
-    assert_eq!(output.rows[0].values[0].value_data, None);
+    assert_eq!(output.rows[0].values[1].value_data, None);
 }
 
 #[test]
@@ -94,7 +94,7 @@ transform:
     ];
 
     assert_eq!(output.schema, expected_schema);
-    assert_eq!(output.rows[0].values[0].value_data, Some(U8Value(0)));
+    assert_eq!(output.rows[0].values[1].value_data, Some(U8Value(0)));
 }
 
 #[test]
@@ -130,7 +130,7 @@ transform:
     ];
 
     assert_eq!(output.schema, expected_schema);
-    assert_eq!(output.rows[0].values[0].value_data, Some(U8Value(0)));
+    assert_eq!(output.rows[0].values[1].value_data, Some(U8Value(0)));
 }
 
 #[test]
@@ -182,6 +182,6 @@ transform:
     ];
 
     assert_eq!(output.schema, expected_schema);
-    assert_eq!(output.rows[0].values[0].value_data, Some(U8Value(0)));
     assert_eq!(output.rows[0].values[1].value_data, Some(U16Value(0)));
+    assert_eq!(output.rows[0].values[2].value_data, Some(U8Value(0)));
 }

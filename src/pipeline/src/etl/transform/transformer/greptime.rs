@@ -65,8 +65,7 @@ impl GreptimeTransformer {
     }
 
     fn transform_map(&self, map: &Map) -> Result<Row, String> {
-        let mut values = Vec::with_capacity(self.schema.len());
-
+        let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         for transform in self.transforms.iter() {
             for field in transform.fields.iter() {
                 let value_data = match map.get(field.get_field_name()) {
@@ -80,7 +79,19 @@ impl GreptimeTransformer {
                         }
                     }
                 };
-                values.push(GreptimeValue { value_data });
+                if let Some(i) = field
+                    .output_fields_index_mapping
+                    .iter()
+                    .next()
+                    .map(|kv| kv.1)
+                {
+                    values[*i] = GreptimeValue { value_data }
+                } else {
+                    return Err(format!(
+                        "field: {} output_fields is empty.",
+                        field.get_field_name()
+                    ));
+                }
             }
         }
 

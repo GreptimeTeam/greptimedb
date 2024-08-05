@@ -263,7 +263,7 @@ transform:
     type: uint32
 "#;
 
-    let expected_values = vec![
+    let mut expected_values = vec![
         (
             "breadcrumbs",
             Some(StringValue("//BC/[a=23.33.41.20,c=g,k=0,l=1]".into())),
@@ -414,10 +414,12 @@ transform:
         ("breadcrumbs_cloud_wrapper_turn_around_time", None),
         ("breadcrumbs_cloud_wrapper_dns_lookup_time", None),
         ("breadcrumbs_cloud_wrapper_asn", None),
-    ]
-    .into_iter()
-    .map(|(_, d)| GreptimeValue { value_data: d })
-    .collect::<Vec<GreptimeValue>>();
+    ];
+    expected_values.sort_by_key(|x| x.0);
+    let expected_values = expected_values
+        .into_iter()
+        .map(|(_, d)| GreptimeValue { value_data: d })
+        .collect::<Vec<GreptimeValue>>();
 
     let yaml_content = Content::Yaml(pipeline_yaml.into());
     let pipeline: Pipeline<GreptimeTransformer> =
