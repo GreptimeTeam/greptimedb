@@ -476,11 +476,13 @@ impl StartCommand {
             .await
             .context(StartDatanodeSnafu)?;
 
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let flow_builder = FlownodeBuilder::new(
             Default::default(),
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
+            flow_metadata_manager.clone(),
         );
         let flownode = Arc::new(
             flow_builder
@@ -511,7 +513,6 @@ impl StartCommand {
             opts.wal.into(),
             kv_backend.clone(),
         ));
-        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),

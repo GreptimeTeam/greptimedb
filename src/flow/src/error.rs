@@ -83,6 +83,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to list flows in flownode={id:?}"))]
+    ListFlows {
+        id: Option<common_meta::FlownodeId>,
+        source: common_meta::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Flow already exist, id={id}"))]
     FlowAlreadyExist {
         id: FlowId,
@@ -214,7 +222,8 @@ impl ErrorExt for Error {
             }
             Self::TableNotFound { .. }
             | Self::TableNotFoundMeta { .. }
-            | Self::FlowNotFound { .. } => StatusCode::TableNotFound,
+            | Self::FlowNotFound { .. }
+            | Self::ListFlows { .. } => StatusCode::TableNotFound,
             Self::InvalidQueryProst { .. }
             | &Self::InvalidQuery { .. }
             | &Self::Plan { .. }

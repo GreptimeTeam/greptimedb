@@ -24,6 +24,7 @@ use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
@@ -296,11 +297,13 @@ impl StartCommand {
             Arc::new(executor),
         );
 
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
         let flownode_builder = FlownodeBuilder::new(
             opts,
             Plugins::new(),
             table_metadata_manager,
             catalog_manager.clone(),
+            flow_metadata_manager,
         )
         .with_heartbeat_task(heartbeat_task);
 
