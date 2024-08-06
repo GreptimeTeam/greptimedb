@@ -13,11 +13,13 @@
 // limitations under the License.
 
 mod collector;
+mod encoder;
 mod iterator;
 
 pub(crate) use collector::{
-    GlobalIndexCollector, IndexCollector, IndexEncoder, NoopCollector, ProviderLevelIndexCollector,
+    GlobalIndexCollector, IndexCollector, NoopCollector, ProviderLevelIndexCollector,
 };
+pub(crate) use encoder::{IndexEncoder, JsonIndexEncoder};
 pub(crate) use iterator::{
     MultipleRegionWalIndexIterator, NextBatchHint, RegionWalIndexIterator, RegionWalRange,
     RegionWalVecIndex,
