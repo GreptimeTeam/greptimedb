@@ -291,6 +291,18 @@ jobs:
             kafka: true
             values: "with-remote-wal.yaml"
     steps:
+      - name: Remove unused software
+        run: |
+          echo "Disk space before:"
+          df -h
+          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
+          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
+          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
+          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo docker builder prune -a
+          echo "Disk space after:"
+          df -h
       - uses: actions/checkout@v4
       - name: Setup Kind
         uses: ./.github/actions/setup-kind
