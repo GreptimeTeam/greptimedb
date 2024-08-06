@@ -20,13 +20,19 @@ use rskafka::client::partition::{Compression, OffsetAt, PartitionClient};
 use rskafka::record::Record;
 use store_api::logstore::provider::KafkaProvider;
 use store_api::storage::RegionId;
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::{self, Result};
 use crate::kafka::index::IndexCollector;
 use crate::kafka::worker::{BackgroundProducerWorker, ProduceResultHandle, WorkerRequest};
 
 pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer>;
+
+// Max batch size for a `OrderedBatchProducer` to handle requests.
+const REQUEST_BATCH_SIZE: usize = 64;
+
+// Producer channel size
+const PRODUCER_CHANNEL_SIZE: usize = REQUEST_BATCH_SIZE * 2;
 
 /// [`OrderedBatchProducer`] attempts to aggregate multiple produce requests together
 #[derive(Debug)]
@@ -43,17 +49,19 @@ impl Drop for OrderedBatchProducer {
 }
 
 impl OrderedBatchProducer {
+    pub(crate) fn channel() -> (Sender<WorkerRequest>, Receiver<WorkerRequest>) {
+        mpsc::channel(PRODUCER_CHANNEL_SIZE)
+    }
+
     /// Constructs a new [`OrderedBatchProducer`].
     pub(crate) fn new(
+        (tx, rx): (Sender<WorkerRequest>, Receiver<WorkerRequest>),
         provider: Arc<KafkaProvider>,
         client: Arc<dyn ProducerClient>,
         compression: Compression,
-        channel_size: usize,
-        request_batch_size: usize,
         max_batch_bytes: usize,
         index_collector: Box<dyn IndexCollector>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(channel_size);
         let running = Arc::new(AtomicBool::new(true));
         let mut worker = BackgroundProducerWorker {
             provider,
@@ -61,7 +69,7 @@ impl OrderedBatchProducer {
             compression,
             running: running.clone(),
             receiver: rx,
-            request_batch_size,
+            request_batch_size: REQUEST_BATCH_SIZE,
             max_batch_bytes,
             index_collector,
         };
@@ -213,11 +221,10 @@ mod tests {
         });
         let provider = Arc::new(KafkaProvider::new(String::new()));
         let producer = OrderedBatchProducer::new(
+            OrderedBatchProducer::channel(),
             provider,
             client.clone(),
             Compression::NoCompression,
-            128,
-            64,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
             Box::new(NoopCollector),
         );
@@ -262,11 +269,10 @@ mod tests {
         });
         let provider = Arc::new(KafkaProvider::new(String::new()));
         let producer = OrderedBatchProducer::new(
+            OrderedBatchProducer::channel(),
             provider,
             client.clone(),
             Compression::NoCompression,
-            128,
-            64,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
             Box::new(NoopCollector),
         );
@@ -315,11 +321,10 @@ mod tests {
 
         let provider = Arc::new(KafkaProvider::new(String::new()));
         let producer = OrderedBatchProducer::new(
+            OrderedBatchProducer::channel(),
             provider,
             client.clone(),
             Compression::NoCompression,
-            128,
-            64,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
             Box::new(NoopCollector),
         );

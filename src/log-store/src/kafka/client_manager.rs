@@ -33,9 +33,6 @@ use crate::kafka::producer::{OrderedBatchProducer, OrderedBatchProducerRef};
 // The `DEFAULT_PARTITION` refers to the index of the partition.
 const DEFAULT_PARTITION: i32 = 0;
 
-// Max batch size for a `OrderedBatchProducer` to handle requests.
-const REQUEST_BATCH_SIZE: usize = 64;
-
 /// Arc wrapper of ClientManager.
 pub(crate) type ClientManagerRef = Arc<ClientManager>;
 
@@ -65,8 +62,6 @@ pub(crate) struct ClientManager {
     instances: RwLock<HashMap<Arc<KafkaProvider>, Client>>,
     global_index_collector: Option<GlobalIndexCollector>,
 
-    producer_channel_size: usize,
-    producer_request_batch_size: usize,
     flush_batch_size: usize,
     compression: Compression,
 }
@@ -96,8 +91,6 @@ impl ClientManager {
             client,
             mutex: Mutex::new(()),
             instances: RwLock::new(HashMap::new()),
-            producer_channel_size: REQUEST_BATCH_SIZE * 2,
-            producer_request_batch_size: REQUEST_BATCH_SIZE,
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
             compression: Compression::Lz4,
             global_index_collector: None,
@@ -149,18 +142,17 @@ impl ClientManager {
             })
             .map(Arc::new)?;
 
+        let (tx, rx) = OrderedBatchProducer::channel();
         let index_collector = if let Some(global_collector) = self.global_index_collector.as_ref() {
-            global_collector.provider_level_index_collector(provider.clone())
+            global_collector.provider_level_index_collector(provider.clone(), tx.clone())
         } else {
             Box::new(NoopCollector)
         };
-
         let producer = Arc::new(OrderedBatchProducer::new(
+            (tx, rx),
             provider.clone(),
             client.clone(),
             self.compression,
-            self.producer_channel_size,
-            self.producer_request_batch_size,
             self.flush_batch_size,
             index_collector,
         ));

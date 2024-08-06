@@ -13,11 +13,31 @@
 // limitations under the License.
 
 use std::collections::{BTreeSet, HashMap};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use bytes::buf::Writer;
+use bytes::{BufMut, Bytes, BytesMut};
+use common_telemetry::tracing::error;
+use futures::future::try_join_all;
+use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
 use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
+use tokio::select;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::Mutex as TokioMutex;
+
+use crate::error::{self, Result};
+use crate::kafka::worker::{DumpIndexRequest, WorkerRequest};
+
+pub trait IndexEncoder: Send + Sync {
+    fn encode(&self, provider: &KafkaProvider, region_index: &RegionIndexes);
+
+    fn finish(&self) -> Result<Vec<u8>>;
+}
 
 /// The [`IndexCollector`] trait defines the operations for managing and collecting index entries.
 pub trait IndexCollector: Send + Sync {
@@ -29,13 +49,16 @@ pub trait IndexCollector: Send + Sync {
 
     /// Truncates the index for a specific region up to a given [`EntryId`].
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId);
+
+    /// Dumps the index.
+    fn dump(&mut self, encoder: &dyn IndexEncoder);
 }
 
 /// The [`GlobalIndexCollector`] struct is responsible for managing index entries
 /// across multiple providers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GlobalIndexCollector {
-    providers: Arc<Mutex<HashMap<Arc<KafkaProvider>, RegionIndexes>>>,
+    providers: Arc<TokioMutex<HashMap<Arc<KafkaProvider>, Sender<WorkerRequest>>>>,
 }
 
 impl GlobalIndexCollector {
@@ -43,9 +66,10 @@ impl GlobalIndexCollector {
     pub fn provider_level_index_collector(
         &self,
         provider: Arc<KafkaProvider>,
+        sender: Sender<WorkerRequest>,
     ) -> Box<dyn IndexCollector> {
         Box::new(ProviderLevelIndexCollector {
-            global: self.clone(),
+            indexes: Default::default(),
             provider,
         })
     }
@@ -55,7 +79,7 @@ impl GlobalIndexCollector {
 /// Each region is identified by a `RegionId` and maps to a set of [`EntryId`]s,
 /// representing the entries within that region. It also keeps track of the
 /// latest [`EntryId`] across all regions.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RegionIndexes {
     regions: HashMap<RegionId, BTreeSet<EntryId>>,
     latest_entry_id: EntryId,
@@ -85,41 +109,25 @@ impl RegionIndexes {
 /// specific to a particular provider.
 #[derive(Debug, Clone)]
 pub struct ProviderLevelIndexCollector {
-    global: GlobalIndexCollector,
+    indexes: RegionIndexes,
     provider: Arc<KafkaProvider>,
 }
 
 impl IndexCollector for ProviderLevelIndexCollector {
     fn append(&mut self, region_id: RegionId, entry_id: EntryId) {
-        self.global
-            .providers
-            .lock()
-            .unwrap()
-            .entry(self.provider.clone())
-            .or_default()
-            .append(region_id, entry_id);
+        self.indexes.append(region_id, entry_id)
     }
 
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId) {
-        if let Some(index) = self
-            .global
-            .providers
-            .lock()
-            .unwrap()
-            .get_mut(&self.provider)
-        {
-            index.truncate(region_id, entry_id);
-        }
+        self.indexes.truncate(region_id, entry_id)
     }
 
     fn set_latest_entry_id(&mut self, entry_id: EntryId) {
-        self.global
-            .providers
-            .lock()
-            .unwrap()
-            .entry(self.provider.clone())
-            .or_default()
-            .set_latest_entry_id(entry_id);
+        self.indexes.set_latest_entry_id(entry_id);
+    }
+
+    fn dump(&mut self, encoder: &dyn IndexEncoder) {
+        encoder.encode(&self.provider, &self.indexes)
     }
 }
 
@@ -135,4 +143,6 @@ impl IndexCollector for NoopCollector {
     fn truncate(&mut self, _region_id: RegionId, _entry_id: EntryId) {}
 
     fn set_latest_entry_id(&mut self, _entry_id: EntryId) {}
+
+    fn dump(&mut self, encoder: &dyn IndexEncoder) {}
 }

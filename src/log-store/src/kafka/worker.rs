@@ -30,6 +30,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot::{self};
 
+use super::index::IndexEncoder;
 use crate::error::{self, NoMaxValueSnafu, Result};
 use crate::kafka::index::IndexCollector;
 use crate::kafka::producer::ProducerClient;
@@ -38,6 +39,7 @@ pub(crate) enum WorkerRequest {
     Produce(ProduceRequest),
     Checkpoint,
     TruncateIndex(TruncateIndexRequest),
+    DumpIndex(DumpIndexRequest),
 }
 
 impl WorkerRequest {
@@ -54,6 +56,24 @@ impl WorkerRequest {
                 sender: tx,
             }),
             ProduceResultHandle { receiver: rx },
+        )
+    }
+}
+
+pub(crate) struct DumpIndexRequest {
+    encoder: Arc<dyn IndexEncoder>,
+    sender: oneshot::Sender<()>,
+}
+
+impl DumpIndexRequest {
+    pub fn new(encoder: Arc<dyn IndexEncoder>) -> (DumpIndexRequest, oneshot::Receiver<()>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            DumpIndexRequest {
+                encoder,
+                sender: tx,
+            },
+            rx,
         )
     }
 }
@@ -171,6 +191,10 @@ impl BackgroundProducerWorker {
                     region_id,
                     entry_id,
                 }) => self.index_collector.truncate(region_id, entry_id),
+                WorkerRequest::DumpIndex(req) => {
+                    self.index_collector.dump(req.encoder.as_ref());
+                    let _ = req.sender.send(());
+                }
             }
         }
 

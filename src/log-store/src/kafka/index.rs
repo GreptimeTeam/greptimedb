@@ -16,7 +16,7 @@ mod collector;
 mod iterator;
 
 pub(crate) use collector::{
-    GlobalIndexCollector, IndexCollector, NoopCollector, ProviderLevelIndexCollector,
+    GlobalIndexCollector, IndexCollector, IndexEncoder, NoopCollector, ProviderLevelIndexCollector,
 };
 pub(crate) use iterator::{
     MultipleRegionWalIndexIterator, NextBatchHint, RegionWalIndexIterator, RegionWalRange,
