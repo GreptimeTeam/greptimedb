@@ -59,7 +59,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
-          path: C:\tmp\greptime-*.log
+          path: C:\Users\RUNNER~1\AppData\Local\Temp\sqlness*
           retention-days: 3
 
   test-on-windows:
