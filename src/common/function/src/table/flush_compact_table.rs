@@ -33,6 +33,8 @@ use crate::handlers::TableMutationHandlerRef;
 
 /// Compact type: strict window.
 const COMPACT_TYPE_STRICT_WINDOW: &str = "strict_window";
+/// Compact type: strict window (short name).
+const COMPACT_TYPE_STRICT_WINDOW_SHORT: &str = "swcs";
 
 #[admin_fn(
     name = FlushTableFunction,
@@ -168,8 +170,12 @@ fn parse_compact_params(
     })
 }
 
+/// Parses compaction strategy type. For `strict_window` or `swcs` strict window compaction is chose,
+/// otherwise choose regular (TWCS) compaction.
 fn parse_compact_type(type_str: &str, option: Option<&str>) -> Result<compact_request::Options> {
-    if type_str.eq_ignore_ascii_case(COMPACT_TYPE_STRICT_WINDOW) {
+    if type_str.eq_ignore_ascii_case(COMPACT_TYPE_STRICT_WINDOW)
+        | type_str.eq_ignore_ascii_case(COMPACT_TYPE_STRICT_WINDOW_SHORT)
+    {
         let window_seconds = option
             .map(|v| {
                 i64::from_str(v).map_err(|_| {
@@ -348,6 +354,17 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
+                },
+            ),
+            (
+                &["table", "swcs", "120"],
+                CompactTableRequest {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::StrictWindow(StrictWindow {
+                        window_seconds: 120,
+                    }),
                 },
             ),
         ]);
