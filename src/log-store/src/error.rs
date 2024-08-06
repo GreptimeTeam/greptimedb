@@ -272,12 +272,36 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to send produce request"))]
+    #[snafu(display("Failed to wait for ProduceResultReceiver"))]
     WaitProduceResultReceiver {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: tokio::sync::oneshot::error::RecvError,
+    },
+
+    #[snafu(display("Failed to wait for result of DumpIndex"))]
+    WaitDumpIndex {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tokio::sync::oneshot::error::RecvError,
+    },
+
+    #[snafu(display("Failed to create writer"))]
+    CreateWriter {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: object_store::Error,
+    },
+
+    #[snafu(display("Failed to write index"))]
+    WriteIndex {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display(
