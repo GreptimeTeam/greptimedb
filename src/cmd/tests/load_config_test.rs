@@ -22,7 +22,7 @@ use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
 use common_runtime::global::RuntimeOptions;
-use common_telemetry::logging::LoggingOptions;
+use common_telemetry::logging::{LoggingOptions, DEFAULT_OTLP_ENDPOINT};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
@@ -88,7 +88,7 @@ fn test_load_datanode_example_config() {
             ],
             logging: LoggingOptions {
                 level: Some("info".to_string()),
-                otlp_endpoint: Some("".to_string()),
+                otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -136,7 +136,7 @@ fn test_load_frontend_example_config() {
             }),
             logging: LoggingOptions {
                 level: Some("info".to_string()),
-                otlp_endpoint: Some("".to_string()),
+                otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -174,7 +174,7 @@ fn test_load_metasrv_example_config() {
             logging: LoggingOptions {
                 dir: "/tmp/greptimedb/logs".to_string(),
                 level: Some("info".to_string()),
-                otlp_endpoint: Some("".to_string()),
+                otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -228,7 +228,7 @@ fn test_load_standalone_example_config() {
             },
             logging: LoggingOptions {
                 level: Some("info".to_string()),
-                otlp_endpoint: Some("".to_string()),
+                otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },

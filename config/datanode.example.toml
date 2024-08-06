@@ -493,8 +493,7 @@ level = "info"
 enable_otlp_tracing = false
 
 ## The OTLP tracing endpoint.
-## +toml2docs:none-default
-otlp_endpoint = ""
+otlp_endpoint = "http://localhost:4317"
 
 ## Whether to append logs to stdout.
 append_stdout = true

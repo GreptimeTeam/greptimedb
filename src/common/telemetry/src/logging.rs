@@ -33,7 +33,7 @@ use tracing_subscriber::{filter, EnvFilter, Registry};
 
 use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
 
-const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
+pub const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
