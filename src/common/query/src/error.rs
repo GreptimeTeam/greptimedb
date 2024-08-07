@@ -155,13 +155,6 @@ pub enum Error {
         source: DataTypeError,
     },
 
-    #[snafu(display("Failed to execute physical plan"))]
-    ExecutePhysicalPlan {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to cast array to {:?}", typ))]
     TypeCast {
         #[snafu(source)]
@@ -308,7 +301,6 @@ impl ErrorExt for Error {
 
             Error::DecodePlan { source, .. }
             | Error::Execute { source, .. }
-            | Error::ExecutePhysicalPlan { source, .. }
             | Error::ProcedureService { source, .. }
             | Error::TableMutation { source, .. } => source.status_code(),
 
