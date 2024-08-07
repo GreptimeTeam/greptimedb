@@ -1,5 +1,5 @@
 meta:
-  config: |-
+  configData: |-
     [runtime]
     global_rt_size = 4
     
@@ -13,7 +13,7 @@ meta:
     [datanode.client]
     timeout = "60s"
 datanode:
-  config: |-
+  configData: |-
     [runtime]
     global_rt_size = 4
     compact_rt_size = 2
@@ -23,7 +23,7 @@ datanode:
     broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
     linger = "2ms"
 frontend:
-  config: |-
+  configData: |-
     [runtime]
     global_rt_size = 4
 
