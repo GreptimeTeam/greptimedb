@@ -27,6 +27,7 @@ use crate::adapter::{FlowId, TableName, TableSource};
 use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
+use crate::metrics::METRIC_FLOW_TOTAL_PROCESSED_ROWS;
 use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP};
 
 /// A context that holds the information of the dataflow
@@ -94,14 +95,14 @@ impl SourceSender {
     /// until send buf is empty or broadchannel is full
     pub async fn try_flush(&self) -> Result<usize, Error> {
         let mut row_cnt = 0;
-        let mut iterations = 0;
-        while iterations < Self::MAX_ITERATIONS {
+        loop {
             let mut send_buf = self.send_buf_rx.write().await;
             // if inner sender channel is empty or send buf is empty, there
             // is nothing to do for now, just break
             if self.sender.len() >= BROADCAST_CAP || send_buf.is_empty() {
                 break;
             }
+            // TODO(discord9): send rows instead so it's just moving a point
             if let Some(rows) = send_buf.recv().await {
                 for row in rows {
                     self.sender
@@ -116,10 +117,10 @@ impl SourceSender {
                     row_cnt += 1;
                 }
             }
-            iterations += 1;
         }
         if row_cnt > 0 {
             debug!("Send {} rows", row_cnt);
+            METRIC_FLOW_TOTAL_PROCESSED_ROWS.add(row_cnt as _);
             debug!(
                 "Remaining Send buf.len() = {}",
                 self.send_buf_rx.read().await.len()
@@ -169,6 +170,7 @@ impl FlownodeContext {
     }
 
     /// Return the sum number of rows in all send buf
+    /// TODO(discord9): remove this since we can't get correct row cnt anyway
     pub async fn get_send_buf_size(&self) -> usize {
         let mut sum = 0;
         for sender in self.source_sender.values() {

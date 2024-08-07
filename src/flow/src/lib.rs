@@ -28,6 +28,7 @@ mod compute;
 pub mod error;
 mod expr;
 pub mod heartbeat;
+mod metrics;
 mod plan;
 mod repr;
 mod server;
