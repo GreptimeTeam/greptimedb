@@ -62,10 +62,35 @@ enum SubCommand {
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    setup_human_panic();
-    start(Command::parse()).await
+fn main() -> Result<()> {
+    // Set the stack size to 8MB for the thread so it wouldn't crash on large stack usage in debug mode
+    // see https://github.com/GreptimeTeam/greptimedb/pull/4317
+    // and https://github.com/rust-lang/rust/issues/34283
+    let builder = std::thread::Builder::new().name("main_larger_stack".to_string());
+    #[cfg(debug_assertions)]
+    let builder = builder.stack_size(8 * 1024 * 1024);
+    builder
+        .spawn(|| {
+            let body = async {
+                setup_human_panic();
+                start(Command::parse()).await
+            };
+            #[allow(clippy::expect_used, clippy::diverging_sub_expression)]
+            {
+                let builder = tokio::runtime::Builder::new_multi_thread().enable_all();
+
+                #[cfg(debug_assertions)]
+                let builder = builder..thread_stack_size(8 * 1024 * 1024);
+
+                return builder
+                    .build()
+                    .expect("Failed building the Runtime")
+                    .block_on(body);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap()
 }
 
 async fn start(cli: Command) -> Result<()> {
