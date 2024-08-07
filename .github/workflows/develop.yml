@@ -145,6 +145,18 @@ jobs:
       matrix:
         target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
     steps:
+      - name: Remove unused software
+        run: |
+          echo "Disk space before:"
+          df -h
+          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
+          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
+          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
+          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo docker builder prune -a
+          echo "Disk space after:"
+          df -h
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3
         with:
@@ -193,6 +205,18 @@ jobs:
       matrix:
         target: [ "unstable_fuzz_create_table_standalone" ]
     steps:
+      - name: Remove unused software
+        run: |
+          echo "Disk space before:"
+          df -h
+          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
+          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
+          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
+          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo docker builder prune -a
+          echo "Disk space after:"
+          df -h
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3
         with:
@@ -285,7 +309,7 @@ jobs:
     strategy:
       matrix:
         target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
-        mode: 
+        mode:
           - name: "Remote WAL"
             minio: true
             kafka: true
@@ -427,6 +451,18 @@ jobs:
             kafka: true
             values: "with-remote-wal.yaml"
     steps:
+      - name: Remove unused software
+        run: |
+          echo "Disk space before:"
+          df -h
+          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
+          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
+          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
+          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo docker builder prune -a
+          echo "Disk space after:"
+          df -h
       - uses: actions/checkout@v4
       - name: Setup Kind
         uses: ./.github/actions/setup-kind

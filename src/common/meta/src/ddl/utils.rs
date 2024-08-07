@@ -15,7 +15,7 @@
 use common_catalog::consts::METRIC_ENGINE;
 use common_error::ext::BoxedError;
 use common_procedure::error::Error as ProcedureError;
-use snafu::{ensure, location, Location, OptionExt};
+use snafu::{ensure, location, OptionExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use table::metadata::TableId;
 

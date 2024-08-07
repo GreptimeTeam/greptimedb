@@ -22,7 +22,7 @@ use datatypes::vectors::{Helper, VectorRef};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple};
 use pyo3::{pymethods, IntoPy, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject};
-use snafu::{ensure, Location, ResultExt};
+use snafu::{ensure, ResultExt};
 
 use crate::engine::EvalContext;
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};

@@ -17,7 +17,7 @@ use std::io;
 use asynchronous_codec::{BytesMut, Decoder, Encoder};
 use bytes::{Buf, BufMut};
 use common_base::BitVec;
-use snafu::{location, Location};
+use snafu::location;
 
 use crate::inverted_index::error::{Error, Result};
 use crate::inverted_index::Bytes;

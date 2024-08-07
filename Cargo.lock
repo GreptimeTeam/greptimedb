@@ -226,7 +226,7 @@ dependencies = [
  "paste",
  "prost 0.12.6",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tonic-build",
 ]
 
@@ -774,7 +774,7 @@ dependencies = [
  "digest",
  "notify",
  "sha1",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
  "tokio",
 ]
@@ -1284,7 +1284,7 @@ dependencies = [
  "common-macro",
  "common-meta",
  "moka",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "substrait 0.9.1",
 ]
 
@@ -1351,7 +1351,7 @@ dependencies = [
  "prometheus",
  "serde_json",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
  "store-api",
  "table",
@@ -1665,7 +1665,7 @@ dependencies = [
  "query",
  "rand",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "substrait 0.37.3",
  "substrait 0.9.1",
  "tokio",
@@ -1751,7 +1751,7 @@ dependencies = [
  "serde_json",
  "servers",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "store-api",
  "substrait 0.9.1",
  "table",
@@ -1808,7 +1808,7 @@ dependencies = [
  "common-macro",
  "paste",
  "serde",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "toml 0.8.14",
  "zeroize",
 ]
@@ -1820,7 +1820,7 @@ dependencies = [
  "chrono",
  "common-error",
  "common-macro",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tokio",
 ]
 
@@ -1840,7 +1840,7 @@ dependencies = [
  "num_cpus",
  "serde",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sysinfo",
  "temp-env",
  "tempfile",
@@ -1876,7 +1876,7 @@ dependencies = [
  "rand",
  "regex",
  "serde",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "strum 0.25.0",
  "tokio",
  "tokio-util",
@@ -1894,14 +1894,14 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
 ]
 
 [[package]]
 name = "common-error"
 version = "0.9.1"
 dependencies = [
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "strum 0.25.0",
  "tonic 0.11.0",
 ]
@@ -1917,7 +1917,7 @@ dependencies = [
  "common-macro",
  "common-query",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
 ]
 
@@ -1948,7 +1948,7 @@ dependencies = [
  "serde",
  "serde_json",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
  "statrs",
  "store-api",
@@ -1992,7 +1992,7 @@ dependencies = [
  "lazy_static",
  "prost 0.12.6",
  "rand",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tokio",
  "tonic 0.11.0",
  "tower",
@@ -2012,7 +2012,7 @@ dependencies = [
  "datatypes",
  "paste",
  "prost 0.12.6",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "table",
 ]
 
@@ -2025,7 +2025,7 @@ dependencies = [
  "datatypes",
  "proc-macro2",
  "quote",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "static_assertions",
  "syn 2.0.66",
 ]
@@ -2036,7 +2036,7 @@ version = "0.9.1"
 dependencies = [
  "common-error",
  "common-macro",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tempfile",
  "tikv-jemalloc-ctl",
  "tikv-jemalloc-sys",
@@ -2088,7 +2088,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "store-api",
  "strum 0.25.0",
  "table",
@@ -2123,7 +2123,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tokio",
  "uuid",
 ]
@@ -2153,7 +2153,7 @@ dependencies = [
  "datafusion-expr",
  "datatypes",
  "serde",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "sqlparser_derive 0.1.1",
  "statrs",
@@ -2176,7 +2176,7 @@ dependencies = [
  "pin-project",
  "serde",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tokio",
 ]
 
@@ -2194,7 +2194,7 @@ dependencies = [
  "paste",
  "prometheus",
  "serde",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tokio",
  "tokio-metrics",
  "tokio-metrics-collector",
@@ -2254,7 +2254,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
 ]
 
 [[package]]
@@ -2282,7 +2282,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tokio",
  "toml 0.8.14",
 ]
@@ -3113,7 +3113,7 @@ dependencies = [
  "serde",
  "servers",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "store-api",
  "substrait 0.9.1",
  "table",
@@ -3143,7 +3143,7 @@ dependencies = [
  "paste",
  "serde",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
 ]
 
 [[package]]
@@ -3707,7 +3707,7 @@ dependencies = [
  "object-store",
  "serde",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "store-api",
  "table",
  "tokio",
@@ -3832,7 +3832,7 @@ dependencies = [
  "servers",
  "session",
  "smallvec",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "store-api",
  "strum 0.25.0",
  "substrait 0.9.1",
@@ -3930,7 +3930,7 @@ dependencies = [
  "serde_json",
  "servers",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "store-api",
@@ -5014,7 +5014,7 @@ dependencies = [
  "regex",
  "regex-automata 0.4.7",
  "serde",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tantivy",
  "tantivy-jieba",
  "tempfile",
@@ -5800,7 +5800,7 @@ dependencies = [
  "rskafka",
  "serde",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "store-api",
  "tokio",
  "uuid",
@@ -6095,7 +6095,7 @@ dependencies = [
  "meta-srv",
  "rand",
  "serde",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tokio",
  "tokio-stream",
  "tonic 0.11.0",
@@ -6148,7 +6148,7 @@ dependencies = [
  "serde_json",
  "servers",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "store-api",
  "table",
  "tokio",
@@ -6204,7 +6204,7 @@ dependencies = [
  "object-store",
  "prometheus",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "store-api",
  "tokio",
 ]
@@ -6330,7 +6330,7 @@ dependencies = [
  "serde_with",
  "session",
  "smallvec",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "store-api",
  "strum 0.25.0",
  "table",
@@ -7208,7 +7208,7 @@ dependencies = [
  "regex",
  "serde_json",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "store-api",
@@ -7476,7 +7476,7 @@ dependencies = [
  "itertools 0.10.5",
  "serde",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "store-api",
@@ -7794,7 +7794,7 @@ dependencies = [
  "serde",
  "serde_json",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
  "table",
  "tokio",
@@ -7916,7 +7916,7 @@ dependencies = [
  "datanode",
  "frontend",
  "meta-srv",
- "snafu 0.8.3",
+ "snafu 0.8.4",
 ]
 
 [[package]]
@@ -8198,7 +8198,7 @@ dependencies = [
  "prost 0.12.6",
  "query",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tokio",
 ]
 
@@ -8252,7 +8252,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -8273,7 +8273,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5bb182580f71dd070f88d01ce3de9f4da5021db7115d2e1c3605a754153b77c1"
 dependencies = [
  "bytes",
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.13.0",
  "log",
  "multimap",
@@ -8434,7 +8434,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "tokio",
  "tokio-util",
  "uuid",
@@ -8591,7 +8591,7 @@ dependencies = [
  "rand",
  "regex",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "statrs",
@@ -9983,7 +9983,7 @@ dependencies = [
  "serde",
  "servers",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
  "table",
  "tokio",
@@ -10310,7 +10310,7 @@ dependencies = [
  "serde",
  "serde_json",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "snap",
  "sql",
  "strum 0.25.0",
@@ -10347,7 +10347,7 @@ dependencies = [
  "common-time",
  "derive_builder 0.12.0",
  "meter-core",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
 ]
 
@@ -10533,11 +10533,11 @@ dependencies = [
 
 [[package]]
 name = "snafu"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "418b8136fec49956eba89be7da2847ec1909df92a9ae4178b5ff0ff092c8d95e"
+checksum = "2b835cb902660db3415a672d862905e791e54d306c6e8189168c7f3d9ae1c79d"
 dependencies = [
- "snafu-derive 0.8.3",
+ "snafu-derive 0.8.4",
 ]
 
 [[package]]
@@ -10554,11 +10554,11 @@ dependencies = [
 
 [[package]]
 name = "snafu-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a4812a669da00d17d8266a0439eddcacbc88b17f732f927e52eeb9d196f7fb5"
+checksum = "38d1e02fca405f6280643174a50c942219f0bbf4dbf7d480f1dd864d6f211ae5"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.66",
@@ -10660,7 +10660,7 @@ dependencies = [
  "lazy_static",
  "regex",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "sqlparser_derive 0.1.1",
  "table",
@@ -10933,7 +10933,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "strum 0.25.0",
  "tokio",
 ]
@@ -11096,7 +11096,7 @@ dependencies = [
  "datatypes",
  "promql",
  "prost 0.12.6",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "substrait 0.37.3",
  "tokio",
 ]
@@ -11313,7 +11313,7 @@ dependencies = [
  "paste",
  "serde",
  "serde_json",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "store-api",
  "tokio",
  "tokio-util",
@@ -11578,7 +11578,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "sqlx",
@@ -11646,7 +11646,7 @@ dependencies = [
  "serde_json",
  "servers",
  "session",
- "snafu 0.8.3",
+ "snafu 0.8.4",
  "sql",
  "sqlx",
  "store-api",
