@@ -15,10 +15,11 @@
 #![doc = include_str!("../../../../README.md")]
 
 use clap::{Parser, Subcommand};
-use cmd::error::Result;
+use cmd::error::{Result, SpawnThreadSnafu};
 use cmd::options::GlobalOptions;
 use cmd::{cli, datanode, flownode, frontend, metasrv, standalone, App};
 use common_version::version;
+use snafu::ResultExt;
 
 #[derive(Parser)]
 #[command(name = "greptime", author, version, long_version = version(), about)]
@@ -89,9 +90,9 @@ fn main() -> Result<()> {
                     .block_on(body);
             }
         })
-        .unwrap()
+        .context(SpawnThreadSnafu)?
         .join()
-        .unwrap()
+        .expect("Couldn't join on the associated thread")
 }
 
 async fn start(cli: Command) -> Result<()> {

@@ -305,6 +305,12 @@ pub enum Error {
         error: std::io::Error,
     },
 
+    #[snafu(display("Failed to spawn thread"))]
+    SpawnThread {
+        #[snafu(source)]
+        error: std::io::Error,
+    },
+
     #[snafu(display("Other error"))]
     Other {
         source: BoxedError,
@@ -395,7 +401,9 @@ impl ErrorExt for Error {
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
             Error::StartCatalogManager { source, .. } => source.status_code(),
 
-            Error::SerdeJson { .. } | Error::FileIo { .. } => StatusCode::Unexpected,
+            Error::SerdeJson { .. } | Error::FileIo { .. } | Error::SpawnThread { .. } => {
+                StatusCode::Unexpected
+            }
 
             Error::Other { source, .. } => source.status_code(),
 
