@@ -77,12 +77,13 @@ fn main() -> Result<()> {
             };
             #[allow(clippy::expect_used, clippy::diverging_sub_expression)]
             {
-                let builder = tokio::runtime::Builder::new_multi_thread().enable_all();
+                let mut builder = tokio::runtime::Builder::new_multi_thread();
 
                 #[cfg(debug_assertions)]
                 let builder = builder.thread_stack_size(8 * 1024 * 1024);
 
                 return builder
+                    .enable_all()
                     .build()
                     .expect("Failed building the Runtime")
                     .block_on(body);
