@@ -67,7 +67,7 @@ fn main() -> Result<()> {
     // Set the stack size to 8MB for the thread so it wouldn't crash on large stack usage in debug mode
     // see https://github.com/GreptimeTeam/greptimedb/pull/4317
     // and https://github.com/rust-lang/rust/issues/34283
-    let builder = std::thread::Builder::new().name("main_larger_stack".to_string());
+    let builder = std::thread::Builder::new().name("main_spawn".to_string());
     #[cfg(debug_assertions)]
     let builder = builder.stack_size(8 * 1024 * 1024);
     builder
