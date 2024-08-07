@@ -53,7 +53,7 @@ get_arch_type
 if [ -n "${OS_TYPE}" ] && [ -n "${ARCH_TYPE}" ]; then
     # Use the latest nightly version.
     if [ "${VERSION}" = "latest" ]; then
-        VERSION=$(curl -s -XGET "https://api.github.com/repos/${GITHUB_ORG}/${GITHUB_REPO}/releases" | grep tag_name | grep nightly | cut -d: -f 2 | sed 's/.*"\(.*\)".*/\1/' | uniq | sort -r | head -n 1)
+        VERSION=$(curl -s -XGET "https://api.github.com/repos/${GITHUB_ORG}/${GITHUB_REPO}/releases" | grep tag_name | grep nightly | cut -d: -f 2 | sed 's/.*"\(.*\)".*/\1/' | uniq | sort -rV | head -n 1)
         if [ -z "${VERSION}" ]; then
             echo "Failed to get the latest version."
             exit 1
