@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use api::v1::meta::Partition;
 use api::v1::{ColumnDataType, SemanticType};
 use common_procedure::Status;
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use table::metadata::{RawTableInfo, TableId};
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
@@ -130,6 +131,11 @@ pub fn test_create_logical_table_task(name: &str) -> CreateTableTask {
         .time_index("ts")
         .primary_keys(["host".into()])
         .table_name(name)
+        .engine(METRIC_ENGINE_NAME)
+        .table_options(HashMap::from([(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            "phy".to_string(),
+        )]))
         .build()
         .unwrap()
         .into();
@@ -166,6 +172,7 @@ pub fn test_create_physical_table_task(name: &str) -> CreateTableTask {
         .time_index("ts")
         .primary_keys(["value".into()])
         .table_name(name)
+        .engine(METRIC_ENGINE_NAME)
         .build()
         .unwrap()
         .into();

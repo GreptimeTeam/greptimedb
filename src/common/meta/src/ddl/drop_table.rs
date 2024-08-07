@@ -227,7 +227,7 @@ impl Procedure for DropTableProcedure {
     }
 
     fn rollback_supported(&self) -> bool {
-        !matches!(self.data.state, DropTableState::Prepare)
+        !matches!(self.data.state, DropTableState::Prepare) && self.data.allow_rollback
     }
 
     async fn rollback(&mut self, _: &ProcedureContext) -> ProcedureResult<()> {
@@ -256,6 +256,8 @@ pub struct DropTableData {
     pub task: DropTableTask,
     pub physical_region_routes: Vec<RegionRoute>,
     pub physical_table_id: Option<TableId>,
+    #[serde(default)]
+    pub allow_rollback: bool,
 }
 
 impl DropTableData {
@@ -266,6 +268,7 @@ impl DropTableData {
             task,
             physical_region_routes: vec![],
             physical_table_id: None,
+            allow_rollback: false,
         }
     }
 
