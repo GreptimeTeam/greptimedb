@@ -80,7 +80,7 @@ fn main() -> Result<()> {
                 let builder = tokio::runtime::Builder::new_multi_thread().enable_all();
 
                 #[cfg(debug_assertions)]
-                let builder = builder..thread_stack_size(8 * 1024 * 1024);
+                let builder = builder.thread_stack_size(8 * 1024 * 1024);
 
                 return builder
                     .build()
