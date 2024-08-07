@@ -1,5 +1,5 @@
 meta:
-  config: |-
+  configData: |-
     [runtime]
     global_rt_size = 4
     
@@ -7,12 +7,12 @@ meta:
     [datanode.client]
     timeout = "60s"
 datanode:
-  config: |-
+  configData: |-
     [runtime]
     global_rt_size = 4
     compact_rt_size = 2
 frontend:
-  config: |-
+  configData: |-
     [runtime]
     global_rt_size = 4
 
