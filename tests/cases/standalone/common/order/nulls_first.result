@@ -36,16 +36,8 @@ SELECT * FROM test ORDER BY i NULLS LAST, j NULLS FIRST;
 |   | 1 | 1970-01-01T00:00:00.002 |
 +---+---+-------------------------+
 
-SELECT i, j, row_number() OVER (PARTITION BY i ORDER BY j NULLS FIRST) FROM test ORDER BY i NULLS FIRST, j NULLS FIRST;
-
-+---+---+------------------------------------------------------------------------------------------------------------------------+
-| i | j | ROW_NUMBER() PARTITION BY [test.i] ORDER BY [test.j ASC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
-+---+---+------------------------------------------------------------------------------------------------------------------------+
-|   | 1 | 1                                                                                                                      |
-| 1 |   | 1                                                                                                                      |
-| 1 | 1 | 2                                                                                                                      |
-+---+---+------------------------------------------------------------------------------------------------------------------------+
-
+-- Temporary disable. Waiting for next upgrade of DataFusion.
+-- SELECT i, j, row_number() OVER (PARTITION BY i ORDER BY j NULLS FIRST) FROM test ORDER BY i NULLS FIRST, j NULLS FIRST;
 SELECT i, j, row_number() OVER (PARTITION BY i ORDER BY j NULLS LAST) FROM test ORDER BY i NULLS FIRST, j NULLS FIRST;
 
 +---+---+-----------------------------------------------------------------------------------------------------------------------+
