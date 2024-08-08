@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
@@ -19,6 +21,7 @@ use common_error::ext::BoxedError;
 use common_telemetry::tracing;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use pipeline::{GreptimeTransformer, Pipeline};
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
@@ -28,7 +31,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::instance::Instance;
-use crate::metrics::{OTLP_METRICS_ROWS, OTLP_TRACES_ROWS};
+use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_TRACES_ROWS};
 
 #[async_trait]
 impl OpenTelemetryProtocolHandler for Instance {
@@ -86,6 +89,33 @@ impl OpenTelemetryProtocolHandler for Instance {
         let (requests, rows) = otlp::trace::to_grpc_insert_requests(table_name, spans)?;
 
         OTLP_TRACES_ROWS.inc_by(rows as u64);
+
+        self.handle_row_inserts(requests, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn logs(
+        &self,
+        request: opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest,
+        pipeline: Arc<Pipeline<GreptimeTransformer>>,
+        table_name: String,
+        ctx: QueryContextRef,
+    ) -> ServerResult<Output> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::Otlp)
+            .context(AuthSnafu)?;
+
+        let interceptor_ref = self
+            .plugins
+            .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
+        interceptor_ref.pre_execute(ctx.clone())?;
+        let (requests, rows) = otlp::logs::to_grpc_insert_requests(request, pipeline, table_name)?;
+        OTLP_LOGS_ROWS.inc_by(rows as u64);
 
         self.handle_row_inserts(requests, ctx)
             .await

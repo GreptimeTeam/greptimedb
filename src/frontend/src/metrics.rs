@@ -51,4 +51,9 @@ lazy_static! {
         "frontend otlp traces rows"
     )
     .unwrap();
+pub static ref OTLP_LOGS_ROWS: IntCounter = register_int_counter!(
+    "greptime_frontend_otlp_logs_rows",
+    "frontend otlp logs rows"
+)
+.unwrap();
 }
