@@ -45,6 +45,8 @@ pub trait IndexCollector: Send + Sync {
     fn append(&mut self, region_id: RegionId, entry_id: EntryId);
 
     /// Truncates the index for a specific region up to a given [`EntryId`].
+    ///
+    /// It removes all [`EntryId`]s smaller than `entry_id`.
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId);
 
     /// Sets the latest [`EntryId`].
