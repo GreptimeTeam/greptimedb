@@ -223,6 +223,7 @@ mod tests {
                 replication_factor: 1,
                 create_topic_timeout: Duration::from_secs(30),
             },
+            ..Default::default()
         };
         assert_eq!(datanode_wal_config, DatanodeWalConfig::Kafka(expected));
     }

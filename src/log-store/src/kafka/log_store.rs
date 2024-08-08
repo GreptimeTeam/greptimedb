@@ -32,6 +32,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
+use crate::kafka::index::GlobalIndexCollector;
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
     convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
@@ -51,8 +52,12 @@ pub struct KafkaLogStore {
 
 impl KafkaLogStore {
     /// Tries to create a Kafka log store.
-    pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
-        let client_manager = Arc::new(ClientManager::try_new(config).await?);
+    pub async fn try_new(
+        config: &DatanodeKafkaConfig,
+        global_index_collector: Option<GlobalIndexCollector>,
+    ) -> Result<Self> {
+        let client_manager =
+            Arc::new(ClientManager::try_new(config, global_index_collector).await?);
 
         Ok(Self {
             client_manager,
@@ -470,7 +475,7 @@ mod tests {
             max_batch_bytes: ReadableSize::kb(32),
             ..Default::default()
         };
-        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
+        let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
         let topic_name = uuid::Uuid::new_v4().to_string();
         let provider = Provider::kafka_provider(topic_name);
         let region_entries = (0..5)
@@ -542,7 +547,7 @@ mod tests {
             max_batch_bytes: ReadableSize::kb(8),
             ..Default::default()
         };
-        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
+        let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
         let topic_name = uuid::Uuid::new_v4().to_string();
         let provider = Provider::kafka_provider(topic_name);
         let region_entries = (0..5)

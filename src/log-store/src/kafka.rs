@@ -25,6 +25,7 @@ pub(crate) mod util;
 #[allow(dead_code)]
 pub(crate) mod worker;
 
+pub use index::{default_index_file, GlobalIndexCollector};
 use serde::{Deserialize, Serialize};
 use store_api::logstore::entry::Id as EntryId;
 
