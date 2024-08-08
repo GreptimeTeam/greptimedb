@@ -33,6 +33,7 @@ use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_query::Output;
 use headers::HeaderValue;
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion};
@@ -105,7 +106,7 @@ pub trait PromStoreProtocolHandler {
 }
 
 #[async_trait]
-pub trait OpenTelemetryProtocolHandler {
+pub trait OpenTelemetryProtocolHandler: LogHandler {
     /// Handling opentelemetry metrics request
     async fn metrics(
         &self,
@@ -117,6 +118,14 @@ pub trait OpenTelemetryProtocolHandler {
     async fn traces(
         &self,
         request: ExportTraceServiceRequest,
+        ctx: QueryContextRef,
+    ) -> Result<Output>;
+
+    async fn logs(
+        &self,
+        request: ExportLogsServiceRequest,
+        pipeline: Arc<Pipeline<GreptimeTransformer>>,
+        table_name: String,
         ctx: QueryContextRef,
     ) -> Result<Output>;
 }

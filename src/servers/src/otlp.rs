@@ -15,3 +15,4 @@
 pub mod metrics;
 pub mod plugin;
 pub mod trace;
+pub mod logs;

@@ -12,20 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::result::Result as StdResult;
 use std::sync::Arc;
 
-use axum::extract::{RawBody, State};
-use axum::http::header;
+use axum::extract::{FromRequestParts, RawBody, State};
+use axum::http::header::HeaderValue;
+use axum::http::request::Parts;
+use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
-use axum::Extension;
+use axum::{async_trait, Extension};
 use common_telemetry::tracing;
 use hyper::Body;
+use opentelemetry_proto::tonic::collector::logs::v1::{
+    ExportLogsServiceRequest, ExportLogsServiceResponse,
+};
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
+use pipeline::util::to_pipeline_version;
 use prost::Message;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
@@ -40,7 +47,7 @@ pub async fn metrics(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(mut query_ctx): Extension<QueryContext>,
     RawBody(body): RawBody,
-) -> Result<OtlpMetricsResponse> {
+) -> Result<OtlpResponse<ExportMetricsServiceResponse>> {
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
     let query_ctx = Arc::new(query_ctx);
@@ -52,7 +59,7 @@ pub async fn metrics(
     handler
         .metrics(request, query_ctx)
         .await
-        .map(|o| OtlpMetricsResponse {
+        .map(|o| OtlpResponse {
             resp_body: ExportMetricsServiceResponse {
                 partial_success: None,
             },
@@ -69,27 +76,13 @@ async fn parse_metrics_body(body: Body) -> Result<ExportMetricsServiceRequest> {
         })
 }
 
-pub struct OtlpMetricsResponse {
-    resp_body: ExportMetricsServiceResponse,
-    write_cost: usize,
-}
-
-impl IntoResponse for OtlpMetricsResponse {
-    fn into_response(self) -> axum::response::Response {
-        let mut header_map = write_cost_header_map(self.write_cost);
-        header_map.insert(header::CONTENT_TYPE, CONTENT_TYPE_PROTOBUF.clone());
-
-        (header_map, self.resp_body.encode_to_vec()).into_response()
-    }
-}
-
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "traces"))]
 pub async fn traces(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(mut query_ctx): Extension<QueryContext>,
     RawBody(body): RawBody,
-) -> Result<OtlpTracesResponse> {
+) -> Result<OtlpResponse<ExportTraceServiceResponse>> {
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
     let query_ctx = Arc::new(query_ctx);
@@ -100,7 +93,7 @@ pub async fn traces(
     handler
         .traces(request, query_ctx)
         .await
-        .map(|o| OtlpTracesResponse {
+        .map(|o| OtlpResponse {
             resp_body: ExportTraceServiceResponse {
                 partial_success: None,
             },
@@ -117,12 +110,100 @@ async fn parse_traces_body(body: Body) -> Result<ExportTraceServiceRequest> {
         })
 }
 
-pub struct OtlpTracesResponse {
-    resp_body: ExportTraceServiceResponse,
+pub struct PipelineInfo {
+    pub pipeline_name: String,
+    pub pipeline_version: Option<String>,
+}
+
+fn pipeline_header_error(
+    header: &HeaderValue,
+) -> StdResult<String, (http::StatusCode, &'static str)> {
+    match header.to_str() {
+        Ok(s) => Ok(s.to_string()),
+        Err(_) => Err((
+            StatusCode::BAD_REQUEST,
+            "`X-Pipeline-Name` or `X-Pipeline-Version` header is not string type.",
+        )),
+    }
+}
+
+#[async_trait]
+impl<S> FromRequestParts<S> for PipelineInfo
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
+        let pipeline_name = parts.headers.get("X-Pipeline-Name");
+        let pipeline_version = parts.headers.get("X-Pipeline-Version");
+        match (pipeline_name, pipeline_version) {
+            (Some(name), Some(version)) => Ok(PipelineInfo {
+                pipeline_name: pipeline_header_error(name)?,
+                pipeline_version: Some(pipeline_header_error(version)?),
+            }),
+            (None, _) => Err((
+                StatusCode::BAD_REQUEST,
+                "`X-Pipeline-Name` header is missing",
+            )),
+            (Some(name), None) => Ok(PipelineInfo {
+                pipeline_name: pipeline_header_error(name)?,
+                pipeline_version: None,
+            }),
+        }
+    }
+}
+
+#[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "traces"))]
+pub async fn logs(
+    State(handler): State<OpenTelemetryProtocolHandlerRef>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    pipeline_info: PipelineInfo,
+    RawBody(body): RawBody,
+) -> Result<OtlpResponse<ExportLogsServiceResponse>> {
+    let db = query_ctx.get_db_string();
+    query_ctx.set_channel(Channel::Otlp);
+    let query_ctx = Arc::new(query_ctx);
+    let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
+    let request = parse_logs_body(body).await?;
+    // TODO remove unwrap
+    let pipeline_version = to_pipeline_version(pipeline_info.pipeline_version).unwrap();
+    let pipeline = handler
+        .get_pipeline(
+            &pipeline_info.pipeline_name,
+            pipeline_version,
+            query_ctx.clone(),
+        )
+        .await?;
+    handler
+        .logs(request, pipeline, "".to_string(), query_ctx)
+        .await
+        .map(|o| OtlpResponse {
+            resp_body: ExportLogsServiceResponse {
+                partial_success: None,
+            },
+            write_cost: o.meta.cost,
+        })
+}
+
+async fn parse_logs_body(body: Body) -> Result<ExportLogsServiceRequest> {
+    hyper::body::to_bytes(body)
+        .await
+        .context(error::HyperSnafu)
+        .and_then(|buf| {
+            ExportLogsServiceRequest::decode(&buf[..]).context(error::DecodeOtlpRequestSnafu)
+        })
+}
+
+pub struct OtlpResponse<T: Message> {
+    resp_body: T,
     write_cost: usize,
 }
 
-impl IntoResponse for OtlpTracesResponse {
+impl<T: Message> IntoResponse for OtlpResponse<T> {
     fn into_response(self) -> axum::response::Response {
         let mut header_map = write_cost_header_map(self.write_cost);
         header_map.insert(header::CONTENT_TYPE, CONTENT_TYPE_PROTOBUF.clone());
