@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_default_selector_type() {
-        assert_eq!(SelectorType::LoadBased, SelectorType::default());
+        assert_eq!(SelectorType::RoundRobin, SelectorType::default());
     }
 
     #[test]
