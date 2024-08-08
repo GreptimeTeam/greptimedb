@@ -57,12 +57,21 @@ impl Default for SelectorOptions {
     }
 }
 
+/// [`SelectorType`] refers to the load balancer used when creating tables.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(try_from = "String")]
 pub enum SelectorType {
-    #[default]
+    /// The current load balancing is based on the number of regions on each datanode node;
+    /// the more regions, the higher the load (it may be changed to Capacity Units(CU)
+    /// calculation in the future).
     LoadBased,
+    /// This one randomly selects from all available (in lease) nodes. Its characteristic
+    /// is simplicity and fast.
     LeaseBased,
+    /// This one selects the node in a round-robin way.
+    /// In most cases, it's recommended and is the default option. If you're unsure which
+    /// to choose, using it is usually correct.
+    #[default]
     RoundRobin,
 }
 
@@ -97,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_default_selector_type() {
-        assert_eq!(SelectorType::LoadBased, SelectorType::default());
+        assert_eq!(SelectorType::RoundRobin, SelectorType::default());
     }
 
     #[test]
