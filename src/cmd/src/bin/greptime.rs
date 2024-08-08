@@ -15,11 +15,10 @@
 #![doc = include_str!("../../../../README.md")]
 
 use clap::{Parser, Subcommand};
-use cmd::error::{Result, SpawnThreadSnafu};
+use cmd::error::Result;
 use cmd::options::GlobalOptions;
 use cmd::{cli, datanode, flownode, frontend, metasrv, standalone, App};
 use common_version::version;
-use snafu::ResultExt;
 
 #[derive(Parser)]
 #[command(name = "greptime", author, version, long_version = version(), about)]
@@ -63,36 +62,39 @@ enum SubCommand {
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+#[cfg(debug_assertions)]
 fn main() -> Result<()> {
+    use snafu::ResultExt;
     // Set the stack size to 8MB for the thread so it wouldn't overflow on large stack usage in debug mode
     // see https://github.com/GreptimeTeam/greptimedb/pull/4317
     // and https://github.com/rust-lang/rust/issues/34283
-    let builder = std::thread::Builder::new().name("main_spawn".to_string());
-    #[cfg(debug_assertions)]
-    let builder = builder.stack_size(8 * 1024 * 1024);
-    builder
+    std::thread::Builder::new()
+        .name("main_spawn".to_string())
+        .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             let body = async {
                 setup_human_panic();
                 start(Command::parse()).await
             };
-            #[allow(clippy::expect_used, clippy::diverging_sub_expression)]
             {
-                let mut builder = tokio::runtime::Builder::new_multi_thread();
-
-                #[cfg(debug_assertions)]
-                let builder = builder.thread_stack_size(8 * 1024 * 1024);
-
-                builder
+                tokio::runtime::Builder::new_multi_thread()
+                    .thread_stack_size(8 * 1024 * 1024)
                     .enable_all()
                     .build()
                     .expect("Failed building the Runtime")
                     .block_on(body)
             }
         })
-        .context(SpawnThreadSnafu)?
+        .context(cmd::error::SpawnThreadSnafu)?
         .join()
         .expect("Couldn't join on the associated thread")
+}
+
+#[cfg(not(debug_assertions))]
+#[tokio::main]
+async fn main() -> Result<()> {
+    setup_human_panic();
+    start(Command::parse()).await
 }
 
 async fn start(cli: Command) -> Result<()> {
