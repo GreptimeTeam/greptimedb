@@ -189,7 +189,7 @@ impl GlobalIndexCollector {
 
 impl GlobalIndexCollector {
     /// Creates a new [`ProviderLevelIndexCollector`] for a specified provider.
-    pub fn provider_level_index_collector(
+    pub(crate) fn provider_level_index_collector(
         &self,
         provider: Arc<KafkaProvider>,
         sender: Sender<WorkerRequest>,
