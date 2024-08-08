@@ -65,7 +65,7 @@ pub enum SelectorType {
     /// the more regions, the higher the load (it may be changed to Capacity Units(CU)
     /// calculation in the future).
     LoadBased,
-    /// This one randomly selects from all available (leased) nodes. Its characteristic
+    /// This one randomly selects from all available (in lease) nodes. Its characteristic
     /// is simplicity and fast.
     LeaseBased,
     /// This one selects the node in a round-robin way.
