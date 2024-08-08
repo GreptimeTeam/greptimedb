@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_telemetry::debug;
 use session::context::QueryContext;
@@ -28,7 +29,7 @@ use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
 use crate::metrics::METRIC_FLOW_TOTAL_PROCESSED_ROWS;
-use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP};
+use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP, SEND_BUF_CAP};
 
 /// A context that holds the information of the dataflow
 #[derive(Default, Debug)]
@@ -154,6 +155,10 @@ impl FlownodeContext {
             .with_context(|| TableNotFoundSnafu {
                 name: table_id.to_string(),
             })?;
+        // wait until send buf is not full
+        while sender.send_buf_rx.read().await.len() >= SEND_BUF_CAP {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         // debug!("FlownodeContext::send: trying to send {} rows", rows.len());
         sender.send_rows(rows).await
     }
