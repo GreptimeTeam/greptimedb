@@ -41,14 +41,14 @@ pub trait IndexEncoder: Send + Sync {
 
 /// The [`IndexCollector`] trait defines the operations for managing and collecting index entries.
 pub trait IndexCollector: Send + Sync {
-    /// Sets the latest [`EntryId`].
-    fn set_latest_entry_id(&mut self, entry_id: EntryId);
-
     /// Appends an [`EntryId`] for a specific region.
     fn append(&mut self, region_id: RegionId, entry_id: EntryId);
 
     /// Truncates the index for a specific region up to a given [`EntryId`].
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId);
+
+    /// Sets the latest [`EntryId`].
+    fn set_latest_entry_id(&mut self, entry_id: EntryId);
 
     /// Dumps the index.
     fn dump(&mut self, encoder: &dyn IndexEncoder);
@@ -94,9 +94,8 @@ impl RegionIndexes {
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId) {
         if let Some(entry_ids) = self.regions.get_mut(&region_id) {
             *entry_ids = entry_ids.split_off(&entry_id);
-            if let Some(last) = entry_ids.last() {
-                self.latest_entry_id = self.latest_entry_id.max(*last);
-            }
+            // The `RegionIndexes` may be, keeps to track the latest entry id.
+            self.latest_entry_id = self.latest_entry_id.max(entry_id);
         }
     }
 
