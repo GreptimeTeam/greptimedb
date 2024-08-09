@@ -21,8 +21,6 @@ use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 
-use crate::kafka::producer::ProduceRequest;
-
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -261,20 +259,42 @@ pub enum Error {
         attempt_index: u64,
     },
 
-    #[snafu(display("Failed to send produce request"))]
-    SendProduceRequest {
+    #[snafu(display("OrderedBatchProducer is stopped",))]
+    OrderedBatchProducerStopped {
         #[snafu(implicit)]
         location: Location,
-        #[snafu(source)]
-        error: tokio::sync::mpsc::error::SendError<ProduceRequest>,
     },
 
-    #[snafu(display("Failed to send produce request"))]
+    #[snafu(display("Failed to wait for ProduceResultReceiver"))]
     WaitProduceResultReceiver {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: tokio::sync::oneshot::error::RecvError,
+    },
+
+    #[snafu(display("Failed to wait for result of DumpIndex"))]
+    WaitDumpIndex {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tokio::sync::oneshot::error::RecvError,
+    },
+
+    #[snafu(display("Failed to create writer"))]
+    CreateWriter {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: object_store::Error,
+    },
+
+    #[snafu(display("Failed to write index"))]
+    WriteIndex {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display(

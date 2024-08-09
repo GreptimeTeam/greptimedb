@@ -12,9 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod collector;
+mod encoder;
 mod iterator;
 
+pub use collector::GlobalIndexCollector;
+pub(crate) use collector::{IndexCollector, NoopCollector, ProviderLevelIndexCollector};
+pub(crate) use encoder::{IndexEncoder, JsonIndexEncoder};
 pub(crate) use iterator::{
     MultipleRegionWalIndexIterator, NextBatchHint, RegionWalIndexIterator, RegionWalRange,
     RegionWalVecIndex,
 };
+
+pub fn default_index_file(datanode_id: u64) -> String {
+    format!("__datanode/{datanode_id}/index.json")
+}

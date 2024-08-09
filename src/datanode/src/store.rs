@@ -29,18 +29,18 @@ use common_telemetry::{info, warn};
 use object_store::layers::{LruCacheLayer, RetryInterceptor, RetryLayer};
 use object_store::services::Fs;
 use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
-use object_store::{Error, HttpClient, ObjectStore, ObjectStoreBuilder};
+use object_store::{Access, Error, HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
 use crate::config::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
 use crate::error::{self, Result};
 
-pub(crate) async fn new_object_store(
-    store: ObjectStoreConfig,
+pub(crate) async fn new_raw_object_store(
+    store: &ObjectStoreConfig,
     data_home: &str,
 ) -> Result<ObjectStore> {
     let data_home = normalize_dir(data_home);
-    let object_store = match &store {
+    let object_store = match store {
         ObjectStoreConfig::File(file_config) => {
             fs::new_fs_object_store(&data_home, file_config).await
         }
@@ -51,27 +51,61 @@ pub(crate) async fn new_object_store(
         }
         ObjectStoreConfig::Gcs(gcs_config) => gcs::new_gcs_object_store(gcs_config).await,
     }?;
+    Ok(object_store)
+}
 
+fn with_retry_layers(object_store: ObjectStore) -> ObjectStore {
+    object_store.layer(
+        RetryLayer::new()
+            .with_jitter()
+            .with_notify(PrintDetailedError),
+    )
+}
+
+pub(crate) async fn new_object_store_without_cache(
+    store: &ObjectStoreConfig,
+    data_home: &str,
+) -> Result<ObjectStore> {
+    let object_store = new_raw_object_store(store, data_home).await?;
     // Enable retry layer and cache layer for non-fs object storages
     let object_store = if !matches!(store, ObjectStoreConfig::File(..)) {
-        let object_store = create_object_store_with_cache(object_store, &store).await?;
-        object_store.layer(
-            RetryLayer::new()
-                .with_jitter()
-                .with_notify(PrintDetailedError),
-        )
+        // Adds retry layer
+        with_retry_layers(object_store)
     } else {
         object_store
     };
 
-    let store = with_instrument_layers(object_store, true);
-    Ok(store)
+    let object_store = with_instrument_layers(object_store, true);
+    Ok(object_store)
 }
 
-async fn create_object_store_with_cache(
-    object_store: ObjectStore,
-    store_config: &ObjectStoreConfig,
+pub(crate) async fn new_object_store(
+    store: ObjectStoreConfig,
+    data_home: &str,
 ) -> Result<ObjectStore> {
+    let object_store = new_raw_object_store(&store, data_home).await?;
+    // Enable retry layer and cache layer for non-fs object storages
+    let object_store = if !matches!(store, ObjectStoreConfig::File(..)) {
+        let object_store = if let Some(cache_layer) = build_cache_layer(&store).await? {
+            // Adds cache layer
+            object_store.layer(cache_layer)
+        } else {
+            object_store
+        };
+
+        // Adds retry layer
+        with_retry_layers(object_store)
+    } else {
+        object_store
+    };
+
+    let object_store = with_instrument_layers(object_store, true);
+    Ok(object_store)
+}
+
+async fn build_cache_layer(
+    store_config: &ObjectStoreConfig,
+) -> Result<Option<LruCacheLayer<impl Access>>> {
     let (cache_path, cache_capacity) = match store_config {
         ObjectStoreConfig::S3(s3_config) => {
             let path = s3_config.cache.cache_path.as_ref();
@@ -127,9 +161,9 @@ async fn create_object_store_with_cache(
             path, cache_capacity
         );
 
-        Ok(object_store.layer(cache_layer))
+        Ok(Some(cache_layer))
     } else {
-        Ok(object_store)
+        Ok(None)
     }
 }
 
@@ -175,7 +209,6 @@ pub(crate) fn build_http_client() -> Result<HttpClient> {
 
     HttpClient::build(http_builder).context(error::InitBackendSnafu)
 }
-
 struct PrintDetailedError;
 
 // PrintDetailedError is a retry interceptor that prints error in Debug format in retrying.

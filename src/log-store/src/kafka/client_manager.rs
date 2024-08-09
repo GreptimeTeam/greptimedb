@@ -23,18 +23,15 @@ use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
 use tokio::sync::{Mutex, RwLock};
 
-use super::producer::OrderedBatchProducer;
 use crate::error::{
     BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
 };
-use crate::kafka::producer::OrderedBatchProducerRef;
+use crate::kafka::index::{GlobalIndexCollector, NoopCollector};
+use crate::kafka::producer::{OrderedBatchProducer, OrderedBatchProducerRef};
 
 // Each topic only has one partition for now.
 // The `DEFAULT_PARTITION` refers to the index of the partition.
 const DEFAULT_PARTITION: i32 = 0;
-
-// Max batch size for a `OrderedBatchProducer` to handle requests.
-const REQUEST_BATCH_SIZE: usize = 64;
 
 /// Arc wrapper of ClientManager.
 pub(crate) type ClientManagerRef = Arc<ClientManager>;
@@ -63,16 +60,18 @@ pub(crate) struct ClientManager {
     /// Used to initialize a new [Client].
     mutex: Mutex<()>,
     instances: RwLock<HashMap<Arc<KafkaProvider>, Client>>,
+    global_index_collector: Option<GlobalIndexCollector>,
 
-    producer_channel_size: usize,
-    producer_request_batch_size: usize,
     flush_batch_size: usize,
     compression: Compression,
 }
 
 impl ClientManager {
     /// Tries to create a ClientManager.
-    pub(crate) async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
+    pub(crate) async fn try_new(
+        config: &DatanodeKafkaConfig,
+        global_index_collector: Option<GlobalIndexCollector>,
+    ) -> Result<Self> {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
         let backoff_config = BackoffConfig {
             init_backoff: config.backoff.init,
@@ -95,10 +94,9 @@ impl ClientManager {
             client,
             mutex: Mutex::new(()),
             instances: RwLock::new(HashMap::new()),
-            producer_channel_size: REQUEST_BATCH_SIZE * 2,
-            producer_request_batch_size: REQUEST_BATCH_SIZE,
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
             compression: Compression::Lz4,
+            global_index_collector,
         })
     }
 
@@ -147,12 +145,19 @@ impl ClientManager {
             })
             .map(Arc::new)?;
 
+        let (tx, rx) = OrderedBatchProducer::channel();
+        let index_collector = if let Some(global_collector) = self.global_index_collector.as_ref() {
+            global_collector.provider_level_index_collector(provider.clone(), tx.clone())
+        } else {
+            Box::new(NoopCollector)
+        };
         let producer = Arc::new(OrderedBatchProducer::new(
+            (tx, rx),
+            provider.clone(),
             client.clone(),
             self.compression,
-            self.producer_channel_size,
-            self.producer_request_batch_size,
             self.flush_batch_size,
+            index_collector,
         ));
 
         Ok(Client { client, producer })
@@ -209,7 +214,7 @@ mod tests {
             broker_endpoints,
             ..Default::default()
         };
-        let manager = ClientManager::try_new(&config).await.unwrap();
+        let manager = ClientManager::try_new(&config, None).await.unwrap();
 
         (manager, topics)
     }

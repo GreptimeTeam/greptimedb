@@ -16,6 +16,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
@@ -32,6 +33,7 @@ use common_wal::config::DatanodeWalConfig;
 use file_engine::engine::FileRegionEngine;
 use futures_util::TryStreamExt;
 use log_store::kafka::log_store::KafkaLogStore;
+use log_store::kafka::{default_index_file, GlobalIndexCollector};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
@@ -64,7 +66,7 @@ use crate::event_listener::{
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
-use crate::store;
+use crate::store::{self, new_object_store_without_cache};
 
 /// Datanode service.
 pub struct Datanode {
@@ -398,15 +400,35 @@ impl DatanodeBuilder {
             )
             .await
             .context(BuildMitoEngineSnafu)?,
-            DatanodeWalConfig::Kafka(kafka_config) => MitoEngine::new(
-                &opts.storage.data_home,
-                config,
-                Self::build_kafka_log_store(kafka_config).await?,
-                object_store_manager,
-                plugins,
-            )
-            .await
-            .context(BuildMitoEngineSnafu)?,
+            DatanodeWalConfig::Kafka(kafka_config) => {
+                let global_index_collector = if kafka_config.create_index && opts.node_id.is_some()
+                {
+                    let operator = new_object_store_without_cache(
+                        &opts.storage.store,
+                        &opts.storage.data_home,
+                    )
+                    .await?;
+                    let path = default_index_file(opts.node_id.unwrap());
+                    Some(Self::build_global_index_collector(
+                        kafka_config.create_index_interval,
+                        kafka_config.index_checkpoint_interval,
+                        operator,
+                        path,
+                    ))
+                } else {
+                    None
+                };
+
+                MitoEngine::new(
+                    &opts.storage.data_home,
+                    config,
+                    Self::build_kafka_log_store(kafka_config, global_index_collector).await?,
+                    object_store_manager,
+                    plugins,
+                )
+                .await
+                .context(BuildMitoEngineSnafu)?
+            }
         };
         Ok(mito_engine)
     }
@@ -438,13 +460,26 @@ impl DatanodeBuilder {
         Ok(Arc::new(logstore))
     }
 
-    /// Builds [KafkaLogStore].
-    async fn build_kafka_log_store(config: &DatanodeKafkaConfig) -> Result<Arc<KafkaLogStore>> {
-        KafkaLogStore::try_new(config)
+    /// Builds [`KafkaLogStore`].
+    async fn build_kafka_log_store(
+        config: &DatanodeKafkaConfig,
+        global_index_collector: Option<GlobalIndexCollector>,
+    ) -> Result<Arc<KafkaLogStore>> {
+        KafkaLogStore::try_new(config, global_index_collector)
             .await
             .map_err(Box::new)
             .context(OpenLogStoreSnafu)
             .map(Arc::new)
+    }
+
+    /// Builds [`GlobalIndexCollector`]
+    fn build_global_index_collector(
+        dump_index_interval: Duration,
+        checkpoint_interval: Duration,
+        operator: object_store::ObjectStore,
+        path: String,
+    ) -> GlobalIndexCollector {
+        GlobalIndexCollector::new(dump_index_interval, checkpoint_interval, operator, path)
     }
 }
 
