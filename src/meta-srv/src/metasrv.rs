@@ -66,6 +66,13 @@ pub const FLOW_ID_SEQ: &str = "flow_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum BackendImpl {
+    EtcdStore,
+    MemoryStore,
+    PostgresStore,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvOptions {
     /// The address the server listens on.
@@ -114,6 +121,8 @@ pub struct MetasrvOptions {
     pub max_txn_ops: usize,
     /// The tracing options.
     pub tracing: TracingOptions,
+    /// The datastore for kv metadata.
+    pub backend: BackendImpl,
 }
 
 impl Default for MetasrvOptions {
@@ -146,6 +155,7 @@ impl Default for MetasrvOptions {
             store_key_prefix: String::new(),
             max_txn_ops: 128,
             tracing: TracingOptions::default(),
+            backend: BackendImpl::EtcdStore,
         }
     }
 }

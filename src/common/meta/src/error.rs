@@ -644,6 +644,22 @@ pub enum Error {
 
     #[snafu(display("Failed to get cache"))]
     GetCache { source: Arc<Error> },
+
+    #[snafu(display("Failed to execute via Postgres"))]
+    PostgresFailed {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to connect to Postgres"))]
+    ConnectPostgres {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -655,10 +671,12 @@ impl ErrorExt for Error {
             IllegalServerState { .. }
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
+            | PostgresFailed { .. }
             | EtcdTxnFailed { .. }
             | ConnectEtcd { .. }
             | MoveValues { .. }
-            | GetCache { .. } => StatusCode::Internal,
+            | GetCache { .. }
+            | ConnectPostgres { .. } => StatusCode::Internal,
 
             ValueNotExist { .. } => StatusCode::Unexpected,
 
