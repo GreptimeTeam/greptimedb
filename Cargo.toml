@@ -151,7 +151,9 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-rskafka = "0.5"
+rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "329431ac4edf630d6bf44976596f89e23429f825", features = [
+    "transport-tls",
+] }
 rstest = "0.21"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"

@@ -12,12 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::Cursor;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use rskafka::client::SaslConfig;
+use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
+use snafu::{OptionExt, ResultExt};
 
 use crate::config::kafka::common::{backoff_prefix, BackoffConfig, KafkaTopicConfig};
+use crate::error::{self, Result};
 use crate::BROKER_ENDPOINT;
 
 /// Kafka wal configurations for datanode.
@@ -48,20 +54,85 @@ pub struct DatanodeKafkaConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KafkaClientSasl {
     #[serde(flatten)]
-    pub config: Option<KafkaClientSaslConfig>,
+    pub config: KafkaClientSaslConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum KafkaClientSaslConfig {
     Plain { username: String, password: String },
 }
 
+#[cfg(test)]
+impl KafkaClientSaslConfig {
+    pub fn new_plain(username: String, password: String) -> Self {
+        Self::Plain { username, password }
+    }
+}
+
+impl KafkaClientSaslConfig {
+    /// Converts to [`SaslConfig`].
+    pub fn to_sasl_config(&self) -> SaslConfig {
+        match &self {
+            KafkaClientSaslConfig::Plain { username, password } => SaslConfig::Plain {
+                username: username.to_string(),
+                password: password.to_string(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KafkaClientTls {
-    server_ca_cert_path: String,
-    client_cert_path: String,
-    client_key_path: String,
+    pub server_ca_cert_path: String,
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
+}
+
+impl KafkaClientTls {
+    /// Builds the [`ClientConfig`].
+    pub fn to_tsl_config(&self) -> Result<Arc<ClientConfig>> {
+        let builder = ClientConfig::builder();
+        let mut roots = RootCertStore::empty();
+
+        let root_cert_bytes =
+            std::fs::read(&self.server_ca_cert_path).context(error::ReadFileSnafu {
+                path: &self.server_ca_cert_path,
+            })?;
+        let mut cursor = Cursor::new(root_cert_bytes);
+        for cert in rustls_pemfile::certs(&mut cursor)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context(error::ReadCertsSnafu {
+                path: &self.server_ca_cert_path,
+            })?
+        {
+            roots.add(cert).context(error::AddCertSnafu)?;
+        }
+        let builder = builder.with_root_certificates(roots);
+
+        let config = if let (Some(cert_path), Some(key_path)) =
+            (&self.client_cert_path, &self.client_key_path)
+        {
+            let cert_bytes =
+                std::fs::read(cert_path).context(error::ReadFileSnafu { path: cert_path })?;
+            let client_certs = rustls_pemfile::certs(&mut Cursor::new(cert_bytes))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context(error::ReadCertsSnafu { path: cert_path })?;
+
+            let key_bytes = std::fs::read(key_path).unwrap();
+            let client_key = rustls_pemfile::private_key(&mut Cursor::new(key_bytes))
+                .context(error::ReadKeySnafu { path: key_path })?
+                .context(error::KeyNotFoundSnafu { path: key_path })?;
+
+            builder
+                .with_client_auth_cert(client_certs, client_key)
+                .context(error::SetClientAuthCertSnafu)?
+        } else {
+            builder.with_no_client_auth()
+        };
+
+        Ok(Arc::new(config))
+    }
 }
 
 impl Default for DatanodeKafkaConfig {

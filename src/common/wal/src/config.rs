@@ -75,6 +75,7 @@ mod tests {
     use std::time::Duration;
 
     use common_base::readable_size::ReadableSize;
+    use kafka::datanode::{KafkaClientSasl, KafkaClientSaslConfig, KafkaClientTls};
     use tests::kafka::common::KafkaTopicConfig;
 
     use super::*;
@@ -144,6 +145,12 @@ mod tests {
             replication_factor = 1
             create_topic_timeout = "30s"
             topic_name_prefix = "greptimedb_wal_topic"
+            [sasl]
+            type = "plain"
+            username = "hi"
+            password = "test"
+            [tls]
+            server_ca_cert_path = "/path/to/server.pem"
         "#;
 
         // Deserialized to MetasrvWalConfig.
@@ -187,6 +194,14 @@ mod tests {
                 replication_factor: 1,
                 create_topic_timeout: Duration::from_secs(30),
             },
+            sasl: Some(KafkaClientSasl {
+                config: KafkaClientSaslConfig::new_plain("hi".to_string(), "test".to_string()),
+            }),
+            tls: Some(KafkaClientTls {
+                server_ca_cert_path: "/path/to/server.pem".to_string(),
+                client_cert_path: None,
+                client_key_path: None,
+            }),
         };
         assert_eq!(datanode_wal_config, DatanodeWalConfig::Kafka(expected));
     }

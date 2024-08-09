@@ -25,7 +25,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use super::producer::OrderedBatchProducer;
 use crate::error::{
-    BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
+    BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result, TlsConfigSnafu,
 };
 use crate::kafka::producer::OrderedBatchProducerRef;
 
@@ -83,13 +83,17 @@ impl ClientManager {
         let broker_endpoints = common_wal::resolve_to_ipv4(&config.broker_endpoints)
             .await
             .context(ResolveKafkaEndpointSnafu)?;
-        let client = ClientBuilder::new(broker_endpoints)
-            .backoff_config(backoff_config)
-            .build()
-            .await
-            .with_context(|_| BuildClientSnafu {
-                broker_endpoints: config.broker_endpoints.clone(),
-            })?;
+        let mut builder = ClientBuilder::new(broker_endpoints).backoff_config(backoff_config);
+        if let Some(sasl) = &config.sasl {
+            builder = builder.sasl_config(sasl.config.to_sasl_config());
+        };
+        if let Some(tls) = &config.tls {
+            builder = builder.tls_config(tls.to_tsl_config().context(TlsConfigSnafu)?)
+        };
+
+        let client = builder.build().await.with_context(|_| BuildClientSnafu {
+            broker_endpoints: config.broker_endpoints.clone(),
+        })?;
 
         Ok(Self {
             client,
