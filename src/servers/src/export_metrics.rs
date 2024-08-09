@@ -59,7 +59,7 @@ pub struct SelfImportOption {
 impl Default for SelfImportOption {
     fn default() -> Self {
         Self {
-            db: "information_schema".to_string(),
+            db: "greptime_metrics".to_string(),
         }
     }
 }
