@@ -537,7 +537,6 @@ impl TypedExpr {
 
 #[cfg(test)]
 mod test {
-    use common_time::{DateTime, Interval};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
     use pretty_assertions::assert_eq;
@@ -794,65 +793,5 @@ mod test {
                 },
             }
         );
-
-        let f = substrait_proto::proto::expression::ScalarFunction {
-            function_reference: 0,
-            arguments: vec![proto_col(0), lit("1 second"), lit("2021-07-01 00:00:00")],
-            options: vec![],
-            output_type: None,
-            ..Default::default()
-        };
-        let input_schema = RelationType::new(vec![
-            ColumnType::new(CDT::timestamp_nanosecond_datatype(), false),
-            ColumnType::new(CDT::string_datatype(), false),
-        ])
-        .into_unnamed();
-        let extensions = FunctionExtensions::from_iter(vec![(0, "tumble".to_string())]);
-        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            res,
-            ScalarExpr::CallUnmaterializable(UnmaterializableFunc::TumbleWindow {
-                ts: Box::new(
-                    ScalarExpr::Column(0)
-                        .with_type(ColumnType::new(CDT::timestamp_nanosecond_datatype(), false))
-                ),
-                window_size: Interval::from_month_day_nano(0, 0, 1_000_000_000),
-                start_time: Some(DateTime::new(1625097600000))
-            })
-            .with_type(ColumnType::new(CDT::timestamp_millisecond_datatype(), true)),
-        );
-
-        let f = substrait_proto::proto::expression::ScalarFunction {
-            function_reference: 0,
-            arguments: vec![proto_col(0), lit("1 second")],
-            options: vec![],
-            output_type: None,
-            ..Default::default()
-        };
-        let input_schema = RelationType::new(vec![
-            ColumnType::new(CDT::timestamp_nanosecond_datatype(), false),
-            ColumnType::new(CDT::string_datatype(), false),
-        ])
-        .into_unnamed();
-        let extensions = FunctionExtensions::from_iter(vec![(0, "tumble".to_string())]);
-        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            res,
-            ScalarExpr::CallUnmaterializable(UnmaterializableFunc::TumbleWindow {
-                ts: Box::new(
-                    ScalarExpr::Column(0)
-                        .with_type(ColumnType::new(CDT::timestamp_nanosecond_datatype(), false))
-                ),
-                window_size: Interval::from_month_day_nano(0, 0, 1_000_000_000),
-                start_time: None
-            })
-            .with_type(ColumnType::new(CDT::timestamp_millisecond_datatype(), true)),
-        )
     }
 }

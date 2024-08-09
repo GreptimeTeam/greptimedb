@@ -35,7 +35,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
 use substrait::df_logical_plan::consumer::name_to_op;
 
-use crate::error::{Error, ExternalSnafu, InvalidQuerySnafu, PlanSnafu};
+use crate::error::{Error, ExternalSnafu, InvalidQuerySnafu, PlanSnafu, UnexpectedSnafu};
 use crate::expr::error::{
     ArrowSnafu, CastValueSnafu, DataTypeSnafu, DivisionByZeroSnafu, EvalError, OverflowSnafu,
     TryFromValueSnafu, TypeMismatchSnafu,
@@ -87,42 +87,10 @@ impl UnmaterializableFunc {
     }
 
     /// Create a UnmaterializableFunc from a string of the function name
-    pub fn from_str_args(name: &str, args: Vec<TypedExpr>) -> Result<Self, Error> {
+    pub fn from_str_args(name: &str, _args: Vec<TypedExpr>) -> Result<Self, Error> {
         match name.to_lowercase().as_str() {
             "now" => Ok(Self::Now),
             "current_schema" => Ok(Self::CurrentSchema),
-            "tumble" => {
-                let ts = args.first().context(InvalidQuerySnafu {
-                    reason: "Tumble window function requires a timestamp argument",
-                })?;
-                let window_size = args
-                    .get(1)
-                    .and_then(|expr| expr.expr.as_literal())
-                    .context(InvalidQuerySnafu {
-                        reason: "Tumble window function requires a window size argument"
-                    })?.as_string() // TODO(discord9): since df to substrait convertor does not support interval type yet, we need to take a string and cast it to interval instead
-                    .map(|s|cast(Value::from(s), &ConcreteDataType::interval_month_day_nano_datatype())).transpose().map_err(BoxedError::new).context(
-                        ExternalSnafu
-                    )?.and_then(|v|v.as_interval())
-                    .with_context(||InvalidQuerySnafu {
-                        reason: format!("Tumble window function requires window size argument to be a string describe a interval, found {:?}", args.get(1))
-                    })?;
-                let start_time = match args.get(2) {
-                    Some(start_time) => start_time.expr.as_literal(),
-                    None => None,
-                }
-                .map(|s| cast(s.clone(), &ConcreteDataType::datetime_datatype())).transpose().map_err(BoxedError::new).context(ExternalSnafu)?.map(|v|v.as_datetime().with_context(
-                    ||InvalidQuerySnafu {
-                        reason: format!("Tumble window function requires start time argument to be a datetime describe in string, found {:?}", args.get(2))
-                    }
-                )).transpose()?;
-
-                Ok(Self::TumbleWindow {
-                    ts: Box::new(ts.clone()),
-                    window_size,
-                    start_time,
-                })
-            }
             _ => InvalidQuerySnafu {
                 reason: format!("Unknown unmaterializable function: {}", name),
             }
@@ -353,27 +321,58 @@ impl UnaryFunc {
                 let ts = args.first().context(InvalidQuerySnafu {
                     reason: "Tumble window function requires a timestamp argument",
                 })?;
-                let window_size = args
-                .get(1)
-                .and_then(|expr| expr.expr.as_literal())
-                .context(InvalidQuerySnafu {
-                    reason: "Tumble window function requires a window size argument"
-                })?.as_string() // TODO(discord9): since df to substrait convertor does not support interval type yet, we need to take a string and cast it to interval instead
-                .map(|s|cast(Value::from(s), &ConcreteDataType::interval_month_day_nano_datatype())).transpose().map_err(BoxedError::new).context(
-                    ExternalSnafu
-                )?.and_then(|v|v.as_interval())
-                .with_context(||InvalidQuerySnafu {
-                    reason: format!("Tumble window function requires window size argument to be a string describe a interval, found {:?}", args.get(1))
-                })?;
+                let window_size = {
+                    let window_size_untyped = args
+                        .get(1)
+                        .and_then(|expr| expr.expr.as_literal())
+                        .context(InvalidQuerySnafu {
+                        reason: "Tumble window function requires a window size argument",
+                    })?;
+                    if let Some(window_size) = window_size_untyped.as_string() {
+                        // cast as interval
+                        cast(
+                            Value::from(window_size),
+                            &ConcreteDataType::interval_month_day_nano_datatype(),
+                        )
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?
+                        .as_interval()
+                        .context(UnexpectedSnafu {
+                            reason: "Expect window size arg to be interval after successful cast"
+                                .to_string(),
+                        })?
+                    } else if let Some(interval) = window_size_untyped.as_interval() {
+                        interval
+                    } else {
+                        InvalidQuerySnafu {
+                                reason: format!(
+                                    "Tumble window function requires window size argument to be either a interval or a string describe a interval, found {:?}",
+                                    window_size_untyped
+                                )
+                            }.fail()?
+                    }
+                };
                 let start_time = match args.get(2) {
-                Some(start_time) => start_time.expr.as_literal(),
-                None => None,
-            }
-            .map(|s| cast(s.clone(), &ConcreteDataType::datetime_datatype())).transpose().map_err(BoxedError::new).context(ExternalSnafu)?.map(|v|v.as_datetime().with_context(
-                ||InvalidQuerySnafu {
-                    reason: format!("Tumble window function requires start time argument to be a datetime describe in string, found {:?}", args.get(2))
-                }
-            )).transpose()?;
+                    Some(start_time) => {
+                        if let Some(value) = start_time.expr.as_literal() {
+                            // cast as DateTime
+                            let ret = cast(value, &ConcreteDataType::datetime_datatype())
+                                .map_err(BoxedError::new)
+                                .context(ExternalSnafu)?
+                                .as_datetime()
+                                .context(UnexpectedSnafu {
+                                    reason:
+                                        "Expect start time arg to be datetime after successful cast"
+                                            .to_string(),
+                                })?;
+                            Some(ret)
+                        } else {
+                            None
+                        }
+                    }
+                    None => None,
+                };
+
                 if name == "tumble_start" {
                     Ok((
                         Self::TumbleWindowFloor {
@@ -394,7 +393,10 @@ impl UnaryFunc {
                     unreachable!()
                 }
             }
-            _ => todo!(),
+            _ => crate::error::InternalSnafu {
+                reason: format!("Unknown tumble kind function: {}", name),
+            }
+            .fail()?,
         }
     }
 
@@ -764,7 +766,7 @@ impl BinaryFunc {
                     InvalidQuerySnafu {
                         reason: format!(
                             "Binary function {:?} requires both arguments to have the same type, left={:?}, right={:?}",
-                            generic,t1,t2
+                            generic, t1, t2
                         ),
                     }
                 );

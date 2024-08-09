@@ -116,7 +116,7 @@ impl TypedPlan {
 /// TODO(discord9): support `TableFunc`（by define FlatMap that map 1 to n)
 /// Plan describe how to transform data in dataflow
 ///
-/// This can be considered as a physical plan in dataflow, which describe how to transform data in
+/// This can be considered as a physical plan in dataflow, which describe how to transform data in a streaming manner.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Plan {
     /// A constant collection of rows.

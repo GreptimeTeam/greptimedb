@@ -1565,8 +1565,13 @@ mod test {
                                     )
                                     .await
                                     .unwrap(),
-                                    exprs: vec![ScalarExpr::Literal(Value::Interval(Interval::from_month_day_nano(0, 0, 30000000000)), CDT::interval_month_day_nano_datatype()),
-                                    ScalarExpr::Column(1).cast(CDT::timestamp_millisecond_datatype())],
+                                    exprs: vec![
+                                        ScalarExpr::Literal(
+                                            Value::Interval(Interval::from_month_day_nano(0, 0, 30000000000)),
+                                            CDT::interval_month_day_nano_datatype()
+                                        ),
+                                        ScalarExpr::Column(1).cast(CDT::timestamp_millisecond_datatype())
+                                        ],
                                 }])
                                 .unwrap()
                                 .project(vec![2])
