@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(super) mod oid_map;
+
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -25,16 +27,16 @@ use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{StringVectorBuilder, VectorRef};
+use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder, VectorRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 
-use super::{OID_COLUMN_NAME, PG_NAMESPACE};
+use super::{PGNamespaceOidMapRef, OID_COLUMN_NAME, PG_NAMESPACE};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::Predicates;
-use crate::system_schema::utils::tables::string_column;
+use crate::system_schema::utils::tables::{string_column, u32_column};
 use crate::system_schema::SystemTable;
 use crate::CatalogManager;
 
@@ -48,21 +50,29 @@ pub(super) struct PGNamespace {
     schema: SchemaRef,
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+
+    // Workaround to convert schema_name to a numeric id
+    oid_map: PGNamespaceOidMapRef,
 }
 
 impl PGNamespace {
-    pub(super) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+    pub(super) fn new(
+        catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
+        oid_map: PGNamespaceOidMapRef,
+    ) -> Self {
         Self {
             schema: Self::schema(),
             catalog_name,
             catalog_manager,
+            oid_map,
         }
     }
 
     fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
             // TODO(J0HN50N133): we do not have a numeric schema id, use schema name as a workaround. Use a proper schema id once we have it.
-            string_column(OID_COLUMN_NAME),
+            u32_column(OID_COLUMN_NAME),
             string_column(NSPNAME),
         ]))
     }
@@ -72,6 +82,7 @@ impl PGNamespace {
             self.schema.clone(),
             self.catalog_name.clone(),
             self.catalog_manager.clone(),
+            self.oid_map.clone(),
         )
     }
 }
@@ -138,8 +149,9 @@ struct PGNamespaceBuilder {
     schema: SchemaRef,
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+    namespace_oid_map: PGNamespaceOidMapRef,
 
-    oid: StringVectorBuilder,
+    oid: UInt32VectorBuilder,
     nspname: StringVectorBuilder,
 }
 
@@ -148,12 +160,14 @@ impl PGNamespaceBuilder {
         schema: SchemaRef,
         catalog_name: String,
         catalog_manager: Weak<dyn CatalogManager>,
+        namespace_oid_map: PGNamespaceOidMapRef,
     ) -> Self {
         Self {
             schema,
             catalog_name,
             catalog_manager,
-            oid: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            namespace_oid_map,
+            oid: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
             nspname: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
@@ -178,14 +192,15 @@ impl PGNamespaceBuilder {
     }
 
     fn add_namespace(&mut self, predicates: &Predicates, schema_name: &str) {
+        let oid = self.namespace_oid_map.get_oid(schema_name);
         let row = [
-            (OID_COLUMN_NAME, &Value::from(schema_name)),
+            (OID_COLUMN_NAME, &Value::from(oid)),
             (NSPNAME, &Value::from(schema_name)),
         ];
         if !predicates.eval(&row) {
             return;
         }
-        self.oid.push(Some(schema_name));
+        self.oid.push(Some(oid));
         self.nspname.push(Some(schema_name));
     }
 }

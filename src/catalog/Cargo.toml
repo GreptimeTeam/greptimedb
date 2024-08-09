@@ -40,6 +40,7 @@ moka = { workspace = true, features = ["future", "sync"] }
 partition.workspace = true
 paste = "1.0"
 prometheus.workspace = true
+rustc-hash.workspace = true
 serde_json.workspace = true
 session.workspace = true
 snafu.workspace = true
