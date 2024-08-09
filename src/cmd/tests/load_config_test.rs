@@ -172,7 +172,7 @@ fn test_load_metasrv_example_config() {
             bg_rt_size: 4,
         },
         component: MetasrvOptions {
-            selector: SelectorType::LeaseBased,
+            selector: SelectorType::default(),
             data_home: "/tmp/metasrv/".to_string(),
             logging: LoggingOptions {
                 dir: "/tmp/greptimedb/logs".to_string(),
