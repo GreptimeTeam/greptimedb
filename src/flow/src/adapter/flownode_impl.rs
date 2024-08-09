@@ -31,6 +31,7 @@ use store_api::storage::RegionId;
 use crate::adapter::FlowWorkerManager;
 use crate::error::InternalSnafu;
 use crate::repr::{self, DiffRow};
+use crate::metrics::METRIC_FLOW_TASK_COUNT;
 
 fn to_meta_err(err: crate::error::Error) -> common_meta::error::Error {
     // TODO(discord9): refactor this
@@ -78,6 +79,7 @@ impl Flownode for FlowWorkerManager {
                     )
                     .await
                     .map_err(to_meta_err)?;
+                METRIC_FLOW_TASK_COUNT.inc();
                 Ok(FlowResponse {
                     affected_flows: ret
                         .map(|id| greptime_proto::v1::FlowId { id: id as u32 })
