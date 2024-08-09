@@ -21,7 +21,7 @@ VALUES
 -- flush flow to make sure that table is created and data is inserted
 select flush_flow('test_numbers_df_func')<=1;
 
-SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+SELECT "SUM(abs(numbers_input_df_func.number))", window_start, window_end FROM out_num_cnt_df_func;
 
 select flush_flow('test_numbers_df_func')<=1;
 
@@ -32,7 +32,7 @@ VALUES
 
 select flush_flow('test_numbers_df_func')<=1;
 
-SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+SELECT "SUM(abs(numbers_input_df_func.number))", window_start, window_end FROM out_num_cnt_df_func;
 
 DROP FLOW test_numbers_df_func;
 DROP TABLE numbers_input_df_func;
@@ -61,7 +61,7 @@ VALUES
 -- flush flow to make sure that table is created and data is inserted
 select flush_flow('test_numbers_df_func')<=1;
 
-SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+SELECT "abs(SUM(numbers_input_df_func.number))", window_start, window_end FROM out_num_cnt_df_func;
 
 select flush_flow('test_numbers_df_func')<=1;
 
@@ -72,7 +72,7 @@ VALUES
 
 select flush_flow('test_numbers_df_func')<=1;
 
-SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
+SELECT "abs(SUM(numbers_input_df_func.number))", window_start, window_end FROM out_num_cnt_df_func;
 
 DROP FLOW test_numbers_df_func;
 DROP TABLE numbers_input_df_func;
@@ -89,7 +89,7 @@ CREATE TABLE numbers_input_df_func (
 CREATE FLOW test_numbers_df_func 
 SINK TO out_num_cnt_df_func
 AS 
-SELECT max(number) - min(number), date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond) FROM numbers_input_df_func GROUP BY date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::TimestampNanosecond);
+SELECT max(number) - min(number) as maxmin, date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'::Timestamp) as time_window FROM numbers_input_df_func GROUP BY time_window;
 
 select flush_flow('test_numbers_df_func')<=1;
 
@@ -100,7 +100,7 @@ VALUES
 
 select flush_flow('test_numbers_df_func')<=1;
 
-SELECT col_0, col_1 FROM out_num_cnt_df_func;
+SELECT maxmin, time_window FROM out_num_cnt_df_func;
 
 select flush_flow('test_numbers_df_func')<=1;
 
@@ -111,7 +111,7 @@ VALUES
 
 select flush_flow('test_numbers_df_func')<=1;
 
-SELECT col_0, col_1 FROM out_num_cnt_df_func;
+SELECT maxmin, time_window FROM out_num_cnt_df_func;
 
 DROP FLOW test_numbers_df_func;
 DROP TABLE numbers_input_df_func;
@@ -129,7 +129,7 @@ CREATE TABLE numbers_input_df_func (
 CREATE FLOW test_numbers_df_func 
 SINK TO out_num_cnt
 AS 
-SELECT date_trunc('second', ts), sum(number) FROM numbers_input_df_func GROUP BY date_trunc('second', ts);
+SELECT date_trunc('second', ts) as time_window, sum(number) as sum_num FROM numbers_input_df_func GROUP BY date_trunc('second', ts);
 
 select flush_flow('test_numbers_df_func')<=1;
 
@@ -140,7 +140,7 @@ VALUES
 
 select flush_flow('test_numbers_df_func')<=1;
 
-SELECT col_0, col_1 FROM out_num_cnt;
+SELECT time_window, sum_num FROM out_num_cnt;
 
 select flush_flow('test_numbers_df_func')<=1;
 
@@ -151,7 +151,7 @@ VALUES
 
 select flush_flow('test_numbers_df_func')<=1;
 
-SELECT col_0, col_1 FROM out_num_cnt;
+SELECT time_window, sum_num FROM out_num_cnt;
 
 DROP FLOW test_numbers_df_func;
 DROP TABLE numbers_input_df_func;

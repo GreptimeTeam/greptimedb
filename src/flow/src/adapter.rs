@@ -49,10 +49,10 @@ use crate::adapter::table_source::TableSource;
 use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
+use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 use crate::expr::GlobalId;
 use crate::repr::{self, DiffRow, Row, BATCH_SIZE};
-use crate::transform::sql_to_flow_plan;
 
 mod flownode_impl;
 mod parse_expr;
