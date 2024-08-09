@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 common-base.workspace = true
 common-error.workspace = true

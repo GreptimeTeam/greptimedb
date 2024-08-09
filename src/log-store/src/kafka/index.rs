@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod collector;
 mod iterator;
 
+pub(crate) use collector::{
+    GlobalIndexCollector, IndexCollector, IndexEncoder, NoopCollector, ProviderLevelIndexCollector,
+};
 pub(crate) use iterator::{
     MultipleRegionWalIndexIterator, NextBatchHint, RegionWalIndexIterator, RegionWalRange,
     RegionWalVecIndex,
