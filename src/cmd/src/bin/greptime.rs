@@ -72,17 +72,13 @@ fn main() -> Result<()> {
         .name("main_spawn".to_string())
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            let body = async {
-                setup_human_panic();
-                start(Command::parse()).await
-            };
             {
                 tokio::runtime::Builder::new_multi_thread()
                     .thread_stack_size(8 * 1024 * 1024)
                     .enable_all()
                     .build()
                     .expect("Failed building the Runtime")
-                    .block_on(body)
+                    .block_on(main_body())
             }
         })
         .context(cmd::error::SpawnThreadSnafu)?
@@ -93,6 +89,10 @@ fn main() -> Result<()> {
 #[cfg(not(debug_assertions))]
 #[tokio::main]
 async fn main() -> Result<()> {
+    main_body().await
+}
+
+async fn main_body() -> Result<()> {
     setup_human_panic();
     start(Command::parse()).await
 }
