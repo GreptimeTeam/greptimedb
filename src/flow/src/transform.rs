@@ -25,7 +25,6 @@ use datatypes::data_type::ConcreteDataType as CDT;
 use literal::{from_substrait_literal, from_substrait_type};
 use prost::Message;
 use query::parser::QueryLanguageParser;
-use query::plan::LogicalPlan;
 use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
@@ -203,13 +202,13 @@ mod test {
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_time::{Date, DateTime};
+    use datafusion_expr::LogicalPlan;
     use datatypes::prelude::*;
     use datatypes::schema::Schema;
     use datatypes::vectors::VectorRef;
     use itertools::Itertools;
     use prost::Message;
     use query::parser::QueryLanguageParser;
-    use query::plan::LogicalPlan;
     use query::QueryEngine;
     use session::context::QueryContext;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -317,7 +316,7 @@ mod test {
             .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
-        let LogicalPlan::DfPlan(plan) = plan;
+        let plan: LogicalPlan;
 
         // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
         let bytes = DFLogicalSubstraitConvertor {}

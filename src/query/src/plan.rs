@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Debug, Display};
+use std::fmt::Display;
 
 use common_query::prelude::ScalarValue;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{ParamValues, TableReference};
-use datafusion_expr::LogicalPlan as DfLogicalPlan;
+use datafusion_expr::LogicalPlan;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::Schema;
 use session::context::QueryContextRef;
@@ -38,81 +38,52 @@ use crate::error::{ConvertDatafusionSchemaSnafu, DataFusionSnafu, Result};
 /// an output relation (table) with a (potentially) different
 /// schema. A plan represents a dataflow tree where data flows
 /// from leaves up to the root to produce the query result.
-#[derive(Clone, Debug)]
-pub enum LogicalPlan {
-    DfPlan(DfLogicalPlan),
+
+/// Get the schema for this logical plan
+pub fn schema(plan: &LogicalPlan) -> Result<Schema> {
+    let df_schema = plan.schema();
+    df_schema
+        .clone()
+        .try_into()
+        .context(ConvertDatafusionSchemaSnafu)
 }
 
-impl LogicalPlan {
-    /// Get the schema for this logical plan
-    pub fn schema(&self) -> Result<Schema> {
-        match self {
-            Self::DfPlan(plan) => {
-                let df_schema = plan.schema();
-                df_schema
-                    .clone()
-                    .try_into()
-                    .context(ConvertDatafusionSchemaSnafu)
-            }
-        }
-    }
-
-    /// Return a `format`able structure that produces a single line
-    /// per node. For example:
-    ///
-    /// ```text
-    /// Projection: employee.id
-    ///    Filter: employee.state Eq Utf8(\"CO\")\
-    ///       CsvScan: employee projection=Some([0, 3])
-    /// ```
-    pub fn display_indent(&self) -> impl Display + '_ {
-        let LogicalPlan::DfPlan(plan) = self;
-        plan.display_indent()
-    }
-
-    /// Walk the logical plan, find any `PlaceHolder` tokens,
-    /// and return a map of their IDs and ConcreteDataTypes
-    pub fn get_param_types(&self) -> Result<HashMap<String, Option<ConcreteDataType>>> {
-        let LogicalPlan::DfPlan(plan) = self;
-        let types = plan.get_parameter_types().context(DataFusionSnafu)?;
-
-        Ok(types
-            .into_iter()
-            .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
-            .collect())
-    }
-
-    /// Return a logical plan with all placeholders/params (e.g $1 $2,
-    /// ...) replaced with corresponding values provided in the
-    /// params_values
-    pub fn replace_params_with_values(&self, values: &[ScalarValue]) -> Result<LogicalPlan> {
-        let LogicalPlan::DfPlan(plan) = self;
-
-        plan.clone()
-            .replace_params_with_values(&ParamValues::List(values.to_vec()))
-            .context(DataFusionSnafu)
-            .map(LogicalPlan::DfPlan)
-    }
-
-    /// Unwrap the logical plan into a DataFusion logical plan
-    pub fn unwrap_df_plan(self) -> DfLogicalPlan {
-        match self {
-            LogicalPlan::DfPlan(plan) => plan,
-        }
-    }
-
-    /// Returns the DataFusion logical plan reference
-    pub fn df_plan(&self) -> &DfLogicalPlan {
-        match self {
-            LogicalPlan::DfPlan(plan) => plan,
-        }
-    }
+/// Return a `format`able structure that produces a single line
+/// per node. For example:
+///
+/// ```text
+/// Projection: employee.id
+///    Filter: employee.state Eq Utf8(\"CO\")\
+///       CsvScan: employee projection=Some([0, 3])
+/// ```
+pub fn display_indent(plan: &LogicalPlan) -> impl Display + '_ {
+    plan.display_indent()
 }
 
-impl From<DfLogicalPlan> for LogicalPlan {
-    fn from(plan: DfLogicalPlan) -> Self {
-        Self::DfPlan(plan)
-    }
+/// Walk the logical plan, find any `PlaceHolder` tokens,
+/// and return a map of their IDs and ConcreteDataTypes
+pub fn get_param_types(plan: &LogicalPlan) -> Result<HashMap<String, Option<ConcreteDataType>>> {
+    let types = plan.get_parameter_types().context(DataFusionSnafu)?;
+
+    Ok(types
+        .into_iter()
+        .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+        .collect())
+}
+
+/// Return a logical plan with all placeholders/params (e.g $1 $2,
+/// ...) replaced with corresponding values provided in the
+/// params_values
+pub fn replace_params_with_values(
+    plan: &LogicalPlan,
+    values: &[ScalarValue],
+) -> Result<LogicalPlan> {
+    let new_plan = plan
+        .clone()
+        .replace_params_with_values(&ParamValues::List(values.to_vec()))
+        .context(DataFusionSnafu)?;
+
+    Ok(new_plan)
 }
 
 struct TableNamesExtractAndRewriter {
@@ -121,7 +92,7 @@ struct TableNamesExtractAndRewriter {
 }
 
 impl TreeNodeRewriter for TableNamesExtractAndRewriter {
-    type Node = DfLogicalPlan;
+    type Node = LogicalPlan;
 
     /// descend
     fn f_down<'a>(
@@ -129,7 +100,7 @@ impl TreeNodeRewriter for TableNamesExtractAndRewriter {
         node: Self::Node,
     ) -> datafusion::error::Result<Transformed<Self::Node>> {
         match node {
-            DfLogicalPlan::TableScan(mut scan) => {
+            LogicalPlan::TableScan(mut scan) => {
                 if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>() {
                     if let Some(provider) = source
                         .table_provider
@@ -185,7 +156,7 @@ impl TreeNodeRewriter for TableNamesExtractAndRewriter {
                         };
                     }
                 }
-                Ok(Transformed::yes(DfLogicalPlan::TableScan(scan)))
+                Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
             }
             node => Ok(Transformed::no(node)),
         }
@@ -193,7 +164,7 @@ impl TreeNodeRewriter for TableNamesExtractAndRewriter {
 }
 
 impl TableNamesExtractAndRewriter {
-    fn new(query_ctx: QueryContextRef) -> Self {
+    pub fn new(query_ctx: QueryContextRef) -> Self {
         Self {
             query_ctx,
             table_names: HashSet::new(),
@@ -204,9 +175,9 @@ impl TableNamesExtractAndRewriter {
 /// Extracts and rewrites the table names in the plan in the fully qualified style,
 /// return the table names and new plan.
 pub fn extract_and_rewrite_full_table_names(
-    plan: DfLogicalPlan,
+    plan: LogicalPlan,
     query_ctx: QueryContextRef,
-) -> Result<(HashSet<TableName>, DfLogicalPlan)> {
+) -> Result<(HashSet<TableName>, LogicalPlan)> {
     let mut extractor = TableNamesExtractAndRewriter::new(query_ctx);
     let plan = plan.rewrite(&mut extractor).context(DataFusionSnafu)?;
     Ok((extractor.table_names, plan.data))
@@ -214,7 +185,6 @@ pub fn extract_and_rewrite_full_table_names(
 
 #[cfg(test)]
 pub(crate) mod tests {
-
     use std::sync::Arc;
 
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -258,7 +228,7 @@ pub(crate) mod tests {
         assert!(table_names.contains(&TableName::new(
             DEFAULT_CATALOG_NAME.to_string(),
             "test".to_string(),
-            "devices".to_string()
+            "devices".to_string(),
         )));
 
         assert_eq!(

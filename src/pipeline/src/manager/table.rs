@@ -26,7 +26,7 @@ use common_telemetry::{debug, info};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::logical_expr::col;
 use datafusion_common::{TableReference, ToDFSchema};
-use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan};
+use datafusion_expr::{DmlStatement, LogicalPlan};
 use datatypes::prelude::ScalarVector;
 use datatypes::timestamp::TimestampNanosecond;
 use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
@@ -34,7 +34,6 @@ use moka::sync::Cache;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use query::dataframe::DataFrame;
-use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -373,7 +372,7 @@ impl PipelineTable {
             Arc::new(dataframe.into_parts().1),
         );
 
-        let plan = LogicalPlan::DfPlan(DfLogicalPlan::Dml(stmt));
+        let plan = LogicalPlan::Dml(stmt);
 
         // 4. execute dml stmt
         let output = self
@@ -427,7 +426,7 @@ impl PipelineTable {
             .limit(0, Some(1))
             .context(BuildDfLogicalPlanSnafu)?;
 
-        let plan = LogicalPlan::DfPlan(dataframe.into_parts().1);
+        let plan = dataframe.into_parts().1;
 
         let table_info = self.table.table_info();
 

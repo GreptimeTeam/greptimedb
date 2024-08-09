@@ -31,11 +31,11 @@ use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::debug;
+use datafusion_expr::LogicalPlan;
 use either::Either;
 use meta_client::client::MetaClientBuilder;
 use query::datafusion::DatafusionQueryEngine;
 use query::parser::QueryLanguageParser;
-use query::plan::LogicalPlan;
 use query::query_engine::{DefaultSerializer, QueryEngineState};
 use query::QueryEngine;
 use rustyline::error::ReadlineError;
@@ -179,7 +179,7 @@ impl Repl {
                 .await
                 .context(PlanStatementSnafu)?;
 
-            let LogicalPlan::DfPlan(plan) = query_engine
+            let plan: LogicalPlan = query_engine
                 .optimize(&query_engine.engine_context(query_ctx), &plan)
                 .context(PlanStatementSnafu)?;
 

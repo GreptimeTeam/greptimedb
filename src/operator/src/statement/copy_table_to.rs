@@ -29,7 +29,6 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion_common::TableReference as DfTableReference;
 use datafusion_expr::LogicalPlanBuilder;
 use object_store::ObjectStore;
-use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::requests::CopyTableRequest;
@@ -133,7 +132,7 @@ impl StatementExecutor {
 
         let output = self
             .query_engine
-            .execute(LogicalPlan::DfPlan(plan), query_ctx)
+            .execute(plan, query_ctx)
             .await
             .context(ExecLogicalPlanSnafu)?;
         let stream = match output.data {
