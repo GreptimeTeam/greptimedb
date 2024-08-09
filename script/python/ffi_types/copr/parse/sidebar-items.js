@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["check_annotation_ret_slice","check_bin_op","get_arg_annotations","get_return_annotations","parse_and_compile_copr","parse_annotation","parse_bin_op","parse_decorator","parse_keywords","parse_native_type","py_str_to_string","pylist_to_vec","ret_parse_error","try_into_datatype"],"struct":["DecoratorArgs"]};

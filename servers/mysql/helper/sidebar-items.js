@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["convert_expr_to_scalar_value","convert_value","format_placeholder","replace_placeholders","transform_placeholders","visit_placeholders"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"macro":["impl_buffer_for_bytes","impl_read_le","impl_write_le"],"struct":["EofSnafu","OverflowSnafu","UnderflowSnafu"],"trait":["Buffer","BufferMut"],"type":["Result"]};

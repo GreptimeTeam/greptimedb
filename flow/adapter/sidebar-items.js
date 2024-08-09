@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AUTO_CREATED_PLACEHOLDER_TS_COL","UPDATE_AT_TS_COL"],"enum":["DiffRequest"],"fn":["diff_row_to_request"],"mod":["flownode_impl","node_context","parse_expr","table_source","util","worker"],"struct":["FlowTickManager","FlowWorkerManager","FlownodeOptions"],"type":["FlowId","FlowWorkerManagerRef","TableName"]};

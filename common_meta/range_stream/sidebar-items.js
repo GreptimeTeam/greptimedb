@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_ADAPTIVE_PAGE_SIZE","DEFAULT_PAGE_SIZE"],"enum":["PaginationStreamState"],"struct":["PaginationStream","PaginationStreamFactory","SimpleKeyValueDecoder"],"type":["KeyValueDecoderFn"]};

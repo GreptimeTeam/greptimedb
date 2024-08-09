@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TEXT_FIELD_NAME"],"mod":["tantivy"],"struct":["TantivyFulltextIndexCreator"],"trait":["FulltextIndexCreator"]};

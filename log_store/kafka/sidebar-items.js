@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["client_manager","consumer","index","log_store","producer","util"],"struct":["EntryImpl","NamespaceImpl"]};

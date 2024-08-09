@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["extract_timestamp","idents_to_full_database_name","timestamp_range_from_option_map","to_copy_database_request","to_copy_table_request"],"mod":["copy_database","copy_table_from","copy_table_to","ddl","describe","dml","set","show","tql"],"struct":["StatementExecutor"],"type":["StatementExecutorRef"]};

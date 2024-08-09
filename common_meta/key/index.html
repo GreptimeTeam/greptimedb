@@ -1,0 +1,104 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="This mod defines all the keys used in the metadata store (Metasrv). Specifically, there are these kinds of keys:"><title>common_meta::key - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-46f98efaafac5295.ttf.woff2,FiraSans-Regular-018c141bf0843ffd.woff2,FiraSans-Medium-8f9a781e4970d388.woff2,SourceCodePro-Regular-562dcc5011b6de7d.ttf.woff2,SourceCodePro-Semibold-d899c5a5c4aeb14a.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-76eba96aa4d2e634.css"><link rel="stylesheet" href="../../static.files/rustdoc-081576b923113409.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="common_meta" data-themes="" data-resource-suffix="" data-rustdoc-version="1.79.0-nightly (f9b161492 2024-04-19)" data-channel="nightly" data-search-js="search-bf21c90c8c1d92b1.js" data-settings-js="settings-4313503d2e1961c2.js" ><script src="../../static.files/storage-e32f0c247825364d.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-20a3ad099b048cf2.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-09095024cf37855e.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-422f7d1d52889060.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-2c020d218678b618.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="mobile-topbar"><button class="sidebar-menu-toggle" title="show sidebar"></button></nav><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../common_meta/index.html">common_meta</a><span class="version">0.9.1</span></h2></div><h2 class="location"><a href="#">Module key</a></h2><div class="sidebar-elems"><section><ul class="block"><li><a href="#modules">Modules</a></li><li><a href="#macros">Macros</a></li><li><a href="#structs">Structs</a></li><li><a href="#constants">Constants</a></li><li><a href="#traits">Traits</a></li><li><a href="#types">Type Aliases</a></li></ul></section><h2><a href="../index.html">In crate common_meta</a></h2></div></nav><div class="sidebar-resizer"></div><main><div class="width-limiter"><nav class="sub"><form class="search-form"><span></span><div id="sidebar-button" tabindex="-1"><a href="../../common_meta/all.html" title="show sidebar"></a></div><input class="search-input" name="search" aria-label="Run search in the documentation" autocomplete="off" spellcheck="false" placeholder="Type ‘S’ or ‘/’ to search, ‘?’ for more options…" type="search"><div id="help-button" tabindex="-1"><a href="../../help.html" title="help">?</a></div><div id="settings-menu" tabindex="-1"><a href="../../settings.html" title="settings">Settings</a></div></form></nav><section id="main-content" class="content"><div class="main-heading"><h1>Module <a href="../index.html">common_meta</a>::<wbr><a class="mod" href="#">key</a><button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><span class="out-of-band"><a class="src" href="../../src/common_meta/key.rs.html#15-2193">source</a> · <button id="toggle-all-docs" title="collapse all docs">[<span>&#x2212;</span>]</button></span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>This mod defines all the keys used in the metadata store (Metasrv).
+Specifically, there are these kinds of keys:</p>
+<ol>
+<li>
+<p>Datanode table key: <code>__dn_table/{datanode_id}/{table_id}</code></p>
+<ul>
+<li>The value is a <a href="datanode_table/struct.DatanodeTableValue.html" title="struct common_meta::key::datanode_table::DatanodeTableValue">DatanodeTableValue</a> struct; it contains <code>table_id</code> and the regions that
+belong to this Datanode.</li>
+<li>This key is primary used in the startup of Datanode, to let Datanode know which tables
+and regions it should open.</li>
+</ul>
+</li>
+<li>
+<p>Table info key: <code>__table_info/{table_id}</code></p>
+<ul>
+<li>The value is a <a href="table_info/struct.TableInfoValue.html" title="struct common_meta::key::table_info::TableInfoValue">TableInfoValue</a> struct; it contains the whole table info (like column
+schemas).</li>
+<li>This key is mainly used in constructing the table in Datanode and Frontend.</li>
+</ul>
+</li>
+<li>
+<p>Catalog name key: <code>__catalog_name/{catalog_name}</code></p>
+<ul>
+<li>Indices all catalog names</li>
+</ul>
+</li>
+<li>
+<p>Schema name key: <code>__schema_name/{catalog_name}/{schema_name}</code></p>
+<ul>
+<li>Indices all schema names belong to the {catalog_name}</li>
+</ul>
+</li>
+<li>
+<p>Table name key: <code>__table_name/{catalog_name}/{schema_name}/{table_name}</code></p>
+<ul>
+<li>The value is a <a href="table_name/struct.TableNameValue.html" title="struct common_meta::key::table_name::TableNameValue">TableNameValue</a> struct; it contains the table id.</li>
+<li>Used in the table name to table id lookup.</li>
+</ul>
+</li>
+<li>
+<p>Flow info key: <code>__flow/info/{flow_id}</code></p>
+<ul>
+<li>Stores metadata of the flow.</li>
+</ul>
+</li>
+<li>
+<p>Flow route key: <code>__flow/route/{flow_id}/{partition_id}</code></p>
+<ul>
+<li>Stores route of the flow.</li>
+</ul>
+</li>
+<li>
+<p>Flow name key: <code>__flow/name/{catalog}/{flow_name}</code></p>
+<ul>
+<li>Mapping {catalog}/{flow_name} to {flow_id}</li>
+</ul>
+</li>
+<li>
+<p>Flownode flow key: <code>__flow/flownode/{flownode_id}/{flow_id}/{partition_id}</code></p>
+<ul>
+<li>Mapping {flownode_id} to {flow_id}</li>
+</ul>
+</li>
+<li>
+<p>Table flow key: <code>__flow/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}</code></p>
+<ul>
+<li>Mapping source table’s {table_id} to {flownode_id}</li>
+<li>Used in <code>Flownode</code> booting.</li>
+</ul>
+</li>
+<li>
+<p>View info key: <code>__view_info/{view_id}</code></p>
+<ul>
+<li>The value is a <a href="view_info/struct.ViewInfoValue.html" title="struct common_meta::key::view_info::ViewInfoValue">ViewInfoValue</a> struct; it contains the encoded logical plan.</li>
+<li>This key is mainly used in constructing the view in Datanode and Frontend.</li>
+</ul>
+</li>
+</ol>
+<p>All keys have related managers. The managers take care of the serialization and deserialization
+of keys and values, and the interaction with the underlying KV store backend.</p>
+<p>To simplify the managers used in struct fields and function parameters, we define “unify”
+table metadata manager: <a href="struct.TableMetadataManager.html" title="struct common_meta::key::TableMetadataManager">TableMetadataManager</a>
+and flow metadata manager: <a href="flow/struct.FlowMetadataManager.html" title="struct common_meta::key::flow::FlowMetadataManager">FlowMetadataManager</a>.
+It contains all the managers defined above. It’s recommended to just use this manager only.</p>
+<p>The whole picture of flow keys will be like this:</p>
+<p>__flow/
+info/
+{flow_id}
+route/
+{flow_id}/
+{partition_id}</p>
+<p>name/
+{catalog_name}
+{flow_name}</p>
+<p>flownode/
+{flownode_id}/
+{flow_id}/
+{partition_id}</p>
+<p>source_table/
+{table_id}/
+{flownode_id}/
+{flow_id}/
+{partition_id}</p>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><ul class="item-table"><li><div class="item-name"><a class="mod" href="catalog_name/index.html" title="mod common_meta::key::catalog_name">catalog_name</a></div></li><li><div class="item-name"><a class="mod" href="datanode_table/index.html" title="mod common_meta::key::datanode_table">datanode_table</a></div></li><li><div class="item-name"><a class="mod" href="flow/index.html" title="mod common_meta::key::flow">flow</a></div></li><li><div class="item-name"><a class="mod" href="schema_name/index.html" title="mod common_meta::key::schema_name">schema_name</a></div></li><li><div class="item-name"><a class="mod" href="table_info/index.html" title="mod common_meta::key::table_info">table_info</a></div></li><li><div class="item-name"><a class="mod" href="table_name/index.html" title="mod common_meta::key::table_name">table_name</a></div></li><li><div class="item-name"><a class="mod" href="table_route/index.html" title="mod common_meta::key::table_route">table_route</a></div></li><li><div class="item-name"><a class="mod" href="test_utils/index.html" title="mod common_meta::key::test_utils">test_utils</a></div></li><li><div class="item-name"><a class="mod" href="tombstone/index.html" title="mod common_meta::key::tombstone">tombstone</a><span title="Restricted Visibility">&nbsp;🔒</span> </div></li><li><div class="item-name"><a class="mod" href="txn_helper/index.html" title="mod common_meta::key::txn_helper">txn_helper</a><span title="Restricted Visibility">&nbsp;🔒</span> </div></li><li><div class="item-name"><a class="mod" href="view_info/index.html" title="mod common_meta::key::view_info">view_info</a></div></li></ul><h2 id="macros" class="section-header">Macros<a href="#macros" class="anchor">§</a></h2><ul class="item-table"><li><div class="item-name"><a class="macro" href="macro.impl_meta_key_get_txn_op.html" title="macro common_meta::key::impl_meta_key_get_txn_op">impl_meta_key_get_txn_op</a><span title="Restricted Visibility">&nbsp;🔒</span> </div></li></ul><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><ul class="item-table"><li><div class="item-name"><a class="struct" href="struct.BytesAdapter.html" title="struct common_meta::key::BytesAdapter">BytesAdapter</a></div></li><li><div class="item-name"><a class="struct" href="struct.CATALOG_NAME_KEY_PATTERN.html" title="struct common_meta::key::CATALOG_NAME_KEY_PATTERN">CATALOG_NAME_KEY_PATTERN</a><span title="Restricted Visibility">&nbsp;🔒</span> </div><div class="desc docblock-short">CATALOG_NAME_KEY: {CATALOG_NAME_KEY_PREFIX}/{catalog_name}</div></li><li><div class="item-name"><a class="struct" href="struct.DATANODE_TABLE_KEY_PATTERN.html" title="struct common_meta::key::DATANODE_TABLE_KEY_PATTERN">DATANODE_TABLE_KEY_PATTERN</a><span title="Restricted Visibility">&nbsp;🔒</span> </div></li><li><div class="item-name"><a class="struct" href="struct.DeserializedValueWithBytes.html" title="struct common_meta::key::DeserializedValueWithBytes">DeserializedValueWithBytes</a></div><div class="desc docblock-short">A struct containing a deserialized value(<code>inner</code>) and an original bytes.</div></li><li><div class="item-name"><a class="struct" href="struct.SCHEMA_NAME_KEY_PATTERN.html" title="struct common_meta::key::SCHEMA_NAME_KEY_PATTERN">SCHEMA_NAME_KEY_PATTERN</a><span title="Restricted Visibility">&nbsp;🔒</span> </div><div class="desc docblock-short">SCHEMA_NAME_KEY: {SCHEMA_NAME_KEY_PREFIX}/{catalog_name}/{schema_name}</div></li><li><div class="item-name"><a class="struct" href="struct.TABLE_INFO_KEY_PATTERN.html" title="struct common_meta::key::TABLE_INFO_KEY_PATTERN">TABLE_INFO_KEY_PATTERN</a><span title="Restricted Visibility">&nbsp;🔒</span> </div></li><li><div class="item-name"><a class="struct" href="struct.TABLE_NAME_KEY_PATTERN.html" title="struct common_meta::key::TABLE_NAME_KEY_PATTERN">TABLE_NAME_KEY_PATTERN</a><span title="Restricted Visibility">&nbsp;🔒</span> </div></li><li><div class="item-name"><a class="struct" href="struct.TABLE_ROUTE_KEY_PATTERN.html" title="struct common_meta::key::TABLE_ROUTE_KEY_PATTERN">TABLE_ROUTE_KEY_PATTERN</a><span title="Restricted Visibility">&nbsp;🔒</span> </div></li><li><div class="item-name"><a class="struct" href="struct.TableMetadataManager.html" title="struct common_meta::key::TableMetadataManager">TableMetadataManager</a></div></li><li><div class="item-name"><a class="struct" href="struct.VIEW_INFO_KEY_PATTERN.html" title="struct common_meta::key::VIEW_INFO_KEY_PATTERN">VIEW_INFO_KEY_PATTERN</a><span title="Restricted Visibility">&nbsp;🔒</span> </div></li></ul><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><ul class="item-table"><li><div class="item-name"><a class="constant" href="constant.CACHE_KEY_PREFIXES.html" title="constant common_meta::key::CACHE_KEY_PREFIXES">CACHE_KEY_PREFIXES</a></div></li><li><div class="item-name"><a class="constant" href="constant.CATALOG_NAME_KEY_PREFIX.html" title="constant common_meta::key::CATALOG_NAME_KEY_PREFIX">CATALOG_NAME_KEY_PREFIX</a></div></li><li><div class="item-name"><a class="constant" href="constant.DATANODE_TABLE_KEY_PREFIX.html" title="constant common_meta::key::DATANODE_TABLE_KEY_PREFIX">DATANODE_TABLE_KEY_PREFIX</a><span title="Restricted Visibility">&nbsp;🔒</span> </div></li><li><div class="item-name"><a class="constant" href="constant.MAINTENANCE_KEY.html" title="constant common_meta::key::MAINTENANCE_KEY">MAINTENANCE_KEY</a></div></li><li><div class="item-name"><a class="constant" href="constant.NAME_PATTERN.html" title="constant common_meta::key::NAME_PATTERN">NAME_PATTERN</a></div></li><li><div class="item-name"><a class="constant" href="constant.SCHEMA_NAME_KEY_PREFIX.html" title="constant common_meta::key::SCHEMA_NAME_KEY_PREFIX">SCHEMA_NAME_KEY_PREFIX</a></div></li><li><div class="item-name"><a class="constant" href="constant.TABLE_INFO_KEY_PREFIX.html" title="constant common_meta::key::TABLE_INFO_KEY_PREFIX">TABLE_INFO_KEY_PREFIX</a></div></li><li><div class="item-name"><a class="constant" href="constant.TABLE_NAME_KEY_PREFIX.html" title="constant common_meta::key::TABLE_NAME_KEY_PREFIX">TABLE_NAME_KEY_PREFIX</a></div></li><li><div class="item-name"><a class="constant" href="constant.TABLE_ROUTE_PREFIX.html" title="constant common_meta::key::TABLE_ROUTE_PREFIX">TABLE_ROUTE_PREFIX</a></div></li><li><div class="item-name"><a class="constant" href="constant.VIEW_INFO_KEY_PREFIX.html" title="constant common_meta::key::VIEW_INFO_KEY_PREFIX">VIEW_INFO_KEY_PREFIX</a></div></li></ul><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><ul class="item-table"><li><div class="item-name"><a class="trait" href="trait.MetaKey.html" title="trait common_meta::key::MetaKey">MetaKey</a></div><div class="desc docblock-short">The key of metadata.</div></li><li><div class="item-name"><a class="trait" href="trait.TableMetaKeyGetTxnOp.html" title="trait common_meta::key::TableMetaKeyGetTxnOp">TableMetaKeyGetTxnOp</a><span title="Restricted Visibility">&nbsp;🔒</span> </div></li><li><div class="item-name"><a class="trait" href="trait.TableMetaValue.html" title="trait common_meta::key::TableMetaValue">TableMetaValue</a></div></li></ul><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><ul class="item-table"><li><div class="item-name"><a class="type" href="type.FlowId.html" title="type common_meta::key::FlowId">FlowId</a></div><div class="desc docblock-short">The id of flow.</div></li><li><div class="item-name"><a class="type" href="type.FlowPartitionId.html" title="type common_meta::key::FlowPartitionId">FlowPartitionId</a></div><div class="desc docblock-short">The partition of flow.</div></li><li><div class="item-name"><a class="type" href="type.RegionDistribution.html" title="type common_meta::key::RegionDistribution">RegionDistribution</a></div></li><li><div class="item-name"><a class="type" href="type.TableMetadataManagerRef.html" title="type common_meta::key::TableMetadataManagerRef">TableMetadataManagerRef</a></div></li></ul></section></div></main></body></html>

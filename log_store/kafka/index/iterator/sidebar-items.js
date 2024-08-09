@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["MultipleRegionWalIndexIterator","NextBatchHint","RegionWalRange","RegionWalVecIndex"],"trait":["RegionWalIndexIterator"]};

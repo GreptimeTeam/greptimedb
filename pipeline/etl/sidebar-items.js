@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DESCRIPTION","PROCESSORS","TRANSFORM"],"enum":["Content"],"fn":["parse"],"mod":["field","processor","transform","value"],"struct":["Pipeline"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["Azblob","AzblobConfig","Fs","FsConfig","Gcs","GcsConfig","Http","HttpConfig","Memory","MemoryConfig","Oss","OssConfig","S3","S3Config"]};

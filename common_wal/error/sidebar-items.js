@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"struct":["EndpointIPV4NotFoundSnafu","ResolveEndpointSnafu"],"type":["Result"]};

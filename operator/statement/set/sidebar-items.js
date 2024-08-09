@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["merge_datestyle_value","set_bytea_output","set_datestyle","set_timezone","try_parse_datestyle","validate_client_encoding"]};

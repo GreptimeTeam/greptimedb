@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["Consumer","FetchResult","RecordsBuffer"],"trait":["FetchClient"]};

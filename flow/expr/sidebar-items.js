@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["error","func","id","linear","relation","scalar","signature"]};

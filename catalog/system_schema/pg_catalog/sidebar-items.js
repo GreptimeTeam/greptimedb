@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["OID_COLUMN_NAME","PG_CLASS","PG_DATABASE","PG_NAMESPACE","PG_TYPE"],"fn":["oid_column"],"macro":["setup_memory_table"],"mod":["pg_catalog_memory_table","pg_class","pg_namespace","table_names"],"struct":["MEMORY_TABLES","PGCatalogProvider"]};

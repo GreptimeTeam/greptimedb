@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["LOCATION_TYPE_AFTER","LOCATION_TYPE_FIRST"],"fn":["alter_expr_to_request","create_table_schema","parse_location"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["alter_parser","copy_parser","create_parser","deallocate_parser","delete_parser","describe_parser","drop_parser","error","execute_parser","explain_parser","insert_parser","prepare_parser","query_parser","set_var_parser","show_parser","tql_parser","truncate_parser","utils"]};

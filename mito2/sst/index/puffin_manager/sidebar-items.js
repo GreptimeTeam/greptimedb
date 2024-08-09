@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["STAGING_DIR"],"struct":["ObjectStorePuffinFileAccessor","PuffinManagerFactory"],"type":["BlobReader","InstrumentedAsyncRead","InstrumentedAsyncWrite","SstPuffinBlob","SstPuffinDir","SstPuffinManager","SstPuffinReader","SstPuffinWriter"]};

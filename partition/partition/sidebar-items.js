@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PartitionBound"],"struct":["PartitionDef","PartitionExpr"],"trait":["PartitionRule"],"type":["PartitionRuleRef"]};

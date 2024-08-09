@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["define_duration_with_unit"],"struct":["DurationMicrosecond","DurationMillisecond","DurationNanosecond","DurationSecond"]};
