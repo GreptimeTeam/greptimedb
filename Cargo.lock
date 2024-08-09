@@ -2279,6 +2279,8 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "rskafka",
+ "rustls 0.23.10",
+ "rustls-pemfile 2.1.2",
  "serde",
  "serde_json",
  "serde_with",
@@ -9135,8 +9137,7 @@ dependencies = [
 [[package]]
 name = "rskafka"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "132ecfa3cd9c3825208524a80881f115337762904ad3f0174e87975b2d79162c"
+source = "git+https://github.com/influxdata/rskafka.git?rev=329431ac4edf630d6bf44976596f89e23429f825#329431ac4edf630d6bf44976596f89e23429f825"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9149,11 +9150,13 @@ dependencies = [
  "parking_lot 0.12.3",
  "pin-project-lite",
  "rand",
+ "rustls 0.23.10",
  "snap",
  "thiserror",
  "tokio",
+ "tokio-rustls 0.26.0",
  "tracing",
- "zstd 0.12.4",
+ "zstd 0.13.1",
 ]
 
 [[package]]

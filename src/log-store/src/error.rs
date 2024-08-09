@@ -27,6 +27,13 @@ use crate::kafka::producer::ProduceRequest;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to create TLS Config"))]
+    TlsConfig {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_wal::error::Error,
+    },
+
     #[snafu(display("Invalid provider type, expected: {}, actual: {}", expected, actual))]
     InvalidProvider {
         #[snafu(implicit)]
