@@ -20,7 +20,6 @@ use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use futures::future::try_join_all;
 use futures_util::StreamExt;
-use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{
@@ -32,6 +31,8 @@ use store_api::storage::RegionId;
 
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
+use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer};
+use crate::kafka::index::RegionWalRange;
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
     convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
@@ -228,35 +229,27 @@ impl LogStore for KafkaLogStore {
             .await
             .context(GetOffsetSnafu {
                 topic: &provider.topic,
-            })?
-            - 1;
-        // Reads entries with offsets in the range [start_offset, end_offset].
-        let start_offset = entry_id as i64;
-
+            })?;
+        let range = entry_id..end_offset as u64;
         debug!(
-            "Start reading entries in range [{}, {}] for ns {}",
-            start_offset, end_offset, provider
+            "Start reading entries in range: {:?} of ns {}",
+            range, provider
         );
-
-        // Abort if there're no new entries.
-        // FIXME(niebayes): how come this case happens?
-        if start_offset > end_offset {
-            warn!(
-                "No new entries for ns {} in range [{}, {}]",
-                provider, start_offset, end_offset
-            );
+        if range.is_empty() {
+            warn!("No new entries in range {:?} of ns {}", range, provider);
             return Ok(futures_util::stream::empty().boxed());
         }
 
-        let mut stream_consumer = StreamConsumerBuilder::new(client, StartOffset::At(start_offset))
-            .with_max_batch_size(self.max_batch_bytes as i32)
-            .with_max_wait_ms(self.consumer_wait_timeout.as_millis() as i32)
-            .build();
+        let index = RegionWalRange::new(range, self.max_batch_bytes);
 
-        debug!(
-            "Built a stream consumer for ns {} to consume entries in range [{}, {}]",
-            provider, start_offset, end_offset
-        );
+        // Safety: Must be ok.
+        let mut stream_consumer = ConsumerBuilder::default()
+            .client(client)
+            .buffer(RecordsBuffer::new(Box::new(index)))
+            .max_batch_size(self.max_batch_bytes)
+            .max_wait_ms(self.consumer_wait_timeout.as_millis() as u32)
+            .build()
+            .unwrap();
 
         // A buffer is used to collect records to construct a complete entry.
         let mut entry_records: HashMap<RegionId, Vec<Record>> = HashMap::new();

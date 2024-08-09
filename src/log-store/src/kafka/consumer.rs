@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_telemetry::debug;
+use derive_builder::Builder;
 use futures::future::{BoxFuture, Fuse, FusedFuture};
 use futures::{FutureExt, Stream};
 use pin_project::pin_project;
@@ -60,38 +61,59 @@ struct FetchResult {
     used_offset: i64,
 }
 
+const MAX_BATCH_SIZE: usize = 52428800;
+const AVG_RECORD_SIZE: usize = 256 * 1024;
+
 /// The [`Consumer`] struct represents a Kafka consumer that fetches messages from
 /// a Kafka cluster. Yielding records respecting the [`RegionWalIndexIterator`].
 #[pin_project]
+#[derive(Builder)]
+#[builder(pattern = "owned")]
 pub struct Consumer {
+    #[builder(default = "-1")]
     last_high_watermark: i64,
 
     /// The client is used to fetch records from kafka topic.
     client: Arc<dyn FetchClient>,
 
     /// The max batch size in a single fetch request.
+    #[builder(default = "MAX_BATCH_SIZE")]
     max_batch_size: usize,
 
     /// The max wait milliseconds.
+    #[builder(default = "500")]
     max_wait_ms: u32,
 
     /// The avg record size
+    #[builder(default = "AVG_RECORD_SIZE")]
     avg_record_size: usize,
 
     /// Termination flag
+    #[builder(default = "false")]
     terminated: bool,
 
     /// The buffer of records.
     buffer: RecordsBuffer,
 
     /// The fetch future.
+    #[builder(default = "Fuse::terminated()")]
     fetch_fut: Fuse<BoxFuture<'static, rskafka::client::error::Result<FetchResult>>>,
 }
 
-struct RecordsBuffer {
+pub(crate) struct RecordsBuffer {
     buffer: VecDeque<RecordAndOffset>,
 
     index: Box<dyn RegionWalIndexIterator>,
+}
+
+impl RecordsBuffer {
+    /// Creates an empty [`RecordsBuffer`]
+    pub fn new(index: Box<dyn RegionWalIndexIterator>) -> Self {
+        RecordsBuffer {
+            buffer: VecDeque::new(),
+            index,
+        }
+    }
 }
 
 impl RecordsBuffer {

@@ -24,6 +24,7 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
+derive_builder.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 itertools.workspace = true
