@@ -6313,6 +6313,7 @@ dependencies = [
  "memcomparable",
  "moka",
  "object-store",
+ "opendal",
  "parquet",
  "paste",
  "pin-project",
