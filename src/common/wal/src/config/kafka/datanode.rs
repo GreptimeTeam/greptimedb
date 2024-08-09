@@ -39,6 +39,29 @@ pub struct DatanodeKafkaConfig {
     /// The kafka topic config.
     #[serde(flatten)]
     pub kafka_topic: KafkaTopicConfig,
+    /// Client SASL.
+    pub sasl: Option<KafkaClientSasl>,
+    /// Client TLS config
+    pub tls: Option<KafkaClientTls>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KafkaClientSasl {
+    #[serde(flatten)]
+    pub config: Option<KafkaClientSaslConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum KafkaClientSaslConfig {
+    Plain { username: String, password: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KafkaClientTls {
+    server_ca_cert_path: String,
+    client_cert_path: String,
+    client_key_path: String,
 }
 
 impl Default for DatanodeKafkaConfig {
@@ -50,6 +73,8 @@ impl Default for DatanodeKafkaConfig {
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig::default(),
             kafka_topic: KafkaTopicConfig::default(),
+            sasl: None,
+            tls: None,
         }
     }
 }
