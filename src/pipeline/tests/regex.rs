@@ -61,7 +61,7 @@ transform:
     assert_eq!(output.schema, *EXPECTED_SCHEMA);
 
     assert_eq!(
-        output.rows[0].values[1].value_data,
+        output.rows[0].values[0].value_data,
         Some(StringValue("123".to_string()))
     );
 }
@@ -94,7 +94,7 @@ transform:
     assert_eq!(output.schema, *EXPECTED_SCHEMA);
 
     assert_eq!(
-        output.rows[0].values[1].value_data,
+        output.rows[0].values[0].value_data,
         Some(StringValue("123".to_string()))
     );
 }

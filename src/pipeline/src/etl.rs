@@ -455,12 +455,12 @@ transform:
         assert_eq!(sechema.len(), result.values.len());
         let test = vec![
             (
-                ColumnDataType::Uint32 as i32,
-                Some(ValueData::U32Value(33085)),
+                ColumnDataType::String as i32,
+                Some(ValueData::StringValue("129.37.245.88".into())),
             ),
             (
                 ColumnDataType::String as i32,
-                Some(ValueData::StringValue("129.37.245.88".into())),
+                Some(ValueData::StringValue("meln1ks".into())),
             ),
             (
                 ColumnDataType::String as i32,
@@ -481,12 +481,12 @@ transform:
                 Some(ValueData::U16Value(501)),
             ),
             (
-                ColumnDataType::TimestampNanosecond as i32,
-                Some(ValueData::TimestampNanosecondValue(1722493367000000000)),
+                ColumnDataType::Uint32 as i32,
+                Some(ValueData::U32Value(33085)),
             ),
             (
-                ColumnDataType::String as i32,
-                Some(ValueData::StringValue("meln1ks".into())),
+                ColumnDataType::TimestampNanosecond as i32,
+                Some(ValueData::TimestampNanosecondValue(1722493367000000000)),
             ),
         ];
         for i in 0..sechema.len() {

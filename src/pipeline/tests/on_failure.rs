@@ -41,19 +41,19 @@ transform:
 
     let expected_schema = vec![
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
-            ColumnDataType::TimestampNanosecond,
-            SemanticType::Timestamp,
-        ),
-        common::make_column_schema(
             "version".to_string(),
             ColumnDataType::Uint8,
             SemanticType::Field,
         ),
+        common::make_column_schema(
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
+        ),
     ];
 
     assert_eq!(output.schema, expected_schema);
-    assert_eq!(output.rows[0].values[1].value_data, None);
+    assert_eq!(output.rows[0].values[0].value_data, None);
 }
 
 #[test]
@@ -82,19 +82,19 @@ transform:
 
     let expected_schema = vec![
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
-            ColumnDataType::TimestampNanosecond,
-            SemanticType::Timestamp,
-        ),
-        common::make_column_schema(
             "version".to_string(),
             ColumnDataType::Uint8,
             SemanticType::Field,
         ),
+        common::make_column_schema(
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
+        ),
     ];
 
     assert_eq!(output.schema, expected_schema);
-    assert_eq!(output.rows[0].values[1].value_data, Some(U8Value(0)));
+    assert_eq!(output.rows[0].values[0].value_data, Some(U8Value(0)));
 }
 
 #[test]
@@ -118,19 +118,19 @@ transform:
 
     let expected_schema = vec![
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
-            ColumnDataType::TimestampNanosecond,
-            SemanticType::Timestamp,
-        ),
-        common::make_column_schema(
             "version".to_string(),
             ColumnDataType::Uint8,
             SemanticType::Field,
         ),
+        common::make_column_schema(
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
+        ),
     ];
 
     assert_eq!(output.schema, expected_schema);
-    assert_eq!(output.rows[0].values[1].value_data, Some(U8Value(0)));
+    assert_eq!(output.rows[0].values[0].value_data, Some(U8Value(0)));
 }
 
 #[test]
@@ -165,9 +165,9 @@ transform:
 
     let expected_schema = vec![
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
-            ColumnDataType::TimestampNanosecond,
-            SemanticType::Timestamp,
+            "version".to_string(),
+            ColumnDataType::Uint8,
+            SemanticType::Field,
         ),
         common::make_column_schema(
             "spec_version".to_string(),
@@ -175,13 +175,13 @@ transform:
             SemanticType::Field,
         ),
         common::make_column_schema(
-            "version".to_string(),
-            ColumnDataType::Uint8,
-            SemanticType::Field,
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
         ),
     ];
 
     assert_eq!(output.schema, expected_schema);
+    assert_eq!(output.rows[0].values[0].value_data, Some(U8Value(0)));
     assert_eq!(output.rows[0].values[1].value_data, Some(U16Value(0)));
-    assert_eq!(output.rows[0].values[2].value_data, Some(U8Value(0)));
 }

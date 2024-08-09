@@ -33,14 +33,14 @@ transform:
 lazy_static! {
     pub static ref EXPECTED_SCHEMA: Vec<ColumnSchema> = vec![
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
-            ColumnDataType::TimestampNanosecond,
-            SemanticType::Timestamp,
-        ),
-        common::make_column_schema(
             "join_test".to_string(),
             ColumnDataType::String,
             SemanticType::Field,
+        ),
+        common::make_column_schema(
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
         ),
     ];
 }
@@ -59,7 +59,7 @@ fn test_simple_join() {
 
     assert_eq!(output.schema, *EXPECTED_SCHEMA);
     assert_eq!(
-        output.rows[0].values[1].value_data,
+        output.rows[0].values[0].value_data,
         Some(StringValue("a-b-c".to_string()))
     );
 }
@@ -77,7 +77,7 @@ fn test_integer_join() {
 
     assert_eq!(output.schema, *EXPECTED_SCHEMA);
     assert_eq!(
-        output.rows[0].values[1].value_data,
+        output.rows[0].values[0].value_data,
         Some(StringValue("1-2-3".to_string()))
     );
 }
@@ -95,7 +95,7 @@ fn test_boolean() {
 
     assert_eq!(output.schema, *EXPECTED_SCHEMA);
     assert_eq!(
-        output.rows[0].values[1].value_data,
+        output.rows[0].values[0].value_data,
         Some(StringValue("true-false-true".to_string()))
     );
 }
@@ -113,7 +113,7 @@ fn test_float() {
 
     assert_eq!(output.schema, *EXPECTED_SCHEMA);
     assert_eq!(
-        output.rows[0].values[1].value_data,
+        output.rows[0].values[0].value_data,
         Some(StringValue("1.1-1.2-1.3".to_string()))
     );
 }

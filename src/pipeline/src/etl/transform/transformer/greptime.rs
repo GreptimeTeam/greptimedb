@@ -58,10 +58,7 @@ impl GreptimeTransformer {
         for transform in transforms.iter() {
             schema.extend(coerce_columns(transform)?);
         }
-        Ok(schema
-            .into_iter()
-            .sorted_by(|left, right| left.column_name.cmp(&right.column_name))
-            .collect())
+        Ok(schema)
     }
 
     fn transform_map(&self, map: &Map) -> Result<Row, String> {
@@ -167,11 +164,10 @@ impl Transformer for GreptimeTransformer {
 
                 let required_keys = transforms.required_keys_mut();
                 required_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
-                required_keys.sort();
 
                 let output_keys = transforms.output_keys_mut();
                 output_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
-                output_keys.sort();
+
                 let schema = GreptimeTransformer::schemas(&transforms)?;
                 Ok(GreptimeTransformer { transforms, schema })
             }
