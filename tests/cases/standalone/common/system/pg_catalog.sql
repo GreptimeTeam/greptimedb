@@ -32,6 +32,9 @@ WHERE c.relkind IN ('r','p','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
+-- make sure oid of namespace keep stable
+SELECT * FROM pg_namespace ORDER BY oid;
+
 create
 database my_db;
 

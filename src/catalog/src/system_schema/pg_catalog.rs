@@ -30,6 +30,7 @@ use pg_namespace::PGNamespace;
 use table::TableRef;
 pub use table_names::*;
 
+use self::pg_namespace::oid_map::{PGNamespaceOidMap, PGNamespaceOidMapRef};
 use super::memory_table::MemoryTable;
 use super::utils::tables::u32_column;
 use super::{SystemSchemaProvider, SystemSchemaProviderInner, SystemTableRef};
@@ -52,6 +53,9 @@ pub struct PGCatalogProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
     tables: HashMap<String, TableRef>,
+
+    // Workaround to store mapping of schema_name to a numeric id
+    namespace_oid_map: PGNamespaceOidMapRef,
 }
 
 impl SystemSchemaProvider for PGCatalogProvider {
@@ -85,6 +89,7 @@ impl PGCatalogProvider {
             catalog_name,
             catalog_manager,
             tables: HashMap::new(),
+            namespace_oid_map: Arc::new(PGNamespaceOidMap::new()),
         };
         provider.build_tables();
         provider
@@ -122,10 +127,12 @@ impl SystemSchemaProviderInner for PGCatalogProvider {
             table_names::PG_NAMESPACE => Some(Arc::new(PGNamespace::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
+                self.namespace_oid_map.clone(),
             ))),
             table_names::PG_CLASS => Some(Arc::new(PGClass::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
+                self.namespace_oid_map.clone(),
             ))),
             _ => None,
         }

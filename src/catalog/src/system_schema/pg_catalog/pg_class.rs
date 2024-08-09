@@ -31,6 +31,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 use table::metadata::TableType;
 
+use super::pg_namespace::oid_map::PGNamespaceOidMapRef;
 use super::{OID_COLUMN_NAME, PG_CLASS};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
@@ -60,14 +61,22 @@ pub(super) struct PGClass {
     schema: SchemaRef,
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+
+    // Workaround to convert schema_name to a numeric id
+    namespace_oid_map: PGNamespaceOidMapRef,
 }
 
 impl PGClass {
-    pub(super) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+    pub(super) fn new(
+        catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
+        namespace_oid_map: PGNamespaceOidMapRef,
+    ) -> Self {
         Self {
             schema: Self::schema(),
             catalog_name,
             catalog_manager,
+            namespace_oid_map,
         }
     }
 
@@ -75,7 +84,7 @@ impl PGClass {
         Arc::new(Schema::new(vec![
             u32_column(OID_COLUMN_NAME),
             string_column(RELNAME),
-            string_column(RELNAMESPACE),
+            u32_column(RELNAMESPACE),
             string_column(RELKIND),
             u32_column(RELOWNER),
         ]))
@@ -86,6 +95,7 @@ impl PGClass {
             self.schema.clone(),
             self.catalog_name.clone(),
             self.catalog_manager.clone(),
+            self.namespace_oid_map.clone(),
         )
     }
 }
@@ -155,10 +165,11 @@ struct PGClassBuilder {
     schema: SchemaRef,
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+    namespace_oid_map: PGNamespaceOidMapRef,
 
     oid: UInt32VectorBuilder,
     relname: StringVectorBuilder,
-    relnamespace: StringVectorBuilder,
+    relnamespace: UInt32VectorBuilder,
     relkind: StringVectorBuilder,
     relowner: UInt32VectorBuilder,
 }
@@ -168,15 +179,17 @@ impl PGClassBuilder {
         schema: SchemaRef,
         catalog_name: String,
         catalog_manager: Weak<dyn CatalogManager>,
+        namespace_oid_map: PGNamespaceOidMapRef,
     ) -> Self {
         Self {
             schema,
             catalog_name,
             catalog_manager,
+            namespace_oid_map,
 
             oid: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
             relname: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            relnamespace: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            relnamespace: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
             relkind: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             relowner: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
         }
@@ -217,6 +230,7 @@ impl PGClassBuilder {
         table: &str,
         kind: &str,
     ) {
+        let namespace_oid = self.namespace_oid_map.get_oid(schema);
         let row = [
             (OID_COLUMN_NAME, &Value::from(oid)),
             (RELNAMESPACE, &Value::from(schema)),
@@ -230,7 +244,7 @@ impl PGClassBuilder {
         }
 
         self.oid.push(Some(oid));
-        self.relnamespace.push(Some(schema));
+        self.relnamespace.push(Some(namespace_oid));
         self.relname.push(Some(table));
         self.relkind.push(Some(kind));
         self.relowner.push(Some(DUMMY_OWNER_ID));
