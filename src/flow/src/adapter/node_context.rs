@@ -15,6 +15,7 @@
 //! Node context, prone to change with every incoming requests
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,6 +72,7 @@ pub struct SourceSender {
     sender: broadcast::Sender<DiffRow>,
     send_buf_tx: mpsc::UnboundedSender<Vec<DiffRow>>,
     send_buf_rx: RwLock<mpsc::UnboundedReceiver<Vec<DiffRow>>>,
+    send_buf_row_cnt: AtomicUsize,
 }
 
 impl Default for SourceSender {
@@ -81,6 +83,7 @@ impl Default for SourceSender {
             sender: broadcast::Sender::new(BROADCAST_CAP * 2),
             send_buf_tx,
             send_buf_rx: RwLock::new(send_buf_rx),
+            send_buf_row_cnt: AtomicUsize::new(0),
         }
     }
 }
@@ -105,6 +108,9 @@ impl SourceSender {
             }
             // TODO(discord9): send rows instead so it's just moving a point
             if let Some(rows) = send_buf.recv().await {
+                let len = rows.len();
+                self.send_buf_row_cnt
+                    .fetch_sub(len, std::sync::atomic::Ordering::SeqCst);
                 for row in rows {
                     self.sender
                         .send(row)
@@ -133,13 +139,17 @@ impl SourceSender {
 
     /// return number of rows it actual send(including what's in the buffer)
     pub async fn send_rows(&self, rows: Vec<DiffRow>) -> Result<usize, Error> {
+        let len = rows.len();
+        self.send_buf_row_cnt
+            .fetch_add(len, std::sync::atomic::Ordering::SeqCst);
         self.send_buf_tx.send(rows).map_err(|e| {
+            self.send_buf_row_cnt
+                .fetch_sub(len, std::sync::atomic::Ordering::SeqCst);
             crate::error::InternalSnafu {
                 reason: format!("Failed to send row, error = {:?}", e),
             }
             .build()
         })?;
-
         Ok(0)
     }
 }
@@ -156,7 +166,13 @@ impl FlownodeContext {
                 name: table_id.to_string(),
             })?;
         // wait until send buf is not full
-        while sender.send_buf_rx.read().await.len() >= SEND_BUF_CAP {
+        while sender
+            .send_buf_row_cnt
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= SEND_BUF_CAP
+        {
+            // TODO: maybe just using bounded sender instead of this
+            common_telemetry::debug!("send buf is full, waiting for flow worker to process");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         // debug!("FlownodeContext::send: trying to send {} rows", rows.len());
