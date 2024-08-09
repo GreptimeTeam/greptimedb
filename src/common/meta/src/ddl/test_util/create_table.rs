@@ -127,7 +127,7 @@ pub fn build_raw_table_info_from_expr(expr: &CreateTableExpr) -> RawTableInfo {
             engine: expr.engine.to_string(),
             next_column_id: expr.column_defs.len() as u32,
             region_numbers: vec![],
-            options: TableOptions::default(),
+            options: TableOptions::try_from_iter(&expr.table_options).unwrap(),
             created_on: DateTime::default(),
             partition_key_indices: vec![],
         },

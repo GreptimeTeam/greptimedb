@@ -91,6 +91,7 @@ async fn test_on_prepare_table() {
     // Drop if exists
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
+    assert!(!procedure.rollback_supported());
 
     let task = new_drop_table_task(table_name, table_id, false);
     // Drop table
@@ -224,9 +225,12 @@ async fn test_on_rollback() {
         let task = new_drop_table_task("phy_table", physical_table_id, false);
         let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
         procedure.on_prepare().await.unwrap();
+        assert!(procedure.rollback_supported());
         procedure.on_delete_metadata().await.unwrap();
+        assert!(procedure.rollback_supported());
         procedure.rollback(&ctx).await.unwrap();
         // Rollback again
+        assert!(procedure.rollback_supported());
         procedure.rollback(&ctx).await.unwrap();
         let kvs = kv_backend.dump();
         assert_eq!(kvs, expected_kvs);
@@ -236,12 +240,7 @@ async fn test_on_rollback() {
     let task = new_drop_table_task("foo", table_ids[0], false);
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
-    procedure.on_delete_metadata().await.unwrap();
-    procedure.rollback(&ctx).await.unwrap();
-    // Rollback again
-    procedure.rollback(&ctx).await.unwrap();
-    let kvs = kv_backend.dump();
-    assert_eq!(kvs, expected_kvs);
+    assert!(!procedure.rollback_supported());
 }
 
 fn new_drop_table_task(table_name: &str, table_id: TableId, drop_if_exists: bool) -> DropTableTask {
