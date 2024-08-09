@@ -17,7 +17,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common_telemetry::debug;
 use session::context::QueryContext;
@@ -70,14 +69,14 @@ pub struct FlownodeContext {
 pub struct SourceSender {
     // TODO(discord9): make it all Vec<DiffRow>?
     sender: broadcast::Sender<DiffRow>,
-    send_buf_tx: mpsc::UnboundedSender<Vec<DiffRow>>,
-    send_buf_rx: RwLock<mpsc::UnboundedReceiver<Vec<DiffRow>>>,
+    send_buf_tx: mpsc::Sender<Vec<DiffRow>>,
+    send_buf_rx: RwLock<mpsc::Receiver<Vec<DiffRow>>>,
     send_buf_row_cnt: AtomicUsize,
 }
 
 impl Default for SourceSender {
     fn default() -> Self {
-        let (send_buf_tx, send_buf_rx) = mpsc::unbounded_channel();
+        let (send_buf_tx, send_buf_rx) = mpsc::channel(SEND_BUF_CAP);
         Self {
             // TODO(discord9): found a better way then increase this to prevent lagging and hence missing input data
             sender: broadcast::Sender::new(BROADCAST_CAP * 2),
@@ -139,12 +138,7 @@ impl SourceSender {
 
     /// return number of rows it actual send(including what's in the buffer)
     pub async fn send_rows(&self, rows: Vec<DiffRow>) -> Result<usize, Error> {
-        let len = rows.len();
-        self.send_buf_row_cnt
-            .fetch_add(len, std::sync::atomic::Ordering::SeqCst);
-        self.send_buf_tx.send(rows).map_err(|e| {
-            self.send_buf_row_cnt
-                .fetch_sub(len, std::sync::atomic::Ordering::SeqCst);
+        self.send_buf_tx.send(rows).await.map_err(|e| {
             crate::error::InternalSnafu {
                 reason: format!("Failed to send row, error = {:?}", e),
             }
@@ -165,17 +159,8 @@ impl FlownodeContext {
             .with_context(|| TableNotFoundSnafu {
                 name: table_id.to_string(),
             })?;
-        // wait until send buf is not full
-        while sender
-            .send_buf_row_cnt
-            .load(std::sync::atomic::Ordering::SeqCst)
-            >= SEND_BUF_CAP
-        {
-            // TODO: maybe just using bounded sender instead of this
-            common_telemetry::debug!("send buf is full, waiting for flow worker to process");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        // debug!("FlownodeContext::send: trying to send {} rows", rows.len());
+
+        debug!("FlownodeContext::send: trying to send {} rows", rows.len());
         sender.send_rows(rows).await
     }
 
