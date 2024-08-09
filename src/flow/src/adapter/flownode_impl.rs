@@ -30,6 +30,7 @@ use store_api::storage::RegionId;
 
 use crate::adapter::FlowWorkerManager;
 use crate::error::InternalSnafu;
+use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
 
 fn to_meta_err(err: crate::error::Error) -> common_meta::error::Error {
@@ -78,6 +79,7 @@ impl Flownode for FlowWorkerManager {
                     )
                     .await
                     .map_err(to_meta_err)?;
+                METRIC_FLOW_TASK_COUNT.inc();
                 Ok(FlowResponse {
                     affected_flows: ret
                         .map(|id| greptime_proto::v1::FlowId { id: id as u32 })
@@ -92,6 +94,7 @@ impl Flownode for FlowWorkerManager {
                 self.remove_flow(flow_id.id as u64)
                     .await
                     .map_err(to_meta_err)?;
+                METRIC_FLOW_TASK_COUNT.dec();
                 Ok(Default::default())
             }
             Some(flow_request::Body::Flush(FlushFlow {

@@ -56,6 +56,9 @@ pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
 /// TODO(discord9): add config for this, so cpu&mem usage can be balanced and configured by this
 pub const BROADCAST_CAP: usize = 65535;
 
+/// The maximum capacity of the send buffer, to prevent the buffer from growing too large
+pub const SEND_BUF_CAP: usize = BROADCAST_CAP * 2;
+
 pub const BATCH_SIZE: usize = BROADCAST_CAP / 2;
 
 /// Convert a value that is or can be converted to Datetime to internal timestamp
