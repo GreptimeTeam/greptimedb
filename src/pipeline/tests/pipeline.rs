@@ -93,7 +93,7 @@ processors:
         - queryStr
       method: decode
       ignore_missing: true
-  - timestamp:
+  - epoch:
       field: reqTimeSec
       resolution: second
       ignore_missing: true
@@ -189,8 +189,8 @@ transform:
     # index: fulltext
   - field: reqTimeSec, req_time_sec
     # epoch time is special, the resolution MUST BE specified
-    type: timestamp, second
-    index: time
+    type: epoch, second
+    index: timestamp
 
   # the following is from cmcd
   - fields:
@@ -414,12 +414,10 @@ transform:
         ("breadcrumbs_cloud_wrapper_turn_around_time", None),
         ("breadcrumbs_cloud_wrapper_dns_lookup_time", None),
         ("breadcrumbs_cloud_wrapper_asn", None),
-    ];
-    // expected_values.sort_by_key(|x| x.0);
-    let expected_values = expected_values
-        .into_iter()
-        .map(|(_, d)| GreptimeValue { value_data: d })
-        .collect::<Vec<GreptimeValue>>();
+    ]
+    .into_iter()
+    .map(|(_, d)| GreptimeValue { value_data: d })
+    .collect::<Vec<GreptimeValue>>();
 
     let yaml_content = Content::Yaml(pipeline_yaml.into());
     let pipeline: Pipeline<GreptimeTransformer> =
@@ -478,7 +476,7 @@ processors:
         - line
       patterns: 
         - "%{+ts} %{+ts} %{content}"
-  - timestamp:
+  - date:
       fields: 
         - ts
       formats:
@@ -489,8 +487,8 @@ transform:
       - content
     type: string
   - field: ts
-    type: timestamp, ns
-    index: time
+    type: time
+    index: timestamp
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml.into());

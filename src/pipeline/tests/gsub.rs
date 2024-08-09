@@ -36,15 +36,15 @@ processors:
       field: reqTimeSec
       pattern: "\\."
       replacement: ""
-  - timestamp:
+  - epoch:
       field: reqTimeSec
       resolution: millisecond
       ignore_missing: true
 
 transform:
   - field: reqTimeSec
-    type: timestamp, millisecond
-    index: time
+    type: epoch, millisecond
+    index: timestamp
 "#;
 
     let output = common::parse_and_exec(input_value_str, pipeline_yaml);
