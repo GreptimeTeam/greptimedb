@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
-
+use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use common_telemetry::warn;
 use itertools::Itertools;
 
@@ -543,6 +542,35 @@ impl DissectProcessor {
 
         Err("No matching pattern found".to_string())
     }
+
+    /// Update the output keys for each field.
+    fn update_output_keys(&mut self) {
+        // every pattern had been checked, so we can get all the output keys
+        let output_keys = self
+            .patterns
+            .iter()
+            .flat_map(|pattern| pattern.iter())
+            .filter_map(|p| match p {
+                Part::Name(name) => {
+                    if !name.is_empty()
+                        && !name.start_modifier.as_ref().is_some_and(|x| {
+                            *x == StartModifier::NamedSkip || *x == StartModifier::MapVal
+                        })
+                    {
+                        Some(name)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for field in self.fields.iter_mut() {
+            for k in &output_keys {
+                field.output_fields_index_mapping.insert(k.to_string(), 0);
+            }
+        }
+    }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessor {
@@ -576,7 +604,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessor {
                 _ => {}
             }
         }
-
+        processor.update_output_keys();
         Ok(processor)
     }
 }
@@ -594,6 +622,24 @@ impl Processor for DissectProcessor {
         &self.fields
     }
 
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        let mut result = HashSet::with_capacity(30);
+        for pattern in &self.patterns {
+            for part in pattern.iter() {
+                if let Part::Name(name) = part {
+                    if !name.is_empty() {
+                        result.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        result
+    }
+
     fn exec_field(&self, val: &Value, _field: &Field) -> Result<Map, String> {
         match val {
             Value::String(val) => match self.process(val) {
@@ -609,6 +655,46 @@ impl Processor for DissectProcessor {
             )),
         }
     }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                // TODO(qtang): Let this method use the intermediate state collection directly.
+                Some(Value::String(val_str)) => match self.process(val_str) {
+                    Ok(mut map) => {
+                        field
+                            .output_fields_index_mapping
+                            .iter()
+                            .for_each(|(k, output_index)| {
+                                if let Some(v) = map.remove(k) {
+                                    val[*output_index] = v
+                                }
+                            });
+                    }
+                    Err(e) => {
+                        warn!("dissect processor: {}", e);
+                    }
+                },
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn is_valid_char(ch: char) -> bool {
@@ -617,7 +703,7 @@ fn is_valid_char(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use ahash::HashMap;
 
     use super::{DissectProcessor, EndModifier, Name, Part, Pattern, StartModifier};
     use crate::etl::value::{Map, Value};

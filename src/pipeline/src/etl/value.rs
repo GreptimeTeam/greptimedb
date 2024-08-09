@@ -16,15 +16,15 @@ pub mod array;
 pub mod map;
 pub mod time;
 
-pub use std::collections::HashMap;
-
+use ahash::{HashMap, HashMapExt};
 pub use array::Array;
 pub use map::Map;
-pub use time::{Epoch, Time};
+pub use time::Timestamp;
 
 /// Value can be used as type
 /// acts as value: the enclosed value is the actual value
 /// acts as type: the enclosed value is the default value
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     // as value: null
@@ -47,8 +47,7 @@ pub enum Value {
     Boolean(bool),
     String(String),
 
-    Time(Time),
-    Epoch(Epoch),
+    Timestamp(Timestamp),
 
     Array(Array),
     Map(Map),
@@ -80,30 +79,26 @@ impl Value {
             "boolean" => Ok(Value::Boolean(false)),
             "string" => Ok(Value::String("".to_string())),
 
-            "time" => Ok(Value::Time(Time::default())),
-            "epoch" => match tail {
+            "timestamp" | "epoch" | "time" => match tail {
                 Some(resolution) if !resolution.is_empty() => match resolution.as_str() {
                     time::NANOSECOND_RESOLUTION | time::NANO_RESOLUTION | time::NS_RESOLUTION => {
-                        Ok(Value::Epoch(Epoch::Nanosecond(0)))
+                        Ok(Value::Timestamp(Timestamp::Nanosecond(0)))
                     }
                     time::MICROSECOND_RESOLUTION | time::MICRO_RESOLUTION | time::US_RESOLUTION => {
-                        Ok(Value::Epoch(Epoch::Microsecond(0)))
+                        Ok(Value::Timestamp(Timestamp::Microsecond(0)))
                     }
                     time::MILLISECOND_RESOLUTION | time::MILLI_RESOLUTION | time::MS_RESOLUTION => {
-                        Ok(Value::Epoch(Epoch::Millisecond(0)))
+                        Ok(Value::Timestamp(Timestamp::Millisecond(0)))
                     }
                     time::SECOND_RESOLUTION | time::SEC_RESOLUTION | time::S_RESOLUTION => {
-                        Ok(Value::Epoch(Epoch::Second(0)))
+                        Ok(Value::Timestamp(Timestamp::Second(0)))
                     }
                     _ => Err(format!(
                         "invalid resolution: '{resolution}'. Available resolutions: {}",
                         time::VALID_RESOLUTIONS.join(",")
                     )),
                 },
-                _ => Err(format!(
-                    "resolution MUST BE set for epoch type: '{t}'. Available resolutions: {}",
-                    time::VALID_RESOLUTIONS.join(", ")
-                )),
+                _ => Ok(Value::Timestamp(Timestamp::Nanosecond(0))),
             },
 
             "array" => Ok(Value::Array(Array::default())),
@@ -212,8 +207,7 @@ impl Value {
             Value::Boolean(_) => "boolean",
             Value::String(_) => "string",
 
-            Value::Time(_) => "time",
-            Value::Epoch(_) => "epoch",
+            Value::Timestamp(_) => "epoch",
 
             Value::Array(_) => "array",
             Value::Map(_) => "map",
@@ -244,8 +238,7 @@ impl std::fmt::Display for Value {
             Value::Boolean(v) => format!("boolean({})", v),
             Value::String(v) => format!("string({})", v),
 
-            Value::Time(v) => format!("time({})", v),
-            Value::Epoch(v) => format!("epoch({})", v),
+            Value::Timestamp(v) => format!("epoch({})", v),
 
             Value::Array(v) => format!("{}", v),
             Value::Map(v) => format!("{}", v),
@@ -275,14 +268,14 @@ impl TryFrom<serde_json::Value> for Value {
             }
             serde_json::Value::String(v) => Ok(Value::String(v)),
             serde_json::Value::Array(v) => {
-                let mut values = vec![];
+                let mut values = Vec::with_capacity(v.len());
                 for v in v {
                     values.push(Value::try_from(v)?);
                 }
                 Ok(Value::Array(Array { values }))
             }
             serde_json::Value::Object(v) => {
-                let mut values = HashMap::new();
+                let mut values = HashMap::with_capacity(v.len());
                 for (k, v) in v {
                     values.insert(k, Value::try_from(v)?);
                 }

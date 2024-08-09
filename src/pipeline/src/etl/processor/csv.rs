@@ -14,8 +14,7 @@
 
 // Reference: https://www.elastic.co/guide/en/elasticsearch/reference/current/csv-processor.html
 
-use std::collections::HashMap;
-
+use ahash::{HashMap, HashSet};
 use csv::{ReaderBuilder, Trim};
 use itertools::EitherOrBoth::{Both, Left, Right};
 use itertools::Itertools;
@@ -121,7 +120,7 @@ impl CsvProcessor {
                 .as_ref()
                 .ok_or(format!(
                     "target fields must be set after '{}'",
-                    field.get_field()
+                    field.get_field_name()
                 ))?
                 .iter()
                 .map(|f| f.to_string())
@@ -146,6 +145,18 @@ impl CsvProcessor {
         } else {
             Err("expected at least one record from csv format, but got none".into())
         }
+    }
+
+    fn update_output_keys(&mut self) {
+        self.fields.iter_mut().for_each(|f| {
+            if let Some(tfs) = f.target_fields.as_ref() {
+                tfs.iter().for_each(|tf| {
+                    if !tf.is_empty() {
+                        f.output_fields_index_mapping.insert(tf.to_string(), 0);
+                    }
+                });
+            }
+        })
     }
 }
 
@@ -184,7 +195,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessor {
                 _ => {}
             }
         }
-
+        processor.update_output_keys();
         Ok(processor)
     }
 }
@@ -202,6 +213,17 @@ impl Processor for CsvProcessor {
         &self.fields
     }
 
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .flat_map(|f| f.target_fields.clone().unwrap_or_default())
+            .collect()
+    }
+
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         match val {
             Value::String(val) => self.process_field(val, field),
@@ -211,12 +233,44 @@ impl Processor for CsvProcessor {
             )),
         }
     }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            match val.get(field.input_field.index) {
+                Some(Value::String(v)) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
+                    let map = self.process_field(v, field)?;
+                    for (k, v) in map.values.into_iter() {
+                        if let Some(index) = field.output_fields_index_mapping.get(&k) {
+                            val[*index] = v;
+                        }
+                    }
+                }
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 // TODO(yuanbohan): more test cases
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use ahash::HashMap;
 
     use super::{CsvProcessor, Value};
     use crate::etl::field::Fields;
@@ -232,8 +286,9 @@ mod tests {
         let values: HashMap<String, Value> = [("data".into(), Value::String("1,2".into()))]
             .into_iter()
             .collect();
+        let mut m = Map { values };
 
-        let result = processor.exec(Value::Map(Map { values })).unwrap();
+        processor.exec_map(&mut m).unwrap();
 
         let values = [
             ("data".into(), Value::String("1,2".into())),
@@ -242,9 +297,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let expected = Value::Map(Map { values });
+        let expected = Map { values };
 
-        assert_eq!(expected, result);
+        assert_eq!(expected, m);
     }
 
     // test target_fields length larger than the record length
@@ -253,7 +308,7 @@ mod tests {
         let values = [("data".into(), Value::String("1,2".into()))]
             .into_iter()
             .collect();
-        let input = Value::Map(Map { values });
+        let mut input = Map { values };
 
         // with no empty value
         {
@@ -261,7 +316,7 @@ mod tests {
             let field = "data,, a,b,c".parse().unwrap();
             processor.with_fields(Fields::one(field));
 
-            let result = processor.exec(input.clone()).unwrap();
+            processor.exec_map(&mut input).unwrap();
 
             let values = [
                 ("data".into(), Value::String("1,2".into())),
@@ -271,9 +326,9 @@ mod tests {
             ]
             .into_iter()
             .collect();
-            let expected = Value::Map(Map { values });
+            let expected = Map { values };
 
-            assert_eq!(expected, result);
+            assert_eq!(expected, input);
         }
 
         // with empty value
@@ -283,7 +338,7 @@ mod tests {
             processor.with_fields(Fields::one(field));
             processor.with_empty_value("default".into());
 
-            let result = processor.exec(input).unwrap();
+            processor.exec_map(&mut input).unwrap();
 
             let values = [
                 ("data".into(), Value::String("1,2".into())),
@@ -293,9 +348,9 @@ mod tests {
             ]
             .into_iter()
             .collect();
-            let expected = Value::Map(Map { values });
+            let expected = Map { values };
 
-            assert_eq!(expected, result);
+            assert_eq!(expected, input);
         }
     }
 
@@ -305,13 +360,13 @@ mod tests {
         let values = [("data".into(), Value::String("1,2,3".into()))]
             .into_iter()
             .collect();
-        let input = Value::Map(Map { values });
+        let mut input = Map { values };
 
         let mut processor = CsvProcessor::new();
         let field = "data,,a,b".parse().unwrap();
         processor.with_fields(Fields::one(field));
 
-        let result = processor.exec(input).unwrap();
+        processor.exec_map(&mut input).unwrap();
 
         let values = [
             ("data".into(), Value::String("1,2,3".into())),
@@ -320,8 +375,8 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let expected = Value::Map(Map { values });
+        let expected = Map { values };
 
-        assert_eq!(expected, result);
+        assert_eq!(expected, input);
     }
 }

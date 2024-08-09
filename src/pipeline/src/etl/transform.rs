@@ -18,7 +18,7 @@ pub mod transformer;
 use itertools::Itertools;
 
 use crate::etl::field::Fields;
-use crate::etl::processor::{yaml_field, yaml_fields, yaml_string};
+use crate::etl::processor::{update_one_one_output_keys, yaml_field, yaml_fields, yaml_string};
 use crate::etl::transform::index::Index;
 use crate::etl::value::Value;
 
@@ -30,13 +30,17 @@ const TRANSFORM_DEFAULT: &str = "default";
 const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
 pub use transformer::greptime::GreptimeTransformer;
-// pub use transformer::noop::NoopTransformer;
 
 pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     type Output;
+    type VecOutput;
 
     fn new(transforms: Transforms) -> Result<Self, String>;
-    fn transform(&self, val: crate::etl::value::Value) -> Result<Self::Output, String>;
+    fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema>;
+    fn transforms(&self) -> &Transforms;
+    fn transforms_mut(&mut self) -> &mut Transforms;
+    fn transform(&self, val: Value) -> Result<Self::Output, String>;
+    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput, String>;
 }
 
 /// On Failure behavior when transform fails
@@ -74,6 +78,30 @@ impl std::fmt::Display for OnFailure {
 #[derive(Debug, Default, Clone)]
 pub struct Transforms {
     transforms: Vec<Transform>,
+    output_keys: Vec<String>,
+    required_keys: Vec<String>,
+}
+
+impl Transforms {
+    pub fn output_keys(&self) -> &Vec<String> {
+        &self.output_keys
+    }
+
+    pub fn output_keys_mut(&mut self) -> &mut Vec<String> {
+        &mut self.output_keys
+    }
+
+    pub fn required_keys_mut(&mut self) -> &mut Vec<String> {
+        &mut self.required_keys
+    }
+
+    pub fn required_keys(&self) -> &Vec<String> {
+        &self.required_keys
+    }
+
+    pub fn transforms(&self) -> &Vec<Transform> {
+        &self.transforms
+    }
 }
 
 impl std::fmt::Display for Transforms {
@@ -106,17 +134,38 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
     type Error = String;
 
     fn try_from(docs: &Vec<yaml_rust::Yaml>) -> Result<Self, Self::Error> {
-        let mut transforms = vec![];
-
+        let mut transforms = Vec::with_capacity(100);
+        let mut all_output_keys: Vec<String> = Vec::with_capacity(100);
+        let mut all_required_keys = Vec::with_capacity(100);
         for doc in docs {
             let transform: Transform = doc
                 .as_hash()
                 .ok_or("transform element must be a map".to_string())?
                 .try_into()?;
+            let mut transform_output_keys = transform
+                .fields
+                .iter()
+                .map(|f| f.get_target_field().to_string())
+                .collect();
+            all_output_keys.append(&mut transform_output_keys);
+
+            let mut transform_required_keys = transform
+                .fields
+                .iter()
+                .map(|f| f.input_field.name.clone())
+                .collect();
+            all_required_keys.append(&mut transform_required_keys);
+
             transforms.push(transform);
         }
 
-        Ok(Transforms { transforms })
+        all_required_keys.sort();
+
+        Ok(Transforms {
+            transforms,
+            output_keys: all_output_keys,
+            required_keys: all_required_keys,
+        })
     }
 }
 
@@ -173,7 +222,8 @@ impl Default for Transform {
 }
 
 impl Transform {
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        update_one_one_output_keys(&mut fields);
         self.fields = fields;
     }
 

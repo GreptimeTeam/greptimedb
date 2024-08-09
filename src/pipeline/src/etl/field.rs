@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
+use ahash::{HashSet, HashSetExt};
 use itertools::Itertools;
 
 #[derive(Debug, Default, Clone)]
@@ -36,15 +39,15 @@ impl Fields {
             return Err("fields must not be empty".to_string());
         }
 
-        let mut set = std::collections::HashSet::new();
+        let mut set = HashSet::new();
         for f in self.0.iter() {
-            if set.contains(&f.field) {
+            if set.contains(&f.input_field.name) {
                 return Err(format!(
                     "field name must be unique, but got duplicated: {}",
-                    f.field
+                    f.input_field.name
                 ));
             }
-            set.insert(&f.field);
+            set.insert(&f.input_field.name);
         }
 
         Ok(self)
@@ -66,9 +69,42 @@ impl std::ops::Deref for Fields {
     }
 }
 
+impl std::ops::DerefMut for Fields {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct InputFieldInfo {
+    pub(crate) name: String,
+    pub(crate) index: usize,
+}
+
+impl InputFieldInfo {
+    pub(crate) fn new(field: impl Into<String>, index: usize) -> Self {
+        InputFieldInfo {
+            name: field.into(),
+            index,
+        }
+    }
+
+    pub(crate) fn name(field: impl Into<String>) -> Self {
+        InputFieldInfo {
+            name: field.into(),
+            index: 0,
+        }
+    }
+}
+
+/// Used to represent the input and output fields of a processor or transform.
 #[derive(Debug, Default, Clone)]
 pub struct Field {
-    pub field: String,
+    /// The input field name and index.
+    pub input_field: InputFieldInfo,
+
+    /// The output field name and index mapping.
+    pub output_fields_index_mapping: BTreeMap<String, usize>,
 
     // rename
     pub target_field: Option<String>,
@@ -82,19 +118,39 @@ pub struct Field {
 impl Field {
     pub(crate) fn new(field: impl Into<String>) -> Self {
         Field {
-            field: field.into(),
+            input_field: InputFieldInfo::name(field.into()),
+            output_fields_index_mapping: BTreeMap::new(),
             target_field: None,
             target_fields: None,
         }
     }
 
-    // column_name in transform
+    /// target column_name in processor or transform
+    /// if target_field is None, return input field name
     pub(crate) fn get_target_field(&self) -> &str {
-        self.target_field.as_deref().unwrap_or(&self.field)
+        self.target_field
+            .as_deref()
+            .unwrap_or(&self.input_field.name)
     }
 
-    pub(crate) fn get_field(&self) -> &str {
-        &self.field
+    /// input column_name in processor or transform
+    pub(crate) fn get_field_name(&self) -> &str {
+        &self.input_field.name
+    }
+
+    /// set input column index in processor or transform
+    pub(crate) fn set_input_index(&mut self, index: usize) {
+        self.input_field.index = index;
+    }
+
+    pub(crate) fn set_output_index(&mut self, key: &str, index: usize) {
+        if let Some(v) = self.output_fields_index_mapping.get_mut(key) {
+            *v = index;
+        }
+    }
+
+    pub(crate) fn insert_output_index(&mut self, key: String, index: usize) {
+        self.output_fields_index_mapping.insert(key, index);
     }
 }
 
@@ -109,14 +165,18 @@ impl std::str::FromStr for Field {
             return Err("field is empty".to_string());
         }
 
-        let target_field = match parts.next() {
+        let renamed_field = match parts.next() {
             Some(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
             _ => None,
         };
 
+        // TODO(qtang): ???? what's this?
+        // weird design? field: <field>,<target_field>,<target_fields>,<target_fields>....
+        // and only use in csv processor
         let fields: Vec<_> = parts
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.trim().to_string())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
             .collect();
         let target_fields = if fields.is_empty() {
             None
@@ -125,8 +185,9 @@ impl std::str::FromStr for Field {
         };
 
         Ok(Field {
-            field,
-            target_field,
+            input_field: InputFieldInfo::name(field),
+            output_fields_index_mapping: BTreeMap::new(),
+            target_field: renamed_field,
             target_fields,
         })
     }
@@ -135,11 +196,16 @@ impl std::str::FromStr for Field {
 impl std::fmt::Display for Field {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match (&self.target_field, &self.target_fields) {
-            (Some(target_field), None) => write!(f, "{}, {target_field}", self.field),
+            (Some(target_field), None) => write!(f, "{}, {target_field}", self.input_field.name),
             (None, Some(target_fields)) => {
-                write!(f, "{}, {}", self.field, target_fields.iter().join(","))
+                write!(
+                    f,
+                    "{}, {}",
+                    self.input_field.name,
+                    target_fields.iter().join(",")
+                )
             }
-            _ => write!(f, "{}", self.field),
+            _ => write!(f, "{}", self.input_field.name),
         }
     }
 }
@@ -187,7 +253,7 @@ mod tests {
 
         for (s, field, target_field, target_fields) in cases.into_iter() {
             let f: Field = s.parse().unwrap();
-            assert_eq!(f.get_field(), field, "{s}");
+            assert_eq!(f.get_field_name(), field, "{s}");
             assert_eq!(f.target_field, target_field, "{s}");
             assert_eq!(f.target_fields, target_fields, "{s}");
         }

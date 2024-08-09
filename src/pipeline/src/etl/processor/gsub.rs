@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ahash::HashSet;
 use regex::Regex;
 
 use crate::etl::field::{Field, Fields};
 use crate::etl::processor::{
-    yaml_bool, yaml_field, yaml_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME, PATTERN_NAME,
+    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
+    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::{Array, Map, Value};
 
@@ -35,7 +36,8 @@ pub struct GsubProcessor {
 }
 
 impl GsubProcessor {
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        update_one_one_output_keys(&mut fields);
         self.fields = fields;
     }
 
@@ -74,19 +76,13 @@ impl GsubProcessor {
             .to_string();
         let val = Value::String(new_val);
 
-        let key = match field.target_field {
-            Some(ref target_field) => target_field,
-            None => field.get_field(),
-        };
+        let key = field.get_target_field();
 
         Ok(Map::one(key, val))
     }
 
     fn process_array_field(&self, arr: &Array, field: &Field) -> Result<Map, String> {
-        let key = match field.target_field {
-            Some(ref target_field) => target_field,
-            None => field.get_field(),
-        };
+        let key = field.get_target_field();
 
         let re = self.pattern.as_ref().unwrap();
         let replacement = self.replacement.as_ref().unwrap();
@@ -160,6 +156,17 @@ impl crate::etl::processor::Processor for GsubProcessor {
         &self.fields
     }
 
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .map(|f| f.get_target_field().to_string())
+            .collect()
+    }
+
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         match val {
             Value::String(val) => self.process_string_field(val, field),
@@ -169,6 +176,36 @@ impl crate::etl::processor::Processor for GsubProcessor {
                 self.kind()
             )),
         }
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+                Some(v) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
+                    let mut map = self.exec_field(v, field)?;
+                    field
+                        .output_fields_index_mapping
+                        .iter()
+                        .for_each(|(k, output_index)| {
+                            if let Some(v) = map.remove(k) {
+                                val[*output_index] = v;
+                            }
+                        });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
