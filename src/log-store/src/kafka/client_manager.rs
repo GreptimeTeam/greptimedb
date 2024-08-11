@@ -85,7 +85,7 @@ impl ClientManager {
             .context(ResolveKafkaEndpointSnafu)?;
         let mut builder = ClientBuilder::new(broker_endpoints).backoff_config(backoff_config);
         if let Some(sasl) = &config.sasl {
-            builder = builder.sasl_config(sasl.config.to_sasl_config());
+            builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
         };
         if let Some(tls) = &config.tls {
             builder = builder.tls_config(tls.to_tsl_config().context(TlsConfigSnafu)?)

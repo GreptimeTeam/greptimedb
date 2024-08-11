@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use rskafka::client::SaslConfig;
+use rskafka::client::{Credentials, SaslConfig};
 use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -58,9 +58,11 @@ pub struct KafkaClientSasl {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "SCREAMING-KEBAB-CASE")]
 pub enum KafkaClientSaslConfig {
     Plain { username: String, password: String },
+    ScramSha256 { username: String, password: String },
+    ScramSha512 { username: String, password: String },
 }
 
 #[cfg(test)]
@@ -72,12 +74,17 @@ impl KafkaClientSaslConfig {
 
 impl KafkaClientSaslConfig {
     /// Converts to [`SaslConfig`].
-    pub fn to_sasl_config(&self) -> SaslConfig {
-        match &self {
-            KafkaClientSaslConfig::Plain { username, password } => SaslConfig::Plain {
-                username: username.to_string(),
-                password: password.to_string(),
-            },
+    pub fn into_sasl_config(self) -> SaslConfig {
+        match self {
+            KafkaClientSaslConfig::Plain { username, password } => {
+                SaslConfig::Plain(Credentials::new(username, password))
+            }
+            KafkaClientSaslConfig::ScramSha256 { username, password } => {
+                SaslConfig::ScramSha256(Credentials::new(username, password))
+            }
+            KafkaClientSaslConfig::ScramSha512 { username, password } => {
+                SaslConfig::ScramSha512(Credentials::new(username, password))
+            }
         }
     }
 }
