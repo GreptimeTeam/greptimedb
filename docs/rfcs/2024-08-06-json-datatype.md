@@ -52,7 +52,7 @@ SELECT json_get_by_paths(b, 'attributes', 'event_attributes') + 1 FROM test;
 
 ## Storage and Querying
 
-Data of JSON type is stored as JSONB format in the database. For storage layer, data is represented as a binary and can be queried through pre-defined JSON functions. For clients, data is shown as strings and can be deserialized to other types if needed.
+Data of JSON type is stored as JSONB format in the database. For storage layer, data is represented as a binary array and can be queried through pre-defined JSON functions. For clients, data is shown as strings and can be deserialized to other types if needed.
 
 Insertions of JSON data goes through following steps:
 
