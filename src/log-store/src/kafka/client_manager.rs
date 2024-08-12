@@ -88,7 +88,7 @@ impl ClientManager {
             builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
         };
         if let Some(tls) = &config.tls {
-            builder = builder.tls_config(tls.to_tsl_config().context(TlsConfigSnafu)?)
+            builder = builder.tls_config(tls.to_tls_config().await.context(TlsConfigSnafu)?)
         };
 
         let client = builder.build().await.with_context(|_| BuildClientSnafu {

@@ -123,6 +123,20 @@ backoff_base = 2
 ## Stop reconnecting if the total wait time reaches the deadline. If this config is missing, the reconnecting won't terminate.
 backoff_deadline = "5mins"
 
+# The Kafka SASL configuration
+# **It's only used when the provider is `kafka`**.
+# [wal.sasl]
+# type = "SCRAM-SHA-512"
+# username = "hi"
+# password = "test"
+
+# The Kafka TLS configuration
+# **It's only used when the provider is `kafka`**.
+# [wal.tls]
+# server_ca_cert_path = "/path/to/server_cert"
+# client_cert_path = "/path/to/client_cert"
+# client_key_path = "/path/to/key"
+
 ## The logging options.
 [logging]
 ## The directory to store the log files.

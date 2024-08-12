@@ -102,14 +102,16 @@ pub struct KafkaClientTls {
 
 impl KafkaClientTls {
     /// Builds the [`ClientConfig`].
-    pub fn to_tsl_config(&self) -> Result<Arc<ClientConfig>> {
+    pub async fn to_tls_config(&self) -> Result<Arc<ClientConfig>> {
         let builder = ClientConfig::builder();
         let mut roots = RootCertStore::empty();
 
         let root_cert_bytes =
-            std::fs::read(&self.server_ca_cert_path).context(error::ReadFileSnafu {
-                path: &self.server_ca_cert_path,
-            })?;
+            tokio::fs::read(&self.server_ca_cert_path)
+                .await
+                .context(error::ReadFileSnafu {
+                    path: &self.server_ca_cert_path,
+                })?;
         let mut cursor = Cursor::new(root_cert_bytes);
         for cert in rustls_pemfile::certs(&mut cursor)
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -124,13 +126,16 @@ impl KafkaClientTls {
         let config = if let (Some(cert_path), Some(key_path)) =
             (&self.client_cert_path, &self.client_key_path)
         {
-            let cert_bytes =
-                std::fs::read(cert_path).context(error::ReadFileSnafu { path: cert_path })?;
+            let cert_bytes = tokio::fs::read(cert_path)
+                .await
+                .context(error::ReadFileSnafu { path: cert_path })?;
             let client_certs = rustls_pemfile::certs(&mut Cursor::new(cert_bytes))
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .context(error::ReadCertsSnafu { path: cert_path })?;
 
-            let key_bytes = std::fs::read(key_path).unwrap();
+            let key_bytes = tokio::fs::read(key_path)
+                .await
+                .context(error::ReadFileSnafu { path: key_path })?;
             let client_key = rustls_pemfile::private_key(&mut Cursor::new(key_bytes))
                 .context(error::ReadKeySnafu { path: key_path })?
                 .context(error::KeyNotFoundSnafu { path: key_path })?;
