@@ -281,22 +281,21 @@ where
     pub fn prepare(&self, val: serde_json::Value, result: &mut [Value]) -> Result<(), String> {
         match val {
             serde_json::Value::Object(map) => {
-                let mut index = 0;
-
-                // because of the key in the required_keys is ordered
+                let mut search_from = 0;
+                // because of the key in the json map is ordered
                 for (payload_key, payload_value) in map.into_iter() {
-                    // find the key in the required_keys
-                    let mut current_index = index;
-                    while current_index < self.required_keys.len() {
-                        if self.required_keys[current_index] == payload_key {
-                            result[current_index] = payload_value.try_into()?;
-                            index += 1;
-                            break;
-                            // can not find the key in the required_keys
-                        } else {
-                            // find the key in the required_keys
-                            current_index += 1;
-                        }
+                    if search_from >= self.required_keys.len() - 1 {
+                        break;
+                    }
+
+                    // because of map key is ordered, required_keys is ordered too
+                    if let Some(pos) = self.required_keys[search_from..]
+                        .iter()
+                        .position(|k| k == &payload_key)
+                    {
+                        result[search_from + pos] = payload_value.try_into()?;
+                        // next search from is always after the current key
+                        search_from = search_from + pos;
                     }
                 }
             }
