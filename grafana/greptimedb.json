@@ -145,9 +145,7 @@
           "countRows": false,
           "enablePagination": false,
           "fields": [],
-          "reducer": [
-            "sum"
-          ],
+          "reducer": ["sum"],
           "show": false
         },
         "showHeader": true,
@@ -225,9 +223,7 @@
         "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": "",
           "values": false
         },
@@ -302,9 +298,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": "",
           "values": false
         },
@@ -449,9 +443,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": "",
           "values": false
         },
@@ -516,9 +508,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": "",
           "values": false
         },
@@ -3343,8 +3333,8 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "GreptimeDB-OSS",
-  "uid": "78ca4f8d-81cb-428d-bda2-6e11cc1dcec7",
-  "version": 8,
+  "title": "GreptimeDB",
+  "uid": "e7097237-669b-4f8d-b751-13067afbfb68",
+  "version": 15,
   "weekStart": ""
 }
