@@ -80,19 +80,19 @@ impl ClientManager {
             base: config.backoff.base as f64,
             deadline: config.backoff.deadline,
         };
-        let broker_endpoints = common_wal::resolve_to_ipv4(&config.broker_endpoints)
+        let broker_endpoints = common_wal::resolve_to_ipv4(&config.connection.broker_endpoints)
             .await
             .context(ResolveKafkaEndpointSnafu)?;
         let mut builder = ClientBuilder::new(broker_endpoints).backoff_config(backoff_config);
-        if let Some(sasl) = &config.sasl {
+        if let Some(sasl) = &config.connection.sasl {
             builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
         };
-        if let Some(tls) = &config.tls {
+        if let Some(tls) = &config.connection.tls {
             builder = builder.tls_config(tls.to_tls_config().await.context(TlsConfigSnafu)?)
         };
 
         let client = builder.build().await.with_context(|_| BuildClientSnafu {
-            broker_endpoints: config.broker_endpoints.clone(),
+            broker_endpoints: config.connection.broker_endpoints.clone(),
         })?;
 
         Ok(Self {
@@ -165,6 +165,7 @@ impl ClientManager {
 
 #[cfg(test)]
 mod tests {
+    use common_wal::config::kafka::common::KafkaConnectionConfig;
     use common_wal::test_util::run_test_with_kafka_wal;
     use tokio::sync::Barrier;
 
@@ -210,7 +211,10 @@ mod tests {
         .await;
 
         let config = DatanodeKafkaConfig {
-            broker_endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let manager = ClientManager::try_new(&config).await.unwrap();

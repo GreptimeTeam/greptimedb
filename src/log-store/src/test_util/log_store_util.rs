@@ -15,6 +15,7 @@
 use std::path::Path;
 
 use common_base::readable_size::ReadableSize;
+use common_wal::config::kafka::common::KafkaConnectionConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 
@@ -34,7 +35,10 @@ pub async fn create_tmp_local_file_log_store<P: AsRef<Path>>(path: P) -> RaftEng
 /// Create a [KafkaLogStore].
 pub async fn create_kafka_log_store(broker_endpoints: Vec<String>) -> KafkaLogStore {
     KafkaLogStore::try_new(&DatanodeKafkaConfig {
-        broker_endpoints,
+        connection: KafkaConnectionConfig {
+            broker_endpoints,
+            ..Default::default()
+        },
         ..Default::default()
     })
     .await

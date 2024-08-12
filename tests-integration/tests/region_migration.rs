@@ -23,7 +23,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir::create_temp_dir;
-use common_wal::config::kafka::common::KafkaTopicConfig;
+use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datatypes::prelude::ScalarVector;
@@ -114,11 +114,17 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
-            broker_endpoints: endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
                 topic_name_prefix: Uuid::new_v4().to_string(),
@@ -246,11 +252,17 @@ pub async fn test_metric_table_region_migration_by_sql(
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
-            broker_endpoints: endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
                 topic_name_prefix: Uuid::new_v4().to_string(),
@@ -371,11 +383,17 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
-            broker_endpoints: endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
                 topic_name_prefix: Uuid::new_v4().to_string(),
@@ -495,11 +513,17 @@ pub async fn test_region_migration_multiple_regions(
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
-            broker_endpoints: endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
                 topic_name_prefix: Uuid::new_v4().to_string(),
@@ -634,11 +658,17 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
-            broker_endpoints: endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
                 topic_name_prefix: Uuid::new_v4().to_string(),
@@ -768,11 +798,17 @@ pub async fn test_region_migration_incorrect_from_peer(
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
-            broker_endpoints: endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
                 topic_name_prefix: Uuid::new_v4().to_string(),
@@ -845,11 +881,17 @@ pub async fn test_region_migration_incorrect_region_id(
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
-            broker_endpoints: endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 3,
                 topic_name_prefix: Uuid::new_v4().to_string(),

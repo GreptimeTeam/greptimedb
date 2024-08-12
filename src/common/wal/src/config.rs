@@ -23,6 +23,7 @@ use crate::config::raft_engine::RaftEngineConfig;
 /// Wal configurations for metasrv.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 #[serde(tag = "provider", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum MetasrvWalConfig {
     #[default]
     RaftEngine,
@@ -48,7 +49,7 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
         match config {
             DatanodeWalConfig::RaftEngine(_) => Self::RaftEngine,
             DatanodeWalConfig::Kafka(config) => Self::Kafka(MetasrvKafkaConfig {
-                broker_endpoints: config.broker_endpoints,
+                connection: config.connection,
                 backoff: config.backoff,
                 kafka_topic: config.kafka_topic,
             }),
@@ -61,7 +62,7 @@ impl From<MetasrvWalConfig> for DatanodeWalConfig {
         match config {
             MetasrvWalConfig::RaftEngine => Self::RaftEngine(RaftEngineConfig::default()),
             MetasrvWalConfig::Kafka(config) => Self::Kafka(DatanodeKafkaConfig {
-                broker_endpoints: config.broker_endpoints,
+                connection: config.connection,
                 backoff: config.backoff,
                 kafka_topic: config.kafka_topic,
                 ..Default::default()
@@ -75,7 +76,9 @@ mod tests {
     use std::time::Duration;
 
     use common_base::readable_size::ReadableSize;
-    use kafka::datanode::{KafkaClientSasl, KafkaClientSaslConfig, KafkaClientTls};
+    use kafka::common::{
+        KafkaClientSasl, KafkaClientSaslConfig, KafkaClientTls, KafkaConnectionConfig,
+    };
     use tests::kafka::common::KafkaTopicConfig;
 
     use super::*;
@@ -156,7 +159,20 @@ mod tests {
         // Deserialized to MetasrvWalConfig.
         let metasrv_wal_config: MetasrvWalConfig = toml::from_str(toml_str).unwrap();
         let expected = MetasrvKafkaConfig {
-            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
+            connection: KafkaConnectionConfig {
+                broker_endpoints: vec!["127.0.0.1:9092".to_string()],
+                sasl: Some(KafkaClientSasl {
+                    config: KafkaClientSaslConfig::ScramSha512 {
+                        username: "hi".to_string(),
+                        password: "test".to_string(),
+                    },
+                }),
+                tls: Some(KafkaClientTls {
+                    server_ca_cert_path: "/path/to/server.pem".to_string(),
+                    client_cert_path: None,
+                    client_key_path: None,
+                }),
+            },
             backoff: BackoffConfig {
                 init: Duration::from_millis(500),
                 max: Duration::from_secs(10),
@@ -177,7 +193,20 @@ mod tests {
         // Deserialized to DatanodeWalConfig.
         let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
         let expected = DatanodeKafkaConfig {
-            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
+            connection: KafkaConnectionConfig {
+                broker_endpoints: vec!["127.0.0.1:9092".to_string()],
+                sasl: Some(KafkaClientSasl {
+                    config: KafkaClientSaslConfig::ScramSha512 {
+                        username: "hi".to_string(),
+                        password: "test".to_string(),
+                    },
+                }),
+                tls: Some(KafkaClientTls {
+                    server_ca_cert_path: "/path/to/server.pem".to_string(),
+                    client_cert_path: None,
+                    client_key_path: None,
+                }),
+            },
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig {
@@ -194,17 +223,6 @@ mod tests {
                 replication_factor: 1,
                 create_topic_timeout: Duration::from_secs(30),
             },
-            sasl: Some(KafkaClientSasl {
-                config: KafkaClientSaslConfig::ScramSha512 {
-                    username: "hi".to_string(),
-                    password: "test".to_string(),
-                },
-            }),
-            tls: Some(KafkaClientTls {
-                server_ca_cert_path: "/path/to/server.pem".to_string(),
-                client_cert_path: None,
-                client_key_path: None,
-            }),
         };
         assert_eq!(datanode_wal_config, DatanodeWalConfig::Kafka(expected));
     }

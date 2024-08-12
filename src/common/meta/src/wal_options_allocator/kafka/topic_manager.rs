@@ -30,7 +30,7 @@ use snafu::{ensure, ResultExt};
 use crate::error::{
     BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, BuildKafkaPartitionClientSnafu,
     CreateKafkaWalTopicSnafu, DecodeJsonSnafu, EncodeJsonSnafu, InvalidNumTopicsSnafu,
-    ProduceRecordSnafu, ResolveKafkaEndpointSnafu, Result,
+    ProduceRecordSnafu, ResolveKafkaEndpointSnafu, Result, TlsConfigSnafu,
 };
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::PutRequest;
@@ -117,15 +117,22 @@ impl TopicManager {
             base: self.config.backoff.base as f64,
             deadline: self.config.backoff.deadline,
         };
-        let broker_endpoints = common_wal::resolve_to_ipv4(&self.config.broker_endpoints)
-            .await
-            .context(ResolveKafkaEndpointSnafu)?;
-        let client = ClientBuilder::new(broker_endpoints)
-            .backoff_config(backoff_config)
+        let broker_endpoints =
+            common_wal::resolve_to_ipv4(&self.config.connection.broker_endpoints)
+                .await
+                .context(ResolveKafkaEndpointSnafu)?;
+        let mut builder = ClientBuilder::new(broker_endpoints).backoff_config(backoff_config);
+        if let Some(sasl) = &self.config.connection.sasl {
+            builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
+        };
+        if let Some(tls) = &self.config.connection.tls {
+            builder = builder.tls_config(tls.to_tls_config().await.context(TlsConfigSnafu)?)
+        };
+        let client = builder
             .build()
             .await
             .with_context(|_| BuildKafkaClientSnafu {
-                broker_endpoints: self.config.broker_endpoints.clone(),
+                broker_endpoints: self.config.connection.broker_endpoints.clone(),
             })?;
 
         let control_client = client
@@ -242,7 +249,7 @@ impl TopicManager {
 
 #[cfg(test)]
 mod tests {
-    use common_wal::config::kafka::common::KafkaTopicConfig;
+    use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
     use common_wal::test_util::run_test_with_kafka_wal;
 
     use super::*;
@@ -289,7 +296,10 @@ mod tests {
                     ..Default::default()
                 };
                 let config = MetasrvKafkaConfig {
-                    broker_endpoints,
+                    connection: KafkaConnectionConfig {
+                        broker_endpoints,
+                        ..Default::default()
+                    },
                     kafka_topic,
                     ..Default::default()
                 };
