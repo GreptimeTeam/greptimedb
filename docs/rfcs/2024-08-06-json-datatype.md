@@ -63,9 +63,9 @@ Insertions of JSON data goes through following steps:
 Queries of JSON data goes through following steps:
 
 1. Client sends query to the frontend.
-2. Frontend sends distributed query plans to the datanode.
-3. Datanode executes distributed query plans and returns results of JSON format to the frontend.
-4. Frontend executes non-distributed query plans and then deserializes results of JSONB format to strings, and returns to the client.
+2. Frontend sends distributed query nodes to the datanode.
+3. Datanode executes distributed query nodes and returns results of JSON format to the frontend.
+4. Frontend executes non-distributed query nodes and then deserializes results of JSONB format to strings, and returns to the client.
 
 ```
 Insertion:
