@@ -171,24 +171,6 @@ sync_period = "10s"
 ## **It's only used when the provider is `kafka`**.
 broker_endpoints = ["127.0.0.1:9092"]
 
-# The Kafka SASL configuration.
-# **It's only used when the provider is `kafka`**.
-# Available SASL mechanisms:
-# - `PLAIN`
-# - `SCRAM-SHA-256`
-# - `SCRAM-SHA-512`
-# [wal.sasl]
-# type = "SCRAM-SHA-512"
-# username = "user_kafka"
-# password = "secret"
-
-# The Kafka TLS configuration.
-# **It's only used when the provider is `kafka`**.
-# [wal.tls]
-# server_ca_cert_path = "/path/to/server_cert"
-# client_cert_path = "/path/to/client_cert"
-# client_key_path = "/path/to/key"
-
 ## Number of topics to be created upon start.
 ## **It's only used when the provider is `kafka`**.
 num_topics = 64
@@ -235,6 +217,24 @@ backoff_base = 2
 ## The deadline of retries.
 ## **It's only used when the provider is `kafka`**.
 backoff_deadline = "5mins"
+
+# The Kafka SASL configuration.
+# **It's only used when the provider is `kafka`**.
+# Available SASL mechanisms:
+# - `PLAIN`
+# - `SCRAM-SHA-256`
+# - `SCRAM-SHA-512`
+# [wal.sasl]
+# type = "SCRAM-SHA-512"
+# username = "user_kafka"
+# password = "secret"
+
+# The Kafka TLS configuration.
+# **It's only used when the provider is `kafka`**.
+# [wal.tls]
+# server_ca_cert_path = "/path/to/server_cert"
+# client_cert_path = "/path/to/client_cert"
+# client_key_path = "/path/to/key"
 
 ## Metadata storage options.
 [metadata_store]
