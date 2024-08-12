@@ -25,6 +25,7 @@ use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
+use datatypes::vectors::Vector;
 use datatypes::{arrow_array, value};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -425,6 +426,29 @@ impl ScalarExpr {
             func,
             expr1: Box::new(self),
             expr2: Box::new(other),
+        }
+    }
+
+    pub fn eval_batch(
+        &self,
+        batch: &[Arc<dyn Vector>],
+        exprs: &[ScalarExpr],
+    ) -> Result<Arc<dyn Vector>, EvalError> {
+        match self {
+            ScalarExpr::Column(i) => Ok(batch[*i].clone()),
+            ScalarExpr::Literal(_, _) => todo!(),
+            ScalarExpr::CallUnmaterializable(_) => OptimizeSnafu {
+                reason: "Can't eval unmaterializable function".to_string(),
+            }
+            .fail()?,
+            ScalarExpr::CallUnary { func, expr } => todo!(),
+            ScalarExpr::CallBinary { func, expr1, expr2 } => todo!(),
+            ScalarExpr::CallVariadic { func, exprs } => todo!(),
+            ScalarExpr::CallDf {
+                df_scalar_fn,
+                exprs,
+            } => todo!(),
+            ScalarExpr::If { cond, then, els } => todo!(),
         }
     }
 
