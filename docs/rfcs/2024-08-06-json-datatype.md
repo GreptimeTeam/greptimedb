@@ -72,7 +72,7 @@ The data of JSON type is represented by `Binary` data type in arrow. There are 2
 
 For the former, the query engine performs queries directly over binary data. We provide functions like `json_get` and `json_get_by_paths` to extract json elements through keys.
 
-For the latter, users need to manually specify the data type of the json elements for computing. Before computing, the query engine will decode the binary data in JSONB format into the specified data type. We provide functions like `json_get_int` and `json_get_by_paths_double` to extract json elements and convert them for further computation.
+For the latter, users need to manually specify the data type of the json elements for computing. We provide functions like `as_int` and `as_double` to decode the binary data into data with specified data type for further computation.
 
 Queries of JSON goes through following steps:
 
@@ -82,13 +82,13 @@ Queries of JSON goes through following steps:
 4. If computation is needed, the binary data is decoded and converted to the specified data type to perform computation. There's no need for further decoding in the frontend.
 
 ```
-Queries without computation:
+Queries without computation, decoding in frontend:
                           Decode                     Query
          JSON Strings ┌────────────┐ JSONB Data ┌──────────────┐
  client <-------------│  Frontend  │<-----------│  Datafusion  │<-- Storage
                       └────────────┘            └──────────────┘
 
-Queries with computation:
+Queries with computation, decoding in datafusion:
                                                                          Query
          Data of Specified Type ┌────────────┐ Data of Certain Type ┌──────────────┐
  client <-----------------------│  Frontend  │<---------------------│  Datafusion  │<-- Storage
