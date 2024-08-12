@@ -20,6 +20,7 @@ humantime-serde.workspace = true
 rskafka.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2.1"
+rustls-native-certs = "0.7.1"
 serde.workspace = true
 serde_with.workspace = true
 snafu.workspace = true

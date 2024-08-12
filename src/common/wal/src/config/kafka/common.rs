@@ -17,9 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rskafka::client::{Credentials, SaslConfig};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName};
-use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore};
+use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
 use snafu::{OptionExt, ResultExt};
@@ -108,66 +106,13 @@ pub struct KafkaClientTls {
     pub client_key_path: Option<String>,
 }
 
-#[derive(Debug)]
-struct NoCertificateVerification;
-
-impl ServerCertVerifier for NoCertificateVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer,
-        _intermediates: &[CertificateDer],
-        _server_name: &ServerName,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer,
-        _dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer,
-        _dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        use rustls::SignatureScheme;
-        vec![
-            SignatureScheme::RSA_PKCS1_SHA1,
-            SignatureScheme::ECDSA_SHA1_Legacy,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::ED25519,
-            SignatureScheme::ED448,
-        ]
-    }
-}
-
 impl KafkaClientTls {
     /// Builds the [`ClientConfig`].
     pub async fn to_tls_config(&self) -> Result<Arc<ClientConfig>> {
         let builder = ClientConfig::builder();
         let mut roots = RootCertStore::empty();
 
-        let builder = if let Some(server_ca_cert_path) = &self.server_ca_cert_path {
+        if let Some(server_ca_cert_path) = &self.server_ca_cert_path {
             let root_cert_bytes =
                 tokio::fs::read(&server_ca_cert_path)
                     .await
@@ -183,13 +128,12 @@ impl KafkaClientTls {
             {
                 roots.add(cert).context(error::AddCertSnafu)?;
             }
-            builder.with_root_certificates(roots)
-        } else {
-            builder
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
         };
+        roots.add_parsable_certificates(
+            rustls_native_certs::load_native_certs().context(error::LoadSystemCertsSnafu)?,
+        );
 
+        let builder = builder.with_root_certificates(roots);
         let config = if let (Some(cert_path), Some(key_path)) =
             (&self.client_cert_path, &self.client_key_path)
         {
