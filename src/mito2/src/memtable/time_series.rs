@@ -203,7 +203,6 @@ impl TimeSeriesMemtable {
         stats.min_ts = stats.min_ts.min(ts);
         stats.max_ts = stats.max_ts.max(ts);
 
-        self.num_rows.fetch_add(1, Ordering::Relaxed);
         let mut guard = series.write().unwrap();
         guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), fields);
 
@@ -246,6 +245,7 @@ impl Memtable for TimeSeriesMemtable {
         local_stats.allocated += std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>();
 
         self.update_stats(local_stats);
+        self.num_rows.fetch_add(1, Ordering::Relaxed);
         res
     }
 
