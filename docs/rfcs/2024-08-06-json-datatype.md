@@ -41,7 +41,7 @@ SELECT json_get(b, 'name') FROM test;
 | jHl2oDDnPc1i2OzlP5Y |
 +---------------------+
 
-SELECT json_get_by_paths(b, 'attributes', 'event_attributes') + 1 FROM test;
+SELECT json_get_by_paths_int(b, 'attributes', 'event_attributes') + 1 FROM test;
 +-------------------------------+
 | b.attributes.event_attributes |
 +-------------------------------+
@@ -50,35 +50,49 @@ SELECT json_get_by_paths(b, 'attributes', 'event_attributes') + 1 FROM test;
 
 ```
 
-## Storage and Querying
+## Storage and Query
 
-Data of JSON type is stored as JSONB format in the database. For storage layer, data is represented as a binary array and can be queried through pre-defined JSON functions. For clients, data is shown as strings and can be deserialized to other types if needed.
+Data of JSON type is stored as JSONB format in the database. For storage layer, data is represented as a binary array and can be queried through pre-defined JSON functions. For clients, data is shown as strings.
 
-Insertions of JSON data goes through following steps:
+Insertions of JSON goes through following steps:
 
 1. Client gets JSON strings and sends it to the frontend.
-2. Frontend serializes JSON strings as JSONB format and sends it to the datanode.
+2. Frontend encode JSON strings to JSONB format and sends it to the datanode.
 3. Datanode stores binary data in the database.
-
-Queries of JSON data goes through following steps:
-
-1. Client sends query to the frontend.
-2. Frontend sends distributed query nodes to the datanode.
-3. Datanode executes distributed query nodes and returns results of JSON format to the frontend.
-4. Frontend executes non-distributed query nodes and then deserializes results of JSONB format to strings, and returns to the client.
 
 ```
 Insertion:
-                        Serialize                   Store
+                          Encode                    Store
          JSON Strings ┌────────────┐ JSONB Data ┌────────────┐
  client ------------->│  Frontend  │----------->│  Datanode  │--> Storage
                       └────────────┘            └────────────┘
+```
 
-Queries:
-                    Query + Deserialize             Query
-         JSON Strings ┌────────────┐ JSONB Data ┌────────────┐
- client <-------------│  Frontend  │<-----------│  Datanode  │<-- Storage
-                      └────────────┘            └────────────┘
+The data of JSON type is represented by `Binary` data type in arrow. There are 2 types of JSON queries: get json elements through keys and compute over json elements.
+
+For the former, the query engine performs queries directly over binary data. We provide functions like `json_get` and `json_get_by_paths` to extract json elements.
+
+For the latter, users need to manually specify the data type of the json elements. Before computing, and the query engine will decode the binary data in JSONB format into the specified data type. We provide functions like `json_get_int` and `json_get_by_paths_double` to extract json elements and convert them for further computation.
+
+Queries of JSON data goes through following steps:
+
+1. Client sends query to frontend, and frontend sends it to datafusion, which is the query engine of GreptimeDB.
+2. Datafusion performs query over JSON data, and returns binary data to frontend.
+3. If no computation is needed, frontend directly decodes it to JSON strings and return it to clients.
+4. If computation is needed, the binary data is decoded and converted to the specified data type to perform computation. Since the data type is specified, there's no need for further decoding in the frontend.
+
+```
+Queries without computation:
+                          Decode                     Query
+         JSON Strings ┌────────────┐ JSONB Data ┌──────────────┐
+ client <-------------│  Frontend  │<-----------│  Datafusion  │<-- Storage
+                      └────────────┘            └──────────────┘
+
+Queries with computation:
+                                                                          Query
+         Data of Specified Type ┌────────────┐ Data of Certain Type ┌──────────────┐
+ client <-----------------------│  Frontend  │<---------------------│  Datafusion  │<-- Storage
+                                └────────────┘                      └──────────────┘
 ```
 
 # Drawbacks
