@@ -85,7 +85,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to ca certs from system"))]
+    #[snafu(display("Failed to load ca certs from system"))]
     LoadSystemCerts {
         #[snafu(source)]
         error: std::io::Error,
