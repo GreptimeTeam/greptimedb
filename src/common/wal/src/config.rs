@@ -146,7 +146,7 @@ mod tests {
             create_topic_timeout = "30s"
             topic_name_prefix = "greptimedb_wal_topic"
             [sasl]
-            type = "plain"
+            type = "SCRAM-SHA-512"
             username = "hi"
             password = "test"
             [tls]
@@ -195,7 +195,10 @@ mod tests {
                 create_topic_timeout: Duration::from_secs(30),
             },
             sasl: Some(KafkaClientSasl {
-                config: KafkaClientSaslConfig::new_plain("hi".to_string(), "test".to_string()),
+                config: KafkaClientSaslConfig::ScramSha512 {
+                    username: "hi".to_string(),
+                    password: "test".to_string(),
+                },
             }),
             tls: Some(KafkaClientTls {
                 server_ca_cert_path: "/path/to/server.pem".to_string(),

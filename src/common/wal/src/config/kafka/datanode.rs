@@ -60,16 +60,20 @@ pub struct KafkaClientSasl {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "SCREAMING-KEBAB-CASE")]
 pub enum KafkaClientSaslConfig {
-    Plain { username: String, password: String },
-    ScramSha256 { username: String, password: String },
-    ScramSha512 { username: String, password: String },
-}
-
-#[cfg(test)]
-impl KafkaClientSaslConfig {
-    pub fn new_plain(username: String, password: String) -> Self {
-        Self::Plain { username, password }
-    }
+    Plain {
+        username: String,
+        password: String,
+    },
+    #[serde(rename = "SCRAM-SHA-256")]
+    ScramSha256 {
+        username: String,
+        password: String,
+    },
+    #[serde(rename = "SCRAM-SHA-512")]
+    ScramSha512 {
+        username: String,
+        password: String,
+    },
 }
 
 impl KafkaClientSaslConfig {
