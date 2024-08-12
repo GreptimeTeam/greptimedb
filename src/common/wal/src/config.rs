@@ -148,12 +148,12 @@ mod tests {
             replication_factor = 1
             create_topic_timeout = "30s"
             topic_name_prefix = "greptimedb_wal_topic"
+            [tls]
+            server_ca_cert_path = "/path/to/server.pem"
             [sasl]
             type = "SCRAM-SHA-512"
             username = "hi"
             password = "test"
-            [tls]
-            server_ca_cert_path = "/path/to/server.pem"
         "#;
 
         // Deserialized to MetasrvWalConfig.
@@ -168,7 +168,7 @@ mod tests {
                     },
                 }),
                 tls: Some(KafkaClientTls {
-                    server_ca_cert_path: "/path/to/server.pem".to_string(),
+                    server_ca_cert_path: Some("/path/to/server.pem".to_string()),
                     client_cert_path: None,
                     client_key_path: None,
                 }),
@@ -202,7 +202,7 @@ mod tests {
                     },
                 }),
                 tls: Some(KafkaClientTls {
-                    server_ca_cert_path: "/path/to/server.pem".to_string(),
+                    server_ca_cert_path: Some("/path/to/server.pem".to_string()),
                     client_cert_path: None,
                     client_key_path: None,
                 }),

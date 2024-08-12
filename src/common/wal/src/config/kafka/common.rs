@@ -16,8 +16,11 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_telemetry::tracing;
 use rskafka::client::{Credentials, SaslConfig};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore};
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
 use snafu::{OptionExt, ResultExt};
@@ -101,9 +104,62 @@ impl KafkaClientSaslConfig {
 /// The TLS configurations for kafka client.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KafkaClientTls {
-    pub server_ca_cert_path: String,
+    pub server_ca_cert_path: Option<String>,
     pub client_cert_path: Option<String>,
     pub client_key_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct NoCertificateVerification;
+
+impl ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer,
+        _intermediates: &[CertificateDer],
+        _server_name: &ServerName,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        use rustls::SignatureScheme;
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
 }
 
 impl KafkaClientTls {
@@ -112,22 +168,28 @@ impl KafkaClientTls {
         let builder = ClientConfig::builder();
         let mut roots = RootCertStore::empty();
 
-        let root_cert_bytes =
-            tokio::fs::read(&self.server_ca_cert_path)
-                .await
-                .context(error::ReadFileSnafu {
-                    path: &self.server_ca_cert_path,
-                })?;
-        let mut cursor = Cursor::new(root_cert_bytes);
-        for cert in rustls_pemfile::certs(&mut cursor)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context(error::ReadCertsSnafu {
-                path: &self.server_ca_cert_path,
-            })?
-        {
-            roots.add(cert).context(error::AddCertSnafu)?;
-        }
-        let builder = builder.with_root_certificates(roots);
+        let builder = if let Some(server_ca_cert_path) = &self.server_ca_cert_path {
+            let root_cert_bytes =
+                tokio::fs::read(&server_ca_cert_path)
+                    .await
+                    .context(error::ReadFileSnafu {
+                        path: server_ca_cert_path,
+                    })?;
+            let mut cursor = Cursor::new(root_cert_bytes);
+            for cert in rustls_pemfile::certs(&mut cursor)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context(error::ReadCertsSnafu {
+                    path: server_ca_cert_path,
+                })?
+            {
+                roots.add(cert).context(error::AddCertSnafu)?;
+            }
+            builder.with_root_certificates(roots)
+        } else {
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+        };
 
         let config = if let (Some(cert_path), Some(key_path)) =
             (&self.client_cert_path, &self.client_key_path)
@@ -138,7 +200,6 @@ impl KafkaClientTls {
             let client_certs = rustls_pemfile::certs(&mut Cursor::new(cert_bytes))
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .context(error::ReadCertsSnafu { path: cert_path })?;
-
             let key_bytes = tokio::fs::read(key_path)
                 .await
                 .context(error::ReadFileSnafu { path: key_path })?;
