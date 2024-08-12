@@ -15,17 +15,21 @@
 //! This module contains the definition of functions that can be used in expressions.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use common_time::timestamp::TimeUnit;
-use common_time::{DateTime, Timestamp};
+use common_time::{datetime, DateTime, Timestamp};
 use datafusion_expr::Operator;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::DataType;
 use datatypes::types::cast;
 use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
+use datatypes::vectors::{
+    BooleanVector, DateTimeVector, Helper, TimestampMillisecondVector, Vector, VectorRef,
+};
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -34,8 +38,8 @@ use substrait::df_logical_plan::consumer::name_to_op;
 
 use crate::error::{Error, ExternalSnafu, InvalidQuerySnafu, PlanSnafu};
 use crate::expr::error::{
-    CastValueSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu, OverflowSnafu,
-    TryFromValueSnafu, TypeMismatchSnafu,
+    ArrowSnafu, CastValueSnafu, DataTypeSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu,
+    OverflowSnafu, TryFromValueSnafu, TypeMismatchSnafu,
 };
 use crate::expr::signature::{GenericFn, Signature};
 use crate::expr::{InvalidArgumentSnafu, ScalarExpr, TypedExpr};
@@ -221,6 +225,133 @@ impl UnaryFunc {
         }
     }
 
+    pub fn eval_batch(
+        &self,
+        batch: &[VectorRef],
+        expr: &ScalarExpr,
+    ) -> Result<VectorRef, EvalError> {
+        let arg_col = expr.eval_batch(batch)?;
+        match self {
+            &Self::Not => {
+                let arrow_array = arg_col.to_arrow_array();
+                let bool_array = arrow_array
+                    .as_any()
+                    .downcast_ref::<arrow::array::BooleanArray>()
+                    .context({
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::boolean_datatype(),
+                            actual: arg_col.data_type(),
+                        }
+                    })?;
+                let ret = arrow::compute::not(bool_array).context(ArrowSnafu { context: "not" })?;
+                let ret = BooleanVector::from(ret);
+                Ok(Arc::new(ret))
+            }
+            Self::IsNull => {
+                let arrow_array = arg_col.to_arrow_array();
+                let ret = arrow::compute::is_null(&arrow_array)
+                    .context(ArrowSnafu { context: "is_null" })?;
+                let ret = BooleanVector::from(ret);
+                Ok(Arc::new(ret))
+            }
+            Self::IsTrue | Self::IsFalse => {
+                let arrow_array = arg_col.to_arrow_array();
+                let bool_array = arrow_array
+                    .as_any()
+                    .downcast_ref::<arrow::array::BooleanArray>()
+                    .context({
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::boolean_datatype(),
+                            actual: arg_col.data_type(),
+                        }
+                    })?;
+
+                if matches!(self, Self::IsTrue) {
+                    Ok(Arc::new(BooleanVector::from(bool_array.clone())))
+                } else {
+                    let ret =
+                        arrow::compute::not(bool_array).context(ArrowSnafu { context: "not" })?;
+                    Ok(Arc::new(BooleanVector::from(ret)))
+                }
+            }
+            Self::StepTimestamp => {
+                let datetime_array = get_datetime_array(&arg_col)?;
+                let date_array_ref = datetime_array
+                    .as_any()
+                    .downcast_ref::<arrow::array::Date64Array>()
+                    .context({
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::boolean_datatype(),
+                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                        }
+                    })?;
+
+                let ret = arrow::compute::unary(date_array_ref, |arr| arr + 1);
+                let ret = DateTimeVector::from(ret);
+                Ok(Arc::new(ret))
+            }
+            Self::Cast(to) => {
+                let arrow_array = arg_col.to_arrow_array();
+                let ret = arrow::compute::cast(&arrow_array, &to.as_arrow_type())
+                    .context(ArrowSnafu { context: "cast" })?;
+                let vector = Helper::try_into_vector(ret).context(DataTypeSnafu {
+                    msg: "Fail to convert to Vector",
+                })?;
+                Ok(vector)
+            }
+            Self::TumbleWindowFloor {
+                window_size,
+                start_time,
+            } => {
+                let datetime_array = get_datetime_array(&arg_col)?;
+                let date_array_ref = datetime_array
+                    .as_any()
+                    .downcast_ref::<arrow::array::Date64Array>()
+                    .context({
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::boolean_datatype(),
+                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                        }
+                    })?;
+
+                let start_time = start_time.map(|t| t.val());
+                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+
+                let ret = arrow::compute::unary(date_array_ref, |ts| {
+                    get_window_start(ts, window_size, start_time)
+                });
+
+                let ret = TimestampMillisecondVector::from(ret);
+                Ok(Arc::new(ret))
+            }
+            Self::TumbleWindowCeiling {
+                window_size,
+                start_time,
+            } => {
+                let datetime_array = get_datetime_array(&arg_col)?;
+                let date_array_ref = datetime_array
+                    .as_any()
+                    .downcast_ref::<arrow::array::Date64Array>()
+                    .context({
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::boolean_datatype(),
+                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                        }
+                    })?;
+
+                let start_time = start_time.map(|t| t.val());
+                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+
+                let ret = arrow::compute::unary(date_array_ref, |ts| {
+                    get_window_start(ts, window_size, start_time) + window_size
+                });
+
+                let ret = TimestampMillisecondVector::from(ret);
+                Ok(Arc::new(ret))
+            }
+        }
+    }
+
     /// Evaluate the function with given values and expression
     ///
     /// # Arguments
@@ -312,6 +443,23 @@ impl UnaryFunc {
             }
         }
     }
+}
+
+fn get_datetime_array(vector: &VectorRef) -> Result<arrow::array::ArrayRef, EvalError> {
+    let arrow_array = vector.to_arrow_array();
+    let datetime_array =
+        if *arrow_array.data_type() == ConcreteDataType::datetime_datatype().as_arrow_type() {
+            arrow_array
+        } else {
+            arrow::compute::cast(
+                &arrow_array,
+                &ConcreteDataType::datetime_datatype().as_arrow_type(),
+            )
+            .context(ArrowSnafu {
+                context: "Trying to cast to datetime in StepTimestamp",
+            })?
+        };
+    Ok(datetime_array)
 }
 
 fn get_window_start(

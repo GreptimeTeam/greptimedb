@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 api.workspace = true
+arrow.workspace = true
 arrow-schema.workspace = true
 async-recursion = "1.0"
 async-trait.workspace = true

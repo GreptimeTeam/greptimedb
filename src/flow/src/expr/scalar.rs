@@ -25,11 +25,11 @@ use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
-use datatypes::vectors::Vector;
+use datatypes::vectors::{Vector, VectorRef};
 use datatypes::{arrow_array, value};
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, IntoError, ResultExt};
 use substrait::error::{DecodeRelSnafu, EncodeRelSnafu};
 use substrait::substrait_proto_df::proto::expression::{RexType, ScalarFunction};
 use substrait::substrait_proto_df::proto::Expression;
@@ -237,11 +237,10 @@ impl DfScalarFunction {
         let schema = self.df_schema.inner().clone();
         let rb = DfRecordBatch::try_new(schema, cols).map_err(|err| {
             ArrowSnafu {
-                raw: err,
                 context:
                     "Failed to create RecordBatch from values when eval datafusion scalar function",
             }
-            .build()
+            .into_error(err)
         })?;
 
         let res = self.fn_impl.evaluate(&rb).map_err(|err| {
@@ -429,11 +428,7 @@ impl ScalarExpr {
         }
     }
 
-    pub fn eval_batch(
-        &self,
-        batch: &[Arc<dyn Vector>],
-        exprs: &[ScalarExpr],
-    ) -> Result<Arc<dyn Vector>, EvalError> {
+    pub fn eval_batch(&self, batch: &[VectorRef]) -> Result<VectorRef, EvalError> {
         match self {
             ScalarExpr::Column(i) => Ok(batch[*i].clone()),
             ScalarExpr::Literal(_, _) => todo!(),

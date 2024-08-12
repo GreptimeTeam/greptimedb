@@ -113,6 +113,7 @@ pub enum EvalError {
 
     #[snafu(display("Arrow error: {raw:?}, context: {context}"))]
     Arrow {
+        #[snafu(source)]
         raw: ArrowError,
         context: String,
         #[snafu(implicit)]

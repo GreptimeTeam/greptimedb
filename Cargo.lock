@@ -3798,6 +3798,7 @@ name = "flow"
 version = "0.9.1"
 dependencies = [
  "api",
+ "arrow",
  "arrow-schema",
  "async-recursion",
  "async-trait",
