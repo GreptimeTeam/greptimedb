@@ -185,6 +185,28 @@ broker_endpoints = ["127.0.0.1:9092"]
 # client_cert_path = "/path/to/client_cert"
 # client_key_path = "/path/to/key"
 
+## Number of topics to be created upon start.
+## **It's only used when the provider is `kafka`**.
+num_topics = 64
+
+## Topic selector type.
+## Available selector types:
+## - `round_robin` (default)
+## **It's only used when the provider is `kafka`**.
+selector_type = "round_robin"
+
+## A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
+## **It's only used when the provider is `kafka`**.
+topic_name_prefix = "greptimedb_wal_topic"
+
+## Expected number of replicas of each partition.
+## **It's only used when the provider is `kafka`**.
+replication_factor = 1
+
+## Above which a topic creation operation will be cancelled.
+## **It's only used when the provider is `kafka`**.
+create_topic_timeout = "30s"
+
 ## The max size of a single producer batch.
 ## Warning: Kafka has a default limit of 1MB per message in a topic.
 ## **It's only used when the provider is `kafka`**.
