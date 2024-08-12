@@ -123,7 +123,7 @@ pub fn prepare_wal_options(
 
 #[cfg(test)]
 mod tests {
-    use common_wal::config::kafka::common::KafkaTopicConfig;
+    use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
     use common_wal::config::kafka::MetasrvKafkaConfig;
     use common_wal::test_util::run_test_with_kafka_wal;
 
@@ -166,7 +166,10 @@ mod tests {
                     ..Default::default()
                 };
                 let config = MetasrvKafkaConfig {
-                    broker_endpoints,
+                    connection: KafkaConnectionConfig {
+                        broker_endpoints,
+                        ..Default::default()
+                    },
                     kafka_topic,
                     ..Default::default()
                 };

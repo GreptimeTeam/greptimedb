@@ -499,6 +499,13 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
+    #[snafu(display("Failed to create TLS Config"))]
+    TlsConfig {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_wal::error::Error,
+    },
+
     #[snafu(display("Failed to resolve Kafka broker endpoint."))]
     ResolveKafkaEndpoint { source: common_wal::error::Error },
 
@@ -714,7 +721,8 @@ impl ErrorExt for Error {
             | AlterLogicalTablesInvalidArguments { .. }
             | CreateLogicalTablesInvalidArguments { .. }
             | MismatchPrefix { .. }
-            | DelimiterNotFound { .. } => StatusCode::InvalidArguments,
+            | DelimiterNotFound { .. }
+            | TlsConfig { .. } => StatusCode::InvalidArguments,
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,

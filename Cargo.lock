@@ -2280,6 +2280,9 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "rskafka",
+ "rustls 0.23.10",
+ "rustls-native-certs",
+ "rustls-pemfile 2.1.2",
  "serde",
  "serde_json",
  "serde_with",
@@ -2444,6 +2447,15 @@ name = "core-foundation-sys"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06ea2b9bc92be3c2baa9334a323ebca2d6f074ff852cd1d7b11064035cd3868f"
+
+[[package]]
+name = "core2"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b49ba7ef1ad6107f8824dbe97de947cbaac53c44e7f9756a1fba0d37c1eec505"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "cpp_demangle"
@@ -8253,7 +8265,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -8274,7 +8286,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5bb182580f71dd070f88d01ce3de9f4da5021db7115d2e1c3605a754153b77c1"
 dependencies = [
  "bytes",
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.13.0",
  "log",
  "multimap",
@@ -9134,10 +9146,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsasl"
+version = "2.0.2"
+source = "git+https://github.com/wenyxu/rsasl.git?rev=06ebb683d5539c3410de4ce9fa37ff9b97e790a4#06ebb683d5539c3410de4ce9fa37ff9b97e790a4"
+dependencies = [
+ "base64 0.22.1",
+ "core2",
+ "digest",
+ "hmac",
+ "pbkdf2",
+ "rand",
+ "serde_json",
+ "sha2",
+ "stringprep",
+ "thiserror",
+]
+
+[[package]]
 name = "rskafka"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "132ecfa3cd9c3825208524a80881f115337762904ad3f0174e87975b2d79162c"
+source = "git+https://github.com/WenyXu/rskafka.git?rev=940c6030012c5b746fad819fb72e3325b26e39de#940c6030012c5b746fad819fb72e3325b26e39de"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9150,11 +9178,14 @@ dependencies = [
  "parking_lot 0.12.3",
  "pin-project-lite",
  "rand",
+ "rsasl",
+ "rustls 0.23.10",
  "snap",
  "thiserror",
  "tokio",
+ "tokio-rustls 0.26.0",
  "tracing",
- "zstd 0.12.4",
+ "zstd 0.13.1",
 ]
 
 [[package]]
@@ -9423,9 +9454,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-native-certs"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f1fb85efa936c42c6d5fc28d2629bb51e4b2f4b8a5211e297d599cc5a093792"
+checksum = "a88d6d420651b496bdd98684116959239430022a115c1240e6c3993be0b15fba"
 dependencies = [
  "openssl-probe",
  "rustls-pemfile 2.1.2",
@@ -10127,12 +10158,13 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.117"
+version = "1.0.122"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "455182ea6142b14f93f4bc5320a2b31c1f266b66a4a5c858b013302a5d8cbfc3"
+checksum = "784b6203951c57ff748476b126ccb5e8e2959a5c19e5c617ab1956be3dbc68da"
 dependencies = [
  "indexmap 2.2.6",
  "itoa",
+ "memchr",
  "ryu",
  "serde",
 ]
@@ -10565,7 +10597,7 @@ version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38d1e02fca405f6280643174a50c942219f0bbf4dbf7d480f1dd864d6f211ae5"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.66",
@@ -11694,18 +11726,18 @@ checksum = "23d434d3f8967a09480fb04132ebe0a3e088c173e6d0ee7897abbdf4eab0f8b9"
 
 [[package]]
 name = "thiserror"
-version = "1.0.61"
+version = "1.0.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c546c80d6be4bc6a00c0f01730c08df82eaa7a7a61f11d656526506112cc1709"
+checksum = "c0342370b38b6a11b6cc11d6a805569958d54cfa061a29969c3b5ce2ea405724"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.61"
+version = "1.0.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46c3384250002a6d5af4d114f2845d37b57521033f30d5c3f46c4d70e1197533"
+checksum = "a4558b58466b9ad7ca0f102865eccc95938dca1a74a856f2b57b6629050da261"
 dependencies = [
  "proc-macro2",
  "quote",

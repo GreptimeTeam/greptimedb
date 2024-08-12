@@ -14,30 +14,20 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::common::KafkaConnectionConfig;
 use crate::config::kafka::common::{backoff_prefix, BackoffConfig, KafkaTopicConfig};
-use crate::BROKER_ENDPOINT;
 
 /// Kafka wal configurations for metasrv.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MetasrvKafkaConfig {
-    /// The broker endpoints of the Kafka cluster.
-    pub broker_endpoints: Vec<String>,
+    /// The kafka connection config.
+    #[serde(flatten)]
+    pub connection: KafkaConnectionConfig,
     /// The backoff config.
     #[serde(flatten, with = "backoff_prefix")]
     pub backoff: BackoffConfig,
     /// The kafka config.
     #[serde(flatten)]
     pub kafka_topic: KafkaTopicConfig,
-}
-
-impl Default for MetasrvKafkaConfig {
-    fn default() -> Self {
-        let broker_endpoints = vec![BROKER_ENDPOINT.to_string()];
-        Self {
-            broker_endpoints,
-            backoff: BackoffConfig::default(),
-            kafka_topic: KafkaTopicConfig::default(),
-        }
-    }
 }

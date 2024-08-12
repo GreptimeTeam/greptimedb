@@ -360,6 +360,7 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use common_telemetry::info;
     use common_telemetry::tracing::warn;
+    use common_wal::config::kafka::common::KafkaConnectionConfig;
     use common_wal::config::kafka::DatanodeKafkaConfig;
     use futures::TryStreamExt;
     use rand::prelude::SliceRandom;
@@ -461,7 +462,10 @@ mod tests {
             .map(|s| s.trim().to_string())
             .collect::<Vec<_>>();
         let config = DatanodeKafkaConfig {
-            broker_endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints,
+                ..Default::default()
+            },
             max_batch_bytes: ReadableSize::kb(32),
             ..Default::default()
         };
@@ -530,7 +534,10 @@ mod tests {
             .map(|s| s.trim().to_string())
             .collect::<Vec<_>>();
         let config = DatanodeKafkaConfig {
-            broker_endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints,
+                ..Default::default()
+            },
             max_batch_bytes: ReadableSize::kb(8),
             ..Default::default()
         };

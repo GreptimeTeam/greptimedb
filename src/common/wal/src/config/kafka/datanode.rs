@@ -17,15 +17,16 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
+use super::common::KafkaConnectionConfig;
 use crate::config::kafka::common::{backoff_prefix, BackoffConfig, KafkaTopicConfig};
-use crate::BROKER_ENDPOINT;
 
 /// Kafka wal configurations for datanode.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct DatanodeKafkaConfig {
-    /// The broker endpoints of the Kafka cluster.
-    pub broker_endpoints: Vec<String>,
+    /// The kafka connection config.
+    #[serde(flatten)]
+    pub connection: KafkaConnectionConfig,
     /// TODO(weny): Remove the alias once we release v0.9.
     /// The max size of a single producer batch.
     #[serde(alias = "max_batch_size")]
@@ -44,7 +45,7 @@ pub struct DatanodeKafkaConfig {
 impl Default for DatanodeKafkaConfig {
     fn default() -> Self {
         Self {
-            broker_endpoints: vec![BROKER_ENDPOINT.to_string()],
+            connection: KafkaConnectionConfig::default(),
             // Warning: Kafka has a default limit of 1MB per message in a topic.
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
