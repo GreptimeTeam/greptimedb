@@ -19,9 +19,11 @@ use crate::kafka::worker::{
 };
 
 impl BackgroundProducerWorker {
+    /// Aggregates records into batches, ensuring that the size of each batch does not exceed a specified maximum (`max_batch_bytes`).
+    ///
     /// ## Panic
     /// Panic if any [Record]'s `approximate_size` > `max_batch_bytes`.
-    pub(crate) fn handle_produce_requests(
+    pub(crate) fn aggregate_records(
         &self,
         requests: &mut Vec<ProduceRequest>,
         max_batch_bytes: usize,

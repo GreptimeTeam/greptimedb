@@ -198,8 +198,7 @@ impl BackgroundProducerWorker {
             }
         }
 
-        let pending_requests =
-            self.handle_produce_requests(&mut produce_requests, self.max_batch_bytes);
+        let pending_requests = self.aggregate_records(&mut produce_requests, self.max_batch_bytes);
         self.try_flush_pending_requests(pending_requests).await;
 
         if do_checkpoint {

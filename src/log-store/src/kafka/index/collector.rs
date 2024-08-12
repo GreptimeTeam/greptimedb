@@ -96,7 +96,7 @@ impl RegionIndexes {
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId) {
         if let Some(entry_ids) = self.regions.get_mut(&region_id) {
             *entry_ids = entry_ids.split_off(&entry_id);
-            // The `RegionIndexes` may be, keeps to track the latest entry id.
+            // The `RegionIndexes` can be empty, keeps to track the latest entry id.
             self.latest_entry_id = self.latest_entry_id.max(entry_id);
         }
     }
