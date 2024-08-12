@@ -16,7 +16,6 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_telemetry::tracing;
 use rskafka::client::{Credentials, SaslConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName};
