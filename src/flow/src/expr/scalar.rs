@@ -29,7 +29,7 @@ use datatypes::vectors::{Vector, VectorRef};
 use datatypes::{arrow_array, value};
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, IntoError, ResultExt};
+use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use substrait::error::{DecodeRelSnafu, EncodeRelSnafu};
 use substrait::substrait_proto_df::proto::expression::{RexType, ScalarFunction};
 use substrait::substrait_proto_df::proto::Expression;
@@ -39,7 +39,7 @@ use crate::error::{
 };
 use crate::expr::error::{
     ArrowSnafu, DatafusionSnafu as EvalDatafusionSnafu, EvalError, ExternalSnafu,
-    InvalidArgumentSnafu, OptimizeSnafu,
+    InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
@@ -438,12 +438,25 @@ impl ScalarExpr {
             .fail()?,
             ScalarExpr::CallUnary { func, expr } => func.eval_batch(batch, expr),
             ScalarExpr::CallBinary { func, expr1, expr2 } => func.eval_batch(batch, expr1, expr2),
-            ScalarExpr::CallVariadic { func, exprs } => todo!(),
+            ScalarExpr::CallVariadic { func, exprs } => func.eval_batch(batch, exprs),
             ScalarExpr::CallDf {
                 df_scalar_fn,
                 exprs,
             } => todo!(),
-            ScalarExpr::If { cond, then, els } => todo!(),
+            ScalarExpr::If { cond, then, els } => {
+                let conds = cond.eval_batch(batch)?;
+                let bool_conds = conds
+                    .as_any()
+                    .downcast_ref::<arrow::array::BooleanArray>()
+                    .context({
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::boolean_datatype(),
+                            actual: conds.data_type(),
+                        }
+                    })?;
+                // TODO(discord9): need Vec<Value> try into VectorRef
+                todo!()
+            }
         }
     }
 

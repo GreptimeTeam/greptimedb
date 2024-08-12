@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use arrow::array::ArrayRef;
+use arrow::array::{ArrayRef, BooleanArray};
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use common_time::timestamp::TimeUnit;
@@ -1063,6 +1063,58 @@ impl VariadicFunc {
             }
             .fail(),
         }
+    }
+
+    pub fn eval_batch(
+        &self,
+        batch: &[VectorRef],
+        exprs: &[ScalarExpr],
+    ) -> Result<VectorRef, EvalError> {
+        ensure!(
+            exprs.len() >= 2,
+            InvalidArgumentSnafu {
+                reason: "Variadic function requires at least 2 arguments"
+            }
+        );
+        let args = exprs
+            .iter()
+            .map(|expr| expr.eval_batch(batch).map(|v| v.to_arrow_array()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut iter = args.into_iter();
+
+        let first = iter.next().unwrap();
+        let mut left = first
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .context({
+                TypeMismatchSnafu {
+                    expected: ConcreteDataType::boolean_datatype(),
+                    actual: ConcreteDataType::from_arrow_type(first.data_type()),
+                }
+            })?
+            .clone();
+
+        for right in iter {
+            let right = right
+                .as_any()
+                .downcast_ref::<arrow::array::BooleanArray>()
+                .context({
+                    TypeMismatchSnafu {
+                        expected: ConcreteDataType::boolean_datatype(),
+                        actual: ConcreteDataType::from_arrow_type(right.data_type()),
+                    }
+                })?;
+            left = match self {
+                Self::And => {
+                    arrow::compute::and(&left, right).context(ArrowSnafu { context: "and" })?
+                }
+                Self::Or => {
+                    arrow::compute::or(&left, right).context(ArrowSnafu { context: "or" })?
+                }
+            }
+        }
+
+        Ok(Arc::new(BooleanVector::from(left)))
     }
 
     /// Evaluate the function with given values and expressions
