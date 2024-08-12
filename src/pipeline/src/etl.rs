@@ -295,7 +295,7 @@ where
                     {
                         result[search_from + pos] = payload_value.try_into()?;
                         // next search from is always after the current key
-                        search_from = search_from + pos;
+                        search_from += pos;
                     }
                 }
             }
