@@ -52,7 +52,7 @@ SELECT json_get_by_paths_int(b, 'attributes', 'event_attributes') + 1 FROM test;
 
 ## Storage and Query
 
-Data of JSON type is stored as JSONB format in the database. For storage layer, data is represented as a binary array and can be queried through pre-defined JSON functions. For clients, data is shown as strings.
+Data of JSON type is stored as JSONB format in the database. For storage layer and query engine, data is represented as a binary array and can be queried through pre-defined JSON functions. For clients, data is shown as strings.
 
 Insertions of JSON goes through following steps:
 
@@ -70,16 +70,16 @@ Insertion:
 
 The data of JSON type is represented by `Binary` data type in arrow. There are 2 types of JSON queries: get json elements through keys and compute over json elements.
 
-For the former, the query engine performs queries directly over binary data. We provide functions like `json_get` and `json_get_by_paths` to extract json elements.
+For the former, the query engine performs queries directly over binary data. We provide functions like `json_get` and `json_get_by_paths` to extract json elements through keys.
 
-For the latter, users need to manually specify the data type of the json elements. Before computing, and the query engine will decode the binary data in JSONB format into the specified data type. We provide functions like `json_get_int` and `json_get_by_paths_double` to extract json elements and convert them for further computation.
+For the latter, users need to manually specify the data type of the json elements for computing. Before computing, the query engine will decode the binary data in JSONB format into the specified data type. We provide functions like `json_get_int` and `json_get_by_paths_double` to extract json elements and convert them for further computation.
 
-Queries of JSON data goes through following steps:
+Queries of JSON goes through following steps:
 
 1. Client sends query to frontend, and frontend sends it to datafusion, which is the query engine of GreptimeDB.
 2. Datafusion performs query over JSON data, and returns binary data to frontend.
 3. If no computation is needed, frontend directly decodes it to JSON strings and return it to clients.
-4. If computation is needed, the binary data is decoded and converted to the specified data type to perform computation. Since the data type is specified, there's no need for further decoding in the frontend.
+4. If computation is needed, the binary data is decoded and converted to the specified data type to perform computation. There's no need for further decoding in the frontend.
 
 ```
 Queries without computation:
@@ -89,7 +89,7 @@ Queries without computation:
                       └────────────┘            └──────────────┘
 
 Queries with computation:
-                                                                          Query
+                                                                         Query
          Data of Specified Type ┌────────────┐ Data of Certain Type ┌──────────────┐
  client <-----------------------│  Frontend  │<---------------------│  Datafusion  │<-- Storage
                                 └────────────┘                      └──────────────┘
