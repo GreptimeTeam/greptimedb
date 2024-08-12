@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+use arrow::array::ArrayRef;
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use common_time::timestamp::TimeUnit;
@@ -838,6 +839,98 @@ impl BinaryFunc {
         };
 
         Ok((spec_fn, signature))
+    }
+
+    pub fn eval_batch(
+        &self,
+        batch: &[VectorRef],
+        expr1: &ScalarExpr,
+        expr2: &ScalarExpr,
+    ) -> Result<VectorRef, EvalError> {
+        let left = expr1.eval_batch(batch)?;
+        let left = left.to_arrow_array();
+        let right = expr2.eval_batch(batch)?;
+        let right = right.to_arrow_array();
+
+        let arrow_array: ArrayRef = match self {
+            Self::Eq => Arc::new(
+                arrow::compute::kernels::cmp::eq(&left, &right)
+                    .context(ArrowSnafu { context: "eq" })?,
+            ),
+            Self::NotEq => Arc::new(
+                arrow::compute::kernels::cmp::neq(&left, &right)
+                    .context(ArrowSnafu { context: "neq" })?,
+            ),
+            Self::Lt => Arc::new(
+                arrow::compute::kernels::cmp::lt(&left, &right)
+                    .context(ArrowSnafu { context: "lt" })?,
+            ),
+            Self::Lte => Arc::new(
+                arrow::compute::kernels::cmp::lt_eq(&left, &right)
+                    .context(ArrowSnafu { context: "lte" })?,
+            ),
+            Self::Gt => Arc::new(
+                arrow::compute::kernels::cmp::gt(&left, &right)
+                    .context(ArrowSnafu { context: "gt" })?,
+            ),
+            Self::Gte => Arc::new(
+                arrow::compute::kernels::cmp::gt_eq(&left, &right)
+                    .context(ArrowSnafu { context: "gte" })?,
+            ),
+
+            Self::AddInt16
+            | Self::AddInt32
+            | Self::AddInt64
+            | Self::AddUInt16
+            | Self::AddUInt32
+            | Self::AddUInt64
+            | Self::AddFloat32
+            | Self::AddFloat64 => arrow::compute::kernels::numeric::add(&left, &right)
+                .context(ArrowSnafu { context: "add" })?,
+
+            Self::SubInt16
+            | Self::SubInt32
+            | Self::SubInt64
+            | Self::SubUInt16
+            | Self::SubUInt32
+            | Self::SubUInt64
+            | Self::SubFloat32
+            | Self::SubFloat64 => arrow::compute::kernels::numeric::sub(&left, &right)
+                .context(ArrowSnafu { context: "sub" })?,
+
+            Self::MulInt16
+            | Self::MulInt32
+            | Self::MulInt64
+            | Self::MulUInt16
+            | Self::MulUInt32
+            | Self::MulUInt64
+            | Self::MulFloat32
+            | Self::MulFloat64 => arrow::compute::kernels::numeric::mul(&left, &right)
+                .context(ArrowSnafu { context: "mul" })?,
+
+            Self::DivInt16
+            | Self::DivInt32
+            | Self::DivInt64
+            | Self::DivUInt16
+            | Self::DivUInt32
+            | Self::DivUInt64
+            | Self::DivFloat32
+            | Self::DivFloat64 => arrow::compute::kernels::numeric::mul(&left, &right)
+                .context(ArrowSnafu { context: "div" })?,
+
+            Self::ModInt16
+            | Self::ModInt32
+            | Self::ModInt64
+            | Self::ModUInt16
+            | Self::ModUInt32
+            | Self::ModUInt64 => arrow::compute::kernels::numeric::rem(&left, &right)
+                .context(ArrowSnafu { context: "rem" })?,
+        };
+
+        let vector = Helper::try_into_vector(arrow_array).context(DataTypeSnafu {
+            msg: "Fail to convert to Vector",
+        })?;
+        Ok(vector)
     }
 
     /// Evaluate the function with given values and expression

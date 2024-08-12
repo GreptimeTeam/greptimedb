@@ -436,8 +436,8 @@ impl ScalarExpr {
                 reason: "Can't eval unmaterializable function".to_string(),
             }
             .fail()?,
-            ScalarExpr::CallUnary { func, expr } => todo!(),
-            ScalarExpr::CallBinary { func, expr1, expr2 } => todo!(),
+            ScalarExpr::CallUnary { func, expr } => func.eval_batch(batch, expr),
+            ScalarExpr::CallBinary { func, expr1, expr2 } => func.eval_batch(batch, expr1, expr2),
             ScalarExpr::CallVariadic { func, exprs } => todo!(),
             ScalarExpr::CallDf {
                 df_scalar_fn,
