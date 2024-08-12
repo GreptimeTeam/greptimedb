@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_catalog::format_full_table_name;
+use snafu::OptionExt;
+use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+
 use crate::ddl::drop_table::DropTableProcedure;
-use crate::error::Result;
+use crate::error::{self, Result};
 
 impl DropTableProcedure {
     /// Fetches the table info and physical table route.
@@ -28,6 +32,23 @@ impl DropTableProcedure {
 
         self.data.physical_region_routes = physical_table_route_value.region_routes;
         self.data.physical_table_id = Some(physical_table_id);
+
+        if physical_table_id == self.data.table_id() {
+            let table_info_value = self
+                .context
+                .table_metadata_manager
+                .table_info_manager()
+                .get(task.table_id)
+                .await?
+                .with_context(|| error::TableInfoNotFoundSnafu {
+                    table: format_full_table_name(&task.catalog, &task.schema, &task.table),
+                })?
+                .into_inner();
+
+            let engine = table_info_value.table_info.meta.engine;
+            // rollback only if dropping the metric physical table fails
+            self.data.allow_rollback = engine.as_str() == METRIC_ENGINE_NAME
+        }
 
         Ok(())
     }

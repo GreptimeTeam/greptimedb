@@ -221,6 +221,10 @@ impl MysqlInstanceShim {
 impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShim {
     type Error = error::Error;
 
+    fn version(&self) -> String {
+        std::env::var("GREPTIMEDB_MYSQL_SERVER_VERSION").unwrap_or_else(|_| "8.4.2".to_string())
+    }
+
     fn salt(&self) -> [u8; 20] {
         self.salt
     }

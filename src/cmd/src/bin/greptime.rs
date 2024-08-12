@@ -62,8 +62,37 @@ enum SubCommand {
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+#[cfg(debug_assertions)]
+fn main() -> Result<()> {
+    use snafu::ResultExt;
+    // Set the stack size to 8MB for the thread so it wouldn't overflow on large stack usage in debug mode
+    // see https://github.com/GreptimeTeam/greptimedb/pull/4317
+    // and https://github.com/rust-lang/rust/issues/34283
+    std::thread::Builder::new()
+        .name("main_spawn".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            {
+                tokio::runtime::Builder::new_multi_thread()
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("Failed building the Runtime")
+                    .block_on(main_body())
+            }
+        })
+        .context(cmd::error::SpawnThreadSnafu)?
+        .join()
+        .expect("Couldn't join on the associated thread")
+}
+
+#[cfg(not(debug_assertions))]
 #[tokio::main]
 async fn main() -> Result<()> {
+    main_body().await
+}
+
+async fn main_body() -> Result<()> {
     setup_human_panic();
     start(Command::parse()).await
 }
