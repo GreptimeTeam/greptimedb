@@ -2141,6 +2141,7 @@ name = "common-query"
 version = "0.9.1"
 dependencies = [
  "api",
+ "arrow-schema",
  "async-trait",
  "bytes",
  "common-base",
@@ -2151,7 +2152,9 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-physical-expr",
  "datatypes",
+ "futures-util",
  "serde",
  "snafu 0.8.4",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",

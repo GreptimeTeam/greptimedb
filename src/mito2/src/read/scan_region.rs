@@ -697,6 +697,12 @@ impl ScanInput {
             }
         });
     }
+
+    pub(crate) fn total_rows(&self) -> usize {
+        let rows_in_files: usize = self.files.iter().map(|f| f.num_rows()).sum();
+        let rows_in_memtables: usize = self.memtables.iter().map(|m| m.stats().num_rows()).sum();
+        rows_in_files + rows_in_memtables
+    }
 }
 
 #[cfg(test)]

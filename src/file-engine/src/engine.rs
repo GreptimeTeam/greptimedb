@@ -90,7 +90,8 @@ impl RegionEngine for FileRegionEngine {
         request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
         let stream = self.handle_query(region_id, request).await?;
-        let scanner = Box::new(SinglePartitionScanner::new(stream));
+        // We don't support enabling append mode for file engine.
+        let scanner = Box::new(SinglePartitionScanner::new(stream, false));
         Ok(scanner)
     }
 

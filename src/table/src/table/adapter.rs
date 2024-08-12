@@ -15,6 +15,7 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
+use common_query::stream::StreamScanAdapter;
 use common_recordbatch::OrderOption;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
@@ -25,10 +26,8 @@ use datafusion_expr::expr::Expr;
 use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDown;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::PhysicalSortExpr;
-use store_api::region_engine::SinglePartitionScanner;
 use store_api::storage::ScanRequest;
 
-use crate::table::scan::RegionScanExec;
 use crate::table::{TableRef, TableType};
 
 /// Adapt greptime's [TableRef] to DataFusion's [TableProvider].
@@ -114,12 +113,9 @@ impl TableProvider for DfTableProviderAdapter {
                 .collect::<Vec<_>>()
         });
 
-        let scanner = Box::new(SinglePartitionScanner::new(stream));
-        let mut plan = RegionScanExec::new(scanner);
-        if let Some(sort_expr) = sort_expr {
-            plan = plan.with_output_ordering(sort_expr);
-        }
-        Ok(Arc::new(plan))
+        Ok(Arc::new(
+            StreamScanAdapter::new(stream).with_output_ordering(sort_expr),
+        ))
     }
 
     fn supports_filters_pushdown(

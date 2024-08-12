@@ -164,18 +164,19 @@ pub struct ScannerProperties {
     /// The first dim vector's length represents the output partition number. The second
     /// dim is ranges within one partition.
     pub partitions: Vec<Vec<PartitionRange>>,
+
+    pub append_mode: bool,
+
+    pub total_rows: usize,
 }
 
 impl ScannerProperties {
     /// Creates a new [`ScannerProperties`] with the given partitioning.
-    pub fn new(partitions: Vec<Vec<PartitionRange>>) -> Self {
-        Self { partitions }
-    }
-
-    /// Creates a new [`ScannerProperties`] with the given number of partitions.
-    pub fn new_with_partitions(partitions: usize) -> Self {
+    pub fn new(partitions: Vec<Vec<PartitionRange>>, append_mode: bool, total_rows: usize) -> Self {
         Self {
-            partitions: vec![vec![]; partitions],
+            partitions,
+            append_mode,
+            total_rows,
         }
     }
 
@@ -297,12 +298,12 @@ pub struct SinglePartitionScanner {
 
 impl SinglePartitionScanner {
     /// Creates a new [SinglePartitionScanner] with the given stream.
-    pub fn new(stream: SendableRecordBatchStream) -> Self {
+    pub fn new(stream: SendableRecordBatchStream, append_mode: bool) -> Self {
         let schema = stream.schema();
         Self {
             stream: Mutex::new(Some(stream)),
             schema,
-            properties: ScannerProperties::new_with_partitions(1),
+            properties: ScannerProperties::new(vec![vec![]; 1], append_mode, 0),
         }
     }
 }
@@ -323,7 +324,11 @@ impl RegionScanner for SinglePartitionScanner {
     }
 
     fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
-        self.properties = ScannerProperties::new(ranges);
+        self.properties = ScannerProperties::new(
+            ranges,
+            self.properties.append_mode,
+            self.properties.total_rows,
+        );
         Ok(())
     }
 

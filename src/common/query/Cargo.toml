@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 api.workspace = true
+arrow-schema.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 common-error.workspace = true
@@ -21,6 +22,7 @@ common-time.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 serde.workspace = true
 snafu.workspace = true
@@ -31,4 +33,5 @@ store-api.workspace = true
 
 [dev-dependencies]
 common-base.workspace = true
+futures-util.workspace = true
 tokio.workspace = true

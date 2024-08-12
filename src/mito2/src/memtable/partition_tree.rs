@@ -25,7 +25,7 @@ mod shard_builder;
 mod tree;
 
 use std::fmt;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
@@ -114,6 +114,7 @@ pub struct PartitionTreeMemtable {
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
+    num_rows: AtomicUsize,
 }
 
 impl fmt::Debug for PartitionTreeMemtable {
@@ -139,6 +140,7 @@ impl Memtable for PartitionTreeMemtable {
 
         self.update_stats(&metrics);
 
+        self.num_rows.fetch_add(kvs.num_rows(), Ordering::Relaxed);
         res
     }
 
@@ -150,6 +152,7 @@ impl Memtable for PartitionTreeMemtable {
 
         self.update_stats(&metrics);
 
+        self.num_rows.fetch_add(1, Ordering::Relaxed);
         res
     }
 
@@ -202,6 +205,7 @@ impl Memtable for PartitionTreeMemtable {
             return MemtableStats {
                 estimated_bytes,
                 time_range: None,
+                num_rows: 0,
             };
         }
 
@@ -219,6 +223,7 @@ impl Memtable for PartitionTreeMemtable {
         MemtableStats {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
+            num_rows: self.num_rows.load(Ordering::Relaxed),
         }
     }
 
@@ -256,6 +261,7 @@ impl PartitionTreeMemtable {
             alloc_tracker,
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
+            num_rows: AtomicUsize::new(0),
         }
     }
 
