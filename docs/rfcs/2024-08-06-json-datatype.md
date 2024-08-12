@@ -50,92 +50,14 @@ SELECT json_get_by_paths(b, 'attributes', 'event_attributes') + 1 FROM test;
 
 ```
 
-## Storage
+## Storage and Querying
 
-### Schema Inference
-Unlike other types, the schema of JSON data is inconsistent. For different JSON columns, we introduce a dynamic schema inference method for storing the data.
-
-For example:
-```JSON
-{
-  "a": "jHl2oDDnPc1i2OzlP5Y",
-  "b": "2024-07-25T04:33:11.369386Z",
-  "c": { "d": 48.28648 }
-}
-```
-This will be parsed at runtime and stored as a corresponding `Struct` type in Arrow:
-```Rust
-Struct(
-    Field("a", Utf8),
-    Field("b", Utf8),
-    Field("c", Struct(Field("d", Float64))),
-)
-```
-
-Dynamic schema inference helps achieve compression in some scenarios. See [benchmark](https://github.com/CookiePieWw/json-format-in-parquet-benchmark/) for more information.
-
-## Schema Change
-The schema must remain consistent for a column within a table. When inserting data with different schemas, schema changes may occur. There are two types of schema changes:
-
-1. Field Addition
-
-   Newly added fields can be incorporated into the schema, treating added fields in previously inserted data as null:
-   ```Rust
-   Struct(
-       Field("a", Utf8),
-   )
-   +
-   Struct(
-       Field("a", Utf8),
-       Field("e", Int32)
-   )
-   =
-   Struct(
-       Field("a", Utf8),
-       Field("e", Int32)
-   )
-   ```
-
-2. Field Modification
-
-   Compatible fields can be altered to the widest type, similar to integral promotion in C:
-   ```Rust
-   Struct(
-       Field("a", Int16),
-   )
-   +
-   Struct(
-       Field("a", Int32),
-   )
-   =
-   Struct(
-       Field("a", Int32),
-   )
-   ```
-
-   Non-compatible fields will fallback to a binary array to store the JSONB encoding:
-   ```Rust
-   Struct(
-       Field("a", Struct(Field("b", Float64))),
-   )
-   +
-   Struct(
-       Field("a", Int32),
-   )
-   =
-   Struct(
-       Field("a", BinaryArray), // JSONB
-   )
-   ```
-
-Like schema inference, schema changes are performed automatically without manual configuration.
+Data of JSON type is stored as JSONB format in the database. For storage layer, data is represented as a binary array and can be queried through pre-defined JSON functions. For clients, data is shown as strings and can be casted to other types if needed.
 
 # Drawbacks
 
-1. This datatype is best suited for data with similar schemas. Varying schemas can lead to frequent schema changes and fallback to JSONB.
-2. Schema inference and change bring additional writing overhead in favor of better compression rate.
+As a general purpose data type, JSONB may not be as efficient as specialized data types for specific scenarios.
 
 # Alternatives
 
-1. JSONB, a widely used binary representation format of json.
-2. JSONC: A tape representation format for JSON with similar writing and query performance and better compression in some cases. See [discussion](https://github.com/apache/datafusion/issues/7845#issuecomment-2068061465) and [repo](https://github.com/CookiePieWw/jsonc) for more information.
+Extract and flatten JSON schema to store in a structured format throught pipeline. For nested data, we can provide nested types like `STRUCT` or `ARRAY`.
