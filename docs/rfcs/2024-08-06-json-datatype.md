@@ -52,7 +52,34 @@ SELECT json_get_by_paths(b, 'attributes', 'event_attributes') + 1 FROM test;
 
 ## Storage and Querying
 
-Data of JSON type is stored as JSONB format in the database. For storage layer, data is represented as a binary array and can be queried through pre-defined JSON functions. For clients, data is shown as strings and can be casted to other types if needed.
+Data of JSON type is stored as JSONB format in the database. For storage layer, data is represented as a binary and can be queried through pre-defined JSON functions. For clients, data is shown as strings and can be deserialized to other types if needed.
+
+Insertions of JSON data goes through following steps:
+
+1. Client gets JSON strings and sends it to the frontend.
+2. Frontend serializes JSON strings as JSONB format and sends it to the datanode.
+3. Datanode stores binary data in the database.
+
+Queries of JSON data goes through following steps:
+
+1. Client sends query to the frontend.
+2. Frontend sends distributed query plans to the datanode.
+3. Datanode executes distributed query plans and returns results of JSON format to the frontend.
+4. Frontend executes non-distributed query plans and then deserializes results of JSONB format to strings, and returns to the client.
+
+```
+Insertion:
+                        Serialize                   Store
+         JSON Strings ┌────────────┐ JSONB Data ┌────────────┐
+ client ------------->│  Frontend  │----------->│  Datanode  │--> Storage
+                      └────────────┘            └────────────┘
+
+Queries:
+                    Query + Deserialize             Query
+         JSON Strings ┌────────────┐ JSONB Data ┌────────────┐
+ client <-------------│  Frontend  │<-----------│  Datanode  │<-- Storage
+                      └────────────┘            └────────────┘
+```
 
 # Drawbacks
 
