@@ -25,7 +25,7 @@ use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
-use datatypes::vectors::{Vector, VectorRef};
+use datatypes::vectors::{Helper, Vector, VectorRef};
 use datatypes::{arrow_array, value};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ use crate::error::{
     DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
 use crate::expr::error::{
-    ArrowSnafu, DatafusionSnafu as EvalDatafusionSnafu, EvalError, ExternalSnafu,
+    ArrowSnafu, DataTypeSnafu, DatafusionSnafu as EvalDatafusionSnafu, EvalError, ExternalSnafu,
     InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
@@ -431,7 +431,15 @@ impl ScalarExpr {
     pub fn eval_batch(&self, batch: &[VectorRef]) -> Result<VectorRef, EvalError> {
         match self {
             ScalarExpr::Column(i) => Ok(batch[*i].clone()),
-            ScalarExpr::Literal(_, _) => todo!(),
+            ScalarExpr::Literal(val, dt) => Ok(Helper::try_from_scalar_value(
+                val.try_to_scalar_value(dt).context(DataTypeSnafu {
+                    msg: "Fail to convert literal to scalar value",
+                })?,
+                batch.first().map(|v| v.len()).unwrap_or(1),
+            )
+            .context(DataTypeSnafu {
+                msg: "Fail to convert scalar value to vector ref when parsing literal",
+            })?),
             ScalarExpr::CallUnmaterializable(_) => OptimizeSnafu {
                 reason: "Can't eval unmaterializable function".to_string(),
             }
