@@ -95,14 +95,18 @@ provider = "raft_engine"
 ## The broker endpoints of the Kafka cluster.
 broker_endpoints = ["127.0.0.1:9092"]
 
-# The Kafka SASL configuration
+# The Kafka SASL configuration.
 # **It's only used when the provider is `kafka`**.
+# Available SASL mechanisms:
+# - `PLAIN`
+# - `SCRAM-SHA-256`
+# - `SCRAM-SHA-512`
 # [wal.sasl]
 # type = "SCRAM-SHA-512"
-# username = "hi"
-# password = "test"
+# username = "user_kafka"
+# password = "secret"
 
-# The Kafka TLS configuration
+# The Kafka TLS configuration.
 # **It's only used when the provider is `kafka`**.
 # [wal.tls]
 # server_ca_cert_path = "/path/to/server_cert"
