@@ -171,6 +171,20 @@ sync_period = "10s"
 ## **It's only used when the provider is `kafka`**.
 broker_endpoints = ["127.0.0.1:9092"]
 
+# The Kafka SASL configuration
+# **It's only used when the provider is `kafka`**.
+# [wal.sasl]
+# type = "SCRAM-SHA-512"
+# username = "hi"
+# password = "test"
+
+# The Kafka TLS configuration
+# **It's only used when the provider is `kafka`**.
+# [wal.tls]
+# server_ca_cert_path = "/path/to/server_cert"
+# client_cert_path = "/path/to/client_cert"
+# client_key_path = "/path/to/key"
+
 ## The max size of a single producer batch.
 ## Warning: Kafka has a default limit of 1MB per message in a topic.
 ## **It's only used when the provider is `kafka`**.
