@@ -106,6 +106,24 @@ macro_rules! define_interval_with_unit {
                     val.0.[<to_ $native_ty>]()
                 }
             }
+
+            impl TryFrom<Value> for Option<[<Interval $unit>]> {
+                type Error = $crate::error::Error;
+
+                #[inline]
+                fn try_from(from: Value) -> std::result::Result<Self, Self::Error> {
+                    match from {
+                        Value::Interval(v) if v.unit() == common_time::interval::IntervalUnit::$unit => {
+                            Ok(Some([<Interval $unit>](v)))
+                        },
+                        Value::Null => Ok(None),
+                        _ => $crate::error::TryFromValueSnafu {
+                            reason: format!("{:?} is not a {}", from, stringify!([<Interval $unit>])),
+                        }
+                        .fail(),
+                    }
+                }
+            }
         }
     };
 }
