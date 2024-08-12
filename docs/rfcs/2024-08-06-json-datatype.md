@@ -60,4 +60,4 @@ As a general purpose data type, JSONB may not be as efficient as specialized dat
 
 # Alternatives
 
-Extract and flatten JSON schema to store in a structured format throught pipeline. For nested data, we can provide nested types like `STRUCT` or `ARRAY`.
+Extract and flatten JSON schema to store in a structured format through pipeline. For nested data, we can provide nested types like `STRUCT` or `ARRAY`.
