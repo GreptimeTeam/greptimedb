@@ -864,4 +864,48 @@ mod tests {
             assert_eq!(Value::Interval(Interval::from_i128(2000)), vector.get(i));
         }
     }
+
+    fn check_try_from_row_to_vector(row: Vec<Value>, dt: &ConcreteDataType) {
+        let vector = Helper::try_from_row_into_vector(row.clone(), dt).unwrap();
+        for (i, item) in row.iter().enumerate().take(vector.len()) {
+            assert_eq!(*item, vector.get(i));
+        }
+    }
+
+    fn check_into_and_from(array: impl Array + 'static) {
+        let array: ArrayRef = Arc::new(array);
+        let vector = Helper::try_into_vector(array.clone()).unwrap();
+        assert_eq!(&array, &vector.to_arrow_array());
+        let row: Vec<Value> = (0..array.len()).map(|i| vector.get(i)).collect();
+        let dt = vector.data_type();
+        check_try_from_row_to_vector(row, &dt);
+    }
+
+    #[test]
+    fn test_try_from_row_to_vector() {
+        check_into_and_from(NullArray::new(2));
+        check_into_and_from(BooleanArray::from(vec![true, false]));
+        check_into_and_from(Int8Array::from(vec![1, 2, 3]));
+        check_into_and_from(Int16Array::from(vec![1, 2, 3]));
+        check_into_and_from(Int32Array::from(vec![1, 2, 3]));
+        check_into_and_from(Int64Array::from(vec![1, 2, 3]));
+        check_into_and_from(UInt8Array::from(vec![1, 2, 3]));
+        check_into_and_from(UInt16Array::from(vec![1, 2, 3]));
+        check_into_and_from(UInt32Array::from(vec![1, 2, 3]));
+        check_into_and_from(UInt64Array::from(vec![1, 2, 3]));
+        check_into_and_from(Float32Array::from(vec![1.0, 2.0, 3.0]));
+        check_into_and_from(Float64Array::from(vec![1.0, 2.0, 3.0]));
+        check_into_and_from(StringArray::from(vec!["hello", "world"]));
+        check_into_and_from(Date32Array::from(vec![1, 2, 3]));
+        check_into_and_from(Date64Array::from(vec![1, 2, 3]));
+
+        check_into_and_from(TimestampSecondArray::from(vec![1, 2, 3]));
+        check_into_and_from(TimestampMillisecondArray::from(vec![1, 2, 3]));
+        check_into_and_from(TimestampMicrosecondArray::from(vec![1, 2, 3]));
+        check_into_and_from(TimestampNanosecondArray::from(vec![1, 2, 3]));
+        check_into_and_from(Time32SecondArray::from(vec![1, 2, 3]));
+        check_into_and_from(Time32MillisecondArray::from(vec![1, 2, 3]));
+        check_into_and_from(Time64MicrosecondArray::from(vec![1, 2, 3]));
+        check_into_and_from(Time64NanosecondArray::from(vec![1, 2, 3]));
+    }
 }
