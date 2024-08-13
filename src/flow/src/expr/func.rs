@@ -21,15 +21,14 @@ use arrow::array::{ArrayRef, BooleanArray};
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use common_time::timestamp::TimeUnit;
-use common_time::{datetime, DateTime, Timestamp};
+use common_time::{DateTime, Timestamp};
 use datafusion_expr::Operator;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::types::cast;
-use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
 use datatypes::vectors::{
-    BooleanVector, DateTimeVector, Helper, TimestampMillisecondVector, Vector, VectorRef,
+    BooleanVector, DateTimeVector, Helper, TimestampMillisecondVector, VectorRef,
 };
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
@@ -39,12 +38,12 @@ use substrait::df_logical_plan::consumer::name_to_op;
 
 use crate::error::{Error, ExternalSnafu, InvalidQuerySnafu, PlanSnafu};
 use crate::expr::error::{
-    ArrowSnafu, CastValueSnafu, DataTypeSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu,
-    OverflowSnafu, TryFromValueSnafu, TypeMismatchSnafu,
+    ArrowSnafu, CastValueSnafu, DataTypeSnafu, DivisionByZeroSnafu, EvalError, OverflowSnafu,
+    TryFromValueSnafu, TypeMismatchSnafu,
 };
 use crate::expr::signature::{GenericFn, Signature};
 use crate::expr::{InvalidArgumentSnafu, ScalarExpr, TypedExpr};
-use crate::repr::{self, value_to_internal_ts, Row};
+use crate::repr::{self, value_to_internal_ts};
 
 /// UnmaterializableFunc is a function that can't be eval independently,
 /// and require special handling

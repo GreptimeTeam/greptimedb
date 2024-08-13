@@ -20,17 +20,11 @@ mod reduce;
 
 use std::collections::BTreeSet;
 
-use datatypes::arrow::ipc::Map;
-use serde::{Deserialize, Serialize};
-
 use crate::error::Error;
-use crate::expr::{
-    AggregateExpr, EvalError, GlobalId, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
-    TypedExpr,
-};
+use crate::expr::{GlobalId, Id, LocalId, MapFilterProject, SafeMfpPlan, TypedExpr};
 use crate::plan::join::JoinPlan;
 pub(crate) use crate::plan::reduce::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan};
-use crate::repr::{ColumnType, DiffRow, RelationDesc, RelationType};
+use crate::repr::{DiffRow, RelationDesc};
 
 /// A plan for a dataflow component. But with type to indicate the output type of the relation.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]

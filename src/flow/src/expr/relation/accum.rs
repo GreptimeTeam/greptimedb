@@ -24,11 +24,9 @@ use std::any::type_name;
 use std::fmt::Display;
 
 use common_decimal::Decimal128;
-use common_time::{Date, DateTime};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, OrderedFloat, Value};
 use enum_dispatch::enum_dispatch;
-use hydroflow::futures::stream::Concat;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
@@ -761,7 +759,10 @@ fn ty_eq_without_precision(left: ConcreteDataType, right: ConcreteDataType) -> b
 #[allow(clippy::too_many_lines)]
 #[cfg(test)]
 mod test {
+    use common_time::DateTime;
+
     use super::*;
+
     #[test]
     fn test_accum() {
         let testcases = vec![

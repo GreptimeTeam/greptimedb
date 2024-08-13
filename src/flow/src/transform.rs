@@ -16,37 +16,25 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use bytes::buf::IntoIter;
 use common_error::ext::BoxedError;
-use common_telemetry::info;
 use datafusion::optimizer::simplify_expressions::SimplifyExpressions;
 use datafusion::optimizer::{OptimizerContext, OptimizerRule};
 use datatypes::data_type::ConcreteDataType as CDT;
-use literal::{from_substrait_literal, from_substrait_type};
-use prost::Message;
 use query::parser::QueryLanguageParser;
 use query::plan::LogicalPlan;
 use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
-use session::context::QueryContext;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
 /// rename it to `substrait_proto`
-use substrait::{
-    substrait_proto_df as substrait_proto, DFLogicalSubstraitConvertor, SubstraitPlan,
-};
+use substrait::{substrait_proto_df as substrait_proto, DFLogicalSubstraitConvertor};
 use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 use crate::adapter::FlownodeContext;
-use crate::error::{
-    DatafusionSnafu, Error, ExternalSnafu, InvalidQueryProstSnafu, NotImplementedSnafu,
-    TableNotFoundSnafu, UnexpectedSnafu,
-};
-use crate::expr::GlobalId;
+use crate::error::{DatafusionSnafu, Error, ExternalSnafu, NotImplementedSnafu, UnexpectedSnafu};
 use crate::plan::TypedPlan;
-use crate::repr::RelationType;
 /// a simple macro to generate a not implemented error
 macro_rules! not_impl_err {
     ($($arg:tt)*)  => {
@@ -202,7 +190,7 @@ mod test {
 
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
-    use common_time::{Date, DateTime};
+    use common_time::DateTime;
     use datatypes::prelude::*;
     use datatypes::schema::Schema;
     use datatypes::vectors::VectorRef;
@@ -219,7 +207,8 @@ mod test {
 
     use super::*;
     use crate::adapter::node_context::IdToNameMap;
-    use crate::repr::ColumnType;
+    use crate::expr::GlobalId;
+    use crate::repr::{ColumnType, RelationType};
 
     pub fn create_test_ctx() -> FlownodeContext {
         let mut schemas = HashMap::new();

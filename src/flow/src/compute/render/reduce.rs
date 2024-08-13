@@ -18,17 +18,15 @@ use std::ops::Range;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::{ListValue, Value};
 use hydroflow::scheduled::graph_ext::GraphExt;
-use hydroflow::scheduled::port::{PortCtx, SEND};
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::compute::render::{Context, SubgraphArg};
-use crate::compute::state::Scheduler;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
 use crate::error::{Error, PlanSnafu};
 use crate::expr::error::{DataAlreadyExpiredSnafu, DataTypeSnafu, InternalSnafu};
-use crate::expr::{AggregateExpr, EvalError, ScalarExpr};
-use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
+use crate::expr::{EvalError, ScalarExpr};
+use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, KeyExpiryManager};
 
@@ -790,8 +788,6 @@ fn from_val_to_slice_idx(
 // TODO(discord9): add tests for accum ser/de
 #[cfg(test)]
 mod test {
-    use std::cell::RefCell;
-    use std::rc::Rc;
 
     use common_time::{DateTime, Interval, Timestamp};
     use datatypes::data_type::{ConcreteDataType, ConcreteDataType as CDT};
@@ -800,7 +796,10 @@ mod test {
     use super::*;
     use crate::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
     use crate::compute::state::DataflowState;
-    use crate::expr::{self, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, UnaryFunc};
+    use crate::expr::{
+        self, AggregateExpr, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, UnaryFunc,
+    };
+    use crate::plan::Plan;
     use crate::repr::{ColumnType, RelationType};
 
     /// SELECT sum(number) FROM numbers_with_ts GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00')

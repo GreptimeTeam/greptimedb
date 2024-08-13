@@ -22,12 +22,11 @@ use hydroflow::scheduled::handoff::TeeingHandoff;
 use hydroflow::scheduled::port::RecvPort;
 use hydroflow::scheduled::SubgraphId;
 use itertools::Itertools;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
-use crate::compute::render::Context;
 use crate::expr::{EvalError, ScalarExpr};
 use crate::repr::DiffRow;
-use crate::utils::{ArrangeHandler, Arrangement};
+use crate::utils::ArrangeHandler;
 
 pub type Toff<T = DiffRow> = TeeingHandoff<T>;
 

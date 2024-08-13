@@ -24,7 +24,7 @@ use crate::compute::state::Scheduler;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
 use crate::error::{Error, PlanSnafu};
 use crate::expr::{EvalError, MapFilterProject, MfpPlan, ScalarExpr};
-use crate::plan::{Plan, TypedPlan};
+use crate::plan::TypedPlan;
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
 use crate::utils::ArrangeHandler;
 
@@ -206,8 +206,6 @@ fn eval_mfp_core(
 
 #[cfg(test)]
 mod test {
-    use std::cell::RefCell;
-    use std::rc::Rc;
 
     use datatypes::data_type::ConcreteDataType;
     use hydroflow::scheduled::graph::Hydroflow;
@@ -216,6 +214,7 @@ mod test {
     use crate::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
     use crate::compute::state::DataflowState;
     use crate::expr::{self, BinaryFunc, GlobalId};
+    use crate::plan::Plan;
     use crate::repr::{ColumnType, RelationType};
 
     /// test if temporal filter works properly

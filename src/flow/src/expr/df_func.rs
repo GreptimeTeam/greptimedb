@@ -14,8 +14,7 @@
 
 //! Porting Datafusion scalar function to our scalar function to be used in dataflow
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::BytesMut;
 use common_error::ext::BoxedError;
@@ -23,27 +22,19 @@ use common_recordbatch::DfRecordBatch;
 use common_telemetry::debug;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::DataType;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
-use datatypes::vectors::{Helper, Vector, VectorRef};
-use datatypes::{arrow_array, value};
 use prost::Message;
-use serde::{Deserialize, Serialize};
-use snafu::{ensure, IntoError, OptionExt, ResultExt};
+use snafu::{IntoError, ResultExt};
 use substrait::error::{DecodeRelSnafu, EncodeRelSnafu};
-use substrait::substrait_proto_df::proto::expression::{RexType, ScalarFunction};
-use substrait::substrait_proto_df::proto::Expression;
+use substrait::substrait_proto_df::proto::expression::ScalarFunction;
 
-use crate::error::{
-    DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
-};
+use crate::error::Error;
 use crate::expr::error::{
-    ArrowSnafu, DataTypeSnafu, DatafusionSnafu as EvalDatafusionSnafu, EvalError, ExternalSnafu,
-    InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
+    ArrowSnafu, DatafusionSnafu as EvalDatafusionSnafu, EvalError, ExternalSnafu,
+    InvalidArgumentSnafu,
 };
-use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::expr::ScalarExpr;
-use crate::repr::{ColumnType, RelationDesc, RelationType};
+use crate::repr::RelationDesc;
 use crate::transform::{from_scalar_fn_to_df_fn_impl, FunctionExtensions};
 
 /// A way to represent a scalar function that is implemented in Datafusion
@@ -204,18 +195,16 @@ impl std::hash::Hash for DfScalarFunction {
 
 #[cfg(test)]
 mod test {
-    use datatypes::arrow::array::Scalar;
-    use query::parser::QueryLanguageParser;
-    use query::QueryEngine;
-    use session::context::QueryContext;
-    use substrait::extension_serializer;
+
+    use datatypes::prelude::ConcreteDataType;
     use substrait::substrait_proto_df::proto::expression::literal::LiteralType;
-    use substrait::substrait_proto_df::proto::expression::Literal;
+    use substrait::substrait_proto_df::proto::expression::{Literal, RexType};
     use substrait::substrait_proto_df::proto::function_argument::ArgType;
-    use substrait::substrait_proto_df::proto::r#type::Kind;
-    use substrait::substrait_proto_df::proto::{r#type, FunctionArgument, Type};
+    use substrait::substrait_proto_df::proto::{Expression, FunctionArgument};
 
     use super::*;
+    use crate::repr::{ColumnType, RelationType};
+
     #[tokio::test]
     async fn test_df_scalar_function() {
         let raw_scalar_func = ScalarFunction {

@@ -19,7 +19,6 @@
 #![feature(let_chains)]
 #![feature(duration_abs_diff)]
 #![allow(dead_code)]
-#![allow(unused_imports)]
 #![warn(clippy::missing_docs_in_private_items)]
 #![warn(clippy::too_many_lines)]
 // allow unused for now because it should be use later

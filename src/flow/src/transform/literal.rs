@@ -34,8 +34,7 @@ use substrait::variation_const::{
 };
 use substrait_proto::proto::expression::literal::LiteralType;
 use substrait_proto::proto::expression::Literal;
-use substrait_proto::proto::r#type::{self, parameter, Kind, Parameter};
-use substrait_proto::proto::Type;
+use substrait_proto::proto::r#type::Kind;
 
 use crate::error::{Error, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu};
 use crate::transform::substrait_proto;

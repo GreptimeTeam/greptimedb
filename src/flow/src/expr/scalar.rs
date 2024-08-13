@@ -15,36 +15,22 @@
 //! Scalar expressions.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
 
-use bytes::BytesMut;
 use common_error::ext::BoxedError;
-use common_recordbatch::DfRecordBatch;
-use common_telemetry::debug;
-use datafusion_physical_expr::PhysicalExpr;
-use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
-use datatypes::vectors::{Helper, Vector, VectorRef};
-use datatypes::{arrow_array, value};
-use prost::Message;
-use serde::{Deserialize, Serialize};
-use snafu::{ensure, IntoError, OptionExt, ResultExt};
-use substrait::error::{DecodeRelSnafu, EncodeRelSnafu};
-use substrait::substrait_proto_df::proto::expression::{RexType, ScalarFunction};
-use substrait::substrait_proto_df::proto::Expression;
+use datatypes::vectors::{Helper, VectorRef};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
 use crate::expr::error::{
-    ArrowSnafu, DataTypeSnafu, DatafusionSnafu as EvalDatafusionSnafu, EvalError, ExternalSnafu,
-    InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
+    DataTypeSnafu, EvalError, InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::expr::DfScalarFunction;
-use crate::repr::{ColumnType, RelationDesc, RelationType};
-use crate::transform::{from_scalar_fn_to_df_fn_impl, FunctionExtensions};
+use crate::repr::{ColumnType, RelationType};
 /// A scalar expression with a known type.
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TypedExpr {
@@ -632,19 +618,9 @@ impl ScalarExpr {
 
 #[cfg(test)]
 mod test {
-    use datatypes::arrow::array::Scalar;
-    use query::parser::QueryLanguageParser;
-    use query::QueryEngine;
-    use session::context::QueryContext;
-    use substrait::extension_serializer;
-    use substrait::substrait_proto_df::proto::expression::literal::LiteralType;
-    use substrait::substrait_proto_df::proto::expression::Literal;
-    use substrait::substrait_proto_df::proto::function_argument::ArgType;
-    use substrait::substrait_proto_df::proto::r#type::Kind;
-    use substrait::substrait_proto_df::proto::{r#type, FunctionArgument, Type};
 
     use super::*;
-    use crate::expr::RawDfScalarFn;
+
     #[test]
     fn test_extract_bound() {
         let test_list: [(ScalarExpr, Result<_, EvalError>); 5] = [

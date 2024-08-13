@@ -14,17 +14,12 @@
 
 //! Error handling for expression evaluation.
 
-use std::any::Any;
-
 use arrow_schema::ArrowError;
 use common_error::ext::BoxedError;
 use common_macro::stack_trace_debug;
-use common_telemetry::common_error::ext::ErrorExt;
-use common_telemetry::common_error::status_code::StatusCode;
 use datafusion_common::DataFusionError;
 use datatypes::data_type::ConcreteDataType;
-use serde::{Deserialize, Serialize};
-use snafu::{Location, ResultExt, Snafu};
+use snafu::{Location, Snafu};
 
 fn is_send_sync() {
     fn check<T: Send + Sync>() {}
