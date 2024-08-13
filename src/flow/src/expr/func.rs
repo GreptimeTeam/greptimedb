@@ -42,7 +42,7 @@ use crate::expr::error::{
     TryFromValueSnafu, TypeMismatchSnafu,
 };
 use crate::expr::signature::{GenericFn, Signature};
-use crate::expr::{InvalidArgumentSnafu, ScalarExpr, TypedExpr};
+use crate::expr::{check_batch, InvalidArgumentSnafu, ScalarExpr, TypedExpr};
 use crate::repr::{self, value_to_internal_ts};
 
 /// UnmaterializableFunc is a function that can't be eval independently,
@@ -228,9 +228,11 @@ impl UnaryFunc {
     pub fn eval_batch(
         &self,
         batch: &[VectorRef],
+        row_count: Option<usize>,
         expr: &ScalarExpr,
     ) -> Result<VectorRef, EvalError> {
-        let arg_col = expr.eval_batch(batch)?;
+        check_batch(batch, row_count)?;
+        let arg_col = expr.eval_batch(batch, row_count)?;
         match self {
             &Self::Not => {
                 let arrow_array = arg_col.to_arrow_array();
@@ -843,12 +845,14 @@ impl BinaryFunc {
     pub fn eval_batch(
         &self,
         batch: &[VectorRef],
+        row_count: Option<usize>,
         expr1: &ScalarExpr,
         expr2: &ScalarExpr,
     ) -> Result<VectorRef, EvalError> {
-        let left = expr1.eval_batch(batch)?;
+        check_batch(batch, row_count)?;
+        let left = expr1.eval_batch(batch, row_count)?;
         let left = left.to_arrow_array();
-        let right = expr2.eval_batch(batch)?;
+        let right = expr2.eval_batch(batch, row_count)?;
         let right = right.to_arrow_array();
 
         let arrow_array: ArrayRef = match self {
@@ -1067,8 +1071,10 @@ impl VariadicFunc {
     pub fn eval_batch(
         &self,
         batch: &[VectorRef],
+        row_count: Option<usize>,
         exprs: &[ScalarExpr],
     ) -> Result<VectorRef, EvalError> {
+        check_batch(batch, row_count)?;
         ensure!(
             exprs.len() >= 2,
             InvalidArgumentSnafu {
@@ -1077,7 +1083,10 @@ impl VariadicFunc {
         );
         let args = exprs
             .iter()
-            .map(|expr| expr.eval_batch(batch).map(|v| v.to_arrow_array()))
+            .map(|expr| {
+                expr.eval_batch(batch, row_count)
+                    .map(|v| v.to_arrow_array())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let mut iter = args.into_iter();
 

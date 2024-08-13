@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use arrow::array::RecordBatchOptions;
 use bytes::BytesMut;
 use common_error::ext::BoxedError;
 use common_recordbatch::DfRecordBatch;
@@ -23,6 +24,7 @@ use common_telemetry::debug;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::DataType;
 use datatypes::value::Value;
+use datatypes::vectors::VectorRef;
 use prost::Message;
 use snafu::{IntoError, ResultExt};
 use substrait::error::{DecodeRelSnafu, EncodeRelSnafu};
@@ -33,16 +35,19 @@ use crate::expr::error::{
     ArrowSnafu, DatafusionSnafu as EvalDatafusionSnafu, EvalError, ExternalSnafu,
     InvalidArgumentSnafu,
 };
-use crate::expr::ScalarExpr;
+use crate::expr::{check_batch, ScalarExpr};
 use crate::repr::RelationDesc;
 use crate::transform::{from_scalar_fn_to_df_fn_impl, FunctionExtensions};
 
 /// A way to represent a scalar function that is implemented in Datafusion
 #[derive(Debug, Clone)]
 pub struct DfScalarFunction {
+    /// The raw bytes encoded datafusion scalar function
     pub(crate) raw_fn: RawDfScalarFn,
     // TODO(discord9): directly from datafusion expr
+    /// The implementation of the function
     pub(crate) fn_impl: Arc<dyn PhysicalExpr>,
+    /// The input schema of the function
     pub(crate) df_schema: Arc<datafusion_common::DFSchema>,
 }
 
@@ -61,6 +66,53 @@ impl DfScalarFunction {
             df_schema: Arc::new(raw_fn.input_schema.to_df_schema()?),
             raw_fn,
         })
+    }
+
+    /// Evaluate a batch of expressions using input values
+    pub fn eval_batch(
+        &self,
+        batch: &[VectorRef],
+        row_count: Option<usize>,
+        exprs: &[ScalarExpr],
+    ) -> Result<VectorRef, EvalError> {
+        check_batch(batch, row_count)?;
+        let batch: Vec<_> = exprs
+            .iter()
+            .map(|expr| expr.eval_batch(batch, row_count))
+            .collect::<Result<_, _>>()?;
+
+        let schema = self.df_schema.inner().clone();
+
+        let arrays = batch
+            .iter()
+            .map(|array| array.to_arrow_array())
+            .collect::<Vec<_>>();
+        let rb = DfRecordBatch::try_new_with_options(schema, arrays, &RecordBatchOptions::new().with_row_count(row_count)).map_err(|err| {
+            ArrowSnafu {
+                context:
+                    "Failed to create RecordBatch from values when eval_batch datafusion scalar function",
+            }
+            .into_error(err)
+        })?;
+
+        let len = rb.num_rows();
+
+        let res = self.fn_impl.evaluate(&rb).map_err(|err| {
+            EvalDatafusionSnafu {
+                raw: err,
+                context: "Failed to evaluate datafusion scalar function",
+            }
+            .build()
+        })?;
+        let res = common_query::columnar_value::ColumnarValue::try_from(&res)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let res_vec = res
+            .try_into_vector(len)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        Ok(res_vec)
     }
 
     /// eval a list of expressions using input values
@@ -97,7 +149,12 @@ impl DfScalarFunction {
             cols.push(array.to_vector().to_arrow_array());
         }
         let schema = self.df_schema.inner().clone();
-        let rb = DfRecordBatch::try_new(schema, cols).map_err(|err| {
+        let rb = DfRecordBatch::try_new_with_options(
+            schema,
+            cols,
+            &RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .map_err(|err| {
             ArrowSnafu {
                 context:
                     "Failed to create RecordBatch from values when eval datafusion scalar function",

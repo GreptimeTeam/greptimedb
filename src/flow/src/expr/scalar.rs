@@ -15,11 +15,12 @@
 //! Scalar expressions.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use common_error::ext::BoxedError;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
-use datatypes::vectors::{Helper, VectorRef};
+use datatypes::vectors::{Helper, NullVector, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
@@ -29,7 +30,7 @@ use crate::expr::error::{
     DataTypeSnafu, EvalError, InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
-use crate::expr::DfScalarFunction;
+use crate::expr::{check_batch, DfScalarFunction};
 use crate::repr::{ColumnType, RelationType};
 /// A scalar expression with a known type.
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Hash)]
@@ -259,14 +260,20 @@ impl ScalarExpr {
         }
     }
 
-    pub fn eval_batch(&self, batch: &[VectorRef]) -> Result<VectorRef, EvalError> {
+    pub fn eval_batch(
+        &self,
+        batch: &[VectorRef],
+        row_count: Option<usize>,
+    ) -> Result<VectorRef, EvalError> {
+        check_batch(batch, row_count)?;
+
         match self {
             ScalarExpr::Column(i) => Ok(batch[*i].clone()),
             ScalarExpr::Literal(val, dt) => Ok(Helper::try_from_scalar_value(
                 val.try_to_scalar_value(dt).context(DataTypeSnafu {
                     msg: "Fail to convert literal to scalar value",
                 })?,
-                batch.first().map(|v| v.len()).unwrap_or(1),
+                batch.first().map(|v| v.len()).or(row_count).unwrap_or(1),
             )
             .context(DataTypeSnafu {
                 msg: "Fail to convert scalar value to vector ref when parsing literal",
@@ -275,15 +282,17 @@ impl ScalarExpr {
                 reason: "Can't eval unmaterializable function".to_string(),
             }
             .fail()?,
-            ScalarExpr::CallUnary { func, expr } => func.eval_batch(batch, expr),
-            ScalarExpr::CallBinary { func, expr1, expr2 } => func.eval_batch(batch, expr1, expr2),
-            ScalarExpr::CallVariadic { func, exprs } => func.eval_batch(batch, exprs),
+            ScalarExpr::CallUnary { func, expr } => func.eval_batch(batch, row_count, expr),
+            ScalarExpr::CallBinary { func, expr1, expr2 } => {
+                func.eval_batch(batch, row_count, expr1, expr2)
+            }
+            ScalarExpr::CallVariadic { func, exprs } => func.eval_batch(batch, row_count, exprs),
             ScalarExpr::CallDf {
                 df_scalar_fn,
                 exprs,
-            } => todo!(),
+            } => df_scalar_fn.eval_batch(batch, row_count, exprs),
             ScalarExpr::If { cond, then, els } => {
-                let conds = cond.eval_batch(batch)?;
+                let conds = cond.eval_batch(batch, row_count)?;
                 let bool_conds = conds
                     .as_any()
                     .downcast_ref::<arrow::array::BooleanArray>()
@@ -293,8 +302,53 @@ impl ScalarExpr {
                             actual: conds.data_type(),
                         }
                     })?;
+
+                let mut ret_vec = None;
+
+                for (idx, cond) in bool_conds.iter().enumerate() {
+                    let input_vectors = batch
+                        .iter()
+                        .map(|v| v.clone().slice(idx, 1))
+                        .collect::<Vec<_>>();
+
+                    let res: VectorRef = match cond {
+                        Some(true) => then.eval_batch(&input_vectors, Some(1))?,
+                        Some(false) => els.eval_batch(&input_vectors, Some(1))?,
+                        None => Arc::new(NullVector::new(1)),
+                    };
+                    match &mut ret_vec {
+                        None => {
+                            let mut builder =
+                                res.data_type().create_mutable_vector(bool_conds.len());
+                            builder
+                                .try_push_value_ref(
+                                    res.try_get(0)
+                                        .map_err(BoxedError::new)
+                                        .context(crate::expr::error::ExternalSnafu)?
+                                        .as_value_ref(),
+                                )
+                                .map_err(BoxedError::new)
+                                .context(crate::expr::error::ExternalSnafu)?;
+                            ret_vec = Some(builder);
+                        }
+                        Some(vec_builder) => {
+                            vec_builder
+                                .try_push_value_ref(
+                                    res.try_get(0)
+                                        .map_err(BoxedError::new)
+                                        .context(crate::expr::error::ExternalSnafu)?
+                                        .as_value_ref(),
+                                )
+                                .map_err(BoxedError::new)
+                                .context(crate::expr::error::ExternalSnafu)?;
+                        }
+                    }
+                }
                 // TODO(discord9): need Vec<Value> try into VectorRef
-                todo!()
+                match ret_vec {
+                    Some(mut ret) => Ok(ret.to_vector()),
+                    None => Ok(Arc::new(NullVector::new(0))),
+                }
             }
         }
     }
