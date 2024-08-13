@@ -15,7 +15,7 @@
       "type": "grafana",
       "id": "grafana",
       "name": "Grafana",
-      "version": "10.2.3"
+      "version": "10.1.5"
     },
     {
       "type": "datasource",
@@ -84,7 +84,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -190,7 +189,9 @@
       "id": 152,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -209,11 +210,11 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, path, code) (rate(greptime_servers_grpc_requests_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, path, code) (rate(greptime_servers_grpc_requests_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{path}}-{{code}}-p99",
+          "legendFormat": "{{instance}}-{{path}}-{{code}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -226,13 +227,13 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, path, code) (rate(greptime_servers_grpc_requests_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
-          "hide": false,
+          "hide": true,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{path}}-{{code}}-qps",
+          "legendFormat": "{{instance}}-{{path}}-{{code}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -252,7 +253,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -358,7 +358,9 @@
       "id": 154,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -379,11 +381,11 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, path, method, code) (rate(greptime_servers_http_requests_elapsed_bucket{greptime_pod=~\"$greptime_pod\",path!~\"/health|/metrics\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, path, method, code) (rate(greptime_servers_http_requests_elapsed_bucket{instance=~\"$instance\",path!~\"/health|/metrics\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{path}}-{{method}}-{{code}}-p99",
+          "legendFormat": "{{instance}}-{{path}}-{{method}}-{{code}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -396,13 +398,13 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, path, method, code) (rate(greptime_servers_http_requests_elapsed_count{greptime_pod=~\"$greptime_pod\",path!~\"/health|/metrics\"}[$__rate_interval]))",
+          "expr": "sum by(instance, path, method, code) (rate(greptime_servers_http_requests_elapsed_count{instance=~\"$instance\",path!~\"/health|/metrics\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{path}}-{{method}}-{{code}}-qps",
+          "legendFormat": "{{instance}}-{{path}}-{{method}}-{{code}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -422,7 +424,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -528,7 +529,9 @@
       "id": 156,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -549,11 +552,11 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, subprotocol, db) (rate(greptime_servers_mysql_query_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, subprotocol, db) (rate(greptime_servers_mysql_query_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{subprotocol}}-{{db}}-p99",
+          "legendFormat": "{{instance}}-{{subprotocol}}-{{db}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -566,13 +569,13 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, subprotocol, db) (rate(greptime_servers_mysql_query_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, subprotocol, db) (rate(greptime_servers_mysql_query_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{subprotocol}}-{{db}}-qps",
+          "legendFormat": "{{instance}}-{{subprotocol}}-{{db}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -592,7 +595,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -698,7 +700,9 @@
       "id": 157,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -719,11 +723,11 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, subprotocol, db) (rate(greptime_servers_postgres_query_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, subprotocol, db) (rate(greptime_servers_postgres_query_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{subprotocol}}-{{db}}-p99",
+          "legendFormat": "{{instance}}-{{subprotocol}}-{{db}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -736,13 +740,13 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, subprotocol, db) (rate(greptime_servers_postgres_query_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, subprotocol, db) (rate(greptime_servers_postgres_query_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{subprotocol}}-{{db}}-qps",
+          "legendFormat": "{{instance}}-{{subprotocol}}-{{db}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -775,7 +779,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -881,7 +884,9 @@
       "id": 159,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -902,11 +907,11 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, db) (rate(greptime_servers_http_sql_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, db) (rate(greptime_servers_http_sql_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{db}}-p99",
+          "legendFormat": "{{instance}}-{{db}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -919,13 +924,13 @@
           "disableTextWrap": false,
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, db) (rate(greptime_servers_http_sql_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, db) (rate(greptime_servers_http_sql_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{db}}-qps",
+          "legendFormat": "{{instance}}-{{db}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -945,7 +950,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -1051,7 +1055,9 @@
       "id": 160,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -1072,11 +1078,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, db) (rate(greptime_servers_http_promql_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, db) (rate(greptime_servers_http_promql_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{db}}-p99",
+          "legendFormat": "{{instance}}-{{db}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1089,13 +1095,13 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, db) (rate(greptime_servers_http_promql_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, db) (rate(greptime_servers_http_promql_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{db}}-qps",
+          "legendFormat": "{{instance}}-{{db}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -1115,7 +1121,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -1221,7 +1226,9 @@
       "id": 161,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -1242,11 +1249,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, db) (rate(greptime_servers_http_influxdb_write_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, db) (rate(greptime_servers_http_influxdb_write_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{db}}-p99",
+          "legendFormat": "{{instance}}-{{db}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1259,13 +1266,13 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, db) (rate(greptime_servers_http_influxdb_write_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, db) (rate(greptime_servers_http_influxdb_write_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{db}}-qps",
+          "legendFormat": "{{instance}}-{{db}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -1285,7 +1292,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -1391,7 +1397,9 @@
       "id": 162,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -1412,11 +1420,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, db) (rate(greptime_servers_http_prometheus_write_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, db) (rate(greptime_servers_http_prometheus_write_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{db}}-p99",
+          "legendFormat": "{{instance}}-{{db}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1429,13 +1437,13 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, db) (rate(greptime_servers_http_prometheus_write_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, db) (rate(greptime_servers_http_prometheus_write_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{db}}-qps",
+          "legendFormat": "{{instance}}-{{db}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -1455,7 +1463,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -1561,7 +1568,9 @@
       "id": 183,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -1582,11 +1591,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, db) (rate(greptime_servers_http_prometheus_read_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, db) (rate(greptime_servers_http_prometheus_read_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{db}}-p99",
+          "legendFormat": "{{instance}}-{{db}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1599,13 +1608,13 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, db) (rate(greptime_servers_http_prometheus_read_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, db) (rate(greptime_servers_http_prometheus_read_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{db}}-qps",
+          "legendFormat": "{{instance}}-{{db}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -1625,7 +1634,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -1731,7 +1739,9 @@
       "id": 184,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -1752,11 +1762,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, db) (rate(greptime_servers_http_otlp_metrics_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, db) (rate(greptime_servers_http_otlp_metrics_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{db}}-p99",
+          "legendFormat": "{{instance}}-{{db}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1769,13 +1779,13 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, db) (rate(greptime_servers_http_otlp_metrics_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, db) (rate(greptime_servers_http_otlp_metrics_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{db}}-qps",
+          "legendFormat": "{{instance}}-{{db}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -1795,7 +1805,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -1901,7 +1910,9 @@
       "id": 185,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -1922,11 +1933,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, db) (rate(greptime_servers_http_otlp_traces_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, db) (rate(greptime_servers_http_otlp_traces_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{db}}-p99",
+          "legendFormat": "{{instance}}-{{db}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1939,13 +1950,13 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, db) (rate(greptime_servers_http_otlp_traces_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, db) (rate(greptime_servers_http_otlp_traces_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{db}}-qps",
+          "legendFormat": "{{instance}}-{{db}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -1978,7 +1989,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -2084,7 +2094,9 @@
       "id": 164,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -2105,11 +2117,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "label_replace(histogram_quantile(0.99, sum by(greptime_pod, le, db, type, code) (rate(greptime_servers_grpc_db_request_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))), \"db\", \"$1\", \"db\", \"(.*)-public\")",
+          "expr": "label_replace(histogram_quantile(0.99, sum by(instance, le, db, type, code) (rate(greptime_servers_grpc_db_request_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval]))), \"db\", \"$1\", \"db\", \"(.*)-public\")",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{db}}-{{type}}-{{code}}-p99",
+          "legendFormat": "{{instance}}-{{db}}-{{type}}-{{code}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -2122,13 +2134,13 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, db, type, code) (rate(greptime_servers_grpc_db_request_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, db, type, code) (rate(greptime_servers_grpc_db_request_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{db}}-{{type}}-{{code}}-qps",
+          "legendFormat": "{{instance}}-{{db}}-{{type}}-{{code}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -2148,7 +2160,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -2254,7 +2265,9 @@
       "id": 165,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -2275,11 +2288,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, db) (rate(greptime_servers_grpc_prom_request_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, db) (rate(greptime_servers_grpc_prom_request_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{db}}-p99",
+          "legendFormat": "{{instance}}-{{db}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -2292,13 +2305,13 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, db) (rate(greptime_servers_grpc_prom_request_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, db) (rate(greptime_servers_grpc_prom_request_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{db}}-qps",
+          "legendFormat": "{{instance}}-{{db}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -2331,7 +2344,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -2437,7 +2449,9 @@
       "id": 186,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true,
@@ -2458,17 +2472,17 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "rate(greptime_table_operator_ingest_rows{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])",
+          "expr": "rate(greptime_table_operator_ingest_rows{instance=~\"$instance\"}[$__rate_interval])",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-rps",
+          "legendFormat": "{{instance}}-rps",
           "range": true,
           "refId": "A",
           "useBackend": false
         }
       ],
-      "title": "ingested rows",
+      "title": "Ingested rows",
       "type": "timeseries"
     },
     {
@@ -2482,7 +2496,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -2588,7 +2601,9 @@
       "id": 167,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -2607,11 +2622,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, request_type) (rate(greptime_grpc_region_request_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, request_type) (rate(greptime_grpc_region_request_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{request_type}}-p99",
+          "legendFormat": "{{instance}}-{{request_type}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -2624,13 +2639,13 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, request_type) (rate(greptime_grpc_region_request_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, request_type) (rate(greptime_grpc_region_request_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{request_type}}-qps",
+          "legendFormat": "{{instance}}-{{request_type}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -2663,7 +2678,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -2769,7 +2783,9 @@
       "id": 188,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -2788,12 +2804,12 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, type) (rate(greptime_mito_handle_request_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, type) (rate(greptime_mito_handle_request_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{type}}-p99",
+          "legendFormat": "{{instance}}-{{type}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -2806,18 +2822,18 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, type) (rate(greptime_mito_handle_request_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, type) (rate(greptime_mito_handle_request_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{type}}-qps",
+          "legendFormat": "{{instance}}-{{type}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
         }
       ],
-      "title": "handle request",
+      "title": "Handle request",
       "type": "timeseries"
     },
     {
@@ -2831,7 +2847,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -2907,11 +2922,11 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "greptime_mito_write_buffer_bytes{greptime_pod=~\"$greptime_pod\"}",
+          "expr": "greptime_mito_write_buffer_bytes{instance=~\"$instance\"}",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}",
+          "legendFormat": "{{instance}}",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -2931,7 +2946,229 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 61
+      },
+      "id": 189,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "sum by(instance) (greptime_mito_write_stall_total{instance=~\"$instance\"})",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "{{instance}}",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Write buffer bytes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS-1}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsZero",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "id": 170,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "histogram_quantile(0.99, sum by(instance, le, stage) (rate(greptime_mito_write_stage_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "{{instance}}-{{stage}}-p99",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Write stage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS-1}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -3032,12 +3269,14 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 61
+        "y": 69
       },
       "id": 169,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -3056,12 +3295,12 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, reason) (rate(greptime_mito_flush_requests_total{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, reason) (rate(greptime_mito_flush_requests_total{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{reason}}-success",
+          "legendFormat": "{{instance}}-{{reason}}-success",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -3074,12 +3313,12 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, reason) (rate(greptime_mito_flush_errors_total{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, reason) (rate(greptime_mito_flush_errors_total{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{reason}}-error",
+          "legendFormat": "{{instance}}-{{reason}}-error",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -3092,18 +3331,18 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod) (rate(greptime_mito_flush_bytes_total{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance) (rate(greptime_mito_flush_bytes_total{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-bytes",
+          "legendFormat": "{{instance}}-bytes",
           "range": true,
           "refId": "C",
           "useBackend": false
         }
       ],
-      "title": "flush total",
+      "title": "Flush total",
       "type": "timeseries"
     },
     {
@@ -3117,343 +3356,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "points",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*?-qps"
-            },
-            "properties": [
-              {
-                "id": "custom.drawStyle",
-                "value": "line"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "unit",
-                "value": "ops"
-              },
-              {
-                "id": "custom.stacking",
-                "value": {
-                  "group": "A",
-                  "mode": "none"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byValue",
-              "options": {
-                "op": "gte",
-                "reducer": "allIsZero",
-                "value": 0
-              }
-            },
-            "properties": [
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": true,
-                  "tooltip": true,
-                  "viz": true
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 61
-      },
-      "id": 170,
-      "options": {
-        "legend": {
-          "calcs": ["last"],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS-1}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, stage) (rate(greptime_mito_write_stage_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
-          "fullMetaSearch": false,
-          "includeNullMetadata": true,
-          "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{stage}}-p99",
-          "range": true,
-          "refId": "A",
-          "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS-1}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "exemplar": false,
-          "expr": "sum by(greptime_pod, stage) (rate(greptime_mito_write_stage_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
-          "fullMetaSearch": false,
-          "hide": false,
-          "includeNullMetadata": true,
-          "instant": false,
-          "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{stage}}-qps",
-          "range": true,
-          "refId": "B",
-          "useBackend": false
-        }
-      ],
-      "title": "write stage",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS-1}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "points",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*?-qps"
-            },
-            "properties": [
-              {
-                "id": "custom.drawStyle",
-                "value": "line"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "unit",
-                "value": "ops"
-              },
-              {
-                "id": "custom.stacking",
-                "value": {
-                  "group": "A",
-                  "mode": "none"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byValue",
-              "options": {
-                "op": "gte",
-                "reducer": "allIsZero",
-                "value": 0
-              }
-            },
-            "properties": [
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": true,
-                  "tooltip": true,
-                  "viz": true
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 69
-      },
-      "id": 172,
-      "options": {
-        "legend": {
-          "calcs": ["last"],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS-1}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le) (rate(greptime_mito_compaction_total_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
-          "fullMetaSearch": false,
-          "includeNullMetadata": true,
-          "instant": false,
-          "legendFormat": "{{greptime_pod}}-p99",
-          "range": true,
-          "refId": "A",
-          "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS-1}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "exemplar": false,
-          "expr": "sum by(greptime_pod) (rate(greptime_mito_compaction_total_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
-          "fullMetaSearch": false,
-          "hide": false,
-          "includeNullMetadata": true,
-          "instant": false,
-          "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-qps",
-          "range": true,
-          "refId": "B",
-          "useBackend": false
-        }
-      ],
-      "title": "compaction total",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS-1}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -3556,10 +3458,12 @@
         "x": 12,
         "y": 69
       },
-      "id": 171,
+      "id": 191,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -3578,11 +3482,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, stage) (rate(greptime_mito_read_stage_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{stage}}-p99",
+          "legendFormat": "{{instance}}-{{stage}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -3595,19 +3499,19 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, stage) (rate(greptime_mito_compaction_stage_elapsed_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance) (rate(greptime_mito_read_stage_elapsed_count{instance=~\"$instance\", stage=\"total\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{stage}}-qps",
+          "legendFormat": "{{instance}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
         }
       ],
-      "title": "compaction stage",
+      "title": "Read stage",
       "type": "timeseries"
     },
     {
@@ -3621,7 +3525,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -3724,10 +3627,12 @@
         "x": 0,
         "y": 77
       },
-      "id": 191,
+      "id": 172,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -3744,13 +3649,13 @@
             "uid": "${DS_PROMETHEUS-1}"
           },
           "disableTextWrap": false,
-          "editorMode": "code",
+          "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, stage) (rate(greptime_mito_read_stage_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le) (rate(greptime_mito_compaction_total_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{stage}}-p99",
+          "legendFormat": "{{instance}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -3761,21 +3666,21 @@
             "uid": "${DS_PROMETHEUS-1}"
           },
           "disableTextWrap": false,
-          "editorMode": "code",
+          "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, stage) (rate(greptime_mito_read_stage_elapsed_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance) (rate(greptime_mito_compaction_total_elapsed_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{stage}}-qps",
+          "legendFormat": "{{instance}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
         }
       ],
-      "title": "write stage",
+      "title": "Compaction total",
       "type": "timeseries"
     },
     {
@@ -3789,7 +3694,129 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsZero",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 77
+      },
+      "id": 171,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS-1}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "histogram_quantile(0.99, sum by(instance, le, stage) (rate(greptime_mito_compaction_stage_elapsed_bucket{instance=~\"$instance\"}[$__rate_interval])))",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "{{instance}}-{{stage}}-p99",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Compaction stage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS-1}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -3841,10 +3868,10 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 77
+        "x": 0,
+        "y": 85
       },
-      "id": 189,
+      "id": 192,
       "options": {
         "legend": {
           "calcs": [],
@@ -3864,18 +3891,18 @@
             "uid": "${DS_PROMETHEUS-1}"
           },
           "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "greptime_mito_cache_bytes{greptime_pod=~\"$greptime_pod\"}",
+          "editorMode": "code",
+          "expr": "greptime_mito_cache_bytes{instance=~\"$instance\"}",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}",
+          "legendFormat": "{{instance}}-{{type}}",
           "range": true,
           "refId": "A",
           "useBackend": false
         }
       ],
-      "title": "cache size",
+      "title": "Cached bytes",
       "type": "timeseries"
     },
     {
@@ -3889,7 +3916,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -3941,10 +3967,10 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 85
       },
-      "id": 190,
+      "id": 193,
       "options": {
         "legend": {
           "calcs": [],
@@ -3965,17 +3991,17 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "greptime_mito_cache_hit{greptime_pod=~\"$greptime_pod\"} / (greptime_mito_cache_hit{greptime_pod=~\"$greptime_pod\"} + greptime_mito_cache_miss{greptime_pod=~\"$greptime_pod\"})",
+          "expr": "sum(increase(greptime_mito_cache_hit[$__rate_interval])) by (instance, type) / (sum(increase(greptime_mito_cache_miss[$__rate_interval])) by (instance, type) + sum(increase(greptime_mito_cache_hit[$__rate_interval])) by (instance, type))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{type}}",
+          "legendFormat": "{{instance}}-{{type}}",
           "range": true,
           "refId": "A",
           "useBackend": false
         }
       ],
-      "title": "cache hit",
+      "title": "Cache hit rate",
       "type": "timeseries"
     },
     {
@@ -4002,7 +4028,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -4108,7 +4133,9 @@
       "id": 178,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -4127,11 +4154,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, scheme) (rate(opendal_requests_duration_seconds_bucket{greptime_pod=~\"$greptime_pod\",operation=\"read\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, scheme) (rate(opendal_requests_duration_seconds_bucket{instance=~\"$instance\",operation=\"read\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-p99",
+          "legendFormat": "{{instance}}-{{scheme}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -4144,19 +4171,19 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, scheme) (rate(opendal_requests_duration_seconds_count{greptime_pod=~\"$greptime_pod\", operation=\"read\"}[$__rate_interval]))",
+          "expr": "sum by(instance, scheme) (rate(opendal_requests_duration_seconds_count{instance=~\"$instance\", operation=\"read\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-qps",
+          "legendFormat": "{{instance}}-{{scheme}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
         }
       ],
-      "title": "requests_duration_seconds_READ",
+      "title": "Read requests",
       "type": "timeseries"
     },
     {
@@ -4170,7 +4197,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -4276,7 +4302,9 @@
       "id": 179,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -4295,11 +4323,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, scheme) (rate(opendal_requests_duration_seconds_bucket{greptime_pod=~\"$greptime_pod\", operation=\"write\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, scheme) (rate(opendal_requests_duration_seconds_bucket{instance=~\"$instance\", operation=\"write\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-p99",
+          "legendFormat": "{{instance}}-{{scheme}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -4312,19 +4340,19 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, scheme) (rate(opendal_requests_duration_seconds_count{greptime_pod=~\"$greptime_pod\", operation=\"write\"}[$__rate_interval]))",
+          "expr": "sum by(instance, scheme) (rate(opendal_requests_duration_seconds_count{instance=~\"$instance\", operation=\"write\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-qps",
+          "legendFormat": "{{instance}}-{{scheme}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
         }
       ],
-      "title": "requests_duration_seconds_WRITE",
+      "title": "Write requests",
       "type": "timeseries"
     },
     {
@@ -4338,7 +4366,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -4444,7 +4471,9 @@
       "id": 180,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -4463,11 +4492,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, scheme) (rate(opendal_requests_duration_seconds_bucket{greptime_pod=~\"$greptime_pod\", operation=\"list\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, scheme) (rate(opendal_requests_duration_seconds_bucket{instance=~\"$instance\", operation=\"list\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-p99",
+          "legendFormat": "{{instance}}-{{scheme}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -4480,19 +4509,19 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, scheme) (rate(opendal_requests_duration_seconds_count{greptime_pod=~\"$greptime_pod\", operation=\"list\"}[$__rate_interval]))",
+          "expr": "sum by(instance, scheme) (rate(opendal_requests_duration_seconds_count{instance=~\"$instance\", operation=\"list\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-qps",
+          "legendFormat": "{{instance}}-{{scheme}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
         }
       ],
-      "title": "requests_duration_seconds_LIST",
+      "title": "List requests",
       "type": "timeseries"
     },
     {
@@ -4506,7 +4535,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -4612,7 +4640,9 @@
       "id": 182,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -4631,11 +4661,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, scheme) (rate(opendal_requests_duration_seconds_bucket{greptime_pod=~\"$greptime_pod\", operation=\"stat\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, scheme) (rate(opendal_requests_duration_seconds_bucket{instance=~\"$instance\", operation=\"stat\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-p99",
+          "legendFormat": "{{instance}}-{{scheme}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -4648,19 +4678,19 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, scheme) (rate(opendal_requests_duration_seconds_count{greptime_pod=~\"$greptime_pod\", operation=\"stat\"}[$__rate_interval]))",
+          "expr": "sum by(instance, scheme) (rate(opendal_requests_duration_seconds_count{instance=~\"$instance\", operation=\"stat\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-qps",
+          "legendFormat": "{{instance}}-{{scheme}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
         }
       ],
-      "title": "requests_duration_seconds_STAT",
+      "title": "Stat requests",
       "type": "timeseries"
     },
     {
@@ -4674,7 +4704,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -4780,7 +4809,9 @@
       "id": 181,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -4799,11 +4830,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, scheme, operation) (rate(opendal_requests_duration_seconds_bucket{greptime_pod=~\"$greptime_pod\", operation!~\"read|write|list\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, scheme, operation) (rate(opendal_requests_duration_seconds_bucket{instance=~\"$instance\", operation!~\"read|write|list\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-{{operation}}-p99",
+          "legendFormat": "{{instance}}-{{scheme}}-{{operation}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -4816,19 +4847,19 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, scheme, operation) (rate(opendal_requests_duration_seconds_count{greptime_pod=~\"$greptime_pod\", operation!~\"read|write|list\"}[$__rate_interval]))",
+          "expr": "sum by(instance, scheme, operation) (rate(opendal_requests_duration_seconds_count{instance=~\"$instance\", operation!~\"read|write|list\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-{{operation}}-qps",
+          "legendFormat": "{{instance}}-{{scheme}}-{{operation}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
         }
       ],
-      "title": "requests_duration_seconds",
+      "title": "Requests duration",
       "type": "timeseries"
     },
     {
@@ -4842,7 +4873,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -4948,7 +4978,9 @@
       "id": 177,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -4967,11 +4999,11 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "histogram_quantile(0.99, sum by(greptime_pod, le, scheme, operation) (rate(opendal_bytes_total_bucket{greptime_pod=~\"$greptime_pod\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, le, scheme, operation) (rate(opendal_bytes_total_bucket{instance=~\"$instance\"}[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-{{operation}}-p99",
+          "legendFormat": "{{instance}}-{{scheme}}-{{operation}}-p99",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -4984,19 +5016,19 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, scheme, operation) (rate(opendal_bytes_total_count{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, scheme, operation) (rate(opendal_bytes_total_count{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
           "interval": "$__rate_interval",
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-{{operation}}-bytes",
+          "legendFormat": "{{instance}}-{{scheme}}-{{operation}}-bytes",
           "range": true,
           "refId": "B",
           "useBackend": false
         }
       ],
-      "title": "bytes_total",
+      "title": "Bytes total",
       "type": "timeseries"
     },
     {
@@ -5010,7 +5042,6 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -5116,7 +5147,9 @@
       "id": 176,
       "options": {
         "legend": {
-          "calcs": ["last"],
+          "calcs": [
+            "last"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -5135,31 +5168,32 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(greptime_pod, scheme, operation) (rate(opendal_requests_total{greptime_pod=~\"$greptime_pod\"}[$__rate_interval]))",
+          "expr": "sum by(instance, scheme, operation) (rate(opendal_requests_total{instance=~\"$instance\"}[$__rate_interval]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{greptime_pod}}-{{scheme}}-{{operation}}-qps",
+          "legendFormat": "{{instance}}-{{scheme}}-{{operation}}-qps",
           "range": true,
           "refId": "B",
           "useBackend": false
         }
       ],
-      "title": "requests_total",
+      "title": "Requests total",
       "type": "timeseries"
     }
   ],
   "refresh": "5s",
-  "schemaVersion": 39,
+  "schemaVersion": 38,
+  "style": "dark",
   "tags": [],
   "templating": {
     "list": [
       {
         "current": {
-          "selected": true,
+          "selected": false,
           "text": "prometheus-1",
-          "value": "c0cef0a2-c372-45c2-a26d-e3dd1d349f0a"
+          "value": "prometheus-1"
         },
         "hide": 0,
         "includeAll": false,
@@ -5179,15 +5213,14 @@
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS-1}"
         },
-        "definition": "label_values(greptime_pod)",
+        "definition": "label_values(instance)",
         "hide": 0,
         "includeAll": true,
         "multi": false,
-        "name": "greptime_pod",
+        "name": "instance",
         "options": [],
         "query": {
-          "qryType": 1,
-          "query": "label_values(greptime_pod)",
+          "query": "label_values(instance)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
@@ -5199,13 +5232,13 @@
     ]
   },
   "time": {
-    "from": "now-1h",
+    "from": "now-30m",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "",
   "title": "GreptimeDB-Cluster",
   "uid": "ea35efe5-918e-44fa-9743-e9aa1a340a3f",
-  "version": 10,
+  "version": 11,
   "weekStart": ""
 }
