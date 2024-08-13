@@ -18,11 +18,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common_telemetry::debug;
 use datatypes::value::Value;
+use datatypes::vectors::{BooleanVector, VectorRef};
 use snafu::ensure;
 
 use crate::error::{Error, InvalidQuerySnafu};
 use crate::expr::error::{EvalError, InternalSnafu};
-use crate::expr::{InvalidArgumentSnafu, ScalarExpr};
+use crate::expr::{check_batch, InvalidArgumentSnafu, ScalarExpr};
 use crate::repr::{self, value_to_internal_ts, Diff, Row};
 
 /// A compound operator that can be applied row-by-row.
@@ -471,6 +472,37 @@ impl SafeMfpPlan {
     /// See [`MapFilterProject::permute`].
     pub fn permute(&mut self, map: BTreeMap<usize, usize>, new_arity: usize) -> Result<(), Error> {
         self.mfp.permute(map, new_arity)
+    }
+
+    /// similar to [`MapFilterProject::evaluate_into`], just in batch, and rows that don't pass the predicates are not included in the output.
+    ///
+    /// so it's not guaranteed that the output will have the same number of rows as the input.
+    pub fn eval_batch_into(
+        &self,
+        batch: &mut Vec<VectorRef>,
+        row_count: Option<usize>,
+    ) -> Result<Option<VectorRef>, EvalError> {
+        todo!()
+    }
+
+    /// similar to [`MapFilterProject::evaluate_into`], just in batch.
+    pub fn eval_batch_inner(
+        &self,
+        batch: &mut Vec<VectorRef>,
+        row_count: Option<usize>,
+    ) -> Result<BooleanVector, EvalError> {
+        check_batch(batch, row_count)?;
+        // mark the columns that have been evaluated and appended to the `batch`
+        let mut expression = 0;
+        // to compute predicate, need to first compute all expressions used in predicates
+        for (support, predicate) in self.mfp.predicates.iter() {
+            while self.mfp.input_arity + expression < *support {
+                batch.push(self.mfp.expressions[expression].eval_batch(&batch[..], row_count)?);
+                expression += 1;
+            }
+            let pred_vec = predicate.eval_batch(batch, row_count)?;
+        }
+        todo!()
     }
 
     /// Evaluates the linear operator on a supplied list of datums.
