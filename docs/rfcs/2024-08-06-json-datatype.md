@@ -14,7 +14,7 @@ JSON is widely used across various scenarios. Direct support for writing and que
 # Details
 
 ## User Interface
-The feature introduces a new data type for the database, similar to the common JSON type. Data is written as JSON strings and can be queried using functions.
+The feature introduces a new data type, `JSON`, for the database. Similar to the common JSON type, data is written as JSON strings and can be queried using functions.
 
 For example:
 ```SQL
@@ -52,47 +52,47 @@ SELECT CAST(json_get_by_paths(b, 'attributes', 'event_attributes') AS DOUBLE) + 
 
 ## Storage and Query
 
-Data of JSON type is stored as JSONB format in the database. For storage layer and query engine, data is represented as a binary array and can be queried through pre-defined JSON functions. For clients, data is shown as strings.
+Data of `JSON` type is stored as JSONB format in the database. For storage layer and query engine, data is represented as a binary array and can be queried through pre-defined JSON functions. For clients, data is shown as strings.
 
-Insertions of JSON goes through following steps:
+Insertions of `JSON` goes through following steps:
 
 1. Client gets JSON strings and sends it to the frontend.
-2. Frontend encode JSON strings to JSONB format and sends it to the datanode.
+2. Frontend encode JSON strings to binary data of JSONB format and sends it to the datanode.
 3. Datanode stores binary data in the database.
 
 ```
 Insertion:
-                          Encode                    Store
-         JSON Strings ┌────────────┐ JSONB Data ┌────────────┐
- client ------------->│  Frontend  │----------->│  Datanode  │--> Storage
-                      └────────────┘            └────────────┘
+                          Encode               Store
+         JSON Strings ┌────────────┐ JSONB ┌────────────┐ JSONB
+ client ------------->│  Frontend  │------>│  Datanode  │------> Storage
+                      └────────────┘       └────────────┘
 ```
 
-The data of JSON type is represented by `Binary` data type in arrow. There are 2 types of JSON queries: get json elements through keys and compute over json elements.
+The data of `JSON` type is represented by `Binary` data type in arrow. There are 2 types of JSON queries: get JSON elements through keys and compute over JSON elements.
 
-For the former, the query engine performs queries directly over binary data. We provide functions like `json_get` and `json_get_by_paths` to extract json elements through keys.
+For the former, the query engine performs queries directly over binary data. We provide functions like `json_get` and `json_get_by_paths` to extract JSON elements through keys.
 
-For the latter, users need to manually specify the data type of the json elements for computing. Users can use `CAST` to convert the binary data to the specified data type. Computation without explicit conversion will result in an error.
+For the latter, users need to manually specify the data type of the JSON elements for computing. Users can use `CAST` to convert the JSON elements to the specified data type. Computation without explicit conversion will result in an error.
 
-Queries of JSON goes through following steps:
+Queries of `JSON` goes through following steps:
 
 1. Client sends query to frontend, and frontend sends it to datafusion, which is the query engine of GreptimeDB.
-2. Datafusion performs query over JSON data, and returns binary data to frontend.
-3. If no computation is needed, frontend directly decodes it to JSON strings and return it to clients.
+2. Datafusion performs query over binray data of JSONB format, and returns binary data to frontend.
+3. If no computation is needed, frontend directly decodes the binary data to JSON strings and return it to clients.
 4. If computation is needed, the binary data is decoded and converted to the specified data type to perform computation. There's no need for further decoding in the frontend.
 
 ```
 Queries without computation, decoding in frontend:
-                          Decode                     Query
-         JSON Strings ┌────────────┐ JSONB Data ┌──────────────┐
- client <-------------│  Frontend  │<-----------│  Datafusion  │<-- Storage
-                      └────────────┘            └──────────────┘
+                          Decode                Query
+         JSON Strings ┌────────────┐ JSONB ┌──────────────┐ JSONB
+ client <-------------│  Frontend  │<------│  Datafusion  │<------ Storage
+                      └────────────┘       └──────────────┘
 
 Queries with computation, decoding in datafusion:
-                                                                         Query
-         Data of Specified Type ┌────────────┐ Data of Certain Type ┌──────────────┐
- client <-----------------------│  Frontend  │<---------------------│  Datafusion  │<-- Storage
-                                └────────────┘                      └──────────────┘
+                                                                           Query
+         Data of Specified Type ┌────────────┐ Data of Specified Type ┌──────────────┐ JSONB
+ client <-----------------------│  Frontend  │<-----------------------│  Datafusion  │<------ Storage
+                                └────────────┘                        └──────────────┘
 ```
 
 # Drawbacks
