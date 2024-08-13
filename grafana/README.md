@@ -25,7 +25,7 @@ Please ensure the following configuration before importing the dashboard into Gr
 
 __1. Prometheus scrape config__
 
-Assign `greptime_pod` label to each host target. We use this label to identify each node instance.
+Configure Prometheus to scrape the cluster.
 
 ```yml
 # example config
@@ -34,27 +34,15 @@ Assign `greptime_pod` label to each host target. We use this label to identify e
 scrape_configs:
   - job_name: metasrv
     static_configs:
-    - targets: ['<ip>:<port>']
-      labels:
-        greptime_pod: metasrv
+    - targets: ['<metasrv-ip>:<port>']
 
   - job_name: datanode
     static_configs:
-    - targets: ['<ip>:<port>']
-      labels:
-        greptime_pod: datanode1
-    - targets: ['<ip>:<port>']
-      labels:
-        greptime_pod: datanode2
-    - targets: ['<ip>:<port>']
-      labels:
-        greptime_pod: datanode3
+    - targets: ['<datanode0-ip>:<port>', '<datanode1-ip>:<port>', '<datanode2-ip>:<port>']
 
   - job_name: frontend
     static_configs:
-    - targets: ['<ip>:<port>']
-      labels:
-        greptime_pod: frontend
+    - targets: ['<frontend-ip>:<port>']
 ```
 
 __2. Grafana config__
@@ -63,4 +51,4 @@ Create a Prometheus data source in Grafana before using this dashboard. We use `
 
 ### Usage
 
-Use `datasource` or `greptime_pod` on the upper-left corner to filter data from certain node.
+Use `datasource` or `instance` on the upper-left corner to filter data from certain node.
