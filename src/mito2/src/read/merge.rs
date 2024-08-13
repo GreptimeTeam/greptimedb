@@ -31,7 +31,7 @@ use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
 ///
 /// The merge reader merges [Batch]es from multiple sources that yield sorted batches.
 /// 1. Batch is ordered by primary key, time index, sequence desc, op type desc (we can
-/// ignore op type as sequence is already unique).
+///    ignore op type as sequence is already unique).
 /// 2. Batches from sources **must** not be empty.
 ///
 /// The reader won't concatenate batches. Each batch returned by the reader also doesn't

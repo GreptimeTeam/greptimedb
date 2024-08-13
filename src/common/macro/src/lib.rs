@@ -76,6 +76,7 @@ pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
 ///    - `&ProcedureServiceHandlerRef` or `&TableMutationHandlerRef` or `FlowServiceHandlerRef` as the first argument,
 ///    - `&QueryContextRef` as the second argument, and
 ///    - `&[ValueRef<'_>]` as the third argument which is SQL function input values in each row.
+///
 /// Return type must be `common_query::error::Result<Value>`.
 ///
 /// # Example see `common/function/src/system/procedure_state.rs`.

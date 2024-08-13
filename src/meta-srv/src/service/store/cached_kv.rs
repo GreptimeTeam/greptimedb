@@ -61,9 +61,9 @@ impl CheckLeader for RwLock<State> {
 /// To use this cache, the following constraints must be followed:
 ///   1. The leader node can create this metadata.
 ///   2. The follower node can create this metadata. The leader node can lazily retrieve
-///     the corresponding data through the caching loading mechanism.
+///      the corresponding data through the caching loading mechanism.
 ///   3. Only the leader node can update this metadata, as the cache cannot detect
-///     modifications made to the data on the follower node.
+///      modifications made to the data on the follower node.
 ///   4. Only the leader node can delete this metadata for the same reason mentioned above.
 pub struct LeaderCachedKvBackend {
     check_leader: CheckLeaderRef,

@@ -110,9 +110,8 @@ impl GreptimeRequestHandler {
                     .spawn(result_future)
                     .await
                     .context(JoinTaskSnafu)
-                    .map_err(|e| {
+                    .inspect_err(|e| {
                         timer.record(e.status_code());
-                        e
                     })?
             }
             None => result_future.await,
@@ -160,11 +159,10 @@ pub(crate) async fn auth(
             name: "Token AuthScheme".to_string(),
         }),
     }
-    .map_err(|e| {
+    .inspect_err(|e| {
         METRIC_AUTH_FAILURE
             .with_label_values(&[e.status_code().as_ref()])
             .inc();
-        e
     })
 }
 

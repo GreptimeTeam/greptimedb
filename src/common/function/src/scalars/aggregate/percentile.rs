@@ -75,7 +75,7 @@ where
         // to keep the not_greater length == floor+1
         // so to ensure the peek of the not_greater is array[floor]
         // and the peek of the greater is array[floor+1]
-        let p = if let Some(p) = self.p { p } else { 0.0_f64 };
+        let p = self.p.unwrap_or(0.0_f64);
         let floor = (((self.n - 1) as f64) * p / (100_f64)).floor();
         if value <= *self.not_greater.peek().unwrap() {
             self.not_greater.push(value);

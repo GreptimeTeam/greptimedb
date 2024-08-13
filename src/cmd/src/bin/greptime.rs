@@ -139,13 +139,10 @@ async fn start(cli: Command) -> Result<()> {
 }
 
 fn setup_human_panic() {
-    let metadata = human_panic::Metadata {
-        version: env!("CARGO_PKG_VERSION").into(),
-        name: "GreptimeDB".into(),
-        authors: Default::default(),
-        homepage: "https://github.com/GreptimeTeam/greptimedb/discussions".into(),
-    };
-    human_panic::setup_panic!(metadata);
+    human_panic::setup_panic!(
+        human_panic::Metadata::new("GreptimeDB", env!("CARGO_PKG_VERSION"))
+            .homepage("https://github.com/GreptimeTeam/greptimedb/discussions")
+    );
 
     common_telemetry::set_panic_hook();
 }

@@ -77,6 +77,7 @@ clippy.readonly_write_lock = "allow"
 rust.unknown_lints = "deny"
 # Remove this after https://github.com/PyO3/pyo3/issues/4094
 rust.non_local_definitions = "allow"
+rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [workspace.dependencies]
 # We turn off default-features for some dependencies here so the workspaces which inherit them can

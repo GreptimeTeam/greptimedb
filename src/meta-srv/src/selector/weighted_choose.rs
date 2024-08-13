@@ -27,6 +27,7 @@ pub trait WeightedChoose<Item>: Send + Sync {
     /// Note:
     /// 1. make sure weight_array is not empty.
     /// 2. the total weight is greater than 0.
+    ///
     /// Otherwise an error will be returned.
     fn set_weight_array(&mut self, weight_array: Vec<WeightedItem<Item>>) -> Result<()>;
 

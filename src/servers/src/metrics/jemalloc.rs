@@ -42,11 +42,10 @@ pub(crate) static JEMALLOC_COLLECTOR: Lazy<Option<JemallocCollector>> = Lazy::ne
             e
         })
         .ok();
-    collector.map(|c| {
+    collector.inspect(|c| {
         if let Err(e) = c.update() {
             error!(e; "Failed to update jemalloc metrics");
         };
-        c
     })
 });
 
