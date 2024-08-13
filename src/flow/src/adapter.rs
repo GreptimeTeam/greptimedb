@@ -52,7 +52,7 @@ use crate::compute::ErrCollector;
 use crate::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 use crate::expr::GlobalId;
 use crate::metrics::{
-    METRIC_FLOW_RUN_INTERVAL_MS, METRIC_FLOW_TOTAL_INSERT_ROWS, METRIC_FLOW_TOTAL_OUTPUT_ROWS,
+    METRIC_FLOW_INPUT_BUF_SIZE, METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_RUN_INTERVAL_MS,
 };
 use crate::repr::{self, DiffRow, Row, BATCH_SIZE};
 use crate::transform::sql_to_flow_plan;
@@ -359,7 +359,6 @@ impl FlowWorkerManager {
                 table_name.join("."),
                 reqs
             );
-            METRIC_FLOW_TOTAL_OUTPUT_ROWS.add(reqs.iter().map(|v| v.len()).sum::<usize>() as i64);
             let now = self.tick_manager.tick();
             for req in reqs {
                 match req {
@@ -623,9 +622,12 @@ impl FlowWorkerManager {
         region_id: RegionId,
         rows: Vec<DiffRow>,
     ) -> Result<(), Error> {
-        METRIC_FLOW_TOTAL_INSERT_ROWS.add(rows.len() as _);
         let rows_len = rows.len();
         let table_id = region_id.table_id();
+        METRIC_FLOW_INPUT_BUF_SIZE.add(rows_len as _);
+        let _timer = METRIC_FLOW_INSERT_ELAPSED
+            .with_label_values(&[table_id.to_string().as_str()])
+            .start_timer();
         self.node_context.read().await.send(table_id, rows).await?;
         debug!(
             "Handling write request for table_id={} with {} rows",

@@ -20,15 +20,14 @@ use prometheus::*;
 lazy_static! {
     pub static ref METRIC_FLOW_TASK_COUNT: IntGauge =
         register_int_gauge!("greptime_flow_task_count", "flow task count").unwrap();
-    pub static ref METRIC_FLOW_TOTAL_INSERT_ROWS: IntGauge =
-        register_int_gauge!("greptime_flow_total_insert_rows", "flow total insert rows").unwrap();
-    pub static ref METRIC_FLOW_TOTAL_PROCESSED_ROWS: IntGauge = register_int_gauge!(
-        "greptime_flow_total_processed_rows",
-        "flow total processed rows"
+    pub static ref METRIC_FLOW_INPUT_BUF_SIZE: IntGauge =
+        register_int_gauge!("greptime_flow_input_buf_size", "flow input buf size").unwrap();
+    pub static ref METRIC_FLOW_INSERT_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_flow_insert_elapsed",
+        "flow insert elapsed",
+        &["table_id"]
     )
     .unwrap();
-    pub static ref METRIC_FLOW_TOTAL_OUTPUT_ROWS: IntGauge =
-        register_int_gauge!("greptime_flow_total_output_rows", "flow total output rows").unwrap();
     pub static ref METRIC_FLOW_RUN_INTERVAL_MS: IntGauge =
         register_int_gauge!("greptime_flow_run_interval_ms", "flow run interval in ms").unwrap();
 }

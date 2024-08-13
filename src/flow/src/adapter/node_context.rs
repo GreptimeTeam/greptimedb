@@ -28,7 +28,7 @@ use crate::adapter::{FlowId, TableName, TableSource};
 use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
-use crate::metrics::METRIC_FLOW_TOTAL_PROCESSED_ROWS;
+use crate::metrics::METRIC_FLOW_INPUT_BUF_SIZE;
 use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP, SEND_BUF_CAP};
 
 /// A context that holds the information of the dataflow
@@ -126,7 +126,7 @@ impl SourceSender {
         }
         if row_cnt > 0 {
             debug!("Send {} rows", row_cnt);
-            METRIC_FLOW_TOTAL_PROCESSED_ROWS.add(row_cnt as _);
+            METRIC_FLOW_INPUT_BUF_SIZE.sub(row_cnt as _);
             debug!(
                 "Remaining Send buf.len() = {}",
                 self.send_buf_rx.read().await.len()
