@@ -241,10 +241,14 @@ pub async fn log_ingester(
     TypedHeader(content_type): TypedHeader<ContentType>,
     payload: String,
 ) -> Result<HttpResponse> {
-    if let Some(log_validator) = log_state.log_validator {
-        if let Some(response) = log_validator.validate(query_params.source.clone(), &payload) {
-            return response;
-        }
+    // validate source and payload
+    let source = query_params.source.as_deref();
+    let response = match &log_state.log_validator {
+        Some(validator) => validator.validate(source, &payload).await,
+        None => None,
+    };
+    if let Some(response) = response {
+        return response;
     }
 
     let handler = log_state.log_handler;
@@ -367,13 +371,14 @@ async fn ingest_logs_inner(
     Ok(response)
 }
 
-pub trait LogValidator {
+#[async_trait]
+pub trait LogValidator: Send + Sync {
     /// validate payload by source before processing
     /// Return a `Some` result to indicate validation failure.
-    fn validate(&self, source: Option<String>, payload: &str) -> Option<Result<HttpResponse>>;
+    async fn validate(&self, source: Option<&str>, payload: &str) -> Option<Result<HttpResponse>>;
 }
 
-pub type LogValidatorRef = Arc<dyn LogValidator + Send + Sync>;
+pub type LogValidatorRef = Arc<dyn LogValidator + 'static>;
 
 /// axum state struct to hold log handler and validator
 #[derive(Clone)]
