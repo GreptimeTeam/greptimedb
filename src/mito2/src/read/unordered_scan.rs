@@ -58,8 +58,11 @@ pub struct UnorderedScan {
 impl UnorderedScan {
     /// Creates a new [UnorderedScan].
     pub(crate) fn new(input: ScanInput) -> Self {
-        let properties =
-            ScannerProperties::new_with_partitions(input.parallelism.parallelism.max(1));
+        let parallelism = input.parallelism.parallelism.max(1);
+        let properties = ScannerProperties::default()
+            .with_parallelism(parallelism)
+            .with_append_mode(input.append_mode)
+            .with_total_rows(input.total_rows());
         let stream_ctx = Arc::new(StreamContext::new(input));
 
         Self {
@@ -135,7 +138,7 @@ impl RegionScanner for UnorderedScan {
     }
 
     fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
-        self.properties = ScannerProperties::new(ranges);
+        self.properties.partitions = ranges;
         Ok(())
     }
 

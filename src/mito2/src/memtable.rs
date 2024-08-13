@@ -69,6 +69,8 @@ pub struct MemtableStats {
     /// The time range that this memtable contains. It is None if
     /// and only if the memtable is empty.
     time_range: Option<(Timestamp, Timestamp)>,
+    /// Total rows in memtable
+    num_rows: usize,
 }
 
 impl MemtableStats {
@@ -87,6 +89,11 @@ impl MemtableStats {
     /// Returns the time range of the memtable.
     pub fn time_range(&self) -> Option<(Timestamp, Timestamp)> {
         self.time_range
+    }
+
+    /// Returns the num of total rows in memtable.
+    pub fn num_rows(&self) -> usize {
+        self.num_rows
     }
 }
 

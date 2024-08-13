@@ -65,7 +65,10 @@ impl SeqScan {
     /// Creates a new [SeqScan].
     pub(crate) fn new(input: ScanInput) -> Self {
         let parallelism = input.parallelism.parallelism.max(1);
-        let properties = ScannerProperties::new_with_partitions(parallelism);
+        let properties = ScannerProperties::default()
+            .with_parallelism(parallelism)
+            .with_append_mode(input.append_mode)
+            .with_total_rows(input.total_rows());
         let stream_ctx = Arc::new(StreamContext::new(input));
 
         Self {
