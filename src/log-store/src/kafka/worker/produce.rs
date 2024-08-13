@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_telemetry::tracing::warn;
 use tokio::sync::oneshot;
 
 use crate::kafka::worker::{
@@ -37,7 +38,7 @@ impl BackgroundProducerWorker {
             batch,
             sender,
             region_id,
-        } in requests.drain(..)
+        } in std::mem::take(requests)
         {
             let mut receiver = ProduceResultReceiver::default();
             for record in batch {
@@ -73,7 +74,9 @@ impl BackgroundProducerWorker {
                 receiver.add_receiver(rx);
             }
 
-            let _ = sender.send(receiver);
+            if sender.send(receiver).is_err() {
+                warn!("The Receiver of ProduceResultReceiver is dropped");
+            }
         }
         pending_requests
     }

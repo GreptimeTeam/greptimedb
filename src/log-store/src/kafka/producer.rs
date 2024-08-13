@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::warn;
@@ -38,14 +37,6 @@ const PRODUCER_CHANNEL_SIZE: usize = REQUEST_BATCH_SIZE * 2;
 #[derive(Debug)]
 pub(crate) struct OrderedBatchProducer {
     pub(crate) sender: Sender<WorkerRequest>,
-    /// Used to control the [`BackgroundProducerWorker`].
-    running: Arc<AtomicBool>,
-}
-
-impl Drop for OrderedBatchProducer {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-    }
 }
 
 impl OrderedBatchProducer {
@@ -62,26 +53,17 @@ impl OrderedBatchProducer {
         max_batch_bytes: usize,
         index_collector: Box<dyn IndexCollector>,
     ) -> Self {
-        let running = Arc::new(AtomicBool::new(true));
         let mut worker = BackgroundProducerWorker {
             provider,
             client,
             compression,
-            running: running.clone(),
             receiver: rx,
             request_batch_size: REQUEST_BATCH_SIZE,
             max_batch_bytes,
             index_collector,
         };
         tokio::spawn(async move { worker.run().await });
-        Self {
-            sender: tx,
-            running,
-        }
-    }
-
-    fn set_running(&self, val: bool) {
-        self.running.store(val, Ordering::Relaxed);
+        Self { sender: tx }
     }
 
     /// Writes `data` to the [`OrderedBatchProducer`].
@@ -99,7 +81,6 @@ impl OrderedBatchProducer {
         let (req, handle) = WorkerRequest::new_produce_request(region_id, batch);
         if self.sender.send(req).await.is_err() {
             warn!("OrderedBatchProducer is already exited");
-            self.set_running(false);
             return error::OrderedBatchProducerStoppedSnafu {}.fail();
         }
 

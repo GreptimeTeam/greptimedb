@@ -16,7 +16,6 @@ pub(crate) mod checkpoint;
 pub(crate) mod flush;
 pub(crate) mod produce;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::debug;
@@ -143,8 +142,6 @@ pub(crate) struct BackgroundProducerWorker {
     pub(crate) client: Arc<dyn ProducerClient>,
     // The compression configuration.
     pub(crate) compression: Compression,
-    // The running flag.
-    pub(crate) running: Arc<AtomicBool>,
     /// Receiver of [ProduceRequest].
     pub(crate) receiver: Receiver<WorkerRequest>,
     /// Max batch size for a worker to handle requests.
@@ -158,7 +155,7 @@ pub(crate) struct BackgroundProducerWorker {
 impl BackgroundProducerWorker {
     pub(crate) async fn run(&mut self) {
         let mut buffer = Vec::with_capacity(self.request_batch_size);
-        while self.running.load(Ordering::Relaxed) {
+        loop {
             match self.receiver.recv().await {
                 Some(req) => {
                     buffer.clear();
