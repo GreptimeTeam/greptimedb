@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod auth_handler;
+mod fixtures;
 mod handler;
 mod server;
 mod types;
