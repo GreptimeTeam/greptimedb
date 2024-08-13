@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_macro::stack_trace_debug;
-use snafu::Snafu;
+use snafu::{Location, Snafu};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -24,10 +24,74 @@ pub enum Error {
         broker_endpoint: String,
         #[snafu(source)]
         error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to find ipv4 endpoint: {:?}", broker_endpoint))]
-    EndpointIPV4NotFound { broker_endpoint: String },
+    EndpointIPV4NotFound {
+        broker_endpoint: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read file, path: {}", path))]
+    ReadFile {
+        path: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to add root cert"))]
+    AddCert {
+        #[snafu(source)]
+        error: rustls::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read cert, path: {}", path))]
+    ReadCerts {
+        path: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read key, path: {}", path))]
+    ReadKey {
+        path: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse key, path: {}", path))]
+    KeyNotFound {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to set client auth cert"))]
+    SetClientAuthCert {
+        #[snafu(source)]
+        error: rustls::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to load ca certs from system"))]
+    LoadSystemCerts {
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -33,6 +33,13 @@ jobs:
           aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
           aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      - name: Upload sqlness logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlness-logs-kind
+          path: /tmp/kind/
+          retention-days: 3
 
   sqlness-windows:
     name: Sqlness tests on Windows
@@ -55,7 +62,7 @@ jobs:
         env:
           SQLNESS_OPTS: "--preserve-state"
       - name: Upload sqlness logs
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs

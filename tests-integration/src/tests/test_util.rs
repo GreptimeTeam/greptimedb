@@ -21,7 +21,7 @@ use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::warn;
 use common_test_util::find_workspace_path;
-use common_wal::config::kafka::common::KafkaTopicConfig;
+use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use frontend::instance::Instance;
@@ -227,11 +227,17 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
     let test_name = uuid::Uuid::new_v4().to_string();
     let builder = GreptimeDbStandaloneBuilder::new(&test_name)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
-            broker_endpoints: endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
             kafka_topic: KafkaTopicConfig {
                 topic_name_prefix: test_name.to_string(),
                 num_topics: 3,
@@ -260,11 +266,17 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
     let builder = GreptimeDbClusterBuilder::new(&test_name)
         .await
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
-            broker_endpoints: endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
             kafka_topic: KafkaTopicConfig {
                 topic_name_prefix: test_name.to_string(),
                 num_topics: 3,

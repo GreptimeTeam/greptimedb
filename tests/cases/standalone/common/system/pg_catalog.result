@@ -70,6 +70,11 @@ ORDER BY 1,2;
 | public | numbers | table |       |
 +--------+---------+-------+-------+
 
+-- make sure oid of namespace keep stable
+SELECT * FROM pg_namespace ORDER BY oid;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.pg_namespace
+
 create
 database my_db;
 
@@ -167,7 +172,7 @@ order by relnamespace, relname;
 +--------------+---------+---------+
 | relnamespace | relname | relkind |
 +--------------+---------+---------+
-| my_db        | foo     | r       |
+| 434869349    | foo     | r       |
 +--------------+---------+---------+
 
 use public;
@@ -190,7 +195,7 @@ desc table pg_class;
 +--------------+--------+-----+------+---------+---------------+
 | oid          | UInt32 |     | NO   |         | FIELD         |
 | relname      | String |     | NO   |         | FIELD         |
-| relnamespace | String |     | NO   |         | FIELD         |
+| relnamespace | UInt32 |     | NO   |         | FIELD         |
 | relkind      | String |     | NO   |         | FIELD         |
 | relowner     | UInt32 |     | NO   |         | FIELD         |
 +--------------+--------+-----+------+---------+---------------+
@@ -200,7 +205,7 @@ desc table pg_namespace;
 +---------+--------+-----+------+---------+---------------+
 | Column  | Type   | Key | Null | Default | Semantic Type |
 +---------+--------+-----+------+---------+---------------+
-| oid     | String |     | NO   |         | FIELD         |
+| oid     | UInt32 |     | NO   |         | FIELD         |
 | nspname | String |     | NO   |         | FIELD         |
 +---------+--------+-----+------+---------+---------------+
 
