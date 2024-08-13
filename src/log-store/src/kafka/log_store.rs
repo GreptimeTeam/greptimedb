@@ -336,7 +336,21 @@ impl LogStore for KafkaLogStore {
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, _provider: &Provider, _entry_id: EntryId) -> Result<()> {
+    async fn obsolete(
+        &self,
+        provider: &Provider,
+        region_id: RegionId,
+        entry_id: EntryId,
+    ) -> Result<()> {
+        if let Some(collector) = self.client_manager.global_index_collector() {
+            let provider = provider
+                .as_kafka_provider()
+                .with_context(|| InvalidProviderSnafu {
+                    expected: KafkaProvider::type_name(),
+                    actual: provider.type_name(),
+                })?;
+            collector.truncate(provider, region_id, entry_id).await?;
+        }
         Ok(())
     }
 

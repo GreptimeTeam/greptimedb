@@ -31,7 +31,7 @@ use tokio::sync::Mutex as TokioMutex;
 use crate::error::{self, Result};
 use crate::kafka::index::encoder::IndexEncoder;
 use crate::kafka::index::JsonIndexEncoder;
-use crate::kafka::worker::{DumpIndexRequest, WorkerRequest};
+use crate::kafka::worker::{DumpIndexRequest, TruncateIndexRequest, WorkerRequest};
 
 /// The [`IndexCollector`] trait defines the operations for managing and collecting index entries.
 pub trait IndexCollector: Send + Sync {
@@ -196,6 +196,30 @@ impl GlobalIndexCollector {
             indexes: Default::default(),
             provider,
         })
+    }
+
+    /// Truncates the index for a specific region up to a given [`EntryId`].
+    ///
+    /// It removes all [`EntryId`]s smaller than `entry_id`.
+    pub(crate) async fn truncate(
+        &self,
+        provider: &Arc<KafkaProvider>,
+        region_id: RegionId,
+        entry_id: EntryId,
+    ) -> Result<()> {
+        if let Some(sender) = self.providers.lock().await.get(provider).cloned() {
+            if sender
+                .send(WorkerRequest::TruncateIndex(TruncateIndexRequest::new(
+                    region_id, entry_id,
+                )))
+                .await
+                .is_err()
+            {
+                return error::OrderedBatchProducerStoppedSnafu {}.fail();
+            }
+        }
+
+        Ok(())
     }
 }
 

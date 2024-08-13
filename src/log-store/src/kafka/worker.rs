@@ -82,6 +82,15 @@ pub(crate) struct TruncateIndexRequest {
     entry_id: EntryId,
 }
 
+impl TruncateIndexRequest {
+    pub fn new(region_id: RegionId, entry_id: EntryId) -> Self {
+        Self {
+            region_id,
+            entry_id,
+        }
+    }
+}
+
 pub(crate) struct ProduceRequest {
     region_id: RegionId,
     batch: Vec<Record>,

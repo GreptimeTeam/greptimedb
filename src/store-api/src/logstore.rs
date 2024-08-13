@@ -62,7 +62,12 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, provider: &Provider, entry_id: EntryId) -> Result<(), Self::Error>;
+    async fn obsolete(
+        &self,
+        provider: &Provider,
+        region_id: RegionId,
+        entry_id: EntryId,
+    ) -> Result<(), Self::Error>;
 
     /// Makes an entry instance of the associated Entry type
     fn entry(

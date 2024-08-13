@@ -168,6 +168,10 @@ impl ClientManager {
 
         Ok(Client { client, producer })
     }
+
+    pub(crate) fn global_index_collector(&self) -> Option<&GlobalIndexCollector> {
+        self.global_index_collector.as_ref()
+    }
 }
 
 #[cfg(test)]

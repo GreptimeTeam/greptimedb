@@ -168,6 +168,7 @@ mod tests {
         async fn obsolete(
             &self,
             _provider: &Provider,
+            _region_id: RegionId,
             _entry_id: EntryId,
         ) -> Result<(), Self::Error> {
             unreachable!()
