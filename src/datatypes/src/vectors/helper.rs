@@ -369,7 +369,7 @@ impl Helper {
     }
 
     /// Try to cast an vec of values into vector, fail if type is not the same across all values.
-    pub fn try_from_row_into_vector(row: Vec<Value>, dt: &ConcreteDataType) -> Result<VectorRef> {
+    pub fn try_from_row_into_vector(row: &[Value], dt: &ConcreteDataType) -> Result<VectorRef> {
         let mut builder = dt.create_mutable_vector(row.len());
         for val in row {
             builder.try_push_value_ref(val.as_value_ref())?;
@@ -694,7 +694,7 @@ mod tests {
     }
 
     fn check_try_from_row_to_vector(row: Vec<Value>, dt: &ConcreteDataType) {
-        let vector = Helper::try_from_row_into_vector(row.clone(), dt).unwrap();
+        let vector = Helper::try_from_row_into_vector(&row, dt).unwrap();
         for (i, item) in row.iter().enumerate().take(vector.len()) {
             assert_eq!(*item, vector.get(i));
         }
