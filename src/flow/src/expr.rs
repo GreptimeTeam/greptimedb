@@ -14,6 +14,7 @@
 
 //! for declare Expression in dataflow, including map, reduce, id and join(TODO!) etc.
 
+mod df_func;
 pub(crate) mod error;
 mod func;
 mod id;
@@ -22,9 +23,10 @@ mod relation;
 mod scalar;
 mod signature;
 
-pub(crate) use error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
+pub(crate) use df_func::{DfScalarFunction, RawDfScalarFn};
+pub(crate) use error::{EvalError, InvalidArgumentSnafu};
 pub(crate) use func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 pub(crate) use id::{GlobalId, Id, LocalId};
 pub(crate) use linear::{MapFilterProject, MfpPlan, SafeMfpPlan};
 pub(crate) use relation::{AggregateExpr, AggregateFunc};
-pub(crate) use scalar::{DfScalarFunction, RawDfScalarFn, ScalarExpr, TypedExpr};
+pub(crate) use scalar::{ScalarExpr, TypedExpr};
