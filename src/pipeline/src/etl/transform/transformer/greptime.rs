@@ -69,10 +69,9 @@ impl GreptimeTransformer {
                     Some(val) => coerce_value(val, transform)?,
                     None => {
                         let default = transform.get_default();
-                        if default.is_some() {
-                            coerce_value(default.unwrap(), transform)?
-                        } else {
-                            None
+                        match default {
+                            Some(default) => coerce_value(default, transform)?,
+                            None => None,
                         }
                     }
                 };
