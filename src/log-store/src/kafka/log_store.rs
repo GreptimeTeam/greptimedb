@@ -26,7 +26,7 @@ use store_api::logstore::entry::{
     Entry, Id as EntryId, MultiplePartEntry, MultiplePartHeader, NaiveEntry,
 };
 use store_api::logstore::provider::{KafkaProvider, Provider};
-use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream};
+use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream, WalIndex};
 use store_api::storage::RegionId;
 
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
@@ -206,6 +206,7 @@ impl LogStore for KafkaLogStore {
         &self,
         provider: &Provider,
         entry_id: EntryId,
+        _index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
         let provider = provider
             .as_kafka_provider()
@@ -504,7 +505,7 @@ mod tests {
         // 5 region
         assert_eq!(response.last_entry_ids.len(), 5);
         let got_entries = logstore
-            .read(&provider, 0)
+            .read(&provider, 0, None)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -577,7 +578,7 @@ mod tests {
         // 5 region
         assert_eq!(response.last_entry_ids.len(), 5);
         let got_entries = logstore
-            .read(&provider, 0)
+            .read(&provider, 0, None)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()

@@ -313,7 +313,7 @@ impl RegionOpener {
         let wal_entry_reader = self
             .wal_entry_reader
             .take()
-            .unwrap_or_else(|| wal.wal_entry_reader(&provider, region_id));
+            .unwrap_or_else(|| wal.wal_entry_reader(&provider, region_id, None));
         let on_region_opened = wal.on_region_opened();
         let object_store = self.object_store(&region_options.storage)?.clone();
 
