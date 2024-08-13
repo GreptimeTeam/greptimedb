@@ -12,20 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Instant;
 
 use async_trait::async_trait;
 use common_telemetry::debug;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tantivy::collector::DocSetCollector;
 use tantivy::query::QueryParser;
-use tantivy::schema::Field;
-use tantivy::{Index, IndexReader, ReloadPolicy};
+use tantivy::schema::{Field, Value};
+use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument};
 
-use crate::fulltext_index::create::TEXT_FIELD_NAME;
-use crate::fulltext_index::error::{Result, TantivyParserSnafu, TantivySnafu};
+use crate::fulltext_index::create::{ROWID_FIELD_NAME, TEXT_FIELD_NAME};
+use crate::fulltext_index::error::{
+    Result, TantivyDocNotFoundSnafu, TantivyParserSnafu, TantivySnafu,
+};
 use crate::fulltext_index::search::{FulltextIndexSearcher, RowId};
 
 /// `TantivyFulltextIndexSearcher` is a searcher using Tantivy.
@@ -77,9 +79,48 @@ impl FulltextIndexSearcher for TantivyFulltextIndexSearcher {
         let query = query_parser
             .parse_query(query)
             .context(TantivyParserSnafu)?;
-        let docs = searcher
+        let doc_addrs = searcher
             .search(&query, &DocSetCollector)
             .context(TantivySnafu)?;
-        Ok(docs.into_iter().map(|d| d.doc_id).collect())
+
+        let seg_metas = self
+            .index
+            .searchable_segment_metas()
+            .context(TantivySnafu)?;
+
+        // FAST PATH: only one segment, the doc id is the same as the row id.
+        //            Also for compatibility with the old version.
+        if seg_metas.len() == 1 {
+            return Ok(doc_addrs.into_iter().map(|d| d.doc_id).collect());
+        }
+
+        // SLOW PATH: multiple segments, need to calculate the row id.
+        let rowid_field = searcher
+            .schema()
+            .get_field(ROWID_FIELD_NAME)
+            .context(TantivySnafu)?;
+        let mut seg_offsets = HashMap::with_capacity(seg_metas.len());
+        let mut res = BTreeSet::new();
+        for doc_addr in doc_addrs {
+            let offset = if let Some(offset) = seg_offsets.get(&doc_addr.segment_ord) {
+                *offset
+            } else {
+                // Calculate the offset at the first time meeting the segment and cache it since
+                // the offset is the same for all rows in the same segment.
+                let doc: TantivyDocument = searcher.doc(doc_addr).context(TantivySnafu)?;
+                let rowid = doc
+                    .get_first(rowid_field)
+                    .and_then(|v| v.as_u64())
+                    .context(TantivyDocNotFoundSnafu { doc_addr })?;
+
+                let offset = rowid as u32 - doc_addr.doc_id;
+                seg_offsets.insert(doc_addr.segment_ord, offset);
+                offset
+            };
+
+            res.insert(doc_addr.doc_id + offset);
+        }
+
+        Ok(res)
     }
 }

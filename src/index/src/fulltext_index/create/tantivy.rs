@@ -16,17 +16,19 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use snafu::{OptionExt, ResultExt};
-use tantivy::schema::{Schema, TEXT};
+use tantivy::indexer::NoMergePolicy;
+use tantivy::schema::{Schema, STORED, TEXT};
 use tantivy::store::{Compressor, ZstdCompressor};
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer, TokenizerManager};
-use tantivy::{doc, Index, SingleSegmentIndexWriter};
+use tantivy::{doc, Index, IndexWriter};
 use tantivy_jieba::JiebaTokenizer;
 
 use crate::fulltext_index::create::FulltextIndexCreator;
-use crate::fulltext_index::error::{FinishedSnafu, IoSnafu, Result, TantivySnafu};
+use crate::fulltext_index::error::{FinishedSnafu, IoSnafu, JoinSnafu, Result, TantivySnafu};
 use crate::fulltext_index::{Analyzer, Config};
 
 pub const TEXT_FIELD_NAME: &str = "greptime_fulltext_text";
+pub const ROWID_FIELD_NAME: &str = "greptime_fulltext_rowid";
 
 /// `TantivyFulltextIndexCreator` is a fulltext index creator using tantivy.
 ///
@@ -34,10 +36,16 @@ pub const TEXT_FIELD_NAME: &str = "greptime_fulltext_text";
 /// the index is limited to 2<<31 rows (around 2 billion rows).
 pub struct TantivyFulltextIndexCreator {
     /// The tantivy index writer.
-    writer: Option<SingleSegmentIndexWriter>,
+    writer: Option<IndexWriter>,
 
     /// The field for the text.
     text_field: tantivy::schema::Field,
+
+    /// The field for the row id.
+    rowid_field: tantivy::schema::Field,
+
+    /// The current max row id.
+    max_rowid: u64,
 }
 
 impl TantivyFulltextIndexCreator {
@@ -51,6 +59,7 @@ impl TantivyFulltextIndexCreator {
 
         let mut schema_builder = Schema::builder();
         let text_field = schema_builder.add_text_field(TEXT_FIELD_NAME, TEXT);
+        let rowid_field = schema_builder.add_u64_field(ROWID_FIELD_NAME, STORED);
         let schema = schema_builder.build();
 
         let mut index = Index::create_in_dir(path, schema).context(TantivySnafu)?;
@@ -59,10 +68,17 @@ impl TantivyFulltextIndexCreator {
 
         let memory_limit = Self::sanitize_memory_limit(memory_limit);
 
-        let writer = SingleSegmentIndexWriter::new(index, memory_limit).context(TantivySnafu)?;
+        // Use one thread to keep order of the row id.
+        let writer = index
+            .writer_with_num_threads(1, memory_limit)
+            .context(TantivySnafu)?;
+        writer.set_merge_policy(Box::new(NoMergePolicy));
+
         Ok(Self {
             writer: Some(writer),
             text_field,
+            rowid_field,
+            max_rowid: 0,
         })
     }
 
@@ -86,7 +102,7 @@ impl TantivyFulltextIndexCreator {
         // Port from tantivy::indexer::index_writer::{MEMORY_BUDGET_NUM_BYTES_MIN, MEMORY_BUDGET_NUM_BYTES_MAX}
         const MARGIN_IN_BYTES: usize = 1_000_000;
         const MEMORY_BUDGET_NUM_BYTES_MIN: usize = ((MARGIN_IN_BYTES as u32) * 15u32) as usize;
-        const MEMORY_BUDGET_NUM_BYTES_MAX: usize = u32::MAX as usize - MARGIN_IN_BYTES;
+        const MEMORY_BUDGET_NUM_BYTES_MAX: usize = u32::MAX as usize - MARGIN_IN_BYTES - 1;
 
         memory_limit.clamp(MEMORY_BUDGET_NUM_BYTES_MIN, MEMORY_BUDGET_NUM_BYTES_MAX)
     }
@@ -96,20 +112,25 @@ impl TantivyFulltextIndexCreator {
 impl FulltextIndexCreator for TantivyFulltextIndexCreator {
     async fn push_text(&mut self, text: &str) -> Result<()> {
         let writer = self.writer.as_mut().context(FinishedSnafu)?;
-        let doc = doc!(self.text_field => text);
-        writer.add_document(doc).context(TantivySnafu)
+        let doc = doc!(self.text_field => text, self.rowid_field => self.max_rowid);
+        self.max_rowid += 1;
+        writer.add_document(doc).context(TantivySnafu)?;
+        Ok(())
     }
 
     async fn finish(&mut self) -> Result<()> {
-        let writer = self.writer.take().context(FinishedSnafu)?;
-        writer.finalize().map(|_| ()).context(TantivySnafu)
+        let mut writer = self.writer.take().context(FinishedSnafu)?;
+        common_runtime::spawn_blocking_global(move || {
+            writer.commit().context(TantivySnafu)?;
+            writer.wait_merging_threads().context(TantivySnafu)
+        })
+        .await
+        .context(JoinSnafu)?
     }
 
     fn memory_usage(&self) -> usize {
-        self.writer
-            .as_ref()
-            .map(|writer| writer.mem_usage())
-            .unwrap_or(0)
+        // Unable to get the memory usage of `IndexWriter`.
+        0
     }
 }
 
@@ -118,6 +139,8 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use tantivy::collector::DocSetCollector;
     use tantivy::query::QueryParser;
+    use tantivy::schema::Value;
+    use tantivy::TantivyDocument;
 
     use super::*;
 
@@ -235,7 +258,16 @@ mod tests {
             );
             let query = query_parser.parse_query(query).unwrap();
             let docs = searcher.search(&query, &DocSetCollector).unwrap();
-            let mut res = docs.into_iter().map(|d| d.doc_id).collect::<Vec<_>>();
+
+            let mut res = vec![];
+            let rowid_field = searcher.schema().get_field(ROWID_FIELD_NAME).unwrap();
+            for doc_addr in &docs {
+                let doc: TantivyDocument = searcher.doc(*doc_addr).unwrap();
+                let rowid = doc.get_first(rowid_field).unwrap().as_u64().unwrap();
+                assert_eq!(rowid as u32, doc_addr.doc_id);
+                res.push(rowid as u32);
+            }
+
             res.sort();
             assert_eq!(res, *expected);
         }

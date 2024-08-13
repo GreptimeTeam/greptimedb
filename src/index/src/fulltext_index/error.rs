@@ -19,6 +19,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
+use tantivy::DocAddress;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -48,6 +49,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Tantivy doc not found"))]
+    TantivyDocNotFound {
+        #[snafu(implicit)]
+        location: Location,
+        doc_addr: DocAddress,
+    },
+
     #[snafu(display("Operate on a finished creator"))]
     Finished {
         #[snafu(implicit)]
@@ -60,6 +68,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Join error"))]
+    Join {
+        #[snafu(source)]
+        error: tokio::task::JoinError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -67,10 +83,10 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            Tantivy { .. } => StatusCode::Internal,
+            Tantivy { .. } | TantivyDocNotFound { .. } => StatusCode::Internal,
             TantivyParser { .. } => StatusCode::InvalidSyntax,
 
-            Io { .. } | Finished { .. } => StatusCode::Unexpected,
+            Io { .. } | Finished { .. } | Join { .. } => StatusCode::Unexpected,
 
             External { source, .. } => source.status_code(),
         }
