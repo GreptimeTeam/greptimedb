@@ -2372,7 +2372,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "greptime_mito_cache_hit / (greptime_mito_cache_miss + greptime_mito_cache_hit)",
+          "expr": "sum(increase(greptime_mito_cache_hit[$__rate_interval])) by (instance, type) / (sum(increase(greptime_mito_cache_miss[$__rate_interval])) by (instance, type) + sum(increase(greptime_mito_cache_hit[$__rate_interval])) by (instance, type))",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
