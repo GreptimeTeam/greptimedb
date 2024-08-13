@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ahash::HashSet;
+
 use crate::etl::field::{Field, Fields};
 use crate::etl::processor::{
-    yaml_bool, yaml_field, yaml_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME, SEPARATOR_NAME,
+    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
+    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, SEPARATOR_NAME,
 };
 use crate::etl::value::{Array, Map, Value};
 
@@ -30,7 +32,8 @@ pub struct JoinProcessor {
 }
 
 impl JoinProcessor {
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        update_one_one_output_keys(&mut fields);
         self.fields = fields;
     }
 
@@ -43,10 +46,7 @@ impl JoinProcessor {
     }
 
     fn process_field(&self, arr: &Array, field: &Field) -> Result<Map, String> {
-        let key = match field.target_field {
-            Some(ref target_field) => target_field,
-            None => field.get_field(),
-        };
+        let key = field.get_target_field();
 
         let sep = self.separator.as_ref().unwrap();
         let val = arr
@@ -111,6 +111,17 @@ impl Processor for JoinProcessor {
         self.ignore_missing
     }
 
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .map(|f| f.get_target_field().to_string())
+            .collect()
+    }
+
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         match val {
             Value::Array(arr) => self.process_field(arr, field),
@@ -119,6 +130,43 @@ impl Processor for JoinProcessor {
                 self.kind()
             )),
         }
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                Some(Value::Array(arr)) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
+                    let mut map = self.process_field(arr, field)?;
+                    field
+                        .output_fields_index_mapping
+                        .iter()
+                        .for_each(|(k, output_index)| {
+                            if let Some(v) = map.remove(k) {
+                                val[*output_index] = v;
+                            }
+                        });
+                }
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

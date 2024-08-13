@@ -7768,6 +7768,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 name = "pipeline"
 version = "0.9.1"
 dependencies = [
+ "ahash 0.8.11",
  "api",
  "arrow",
  "async-trait",
@@ -7784,6 +7785,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "criterion 0.4.0",
  "crossbeam-utils",
  "csv",
  "dashmap",
@@ -7793,6 +7795,7 @@ dependencies = [
  "datafusion-functions",
  "datafusion-physical-expr",
  "datatypes",
+ "enum_dispatch",
  "futures",
  "greptime-proto",
  "itertools 0.10.5",
