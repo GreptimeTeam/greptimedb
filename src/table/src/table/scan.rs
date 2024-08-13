@@ -67,8 +67,8 @@ impl RegionScanExec {
             Partitioning::UnknownPartitioning(num_output_partition),
             ExecutionMode::Bounded,
         );
-        let append_mode = scanner_props.append_mode;
-        let total_rows = scanner_props.total_rows;
+        let append_mode = scanner_props.append_mode();
+        let total_rows = scanner_props.total_rows();
         Self {
             scanner: Mutex::new(scanner),
             arrow_schema,

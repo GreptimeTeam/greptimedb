@@ -16,16 +16,16 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex};
 
-use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::SendableRecordBatchStream as DfSendableRecordBatchStream;
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
 };
 use datafusion_common::DataFusionError;
-use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
+use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::schema::SchemaRef;
 
 /// Adapts greptime's [SendableRecordBatchStream] to DataFusion's [ExecutionPlan].

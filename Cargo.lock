@@ -2141,7 +2141,6 @@ name = "common-query"
 version = "0.9.1"
 dependencies = [
  "api",
- "arrow-schema",
  "async-trait",
  "bytes",
  "common-base",
@@ -2152,7 +2151,6 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
- "datafusion-physical-expr",
  "datatypes",
  "futures-util",
  "serde",

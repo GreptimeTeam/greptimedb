@@ -101,6 +101,7 @@ pub struct TimeSeriesMemtable {
     min_timestamp: AtomicI64,
     dedup: bool,
     merge_mode: MergeMode,
+    /// Total written rows in memtable. This also includes deleted and duplicated rows.
     num_rows: AtomicUsize,
 }
 

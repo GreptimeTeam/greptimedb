@@ -114,6 +114,7 @@ pub struct PartitionTreeMemtable {
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
+    /// Total written rows in memtable. This also includes deleted and duplicated rows.
     num_rows: AtomicUsize,
 }
 
