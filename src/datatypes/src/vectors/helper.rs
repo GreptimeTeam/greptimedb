@@ -26,22 +26,19 @@ use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result, UnsupportedArrowTypeSnafu};
+use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result};
 use crate::prelude::DataType;
 use crate::scalars::{Scalar, ScalarVectorBuilder};
-use crate::types::LogicalPrimitiveType;
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::{
-    BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, ConstantVector,
-    DateTimeVector, DateVector, Decimal128Vector, Decimal128VectorBuilder,
+    BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Decimal128Vector,
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
     DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
     Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
-    ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector, StringVectorBuilder,
-    TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
-    TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, Vector,
-    VectorRef,
+    ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
+    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
+    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
+    UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
 };
 
 /// Helper functions for `Vector`.
@@ -373,129 +370,12 @@ impl Helper {
 
     /// Try to cast an vec of values into vector, fail if type is not the same across all values.
     pub fn try_from_row_into_vector(row: Vec<Value>, dt: &ConcreteDataType) -> Result<VectorRef> {
-        use common_time::timestamp::TimeUnit;
-        use ConcreteDataType as CDT;
-
-        use crate::types::{
-            DateTimeType, DateType, DurationMicrosecondType, DurationMillisecondType,
-            DurationNanosecondType, DurationSecondType, Float32Type, Float64Type, Int16Type,
-            Int32Type, Int64Type, Int8Type, IntervalDayTimeType, IntervalMonthDayNanoType,
-            IntervalYearMonthType, TimeMicrosecondType, TimeMillisecondType, TimeNanosecondType,
-            TimeSecondType, TimestampMicrosecondType, TimestampMillisecondType,
-            TimestampNanosecondType, TimestampSecondType, UInt16Type, UInt32Type, UInt64Type,
-            UInt8Type,
-        };
-        use crate::vectors::PrimitiveVectorBuilder;
-        fn primitive_values_to_vector<T>(values: Vec<Value>) -> Result<VectorRef>
-        where
-            T: LogicalPrimitiveType,
-        {
-            let mut builder = PrimitiveVectorBuilder::<T>::with_capacity(values.len());
-            for val in values.clone() {
-                builder.try_push_value_ref(val.as_value_ref())?;
-            }
-            let vector = builder.finish();
-            Ok(Arc::new(vector))
+        let mut builder = dt.create_mutable_vector(row.len());
+        for val in row {
+            builder.try_push_value_ref(val.as_value_ref())?;
         }
-
-        match dt {
-            CDT::Null(_) => {
-                let vector = NullVector::new(row.len());
-                Ok(Arc::new(vector))
-            }
-            CDT::Boolean(_) => {
-                let mut builder = BooleanVectorBuilder::with_capacity(row.len());
-                for val in row {
-                    builder.try_push_value_ref(val.as_value_ref())?;
-                }
-                let vector = builder.finish();
-                Ok(Arc::new(vector))
-            }
-            CDT::Int8(_) => primitive_values_to_vector::<Int8Type>(row),
-            CDT::Int16(_) => primitive_values_to_vector::<Int16Type>(row),
-            CDT::Int32(_) => primitive_values_to_vector::<Int32Type>(row),
-            CDT::Int64(_) => primitive_values_to_vector::<Int64Type>(row),
-            CDT::UInt8(_) => primitive_values_to_vector::<UInt8Type>(row),
-            CDT::UInt16(_) => primitive_values_to_vector::<UInt16Type>(row),
-            CDT::UInt32(_) => primitive_values_to_vector::<UInt32Type>(row),
-            CDT::UInt64(_) => primitive_values_to_vector::<UInt64Type>(row),
-            CDT::Float32(_) => primitive_values_to_vector::<Float32Type>(row),
-            CDT::Float64(_) => primitive_values_to_vector::<Float64Type>(row),
-            CDT::String(_) => {
-                let mut builder = StringVectorBuilder::with_capacity(row.len());
-                for val in row {
-                    builder.try_push_value_ref(val.as_value_ref())?;
-                }
-                let vector = builder.finish();
-                Ok(Arc::new(vector))
-            }
-            CDT::Binary(_) => {
-                let mut builder = BinaryVectorBuilder::with_capacity(row.len());
-                for val in row {
-                    builder.try_push_value_ref(val.as_value_ref())?;
-                }
-                let vector = builder.finish();
-                Ok(Arc::new(vector))
-            }
-            CDT::Date(_) => primitive_values_to_vector::<DateType>(row),
-            CDT::DateTime(_) => primitive_values_to_vector::<DateTimeType>(row),
-            CDT::Time(time_type) => match time_type.unit() {
-                TimeUnit::Second => primitive_values_to_vector::<TimeSecondType>(row),
-                TimeUnit::Millisecond => primitive_values_to_vector::<TimeMillisecondType>(row),
-                TimeUnit::Microsecond => primitive_values_to_vector::<TimeMicrosecondType>(row),
-                TimeUnit::Nanosecond => primitive_values_to_vector::<TimeNanosecondType>(row),
-            },
-            CDT::Timestamp(timestamp_type) => match timestamp_type.unit() {
-                TimeUnit::Second => primitive_values_to_vector::<TimestampSecondType>(row),
-                TimeUnit::Millisecond => {
-                    primitive_values_to_vector::<TimestampMillisecondType>(row)
-                }
-                TimeUnit::Microsecond => {
-                    primitive_values_to_vector::<TimestampMicrosecondType>(row)
-                }
-                TimeUnit::Nanosecond => primitive_values_to_vector::<TimestampNanosecondType>(row),
-            },
-            CDT::Interval(interval_type) => match interval_type.unit() {
-                common_time::interval::IntervalUnit::YearMonth => {
-                    primitive_values_to_vector::<IntervalYearMonthType>(row)
-                }
-                common_time::interval::IntervalUnit::DayTime => {
-                    primitive_values_to_vector::<IntervalDayTimeType>(row)
-                }
-                common_time::interval::IntervalUnit::MonthDayNano => {
-                    primitive_values_to_vector::<IntervalMonthDayNanoType>(row)
-                }
-            },
-            CDT::Duration(duration_type) => match duration_type.unit() {
-                TimeUnit::Second => primitive_values_to_vector::<DurationSecondType>(row),
-                TimeUnit::Millisecond => primitive_values_to_vector::<DurationMillisecondType>(row),
-                TimeUnit::Microsecond => primitive_values_to_vector::<DurationMicrosecondType>(row),
-                TimeUnit::Nanosecond => primitive_values_to_vector::<DurationNanosecondType>(row),
-            },
-            CDT::Decimal128(_) => {
-                let mut builder = Decimal128VectorBuilder::with_capacity(row.len());
-                if let Some(first) = row.first() {
-                    if let Value::Decimal128(decimal) = first {
-                        let (precision, scale) = (decimal.precision(), decimal.scale());
-                        builder = builder.with_precision_and_scale(precision, scale)?;
-                    } else {
-                        return error::ConversionSnafu {
-                            from: format!("Unsupported scalar value: {first:?}"),
-                        }
-                        .fail();
-                    }
-                }
-                for val in row {
-                    builder.try_push_value_ref(val.as_value_ref())?;
-                }
-                let vector = builder.finish();
-                Ok(Arc::new(vector))
-            }
-            _ => UnsupportedArrowTypeSnafu {
-                arrow_type: dt.as_arrow_type(),
-            }
-            .fail()?,
-        }
+        let vector = builder.to_vector();
+        Ok(vector)
     }
 
     /// Try to cast slice of `arrays` to vectors.
