@@ -22,7 +22,6 @@ use arrow::compute;
 use arrow::compute::kernels::comparison;
 use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 use arrow_schema::IntervalUnit;
-use common_base::bytes::StringBytes;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 
@@ -30,14 +29,15 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result, UnsupportedArrowTypeSnafu};
 use crate::prelude::DataType;
 use crate::scalars::{Scalar, ScalarVectorBuilder};
-use crate::types::{LogicalPrimitiveType, WrapperType};
+use crate::types::LogicalPrimitiveType;
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::{
-    BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Decimal128Vector,
+    BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, ConstantVector,
+    DateTimeVector, DateVector, Decimal128Vector, Decimal128VectorBuilder,
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
     DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
     Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
-    ListVector, ListVectorBuilder, MutableVector, NullVector, PrimitiveVector, StringVector,
+    ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector, StringVectorBuilder,
     TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
     TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
     TimestampSecondVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, Vector,
@@ -385,19 +385,16 @@ impl Helper {
             TimestampNanosecondType, TimestampSecondType, UInt16Type, UInt32Type, UInt64Type,
             UInt8Type,
         };
-        fn primitive_values_to_vector<T, Native, Wrapped>(values: Vec<Value>) -> Result<VectorRef>
+        use crate::vectors::PrimitiveVectorBuilder;
+        fn primitive_values_to_vector<T>(values: Vec<Value>) -> Result<VectorRef>
         where
-            T: LogicalPrimitiveType<Native = Native>,
-            Wrapped: WrapperType<Native = Native, LogicalType = T>,
-            Option<Wrapped>: TryFrom<Value, Error = error::Error>,
+            T: LogicalPrimitiveType,
         {
-            let mut native_values: Vec<Option<Native>> = Vec::new();
-            for value in values.into_iter() {
-                let native: Option<Native> =
-                    Option::<Wrapped>::try_from(value)?.map(|inner| inner.into_native());
-                native_values.push(native);
+            let mut builder = PrimitiveVectorBuilder::<T>::with_capacity(values.len());
+            for val in values.clone() {
+                builder.try_push_value_ref(val.as_value_ref())?;
             }
-            let vector = PrimitiveVector::<T>::from(native_values);
+            let vector = builder.finish();
             Ok(Arc::new(vector))
         }
 
@@ -407,140 +404,80 @@ impl Helper {
                 Ok(Arc::new(vector))
             }
             CDT::Boolean(_) => {
-                let values: Vec<Option<_>> = row
-                    .into_iter()
-                    .map(|v| v.try_into())
-                    .collect::<Result<_>>()?;
-                let vector = BooleanVector::from(values);
+                let mut builder = BooleanVectorBuilder::with_capacity(row.len());
+                for val in row {
+                    builder.try_push_value_ref(val.as_value_ref())?;
+                }
+                let vector = builder.finish();
                 Ok(Arc::new(vector))
             }
-            CDT::Int8(_) => primitive_values_to_vector::<Int8Type, i8, i8>(row),
-            CDT::Int16(_) => primitive_values_to_vector::<Int16Type, i16, i16>(row),
-            CDT::Int32(_) => primitive_values_to_vector::<Int32Type, i32, i32>(row),
-            CDT::Int64(_) => primitive_values_to_vector::<Int64Type, i64, i64>(row),
-            CDT::UInt8(_) => primitive_values_to_vector::<UInt8Type, u8, u8>(row),
-            CDT::UInt16(_) => primitive_values_to_vector::<UInt16Type, u16, u16>(row),
-            CDT::UInt32(_) => primitive_values_to_vector::<UInt32Type, u32, u32>(row),
-            CDT::UInt64(_) => primitive_values_to_vector::<UInt64Type, u64, u64>(row),
-            CDT::Float32(_) => primitive_values_to_vector::<Float32Type, f32, f32>(row),
-            CDT::Float64(_) => primitive_values_to_vector::<Float64Type, f64, f64>(row),
+            CDT::Int8(_) => primitive_values_to_vector::<Int8Type>(row),
+            CDT::Int16(_) => primitive_values_to_vector::<Int16Type>(row),
+            CDT::Int32(_) => primitive_values_to_vector::<Int32Type>(row),
+            CDT::Int64(_) => primitive_values_to_vector::<Int64Type>(row),
+            CDT::UInt8(_) => primitive_values_to_vector::<UInt8Type>(row),
+            CDT::UInt16(_) => primitive_values_to_vector::<UInt16Type>(row),
+            CDT::UInt32(_) => primitive_values_to_vector::<UInt32Type>(row),
+            CDT::UInt64(_) => primitive_values_to_vector::<UInt64Type>(row),
+            CDT::Float32(_) => primitive_values_to_vector::<Float32Type>(row),
+            CDT::Float64(_) => primitive_values_to_vector::<Float64Type>(row),
             CDT::String(_) => {
-                let values: Vec<Option<String>> = row
-                    .into_iter()
-                    .map(|v| {
-                        Option::<StringBytes>::try_from(v)
-                            .map(|v| v.map(|inner| inner.into_string()))
-                    })
-                    .collect::<Result<_>>()?;
-                let vector = StringVector::from(values);
+                let mut builder = StringVectorBuilder::with_capacity(row.len());
+                for val in row {
+                    builder.try_push_value_ref(val.as_value_ref())?;
+                }
+                let vector = builder.finish();
                 Ok(Arc::new(vector))
             }
             CDT::Binary(_) => {
-                let values: Vec<Option<Vec<u8>>> = row
-                    .into_iter()
-                    .map(|v| {
-                        Option::<common_base::bytes::Bytes>::try_from(v)
-                            .map(|v| v.map(|inner| inner.to_vec()))
-                    })
-                    .collect::<Result<_>>()?;
-                let vector = BinaryVector::from(values);
+                let mut builder = BinaryVectorBuilder::with_capacity(row.len());
+                for val in row {
+                    builder.try_push_value_ref(val.as_value_ref())?;
+                }
+                let vector = builder.finish();
                 Ok(Arc::new(vector))
             }
-            CDT::Date(_) => primitive_values_to_vector::<DateType, i32, common_time::Date>(row),
-            CDT::DateTime(_) => {
-                primitive_values_to_vector::<DateTimeType, i64, common_time::DateTime>(row)
-            }
+            CDT::Date(_) => primitive_values_to_vector::<DateType>(row),
+            CDT::DateTime(_) => primitive_values_to_vector::<DateTimeType>(row),
             CDT::Time(time_type) => match time_type.unit() {
-                TimeUnit::Second => {
-                    primitive_values_to_vector::<TimeSecondType, i32, crate::time::TimeSecond>(row)
-                }
-                TimeUnit::Millisecond => primitive_values_to_vector::<
-                    TimeMillisecondType,
-                    i32,
-                    crate::time::TimeMillisecond,
-                >(row),
-                TimeUnit::Microsecond => primitive_values_to_vector::<
-                    TimeMicrosecondType,
-                    i64,
-                    crate::time::TimeMicrosecond,
-                >(row),
-                TimeUnit::Nanosecond => {
-                    primitive_values_to_vector::<TimeNanosecondType, i64, crate::time::TimeNanosecond>(
-                        row,
-                    )
-                }
+                TimeUnit::Second => primitive_values_to_vector::<TimeSecondType>(row),
+                TimeUnit::Millisecond => primitive_values_to_vector::<TimeMillisecondType>(row),
+                TimeUnit::Microsecond => primitive_values_to_vector::<TimeMicrosecondType>(row),
+                TimeUnit::Nanosecond => primitive_values_to_vector::<TimeNanosecondType>(row),
             },
             CDT::Timestamp(timestamp_type) => match timestamp_type.unit() {
-                TimeUnit::Second => primitive_values_to_vector::<
-                    TimestampSecondType,
-                    i64,
-                    crate::timestamp::TimestampSecond,
-                >(row),
-                TimeUnit::Millisecond => primitive_values_to_vector::<
-                    TimestampMillisecondType,
-                    i64,
-                    crate::timestamp::TimestampMillisecond,
-                >(row),
-                TimeUnit::Microsecond => primitive_values_to_vector::<
-                    TimestampMicrosecondType,
-                    i64,
-                    crate::timestamp::TimestampMicrosecond,
-                >(row),
-                TimeUnit::Nanosecond => primitive_values_to_vector::<
-                    TimestampNanosecondType,
-                    i64,
-                    crate::timestamp::TimestampNanosecond,
-                >(row),
+                TimeUnit::Second => primitive_values_to_vector::<TimestampSecondType>(row),
+                TimeUnit::Millisecond => {
+                    primitive_values_to_vector::<TimestampMillisecondType>(row)
+                }
+                TimeUnit::Microsecond => {
+                    primitive_values_to_vector::<TimestampMicrosecondType>(row)
+                }
+                TimeUnit::Nanosecond => primitive_values_to_vector::<TimestampNanosecondType>(row),
             },
             CDT::Interval(interval_type) => match interval_type.unit() {
-                common_time::interval::IntervalUnit::YearMonth => primitive_values_to_vector::<
-                    IntervalYearMonthType,
-                    i32,
-                    crate::interval::IntervalYearMonth,
-                >(row),
-                common_time::interval::IntervalUnit::DayTime => primitive_values_to_vector::<
-                    IntervalDayTimeType,
-                    i64,
-                    crate::interval::IntervalDayTime,
-                >(row),
-                common_time::interval::IntervalUnit::MonthDayNano => primitive_values_to_vector::<
-                    IntervalMonthDayNanoType,
-                    i128,
-                    crate::interval::IntervalMonthDayNano,
-                >(row),
+                common_time::interval::IntervalUnit::YearMonth => {
+                    primitive_values_to_vector::<IntervalYearMonthType>(row)
+                }
+                common_time::interval::IntervalUnit::DayTime => {
+                    primitive_values_to_vector::<IntervalDayTimeType>(row)
+                }
+                common_time::interval::IntervalUnit::MonthDayNano => {
+                    primitive_values_to_vector::<IntervalMonthDayNanoType>(row)
+                }
             },
             CDT::Duration(duration_type) => match duration_type.unit() {
-                TimeUnit::Second => primitive_values_to_vector::<
-                    DurationSecondType,
-                    i64,
-                    crate::duration::DurationSecond,
-                >(row),
-                TimeUnit::Millisecond => primitive_values_to_vector::<
-                    DurationMillisecondType,
-                    i64,
-                    crate::duration::DurationMillisecond,
-                >(row),
-                TimeUnit::Microsecond => primitive_values_to_vector::<
-                    DurationMicrosecondType,
-                    i64,
-                    crate::duration::DurationMicrosecond,
-                >(row),
-                TimeUnit::Nanosecond => primitive_values_to_vector::<
-                    DurationNanosecondType,
-                    i64,
-                    crate::duration::DurationNanosecond,
-                >(row),
+                TimeUnit::Second => primitive_values_to_vector::<DurationSecondType>(row),
+                TimeUnit::Millisecond => primitive_values_to_vector::<DurationMillisecondType>(row),
+                TimeUnit::Microsecond => primitive_values_to_vector::<DurationMicrosecondType>(row),
+                TimeUnit::Nanosecond => primitive_values_to_vector::<DurationNanosecondType>(row),
             },
             CDT::Decimal128(_) => {
-                let values: Vec<_> = row
-                    .into_iter()
-                    .map(|v| {
-                        Option::<common_decimal::Decimal128>::try_from(v)
-                            .map(|v| v.map(|inner| inner.val()))
-                    })
-                    .collect::<Result<_>>()?;
-                let array: arrow_array::Decimal128Array = values.into_iter().collect();
-                let vector = Decimal128Vector::from(array);
+                let mut builder = Decimal128VectorBuilder::with_capacity(row.len());
+                for val in row {
+                    builder.try_push_value_ref(val.as_value_ref())?;
+                }
+                let vector = builder.finish();
                 Ok(Arc::new(vector))
             }
             _ => UnsupportedArrowTypeSnafu {
