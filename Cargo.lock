@@ -5789,6 +5789,7 @@ version = "0.9.1"
 dependencies = [
  "async-stream",
  "async-trait",
+ "bytes",
  "chrono",
  "common-base",
  "common-error",

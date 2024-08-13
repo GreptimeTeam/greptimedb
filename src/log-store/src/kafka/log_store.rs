@@ -178,7 +178,8 @@ impl LogStore for KafkaLogStore {
         for (region_id, (producer, records)) in region_grouped_records {
             // Safety: `KafkaLogStore::entry` will ensure that the
             // `Record`'s `approximate_size` must be less or equal to `max_batch_bytes`.
-            region_grouped_result_receivers.push((region_id, producer.produce(records).await?))
+            region_grouped_result_receivers
+                .push((region_id, producer.produce(region_id, records).await?))
         }
 
         let region_grouped_max_offset =
