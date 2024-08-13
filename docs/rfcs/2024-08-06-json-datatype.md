@@ -41,7 +41,7 @@ SELECT json_get(b, 'name') FROM test;
 | jHl2oDDnPc1i2OzlP5Y |
 +---------------------+
 
-SELECT json_get_by_paths_int(b, 'attributes', 'event_attributes') + 1 FROM test;
+SELECT CAST(json_get_by_paths(b, 'attributes', 'event_attributes') AS DOUBLE) + 1 FROM test;
 +-------------------------------+
 | b.attributes.event_attributes |
 +-------------------------------+
@@ -72,7 +72,7 @@ The data of JSON type is represented by `Binary` data type in arrow. There are 2
 
 For the former, the query engine performs queries directly over binary data. We provide functions like `json_get` and `json_get_by_paths` to extract json elements through keys.
 
-For the latter, users need to manually specify the data type of the json elements for computing. We provide functions like `as_int` and `as_double` to decode the binary data into data with specified data type for further computation.
+For the latter, users need to manually specify the data type of the json elements for computing. Users can use `CAST` to convert the binary data to the specified data type. Computation without explicit conversion will result in an error.
 
 Queries of JSON goes through following steps:
 
