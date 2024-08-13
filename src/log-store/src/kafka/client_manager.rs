@@ -151,7 +151,9 @@ impl ClientManager {
 
         let (tx, rx) = OrderedBatchProducer::channel();
         let index_collector = if let Some(global_collector) = self.global_index_collector.as_ref() {
-            global_collector.provider_level_index_collector(provider.clone(), tx.clone())
+            global_collector
+                .provider_level_index_collector(provider.clone(), tx.clone())
+                .await
         } else {
             Box::new(NoopCollector)
         };

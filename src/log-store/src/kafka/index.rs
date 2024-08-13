@@ -17,7 +17,7 @@ mod encoder;
 mod iterator;
 
 pub use collector::GlobalIndexCollector;
-pub(crate) use collector::{IndexCollector, NoopCollector, ProviderLevelIndexCollector};
+pub(crate) use collector::{IndexCollector, NoopCollector};
 pub(crate) use encoder::{IndexEncoder, JsonIndexEncoder};
 pub(crate) use iterator::{
     MultipleRegionWalIndexIterator, NextBatchHint, RegionWalIndexIterator, RegionWalRange,

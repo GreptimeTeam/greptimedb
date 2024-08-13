@@ -34,13 +34,16 @@ pub async fn create_tmp_local_file_log_store<P: AsRef<Path>>(path: P) -> RaftEng
 
 /// Create a [KafkaLogStore].
 pub async fn create_kafka_log_store(broker_endpoints: Vec<String>) -> KafkaLogStore {
-    KafkaLogStore::try_new(&DatanodeKafkaConfig {
-        connection: KafkaConnectionConfig {
-            broker_endpoints,
+    KafkaLogStore::try_new(
+        &DatanodeKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints,
+                ..Default::default()
+            },
             ..Default::default()
         },
-        ..Default::default()
-    })
+        None,
+    )
     .await
     .unwrap()
 }

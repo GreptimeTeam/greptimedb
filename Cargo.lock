@@ -5796,7 +5796,6 @@ checksum = "90ed8c1e510134f979dbc4f070f87d4313098b704861a105fe34231c70a3901c"
 name = "log-store"
 version = "0.9.1"
 dependencies = [
- "arrow",
  "async-stream",
  "async-trait",
  "bytes",
@@ -5816,7 +5815,6 @@ dependencies = [
  "itertools 0.10.5",
  "lazy_static",
  "object-store",
- "parquet",
  "pin-project",
  "prometheus",
  "protobuf",

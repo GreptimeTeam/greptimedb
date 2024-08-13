@@ -13,7 +13,6 @@ protobuf-build = { version = "0.15", default-features = false, features = [
 workspace = true
 
 [dependencies]
-arrow.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
@@ -32,7 +31,6 @@ futures-util.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
 object-store.workspace = true
-parquet.workspace = true
 pin-project.workspace = true
 prometheus.workspace = true
 protobuf = { version = "2", features = ["bytes"] }

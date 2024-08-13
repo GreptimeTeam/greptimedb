@@ -30,6 +30,7 @@ pub enum MetasrvWalConfig {
     Kafka(MetasrvKafkaConfig),
 }
 
+#[allow(clippy::large_enum_variant)]
 /// Wal configurations for datanode.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "provider", rename_all = "snake_case")]

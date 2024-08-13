@@ -13,20 +13,9 @@
 // limitations under the License.
 
 use std::collections::{BTreeSet, HashMap};
-use std::fs::File;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use arrow::array::{
-    Array, ArrayBuilder, ArrayData, ArrayRef, ListArray, ListBuilder, PrimitiveArray, RecordBatch,
-    StringArray, StructArray, StructBuilder, UInt64Array, UInt64Builder,
-};
-use arrow::buffer::OffsetBuffer;
-use arrow::datatypes::{DataType, Field, Fields, Schema, UInt64Type};
-use arrow::util::pretty::pretty_format_batches;
 use delta_encoding::{DeltaDecoderExt, DeltaEncoderExt};
-use parquet::arrow::ArrowWriter;
-use parquet::file::page_index::index_reader;
-use parquet::schema::types::{Type, TypePtr};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;

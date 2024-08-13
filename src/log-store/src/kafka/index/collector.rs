@@ -13,15 +13,12 @@
 // limitations under the License.
 
 use std::collections::{BTreeSet, HashMap};
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::{BufMut, Bytes, BytesMut};
 use common_telemetry::{error, info};
 use futures::future::try_join_all;
-use object_store::Writer;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
@@ -189,11 +186,12 @@ impl GlobalIndexCollector {
 
 impl GlobalIndexCollector {
     /// Creates a new [`ProviderLevelIndexCollector`] for a specified provider.
-    pub(crate) fn provider_level_index_collector(
+    pub(crate) async fn provider_level_index_collector(
         &self,
         provider: Arc<KafkaProvider>,
         sender: Sender<WorkerRequest>,
     ) -> Box<dyn IndexCollector> {
+        self.providers.lock().await.insert(provider.clone(), sender);
         Box::new(ProviderLevelIndexCollector {
             indexes: Default::default(),
             provider,
@@ -269,5 +267,5 @@ impl IndexCollector for NoopCollector {
 
     fn set_latest_entry_id(&mut self, _entry_id: EntryId) {}
 
-    fn dump(&mut self, encoder: &dyn IndexEncoder) {}
+    fn dump(&mut self, _encoder: &dyn IndexEncoder) {}
 }
