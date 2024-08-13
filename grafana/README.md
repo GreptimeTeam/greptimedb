@@ -63,4 +63,4 @@ Create a Prometheus data source in Grafana before using this dashboard. We use `
 
 ### Usage
 
-Use `datasource` or `greptime_pod` on the upper-left corner to filter data from certain node.
+Use `datasource` or `instance` on the upper-left corner to filter data from certain node.
