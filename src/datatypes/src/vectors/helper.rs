@@ -474,6 +474,17 @@ impl Helper {
             },
             CDT::Decimal128(_) => {
                 let mut builder = Decimal128VectorBuilder::with_capacity(row.len());
+                if let Some(first) = row.first() {
+                    if let Value::Decimal128(decimal) = first {
+                        let (precision, scale) = (decimal.precision(), decimal.scale());
+                        builder = builder.with_precision_and_scale(precision, scale)?;
+                    } else {
+                        return error::ConversionSnafu {
+                            from: format!("Unsupported scalar value: {first:?}"),
+                        }
+                        .fail();
+                    }
+                }
                 for val in row {
                     builder.try_push_value_ref(val.as_value_ref())?;
                 }
