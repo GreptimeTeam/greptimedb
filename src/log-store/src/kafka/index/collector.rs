@@ -69,14 +69,10 @@ pub struct CollectionTask {
 }
 
 impl CollectionTask {
-    async fn dump_index(
-        providers: &Arc<TokioMutex<HashMap<Arc<KafkaProvider>, Sender<WorkerRequest>>>>,
-        operator: &object_store::ObjectStore,
-        path: &str,
-    ) -> Result<()> {
+    async fn dump_index(&self) -> Result<()> {
         let encoder = Arc::new(JsonIndexEncoder::default());
         let receivers = {
-            let providers = providers.lock().await;
+            let providers = self.providers.lock().await;
             let mut receivers = Vec::with_capacity(providers.len());
             for (provider, sender) in providers.iter() {
                 let (req, rx) = DumpIndexRequest::new(encoder.clone());
@@ -94,8 +90,9 @@ impl CollectionTask {
             .await
             .context(error::WaitDumpIndexSnafu)?;
         let bytes = encoder.finish()?;
-        let mut writer = operator
-            .writer(path)
+        let mut writer = self
+            .operator
+            .writer(&self.path)
             .await
             .context(error::CreateWriterSnafu)?;
         writer.write(bytes).await.context(error::WriteIndexSnafu)?;
@@ -104,10 +101,8 @@ impl CollectionTask {
         Ok(())
     }
 
-    async fn checkpoint(
-        providers: &Arc<TokioMutex<HashMap<Arc<KafkaProvider>, Sender<WorkerRequest>>>>,
-    ) {
-        for (provider, sender) in providers.lock().await.iter() {
+    async fn checkpoint(&self) {
+        for (provider, sender) in self.providers.lock().await.iter() {
             if sender.send(WorkerRequest::Checkpoint).await.is_err() {
                 error!(
                     "BackgroundProducerWorker is stopped, topic: {}",
@@ -120,13 +115,11 @@ impl CollectionTask {
     /// The background task performs two main operations:
     /// - Persists the WAL index to the specified `path` at every `dump_index_interval`.
     /// - Updates the latest index ID for each WAL provider at every `checkpoint_interval`.
-    fn run(&mut self) {
+    fn run(&self) {
         let mut dump_index_interval = tokio::time::interval(self.dump_index_interval);
         let mut checkpoint_interval = tokio::time::interval(self.checkpoint_interval);
-        let providers = self.providers.clone();
-        let path = self.path.to_string();
-        let operator = self.operator.clone();
         let running = self.running.clone();
+        let moved_self = self.clone();
         common_runtime::spawn_global(async move {
             loop {
                 if !running.load(Ordering::Relaxed) {
@@ -135,12 +128,12 @@ impl CollectionTask {
                 }
                 select! {
                     _ = dump_index_interval.tick() => {
-                        if let Err(err) = CollectionTask::dump_index(&providers, &operator, &path).await {
+                        if let Err(err) = moved_self.dump_index().await {
                             error!(err; "Failed to persist the WAL index");
                         }
                     },
                     _ = checkpoint_interval.tick() => {
-                        CollectionTask::checkpoint(&providers).await;
+                        moved_self.checkpoint().await;
                     }
                 }
             }
@@ -171,7 +164,7 @@ impl GlobalIndexCollector {
     ) -> Self {
         let providers: Arc<TokioMutex<HashMap<Arc<KafkaProvider>, Sender<WorkerRequest>>>> =
             Arc::new(Default::default());
-        let mut task = CollectionTask {
+        let task = CollectionTask {
             providers: providers.clone(),
             dump_index_interval,
             checkpoint_interval,

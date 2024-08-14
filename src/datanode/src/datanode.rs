@@ -410,7 +410,7 @@ impl DatanodeBuilder {
                     .await?;
                     let path = default_index_file(opts.node_id.unwrap());
                     Some(Self::build_global_index_collector(
-                        kafka_config.create_index_interval,
+                        kafka_config.dump_index_interval,
                         kafka_config.index_checkpoint_interval,
                         operator,
                         path,
