@@ -15,16 +15,16 @@
 //! define MapFilterProject which is a compound operator that can be applied row-by-row.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
-use arrow::array::AsArray;
+use arrow::compute::FilterBuilder;
 use common_telemetry::debug;
 use datatypes::value::Value;
-use datatypes::vectors::{BooleanVector, BooleanVectorBuilder, ConstantVector, VectorRef};
-use snafu::{ensure, OptionExt, ResultExt};
+use datatypes::vectors::{BooleanVector, Helper};
+use itertools::Itertools;
+use snafu::{ensure, ResultExt};
 
 use crate::error::{Error, InvalidQuerySnafu};
-use crate::expr::error::{ArrowSnafu, EvalError, InternalSnafu};
+use crate::expr::error::{ArrowSnafu, DataTypeSnafu, EvalError, InternalSnafu};
 use crate::expr::{to_bool_array, Batch, InvalidArgumentSnafu, ScalarExpr};
 use crate::repr::{self, value_to_internal_ts, Diff, Row};
 
@@ -479,8 +479,30 @@ impl SafeMfpPlan {
     /// similar to [`MapFilterProject::evaluate_into`], just in batch, and rows that don't pass the predicates are not included in the output.
     ///
     /// so it's not guaranteed that the output will have the same number of rows as the input.
-    pub fn eval_batch_into(&self, batch: &mut Batch) -> Result<Option<VectorRef>, EvalError> {
-        todo!()
+    pub fn eval_batch_into(&self, batch: &mut Batch) -> Result<Batch, EvalError> {
+        let passed_predicates = self.eval_batch_inner(batch)?;
+        let filter = FilterBuilder::new(passed_predicates.as_boolean_array());
+        let pred = filter.build();
+        let mut result = vec![];
+        for col in batch.batch() {
+            let filtered = pred
+                .filter(col.to_arrow_array().as_ref())
+                .context(ArrowSnafu {
+                    context: format!("failed to filter column for mfp operator {:?}", self),
+                })?;
+            result.push(Helper::try_into_vector(filtered).context(DataTypeSnafu {
+                msg: "Failed to convert arrow array to vector",
+            })?);
+        }
+        let projected = self
+            .mfp
+            .projection
+            .iter()
+            .map(|c| result[*c].clone())
+            .collect_vec();
+        let row_count = pred.count();
+
+        Ok(Batch::new(projected, row_count))
     }
 
     /// similar to [`MapFilterProject::evaluate_into`], just in batch.
@@ -508,7 +530,7 @@ impl SafeMfpPlan {
 
         // while evaluated expressions are less than total expressions, keep evaluating
         while expression < self.mfp.expressions.len() {
-            let expr_eval = self.mfp.expressions[expression].eval_batch(&batch)?;
+            let expr_eval = self.mfp.expressions[expression].eval_batch(batch)?;
             batch.batch_mut().push(expr_eval);
             expression += 1;
         }
