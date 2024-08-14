@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use arrow::array::BooleanArray;
 use common_error::ext::BoxedError;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
@@ -265,15 +266,15 @@ impl ScalarExpr {
             ScalarExpr::Column(i) => Ok(batch.batch()[*i].clone()),
             ScalarExpr::Literal(val, dt) => Ok(Helper::try_from_scalar_value(
                 val.try_to_scalar_value(dt).context(DataTypeSnafu {
-                    msg: "Fail to convert literal to scalar value",
+                    msg: "Failed to convert literal to scalar value",
                 })?,
                 batch.row_count(),
             )
             .context(DataTypeSnafu {
-                msg: "Fail to convert scalar value to vector ref when parsing literal",
+                msg: "Failed to convert scalar value to vector ref when parsing literal",
             })?),
             ScalarExpr::CallUnmaterializable(_) => OptimizeSnafu {
-                reason: "Can't eval unmaterializable function".to_string(),
+                reason: "Can't eval unmaterializable function",
             }
             .fail()?,
             ScalarExpr::CallUnary { func, expr } => func.eval_batch(batch, expr),
@@ -285,15 +286,12 @@ impl ScalarExpr {
             } => df_scalar_fn.eval_batch(batch, exprs),
             ScalarExpr::If { cond, then, els } => {
                 let conds = cond.eval_batch(batch)?;
-                let bool_conds = conds
-                    .as_any()
-                    .downcast_ref::<arrow::array::BooleanArray>()
-                    .context({
-                        TypeMismatchSnafu {
-                            expected: ConcreteDataType::boolean_datatype(),
-                            actual: conds.data_type(),
-                        }
-                    })?;
+                let bool_conds = conds.as_any().downcast_ref::<BooleanArray>().context({
+                    TypeMismatchSnafu {
+                        expected: ConcreteDataType::boolean_datatype(),
+                        actual: conds.data_type(),
+                    }
+                })?;
 
                 let mut ret_vec = None;
 

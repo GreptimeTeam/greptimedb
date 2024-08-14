@@ -228,11 +228,11 @@ impl UnaryFunc {
     pub fn eval_batch(&self, batch: &Batch, expr: &ScalarExpr) -> Result<VectorRef, EvalError> {
         let arg_col = expr.eval_batch(batch)?;
         match self {
-            &Self::Not => {
+            Self::Not => {
                 let arrow_array = arg_col.to_arrow_array();
                 let bool_array = arrow_array
                     .as_any()
-                    .downcast_ref::<arrow::array::BooleanArray>()
+                    .downcast_ref::<BooleanArray>()
                     .context({
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::boolean_datatype(),
@@ -254,7 +254,7 @@ impl UnaryFunc {
                 let arrow_array = arg_col.to_arrow_array();
                 let bool_array = arrow_array
                     .as_any()
-                    .downcast_ref::<arrow::array::BooleanArray>()
+                    .downcast_ref::<BooleanArray>()
                     .context({
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::boolean_datatype(),
@@ -1086,15 +1086,12 @@ impl VariadicFunc {
             .clone();
 
         for right in iter {
-            let right = right
-                .as_any()
-                .downcast_ref::<arrow::array::BooleanArray>()
-                .context({
-                    TypeMismatchSnafu {
-                        expected: ConcreteDataType::boolean_datatype(),
-                        actual: ConcreteDataType::from_arrow_type(right.data_type()),
-                    }
-                })?;
+            let right = right.as_any().downcast_ref::<BooleanArray>().context({
+                TypeMismatchSnafu {
+                    expected: ConcreteDataType::boolean_datatype(),
+                    actual: ConcreteDataType::from_arrow_type(right.data_type()),
+                }
+            })?;
             left = match self {
                 Self::And => {
                     arrow::compute::and(&left, right).context(ArrowSnafu { context: "and" })?
