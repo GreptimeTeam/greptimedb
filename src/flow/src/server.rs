@@ -398,13 +398,15 @@ impl FlownodeBuilder {
         let (tx, rx) = oneshot::channel();
 
         let node_id = self.opts.node_id.map(|id| id as u32);
-        let _handle = std::thread::spawn(move || {
-            let (flow_node_manager, mut worker) =
-                FlowWorkerManager::new_with_worker(node_id, query_engine, table_meta);
-            let _ = tx.send(flow_node_manager);
-            info!("Flow Worker started in new thread");
-            worker.run();
-        });
+        let _handle = std::thread::Builder::new()
+            .name("flow-worker".to_string())
+            .spawn(move || {
+                let (flow_node_manager, mut worker) =
+                    FlowWorkerManager::new_with_worker(node_id, query_engine, table_meta);
+                let _ = tx.send(flow_node_manager);
+                info!("Flow Worker started in new thread");
+                worker.run();
+            });
         let man = rx.await.map_err(|_e| {
             UnexpectedSnafu {
                 reason: "sender is dropped, failed to create flow node manager",

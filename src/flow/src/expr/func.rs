@@ -278,14 +278,12 @@ impl UnaryFunc {
             }
             Self::Cast(to) => {
                 let arg_ty = arg.data_type();
-                let res = cast(arg, to).context({
+                cast(arg, to).context({
                     CastValueSnafu {
                         from: arg_ty,
                         to: to.clone(),
                     }
-                });
-                debug!("Cast to type: {to:?}, result: {:?}", res);
-                res
+                })
             }
             Self::TumbleWindowFloor {
                 window_size,
