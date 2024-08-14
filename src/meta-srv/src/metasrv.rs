@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use clap::ValueEnum;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_config::Configurable;
@@ -64,6 +65,19 @@ use crate::state::{become_follower, become_leader, StateRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
+
+// The datastores that implements metadata kvbackend.
+#[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]
+pub enum BackendImpl {
+    // Etcd as metadata storage.
+    #[default]
+    EtcdStore,
+    // In memory metadata storage - mostly used for testing.
+    MemoryStore,
+    #[cfg(feature = "pg_kvbackend")]
+    // Postgres as metadata storage.
+    PostgresStore,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -114,6 +128,8 @@ pub struct MetasrvOptions {
     pub max_txn_ops: usize,
     /// The tracing options.
     pub tracing: TracingOptions,
+    /// The datastore for kv metadata.
+    pub backend: BackendImpl,
 }
 
 impl Default for MetasrvOptions {
@@ -146,6 +162,7 @@ impl Default for MetasrvOptions {
             store_key_prefix: String::new(),
             max_txn_ops: 128,
             tracing: TracingOptions::default(),
+            backend: BackendImpl::EtcdStore,
         }
     }
 }

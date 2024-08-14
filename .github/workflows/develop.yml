@@ -338,6 +338,8 @@ jobs:
         uses: ./.github/actions/setup-kafka-cluster
       - name: Setup Etcd cluser
         uses: ./.github/actions/setup-etcd-cluster
+      - name: Setup Postgres cluser
+        uses: ./.github/actions/setup-postgres-cluster
       # Prepares for fuzz tests
       - uses: arduino/setup-protoc@v3
         with:
@@ -476,6 +478,8 @@ jobs:
         uses: ./.github/actions/setup-kafka-cluster
       - name: Setup Etcd cluser
         uses: ./.github/actions/setup-etcd-cluster
+      - name: Setup Postgres cluser
+        uses: ./.github/actions/setup-postgres-cluster
       # Prepares for fuzz tests
       - uses: arduino/setup-protoc@v3
         with:
@@ -702,6 +706,9 @@ jobs:
       - name: Setup minio
         working-directory: tests-integration/fixtures/minio
         run: docker compose -f docker-compose-standalone.yml up -d --wait
+      - name: Setup postgres server
+        working-directory: tests-integration/fixtures/postgres
+        run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F pyo3_backend -F dashboard
         env:
@@ -718,6 +725,7 @@ jobs:
           GT_MINIO_REGION: us-west-2
           GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
+          GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
           UNITTEST_LOG_DIR: "__unittest_logs"

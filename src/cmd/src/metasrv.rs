@@ -22,6 +22,7 @@ use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use meta_srv::bootstrap::MetasrvInstance;
+use meta_srv::metasrv::BackendImpl;
 use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -137,6 +138,9 @@ struct StartCommand {
     /// The max operations per txn
     #[clap(long)]
     max_txn_ops: Option<usize>,
+    /// The database backend.
+    #[clap(long, value_enum)]
+    backend: Option<BackendImpl>,
 }
 
 impl StartCommand {
@@ -217,6 +221,12 @@ impl StartCommand {
 
         if let Some(max_txn_ops) = self.max_txn_ops {
             opts.max_txn_ops = max_txn_ops;
+        }
+
+        if let Some(backend) = &self.backend {
+            opts.backend.clone_from(backend);
+        } else {
+            opts.backend = BackendImpl::default()
         }
 
         // Disable dashboard in metasrv.

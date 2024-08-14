@@ -31,6 +31,8 @@ use crate::rpc::KeyValue;
 pub mod chroot;
 pub mod etcd;
 pub mod memory;
+#[cfg(feature = "pg_kvbackend")]
+pub mod postgres;
 pub mod test;
 pub mod txn;
 
