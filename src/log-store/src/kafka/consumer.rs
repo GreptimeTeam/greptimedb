@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::debug;
 use derive_builder::Builder;
 use futures::future::{BoxFuture, Fuse, FusedFuture};
@@ -61,8 +62,8 @@ struct FetchResult {
     used_offset: i64,
 }
 
-const MAX_BATCH_SIZE: usize = 52428800;
-const AVG_RECORD_SIZE: usize = 256 * 1024;
+const MAX_BATCH_SIZE: usize = ReadableSize::mb(64).as_bytes() as usize;
+const AVG_RECORD_SIZE: usize = ReadableSize::kb(256).as_bytes() as usize;
 
 /// The [`Consumer`] struct represents a Kafka consumer that fetches messages from
 /// a Kafka cluster. Yielding records respecting the [`RegionWalIndexIterator`].
