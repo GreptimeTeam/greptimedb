@@ -195,10 +195,6 @@ create_index = true
 ## **It's only used when the provider is `kafka`**.
 dump_index_interval = "60s"
 
-## The interval for doing WAL index checkpoints.
-## **It's only used when the provider is `kafka`**.
-index_checkpoint_interval = "300s"
-
 # The Kafka SASL configuration.
 # **It's only used when the provider is `kafka`**.
 # Available SASL mechanisms:

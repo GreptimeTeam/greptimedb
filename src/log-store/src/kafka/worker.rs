@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod checkpoint;
+pub(crate) mod dump_index;
 pub(crate) mod flush;
 pub(crate) mod produce;
 
@@ -29,14 +29,12 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot::{self};
 
-use super::index::IndexEncoder;
 use crate::error::{self, NoMaxValueSnafu, Result};
-use crate::kafka::index::IndexCollector;
+use crate::kafka::index::{IndexCollector, IndexEncoder};
 use crate::kafka::producer::ProducerClient;
 
 pub(crate) enum WorkerRequest {
     Produce(ProduceRequest),
-    Checkpoint,
     TruncateIndex(TruncateIndexRequest),
     DumpIndex(DumpIndexRequest),
 }
@@ -188,27 +186,18 @@ impl BackgroundProducerWorker {
 
     async fn handle_requests(&mut self, buffer: &mut Vec<WorkerRequest>) {
         let mut produce_requests = Vec::with_capacity(buffer.len());
-        let mut do_checkpoint = false;
         for req in buffer.drain(..) {
             match req {
                 WorkerRequest::Produce(req) => produce_requests.push(req),
-                WorkerRequest::Checkpoint => do_checkpoint = true,
                 WorkerRequest::TruncateIndex(TruncateIndexRequest {
                     region_id,
                     entry_id,
                 }) => self.index_collector.truncate(region_id, entry_id),
-                WorkerRequest::DumpIndex(req) => {
-                    self.index_collector.dump(req.encoder.as_ref());
-                    let _ = req.sender.send(());
-                }
+                WorkerRequest::DumpIndex(req) => self.dump_index(req).await,
             }
         }
 
         let pending_requests = self.aggregate_records(&mut produce_requests, self.max_batch_bytes);
         self.try_flush_pending_requests(pending_requests).await;
-
-        if do_checkpoint {
-            self.do_checkpoint().await;
-        }
     }
 }

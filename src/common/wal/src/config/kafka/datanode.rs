@@ -43,8 +43,6 @@ pub struct DatanodeKafkaConfig {
     pub create_index: bool,
     #[serde(with = "humantime_serde")]
     pub dump_index_interval: Duration,
-    #[serde(with = "humantime_serde")]
-    pub index_checkpoint_interval: Duration,
 }
 
 impl Default for DatanodeKafkaConfig {
@@ -58,7 +56,6 @@ impl Default for DatanodeKafkaConfig {
             kafka_topic: KafkaTopicConfig::default(),
             create_index: true,
             dump_index_interval: Duration::from_secs(60),
-            index_checkpoint_interval: Duration::from_secs(5 * 60),
         }
     }
 }

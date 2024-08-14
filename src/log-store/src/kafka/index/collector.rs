@@ -62,7 +62,6 @@ pub struct GlobalIndexCollector {
 pub struct CollectionTask {
     providers: Arc<TokioMutex<HashMap<Arc<KafkaProvider>, Sender<WorkerRequest>>>>,
     dump_index_interval: Duration,
-    checkpoint_interval: Duration,
     operator: object_store::ObjectStore,
     path: String,
     running: Arc<AtomicBool>,
@@ -101,23 +100,11 @@ impl CollectionTask {
         Ok(())
     }
 
-    async fn checkpoint(&self) {
-        for (provider, sender) in self.providers.lock().await.iter() {
-            if sender.send(WorkerRequest::Checkpoint).await.is_err() {
-                error!(
-                    "BackgroundProducerWorker is stopped, topic: {}",
-                    provider.topic
-                )
-            }
-        }
-    }
-
     /// The background task performs two main operations:
     /// - Persists the WAL index to the specified `path` at every `dump_index_interval`.
     /// - Updates the latest index ID for each WAL provider at every `checkpoint_interval`.
     fn run(&self) {
         let mut dump_index_interval = tokio::time::interval(self.dump_index_interval);
-        let mut checkpoint_interval = tokio::time::interval(self.checkpoint_interval);
         let running = self.running.clone();
         let moved_self = self.clone();
         common_runtime::spawn_global(async move {
@@ -132,9 +119,6 @@ impl CollectionTask {
                             error!(err; "Failed to persist the WAL index");
                         }
                     },
-                    _ = checkpoint_interval.tick() => {
-                        moved_self.checkpoint().await;
-                    }
                 }
             }
         });
@@ -153,12 +137,9 @@ impl GlobalIndexCollector {
     /// This method initializes a `GlobalIndexCollector` instance and starts a background task
     /// for managing WAL (Write-Ahead Logging) indexes.
     ///
-    /// The background task performs two main operations:
-    /// - Persists the WAL index to the specified `path` at every `dump_index_interval`.
-    /// - Updates the latest index ID for each WAL provider at every `checkpoint_interval`.
+    /// The background task persists the WAL index to the specified `path` at every `dump_index_interval`.
     pub fn new(
         dump_index_interval: Duration,
-        checkpoint_interval: Duration,
         operator: object_store::ObjectStore,
         path: String,
     ) -> Self {
@@ -167,7 +148,6 @@ impl GlobalIndexCollector {
         let task = CollectionTask {
             providers: providers.clone(),
             dump_index_interval,
-            checkpoint_interval,
             operator,
             path,
             running: Arc::new(AtomicBool::new(true)),

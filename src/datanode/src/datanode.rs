@@ -411,7 +411,6 @@ impl DatanodeBuilder {
                     let path = default_index_file(opts.node_id.unwrap());
                     Some(Self::build_global_index_collector(
                         kafka_config.dump_index_interval,
-                        kafka_config.index_checkpoint_interval,
                         operator,
                         path,
                     ))
@@ -475,11 +474,10 @@ impl DatanodeBuilder {
     /// Builds [`GlobalIndexCollector`]
     fn build_global_index_collector(
         dump_index_interval: Duration,
-        checkpoint_interval: Duration,
         operator: object_store::ObjectStore,
         path: String,
     ) -> GlobalIndexCollector {
-        GlobalIndexCollector::new(dump_index_interval, checkpoint_interval, operator, path)
+        GlobalIndexCollector::new(dump_index_interval, operator, path)
     }
 }
 
