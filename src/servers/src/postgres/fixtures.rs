@@ -50,7 +50,7 @@ static VAR_VALUES: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
 
 static SHOW_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^SHOW (.*?);?$").unwrap());
 static SET_TRANSACTION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^SET TRANSACTION (.*?);?").unwrap());
+    Lazy::new(|| Regex::new("(?i)^SET TRANSACTION (.*?);?$").unwrap());
 static TRANSACTION_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(BEGIN|ROLLBACK|COMMIT);?").unwrap());
 
