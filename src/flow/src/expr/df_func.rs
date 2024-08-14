@@ -35,7 +35,7 @@ use crate::expr::error::{
     ArrowSnafu, DatafusionSnafu as EvalDatafusionSnafu, EvalError, ExternalSnafu,
     InvalidArgumentSnafu,
 };
-use crate::expr::{check_batch, ScalarExpr};
+use crate::expr::{Batch, ScalarExpr};
 use crate::repr::RelationDesc;
 use crate::transform::{from_scalar_fn_to_df_fn_impl, FunctionExtensions};
 
@@ -69,16 +69,11 @@ impl DfScalarFunction {
     }
 
     /// Evaluate a batch of expressions using input values
-    pub fn eval_batch(
-        &self,
-        batch: &[VectorRef],
-        row_count: Option<usize>,
-        exprs: &[ScalarExpr],
-    ) -> Result<VectorRef, EvalError> {
-        check_batch(batch, row_count)?;
+    pub fn eval_batch(&self, batch: &Batch, exprs: &[ScalarExpr]) -> Result<VectorRef, EvalError> {
+        let row_count = batch.row_count();
         let batch: Vec<_> = exprs
             .iter()
-            .map(|expr| expr.eval_batch(batch, row_count))
+            .map(|expr| expr.eval_batch(batch))
             .collect::<Result<_, _>>()?;
 
         let schema = self.df_schema.inner().clone();
@@ -87,7 +82,7 @@ impl DfScalarFunction {
             .iter()
             .map(|array| array.to_arrow_array())
             .collect::<Vec<_>>();
-        let rb = DfRecordBatch::try_new_with_options(schema, arrays, &RecordBatchOptions::new().with_row_count(row_count)).map_err(|err| {
+        let rb = DfRecordBatch::try_new_with_options(schema, arrays, &RecordBatchOptions::new().with_row_count(Some(row_count))).map_err(|err| {
             ArrowSnafu {
                 context:
                     "Failed to create RecordBatch from values when eval_batch datafusion scalar function",

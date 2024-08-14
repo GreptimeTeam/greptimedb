@@ -35,28 +35,22 @@ use snafu::ensure;
 
 use crate::expr::error::InternalSnafu;
 
-/// Check if all vectors in batch have the same length and the length is equal to row_count if it is set
-pub(crate) fn check_batch(batch: &[VectorRef], row_count: Option<usize>) -> Result<(), EvalError> {
-    if let Some(row_count) = row_count {
-        ensure!(
-            batch.iter().all(|v| v.len() == row_count),
-            InternalSnafu {
-                reason: "All vectors in batch must have the same length with row_count".to_string(),
-            }
-        );
-    } else if let Some(v) = batch.first() {
-        let row_count = v.len();
-        ensure!(
-            batch.iter().all(|v| v.len() == row_count),
-            InternalSnafu {
-                reason: "All vectors in batch must have the same length".to_string(),
-            }
-        );
-    } else {
-        InternalSnafu {
-            reason: "Empty batch without explicit setting row_count".to_string(),
-        }
-        .fail()?;
+/// A batch of vectors with the same length but without schema, only useful in dataflow
+pub struct Batch {
+    batch: Vec<VectorRef>,
+    row_count: usize,
+}
+
+impl Batch {
+    pub fn new(batch: Vec<VectorRef>, row_count: usize) -> Self {
+        Self { batch, row_count }
     }
-    Ok(())
+
+    pub fn batch(&self) -> &[VectorRef] {
+        &self.batch
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.row_count
+    }
 }

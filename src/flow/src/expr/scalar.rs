@@ -30,7 +30,7 @@ use crate::expr::error::{
     DataTypeSnafu, EvalError, InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
-use crate::expr::{check_batch, DfScalarFunction};
+use crate::expr::{Batch, DfScalarFunction};
 use crate::repr::{ColumnType, RelationType};
 /// A scalar expression with a known type.
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Hash)]
@@ -260,20 +260,14 @@ impl ScalarExpr {
         }
     }
 
-    pub fn eval_batch(
-        &self,
-        batch: &[VectorRef],
-        row_count: Option<usize>,
-    ) -> Result<VectorRef, EvalError> {
-        check_batch(batch, row_count)?;
-
+    pub fn eval_batch(&self, batch: &Batch) -> Result<VectorRef, EvalError> {
         match self {
-            ScalarExpr::Column(i) => Ok(batch[*i].clone()),
+            ScalarExpr::Column(i) => Ok(batch.batch()[*i].clone()),
             ScalarExpr::Literal(val, dt) => Ok(Helper::try_from_scalar_value(
                 val.try_to_scalar_value(dt).context(DataTypeSnafu {
                     msg: "Fail to convert literal to scalar value",
                 })?,
-                batch.first().map(|v| v.len()).or(row_count).unwrap_or(1),
+                batch.row_count(),
             )
             .context(DataTypeSnafu {
                 msg: "Fail to convert scalar value to vector ref when parsing literal",
@@ -282,17 +276,15 @@ impl ScalarExpr {
                 reason: "Can't eval unmaterializable function".to_string(),
             }
             .fail()?,
-            ScalarExpr::CallUnary { func, expr } => func.eval_batch(batch, row_count, expr),
-            ScalarExpr::CallBinary { func, expr1, expr2 } => {
-                func.eval_batch(batch, row_count, expr1, expr2)
-            }
-            ScalarExpr::CallVariadic { func, exprs } => func.eval_batch(batch, row_count, exprs),
+            ScalarExpr::CallUnary { func, expr } => func.eval_batch(batch, expr),
+            ScalarExpr::CallBinary { func, expr1, expr2 } => func.eval_batch(batch, expr1, expr2),
+            ScalarExpr::CallVariadic { func, exprs } => func.eval_batch(batch, exprs),
             ScalarExpr::CallDf {
                 df_scalar_fn,
                 exprs,
-            } => df_scalar_fn.eval_batch(batch, row_count, exprs),
+            } => df_scalar_fn.eval_batch(batch, exprs),
             ScalarExpr::If { cond, then, els } => {
-                let conds = cond.eval_batch(batch, row_count)?;
+                let conds = cond.eval_batch(batch)?;
                 let bool_conds = conds
                     .as_any()
                     .downcast_ref::<arrow::array::BooleanArray>()
@@ -307,13 +299,14 @@ impl ScalarExpr {
 
                 for (idx, cond) in bool_conds.iter().enumerate() {
                     let input_vectors = batch
+                        .batch()
                         .iter()
                         .map(|v| v.clone().slice(idx, 1))
                         .collect::<Vec<_>>();
-
+                    let input_batch = Batch::new(input_vectors, 1);
                     let res: VectorRef = match cond {
-                        Some(true) => then.eval_batch(&input_vectors, Some(1))?,
-                        Some(false) => els.eval_batch(&input_vectors, Some(1))?,
+                        Some(true) => then.eval_batch(&input_batch)?,
+                        Some(false) => els.eval_batch(&input_batch)?,
                         None => Arc::new(NullVector::new(1)),
                     };
                     match &mut ret_vec {
