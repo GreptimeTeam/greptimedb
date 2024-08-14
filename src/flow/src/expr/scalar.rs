@@ -337,7 +337,7 @@ impl ScalarExpr {
                         }
                     }
                 }
-                // TODO(discord9): need Vec<Value> try into VectorRef
+
                 match ret_vec {
                     Some(mut ret) => Ok(ret.to_vector()),
                     None => Ok(Arc::new(NullVector::new(0))),
