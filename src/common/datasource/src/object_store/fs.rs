@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use object_store::services::Fs;
+use object_store::util::DefaultLoggingInterceptor;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
@@ -22,13 +23,9 @@ pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
     let builder = Fs::default();
     let object_store = ObjectStore::new(builder.root(root))
         .context(BuildBackendSnafu)?
-        .layer(
-            object_store::layers::LoggingLayer::default()
-                // Print the expected error only in DEBUG level.
-                // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
-                .with_error_level(Some("debug"))
-                .expect("input error level must be valid"),
-        )
+        .layer(object_store::layers::LoggingLayer::new(
+            DefaultLoggingInterceptor,
+        ))
         .layer(object_store::layers::TracingLayer)
         .layer(object_store::layers::PrometheusMetricsLayer::new(true))
         .finish();

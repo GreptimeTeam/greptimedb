@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_telemetry::{debug, error, trace};
 use futures::TryStreamExt;
-use opendal::layers::{LoggingLayer, TracingLayer};
-use opendal::{Entry, Lister};
+use opendal::layers::{LoggingInterceptor, LoggingLayer, TracingLayer};
+use opendal::raw::{AccessorInfo, Operation};
+use opendal::{Entry, ErrorKind, Lister};
 
 use crate::layers::PrometheusMetricsLayer;
 use crate::ObjectStore;
@@ -140,15 +142,104 @@ pub(crate) fn extract_parent_path(path: &str) -> &str {
 /// Attaches instrument layers to the object store.
 pub fn with_instrument_layers(object_store: ObjectStore, path_label: bool) -> ObjectStore {
     object_store
-        .layer(
-            LoggingLayer::default()
-                // Print the expected error only in DEBUG level.
-                // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
-                .with_error_level(Some("debug"))
-                .expect("input error level must be valid"),
-        )
+        .layer(LoggingLayer::new(DefaultLoggingInterceptor))
         .layer(TracingLayer)
         .layer(PrometheusMetricsLayer::new(path_label))
+}
+
+static LOGGING_TARGET: &str = "opendal::services";
+
+#[derive(Debug, Copy, Clone, Default)]
+pub struct DefaultLoggingInterceptor;
+
+impl LoggingInterceptor for DefaultLoggingInterceptor {
+    #[inline]
+    fn log(
+        &self,
+        info: &AccessorInfo,
+        operation: Operation,
+        context: &[(&str, &str)],
+        message: &str,
+        err: Option<&opendal::Error>,
+    ) {
+        if let Some(err) = err {
+            // Print error if it's unexpected, otherwise in debug.
+            if err.kind() == ErrorKind::Unexpected {
+                error!(
+                    target: LOGGING_TARGET,
+                    "service={} name={} {}: {operation} {message} {}",
+                    info.scheme(),
+                    info.name(),
+                    format_args!(
+                        "{}",
+                        context.iter().enumerate().map(|(i, (k, v))| {
+                            if i > 0 {
+                                format!(" {}={}", k, v)
+                            } else {
+                                format!("{}={}", k, v)
+                            }
+                        }).collect::<String>()
+                    ),
+                    format!("{err:?}")
+                );
+            } else {
+                debug!(
+                    target: LOGGING_TARGET,
+                    "service={} name={} {}: {operation} {message} {}",
+                    info.scheme(),
+                    info.name(),
+                    format_args!(
+                        "{}",
+                        context.iter().enumerate().map(|(i, (k, v))| {
+                            if i > 0 {
+                                format!(" {}={}", k, v)
+                            } else {
+                                format!("{}={}", k, v)
+                            }
+                        }).collect::<String>()
+                    ),
+                    format!("{err:?}")
+                );
+            };
+        }
+
+        // Print debug message if operation is oneshot, otherwise in trace.
+        if operation.is_oneshot() {
+            debug!(
+                target: LOGGING_TARGET,
+                "service={} name={} {}: {operation} {message}",
+                info.scheme(),
+                info.name(),
+                format_args!(
+                    "{}",
+                    context.iter().enumerate().map(|(i, (k, v))| {
+                        if i > 0 {
+                            format!(" {}={}", k, v)
+                        } else {
+                            format!("{}={}", k, v)
+                        }
+                    }).collect::<String>()
+                ),
+            );
+        } else {
+            trace!(
+                target: LOGGING_TARGET,
+                "service={} name={} {}: {operation} {message}",
+                info.scheme(),
+                info.name(),
+                format_args!(
+                    "{}",
+                    context.iter().enumerate().map(|(i, (k, v))| {
+                        if i > 0 {
+                            format!(" {}={}", k, v)
+                        } else {
+                            format!("{}={}", k, v)
+                        }
+                    }).collect::<String>()
+                ),
+            );
+        };
+    }
 }
 
 #[cfg(test)]
