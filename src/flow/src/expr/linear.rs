@@ -15,15 +15,17 @@
 //! define MapFilterProject which is a compound operator that can be applied row-by-row.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
+use arrow::array::AsArray;
 use common_telemetry::debug;
 use datatypes::value::Value;
-use datatypes::vectors::{BooleanVector, VectorRef};
-use snafu::ensure;
+use datatypes::vectors::{BooleanVector, BooleanVectorBuilder, ConstantVector, VectorRef};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{Error, InvalidQuerySnafu};
-use crate::expr::error::{EvalError, InternalSnafu};
-use crate::expr::{check_batch, InvalidArgumentSnafu, ScalarExpr};
+use crate::expr::error::{ArrowSnafu, EvalError, InternalSnafu};
+use crate::expr::{to_bool_array, Batch, InvalidArgumentSnafu, ScalarExpr};
 use crate::repr::{self, value_to_internal_ts, Diff, Row};
 
 /// A compound operator that can be applied row-by-row.
@@ -477,32 +479,41 @@ impl SafeMfpPlan {
     /// similar to [`MapFilterProject::evaluate_into`], just in batch, and rows that don't pass the predicates are not included in the output.
     ///
     /// so it's not guaranteed that the output will have the same number of rows as the input.
-    pub fn eval_batch_into(
-        &self,
-        batch: &mut Vec<VectorRef>,
-        row_count: Option<usize>,
-    ) -> Result<Option<VectorRef>, EvalError> {
+    pub fn eval_batch_into(&self, batch: &mut Batch) -> Result<Option<VectorRef>, EvalError> {
         todo!()
     }
 
     /// similar to [`MapFilterProject::evaluate_into`], just in batch.
-    pub fn eval_batch_inner(
-        &self,
-        batch: &mut Vec<VectorRef>,
-        row_count: Option<usize>,
-    ) -> Result<BooleanVector, EvalError> {
-        check_batch(batch, row_count)?;
+    pub fn eval_batch_inner(&self, batch: &mut Batch) -> Result<BooleanVector, EvalError> {
         // mark the columns that have been evaluated and appended to the `batch`
         let mut expression = 0;
+        // preds default to true and will be updated as we evaluate each predicate
+        let mut all_preds = BooleanVector::from(vec![Some(true); batch.row_count()]);
+
         // to compute predicate, need to first compute all expressions used in predicates
         for (support, predicate) in self.mfp.predicates.iter() {
             while self.mfp.input_arity + expression < *support {
-                batch.push(self.mfp.expressions[expression].eval_batch(&batch[..], row_count)?);
+                let expr_eval = self.mfp.expressions[expression].eval_batch(batch)?;
+                batch.batch_mut().push(expr_eval);
                 expression += 1;
             }
-            let pred_vec = predicate.eval_batch(batch, row_count)?;
+            let pred_vec = predicate.eval_batch(batch)?;
+            let pred_arr = to_bool_array(&pred_vec)?;
+            let all_arr = all_preds.as_boolean_array();
+            let res_arr = arrow::compute::and(all_arr, pred_arr).context(ArrowSnafu {
+                context: format!("failed to compute predicate for mfp operator {:?}", self),
+            })?;
+            all_preds = BooleanVector::from(res_arr);
         }
-        todo!()
+
+        // while evaluated expressions are less than total expressions, keep evaluating
+        while expression < self.mfp.expressions.len() {
+            let expr_eval = self.mfp.expressions[expression].eval_batch(&batch)?;
+            batch.batch_mut().push(expr_eval);
+            expression += 1;
+        }
+
+        Ok(all_preds)
     }
 
     /// Evaluates the linear operator on a supplied list of datums.

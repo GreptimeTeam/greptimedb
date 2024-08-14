@@ -24,6 +24,8 @@ mod scalar;
 mod signature;
 
 use datatypes::prelude::DataType;
+use arrow::array::BooleanArray;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::VectorRef;
 pub(crate) use df_func::{DfScalarFunction, RawDfScalarFn};
 pub(crate) use error::{EvalError, InvalidArgumentSnafu};
@@ -36,6 +38,9 @@ pub(crate) use scalar::{ScalarExpr, TypedExpr};
 use snafu::{ensure, ResultExt};
 
 use crate::expr::error::DataTypeSnafu;
+use snafu::OptionExt;
+
+use crate::expr::error::TypeMismatchSnafu;
 
 /// A batch of vectors with the same length but without schema, only useful in dataflow
 pub struct Batch {
@@ -50,6 +55,10 @@ impl Batch {
 
     pub fn batch(&self) -> &[VectorRef] {
         &self.batch
+    }
+
+    pub fn batch_mut(&mut self) -> &mut Vec<VectorRef> {
+        &mut self.batch
     }
 
     pub fn row_count(&self) -> usize {
@@ -111,4 +120,13 @@ impl Batch {
         self.row_count = zelf_row_count + other_row_count;
         Ok(())
     }
+}
+
+pub fn to_bool_array(input: &VectorRef) -> Result<&BooleanArray, EvalError> {
+    input.as_any().downcast_ref::<BooleanArray>().context({
+        TypeMismatchSnafu {
+            expected: ConcreteDataType::boolean_datatype(),
+            actual: input.data_type(),
+        }
+    })
 }
