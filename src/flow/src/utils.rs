@@ -19,14 +19,11 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use common_telemetry::debug;
-use itertools::Itertools;
-use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
-use crate::expr::error::InternalSnafu;
 use crate::expr::{EvalError, ScalarExpr};
-use crate::repr::{value_to_internal_ts, Diff, DiffRow, Duration, KeyValDiffRow, Row, Timestamp};
+use crate::repr::{value_to_internal_ts, DiffRow, Duration, KeyValDiffRow, Row, Timestamp};
 
 /// A batch of updates, arranged by key
 pub type Batch = BTreeMap<Row, SmallVec<[DiffRow; 2]>>;
@@ -585,6 +582,7 @@ mod test {
     use std::borrow::Borrow;
 
     use datatypes::value::Value;
+    use itertools::Itertools;
 
     use super::*;
 

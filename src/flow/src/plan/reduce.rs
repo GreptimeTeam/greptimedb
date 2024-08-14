@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::{Deserialize, Serialize};
-
-use crate::expr::{AggregateExpr, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr};
+use crate::expr::{AggregateExpr, SafeMfpPlan};
 
 /// Describe how to extract key-value pair from a `Row`
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]

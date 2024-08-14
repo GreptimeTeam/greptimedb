@@ -16,16 +16,15 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
-use common_time::{Date, DateTime};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::value::{OrderedF32, OrderedF64, Value};
+use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
-use snafu::{IntoError, OptionExt, ResultExt};
+use snafu::{IntoError, OptionExt};
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::error::{DatafusionSnafu, Error, InvalidQuerySnafu};
-use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
+use crate::expr::error::EvalError;
 use crate::expr::relation::accum::{Accum, Accumulator};
 use crate::expr::signature::{GenericFn, Signature};
 use crate::repr::Diff;

@@ -22,11 +22,9 @@ use substrait_proto::proto::read_rel::ReadType;
 use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{plan_rel, Plan as SubPlan, ProjectRel, Rel};
 
-use crate::error::{
-    Error, InternalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
-};
+use crate::error::{Error, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu};
 use crate::expr::{MapFilterProject, ScalarExpr, TypedExpr, UnaryFunc};
-use crate::plan::{KeyValPlan, Plan, ReducePlan, TypedPlan};
+use crate::plan::{KeyValPlan, Plan, TypedPlan};
 use crate::repr::{self, RelationDesc, RelationType};
 use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
@@ -350,7 +348,7 @@ mod test {
     use super::*;
     use crate::expr::{GlobalId, ScalarExpr};
     use crate::plan::{Plan, TypedPlan};
-    use crate::repr::{self, ColumnType, RelationType};
+    use crate::repr::{ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
     use crate::transform::CDT;
 

@@ -16,32 +16,21 @@
 //!
 //! And the [`Context`] is the environment for the render process, it contains all the necessary information for the render process
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
-use std::ops::Range;
-use std::rc::Rc;
+use std::collections::BTreeMap;
 
-use datatypes::data_type::ConcreteDataType;
-use datatypes::value::{ListValue, Value};
-use hydroflow::futures::SinkExt;
-use hydroflow::lattices::cc_traits::Get;
 use hydroflow::scheduled::graph::Hydroflow;
 use hydroflow::scheduled::graph_ext::GraphExt;
 use hydroflow::scheduled::port::{PortCtx, SEND};
 use itertools::Itertools;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::OptionExt;
 
 use super::state::Scheduler;
 use crate::compute::state::DataflowState;
-use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
-use crate::error::{Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu};
-use crate::expr::error::{DataTypeSnafu, InternalSnafu};
-use crate::expr::{
-    self, EvalError, GlobalId, LocalId, MapFilterProject, MfpPlan, SafeMfpPlan, ScalarExpr,
-};
-use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan, TypedPlan};
-use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
-use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, Arrangement};
+use crate::compute::types::{Collection, CollectionBundle, ErrCollector, Toff};
+use crate::error::{Error, InvalidQuerySnafu, NotImplementedSnafu};
+use crate::expr::{self, GlobalId, LocalId};
+use crate::plan::{Plan, TypedPlan};
+use crate::repr::{self, DiffRow};
 
 mod map;
 mod reduce;
@@ -218,20 +207,17 @@ mod test {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use common_time::DateTime;
-    use datatypes::data_type::ConcreteDataType;
     use hydroflow::scheduled::graph::Hydroflow;
     use hydroflow::scheduled::graph_ext::GraphExt;
     use hydroflow::scheduled::handoff::VecHandoff;
-    use pretty_assertions::{assert_eq, assert_ne};
+    use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::expr::BinaryFunc;
     use crate::repr::Row;
     pub fn run_and_check(
         state: &mut DataflowState,
         df: &mut Hydroflow,
-        time_range: Range<i64>,
+        time_range: std::ops::Range<i64>,
         expected: BTreeMap<i64, Vec<DiffRow>>,
         output: Rc<RefCell<Vec<DiffRow>>>,
     ) {

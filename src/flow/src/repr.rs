@@ -17,14 +17,10 @@
 
 mod relation;
 
-use std::borrow::Borrow;
-use std::slice::SliceIndex;
-
 use api::helper::{pb_value_to_value_ref, value_to_grpc_value};
 use api::v1::Row as ProtoRow;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
-use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
 use itertools::Itertools;
 pub(crate) use relation::{ColumnType, Key, RelationDesc, RelationType};

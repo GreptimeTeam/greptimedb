@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use common_telemetry::{debug, info};
+use common_telemetry::debug;
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::OptionExt;
@@ -27,7 +27,7 @@ use crate::compute::render::Context;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, Toff};
 use crate::error::{Error, PlanSnafu};
 use crate::expr::error::InternalSnafu;
-use crate::expr::{EvalError, GlobalId};
+use crate::expr::EvalError;
 use crate::repr::{DiffRow, Row, BROADCAST_CAP};
 
 #[allow(clippy::mutable_key_type)]
