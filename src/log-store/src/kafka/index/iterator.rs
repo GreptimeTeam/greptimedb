@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::cmp::min;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
+use std::fmt::Debug;
 use std::ops::Range;
 
+use common_telemetry::debug;
 use store_api::logstore::EntryId;
 
 use crate::kafka::util::range::{ConvertIndexToRange, MergeRange};
@@ -27,7 +29,7 @@ pub(crate) struct NextBatchHint {
 }
 
 /// An iterator over WAL (Write-Ahead Log) entries index for a region.
-pub trait RegionWalIndexIterator: Send + Sync {
+pub trait RegionWalIndexIterator: Send + Sync + Debug {
     /// Returns next batch hint.
     fn next_batch_hint(&self, avg_size: usize) -> Option<NextBatchHint>;
 
@@ -39,6 +41,7 @@ pub trait RegionWalIndexIterator: Send + Sync {
 }
 
 /// Represents a range [next_entry_id, end_entry_id) of WAL entries for a region.
+#[derive(Debug)]
 pub struct RegionWalRange {
     current_entry_id: EntryId,
     end_entry_id: EntryId,
@@ -98,8 +101,11 @@ impl RegionWalIndexIterator for RegionWalRange {
     }
 }
 
+pub const MIN_BATCH_WINDOW_SIZE: usize = 4 * 1024 * 1024;
+
 /// Represents an index of Write-Ahead Log entries for a region,
 /// stored as a vector of [EntryId]s.
+#[derive(Debug)]
 pub struct RegionWalVecIndex {
     index: VecDeque<EntryId>,
     min_batch_window_size: usize,
@@ -139,6 +145,7 @@ impl RegionWalIndexIterator for RegionWalVecIndex {
 /// Represents an iterator over multiple region WAL indexes.
 ///
 /// Allowing iteration through multiple WAL indexes.
+#[derive(Debug)]
 pub struct MultipleRegionWalIndexIterator {
     iterator: VecDeque<Box<dyn RegionWalIndexIterator>>,
 }
@@ -184,6 +191,47 @@ impl RegionWalIndexIterator for MultipleRegionWalIndexIterator {
         }
 
         self.iterator.front_mut().and_then(|iter| iter.next())
+    }
+}
+
+/// Builds [`RegionWalIndexIterator`].
+///
+/// Returns None means there are no entries to replay.
+pub fn build_region_wal_index_iterator(
+    start_entry_id: EntryId,
+    end_entry_id: EntryId,
+    region_indexes: Option<(BTreeSet<EntryId>, EntryId)>,
+    max_batch_bytes: usize,
+    min_window_size: usize,
+) -> Option<Box<dyn RegionWalIndexIterator>> {
+    if (start_entry_id..end_entry_id).is_empty() {
+        return None;
+    }
+
+    match region_indexes {
+        Some((region_indexes, last_index)) => {
+            if region_indexes.is_empty() && last_index >= end_entry_id {
+                return None;
+            }
+
+            let mut iterator: Vec<Box<dyn RegionWalIndexIterator>> = Vec::with_capacity(2);
+            if !region_indexes.is_empty() {
+                let index = RegionWalVecIndex::new(region_indexes, min_window_size);
+                iterator.push(Box::new(index));
+            }
+            if last_index < end_entry_id {
+                let range = last_index..end_entry_id;
+                let index = RegionWalRange::new(range, max_batch_bytes);
+                iterator.push(Box::new(index));
+            }
+
+            Some(Box::new(MultipleRegionWalIndexIterator::new(iterator)))
+        }
+        None => {
+            let range = start_entry_id..end_entry_id;
+
+            Some(Box::new(RegionWalRange::new(range, max_batch_bytes)))
+        }
     }
 }
 

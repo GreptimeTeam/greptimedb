@@ -29,11 +29,11 @@ use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream, WalIndex};
 use store_api::storage::RegionId;
 
+use super::index::build_region_wal_index_iterator;
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
-use crate::kafka::index::GlobalIndexCollector;
 use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer};
-use crate::kafka::index::RegionWalRange;
+use crate::kafka::index::{GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE};
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
     convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
@@ -206,7 +206,7 @@ impl LogStore for KafkaLogStore {
         &self,
         provider: &Provider,
         entry_id: EntryId,
-        _index: Option<WalIndex>,
+        index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
         let provider = provider
             .as_kafka_provider()
@@ -235,22 +235,36 @@ impl LogStore for KafkaLogStore {
             .context(GetOffsetSnafu {
                 topic: &provider.topic,
             })?;
-        let range = entry_id..end_offset as u64;
-        debug!(
-            "Start reading entries in range: {:?} of ns {}",
-            range, provider
-        );
-        if range.is_empty() {
+
+        let region_indexes = if let (Some(index), Some(collector)) =
+            (index, self.client_manager.global_index_collector())
+        {
+            collector
+                .read_remote_region_index(index.from_peer_id, provider, index.region_id, entry_id)
+                .await?
+        } else {
+            None
+        };
+
+        let Some(iterator) = build_region_wal_index_iterator(
+            entry_id,
+            end_offset as u64,
+            region_indexes,
+            self.max_batch_bytes,
+            MIN_BATCH_WINDOW_SIZE,
+        ) else {
+            let range = entry_id..end_offset as u64;
             warn!("No new entries in range {:?} of ns {}", range, provider);
             return Ok(futures_util::stream::empty().boxed());
-        }
+        };
 
-        let index = RegionWalRange::new(range, self.max_batch_bytes);
+        debug!("Reading entries with {:?} of ns {}", iterator, provider);
 
         // Safety: Must be ok.
         let mut stream_consumer = ConsumerBuilder::default()
             .client(client)
-            .buffer(RecordsBuffer::new(Box::new(index)))
+            // Safety: checked before.
+            .buffer(RecordsBuffer::new(iterator))
             .max_batch_size(self.max_batch_bytes)
             .max_wait_ms(self.consumer_wait_timeout.as_millis() as u32)
             .build()
