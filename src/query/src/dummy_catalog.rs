@@ -182,7 +182,7 @@ impl TableProvider for DummyTableProvider {
         let supported = filters
             .iter()
             .map(|e| {
-                // Simple filter on primary key columns are percisely evaluated.
+                // Simple filter on primary key columns are precisely evaluated.
                 if let Some(simple_filter) = SimpleFilterEvaluator::try_new(e) {
                     if self
                         .metadata
