@@ -12,91 +12,156 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::stream;
-use pgwire::api::results::{
-    DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo,
-    QueryResponse, Response, Tag,
-};
+use once_cell::sync::Lazy;
+use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::api::Type;
-use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::error::PgWireResult;
+use pgwire::messages::data::DataRow;
+use regex::Regex;
 use session::context::QueryContextRef;
+
+fn build_string_data_rows(
+    schema: Arc<Vec<FieldInfo>>,
+    rows: Vec<Vec<String>>,
+) -> Vec<PgWireResult<DataRow>> {
+    rows.iter()
+        .map(|row| {
+            let mut encoder = DataRowEncoder::new(schema.clone());
+            for value in row {
+                encoder.encode_field(&Some(value))?;
+            }
+            encoder.finish()
+        })
+        .collect()
+}
+
+static VAR_VALUES: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
+    HashMap::from([
+        ("default_transaction_isolation", "read committed"),
+        ("transaction isolation level", "read committed"),
+        ("standard_conforming_strings", "on"),
+        ("client_encoding", "UTF8"),
+    ])
+});
+
+static SHOW_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^SHOW (.*?);?$").unwrap());
+static SET_TRANSACTION_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^SET TRANSACTION (.*?);?").unwrap());
+static TRANSACTION_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^(BEGIN|ROLLBACK|COMMIT);?").unwrap());
 
 /// Process unsupported SQL and return fixed result as a compatibility solution
 pub(crate) fn process<'a>(
     query: &str,
-    query_ctx: QueryContextRef,
+    _query_ctx: QueryContextRef,
 ) -> Option<PgWireResult<Vec<Response<'a>>>> {
-    dbg!(query);
-    if query.trim().starts_with("BEGIN") {
-        Some(Ok(vec![Response::Execution(Tag::new("BEGIN"))]))
-    } else if query.trim().starts_with("ROLLBACK") {
-        Some(Ok(vec![Response::Execution(Tag::new("ROLLBACK"))]))
-    } else if query.trim().starts_with("COMMIT") {
-        Some(Ok(vec![Response::Execution(Tag::new("COMMIT"))]))
-    } else if query.trim().starts_with("SET") {
+    // Transaction directives:
+    if let Some(tx) = TRANSACTION_PATTERN.captures(query) {
+        let tx_tag = &tx[1];
+        Some(Ok(vec![Response::Execution(Tag::new(
+            &tx_tag.to_uppercase(),
+        ))]))
+    } else if let Some(show_var) = SHOW_PATTERN.captures(query) {
+        let show_var = show_var[1].to_lowercase();
+        if let Some(value) = VAR_VALUES.get(&show_var.as_ref()) {
+            let f1 = FieldInfo::new(
+                show_var.clone(),
+                None,
+                None,
+                Type::VARCHAR,
+                FieldFormat::Text,
+            );
+            let schema = Arc::new(vec![f1]);
+            let data = stream::iter(build_string_data_rows(
+                schema.clone(),
+                vec![vec![value.to_string()]],
+            ));
+
+            Some(Ok(vec![Response::Query(QueryResponse::new(schema, data))]))
+        } else {
+            None
+        }
+    } else if SET_TRANSACTION_PATTERN.is_match(query) {
         Some(Ok(vec![Response::Execution(Tag::new("SET"))]))
-    } else if query == "SELECT t.oid, NULL\nFROM pg_type t JOIN pg_namespace ns\n    ON typnamespace = ns.oid\nWHERE typname = 'hstore';\n"{
-        let f1 = FieldInfo::new("t.oid".into(), None, None, Type::OID, FieldFormat::Text);
-        let f2 = FieldInfo::new("?coulmn?".into(), None, None, Type::VARCHAR, FieldFormat::Text);
-
-        Some(Ok(vec![Response::Query(QueryResponse::new(Arc::new(vec![f1, f2]), stream::iter(vec![])))]))
-    } else if query == "show transaction isolation level"{
-        let f1 = FieldInfo::new("transaction_isolation".into(), None, None, Type::VARCHAR, FieldFormat::Text);
-        let schema = Arc::new(vec![f1]);
-        let data = stream::iter(vec![
-            {
-                let mut encoder = DataRowEncoder::new(schema.clone());
-                let _ = encoder.encode_field(&Some("read committed"));
-                encoder.finish()
-            }
-
-        ]);
-
-        Some(Ok(vec![ Response::Query(QueryResponse::new(schema, data))]))
-    } else if query == "show standard_conforming_strings"{
-        let f1 = FieldInfo::new("standard_conforming_strings".into(), None, None, Type::VARCHAR, FieldFormat::Text);
-        let schema = Arc::new(vec![f1]);
-        let data = stream::iter(vec![
-            {
-                let mut encoder = DataRowEncoder::new(schema.clone());
-                let _ = encoder.encode_field(&Some("on"));
-                encoder.finish()
-            }
-
-        ]);
-
-        Some(Ok(vec![ Response::Query(QueryResponse::new(schema, data))]))
-    } else if query == "SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' ORDER BY nspname" {
-        let f1 = FieldInfo::new("nspname".into(), None, None, Type::VARCHAR, FieldFormat::Text);
-        let schema = Arc::new(vec![f1]);
-        let data = stream::iter(vec![
-            {
-                let mut encoder = DataRowEncoder::new(schema.clone());
-                let _ = encoder.encode_field(&Some(query_ctx.current_schema()));
-                encoder.finish()
-            }
-
-        ]);
-
-        Some(Ok(vec![ Response::Query(QueryResponse::new(schema, data))]))
     } else {
         None
     }
 }
 
-// else if query == "select pg_catalog.version()"{
-//         let f1 = FieldInfo::new("version".into(), None, None, Type::VARCHAR, FieldFormat::Text);
-//         let schema = Arc::new(vec![f1]);
-//         let data = stream::iter(vec![
-//             {
-//                 let mut encoder = DataRowEncoder::new(schema.clone());
-//                 encoder.encode_field(&Some("PostgreSQL 16.3 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 14.1.1 20240720, 64-bit"));
-//                 encoder.finish()
-//             }
+#[cfg(test)]
+mod test {
+    use session::context::{QueryContext, QueryContextRef};
 
-//         ]);
+    use super::*;
 
-//         Some(Ok(vec![ Response::Query(QueryResponse::new(schema, data))]))
-//     }
+    fn assert_tag(q: &str, t: &str, query_context: QueryContextRef) {
+        if let Response::Execution(tag) = process(q, query_context.clone())
+            .unwrap_or_else(|| panic!("fail to match {}", q))
+            .expect("unexpected error")
+            .remove(0)
+        {
+            assert_eq!(Tag::new(t), tag);
+        } else {
+            panic!("Invalid response");
+        }
+    }
+
+    fn get_data<'a>(q: &str, query_context: QueryContextRef) -> QueryResponse<'a> {
+        if let Response::Query(resp) = process(q, query_context.clone())
+            .unwrap_or_else(|| panic!("fail to match {}", q))
+            .expect("unexpected error")
+            .remove(0)
+        {
+            resp
+        } else {
+            panic!("Invalid response");
+        }
+    }
+
+    #[test]
+    fn test_process() {
+        let query_context = QueryContext::arc();
+
+        assert_tag("BEGIN", "BEGIN", query_context.clone());
+        assert_tag("BEGIN;", "BEGIN", query_context.clone());
+        assert_tag("begin;", "BEGIN", query_context.clone());
+        assert_tag("ROLLBACK", "ROLLBACK", query_context.clone());
+        assert_tag("ROLLBACK;", "ROLLBACK", query_context.clone());
+        assert_tag("rollback;", "ROLLBACK", query_context.clone());
+        assert_tag("COMMIT", "COMMIT", query_context.clone());
+        assert_tag("COMMIT;", "COMMIT", query_context.clone());
+        assert_tag("commit;", "COMMIT", query_context.clone());
+        assert_tag(
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+            "SET",
+            query_context.clone(),
+        );
+        assert_tag(
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED;",
+            "SET",
+            query_context.clone(),
+        );
+        assert_tag(
+            "SET transaction isolation level READ COMMITTED;",
+            "SET",
+            query_context.clone(),
+        );
+
+        let resp = get_data("SHOW transaction isolation level", query_context.clone());
+        assert_eq!(1, resp.row_schema().len());
+        let resp = get_data("show client_encoding;", query_context.clone());
+        assert_eq!(1, resp.row_schema().len());
+        let resp = get_data("show standard_conforming_strings;", query_context.clone());
+        assert_eq!(1, resp.row_schema().len());
+        let resp = get_data("show default_transaction_isolation", query_context.clone());
+        assert_eq!(1, resp.row_schema().len());
+
+        assert!(process("SELECT 1", query_context.clone()).is_none());
+        assert!(process("SHOW TABLES ", query_context.clone()).is_none());
+        assert!(process("SET TIME_ZONE=utc ", query_context.clone()).is_none());
+    }
+}

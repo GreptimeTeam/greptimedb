@@ -42,13 +42,13 @@ use self::handler::DefaultQueryParser;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub(crate) struct GreptimeDBStartupParameters {
-    version: &'static str,
+    version: String,
 }
 
 impl GreptimeDBStartupParameters {
     fn new() -> GreptimeDBStartupParameters {
         GreptimeDBStartupParameters {
-            version: env!("CARGO_PKG_VERSION"),
+            version: format!("16.3-greptime-{}", env!("CARGO_PKG_VERSION")),
         }
     }
 }
@@ -59,7 +59,7 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
         C: ClientInfo,
     {
         Some(HashMap::from([
-            ("server_version".to_owned(), self.version.to_owned()),
+            ("server_version".to_owned(), self.version.clone()),
             ("server_encoding".to_owned(), "UTF8".to_owned()),
             ("client_encoding".to_owned(), "UTF8".to_owned()),
             ("DateStyle".to_owned(), "ISO YMD".to_owned()),

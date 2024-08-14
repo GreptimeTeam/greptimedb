@@ -77,7 +77,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
     }
 }
 
-fn output_to_query_response<'a>(
+pub(crate) fn output_to_query_response<'a>(
     query_ctx: QueryContextRef,
     output: Result<Output>,
     field_format: &Format,
