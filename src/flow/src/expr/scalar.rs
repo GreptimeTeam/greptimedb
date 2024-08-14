@@ -15,20 +15,18 @@
 //! Scalar expressions.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
-use arrow::array::BooleanArray;
 use common_error::ext::BoxedError;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
-use datatypes::vectors::{Helper, NullVector, VectorRef};
+use datatypes::vectors::{BooleanVector, Helper, NullVector, Vector, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
 use crate::expr::error::{
-    DataTypeSnafu, EvalError, InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
+    DataTypeSnafu, EvalError, InternalSnafu, InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::expr::{Batch, DfScalarFunction};
@@ -284,64 +282,152 @@ impl ScalarExpr {
                 df_scalar_fn,
                 exprs,
             } => df_scalar_fn.eval_batch(batch, exprs),
-            ScalarExpr::If { cond, then, els } => {
-                let conds = cond.eval_batch(batch)?;
-                let bool_conds = conds.as_any().downcast_ref::<BooleanArray>().context({
-                    TypeMismatchSnafu {
-                        expected: ConcreteDataType::boolean_datatype(),
-                        actual: conds.data_type(),
-                    }
-                })?;
+            ScalarExpr::If { cond, then, els } => Self::eval_if_then(batch, cond, then, els),
+        }
+    }
 
-                let mut ret_vec = None;
-
-                for (idx, cond) in bool_conds.iter().enumerate() {
-                    let input_vectors = batch
-                        .batch()
-                        .iter()
-                        .map(|v| v.clone().slice(idx, 1))
-                        .collect::<Vec<_>>();
-                    let input_batch = Batch::new(input_vectors, 1);
-                    let res: VectorRef = match cond {
-                        Some(true) => then.eval_batch(&input_batch)?,
-                        Some(false) => els.eval_batch(&input_batch)?,
-                        None => Arc::new(NullVector::new(1)),
-                    };
-                    match &mut ret_vec {
-                        None => {
-                            let mut builder =
-                                res.data_type().create_mutable_vector(bool_conds.len());
-                            builder
-                                .try_push_value_ref(
-                                    res.try_get(0)
-                                        .map_err(BoxedError::new)
-                                        .context(crate::expr::error::ExternalSnafu)?
-                                        .as_value_ref(),
-                                )
-                                .map_err(BoxedError::new)
-                                .context(crate::expr::error::ExternalSnafu)?;
-                            ret_vec = Some(builder);
-                        }
-                        Some(vec_builder) => {
-                            vec_builder
-                                .try_push_value_ref(
-                                    res.try_get(0)
-                                        .map_err(BoxedError::new)
-                                        .context(crate::expr::error::ExternalSnafu)?
-                                        .as_value_ref(),
-                                )
-                                .map_err(BoxedError::new)
-                                .context(crate::expr::error::ExternalSnafu)?;
-                        }
-                    }
+    fn eval_if_then(
+        batch: &Batch,
+        cond: &ScalarExpr,
+        then: &ScalarExpr,
+        els: &ScalarExpr,
+    ) -> Result<VectorRef, EvalError> {
+        let conds = cond.eval_batch(batch)?;
+        let bool_conds = conds
+            .as_any()
+            .downcast_ref::<BooleanVector>()
+            .context({
+                TypeMismatchSnafu {
+                    expected: ConcreteDataType::boolean_datatype(),
+                    actual: conds.data_type(),
                 }
+            })?
+            .as_boolean_array();
 
-                match ret_vec {
-                    Some(mut ret) => Ok(ret.to_vector()),
-                    None => Ok(Arc::new(NullVector::new(0))),
-                }
+        let mut then_input_batch = None;
+        let mut else_input_batch = None;
+        let mut null_input_batch = None;
+
+        // instructions for how to reassembly result vector,
+        // iterate over (type of vec, offset, length) and append to resulting vec
+        let mut assembly_idx = vec![];
+
+        // append batch, returning appended batch's slice in (offset, length)
+        fn append_batch(
+            batch: &mut Option<Batch>,
+            to_be_append: Batch,
+        ) -> Result<(usize, usize), EvalError> {
+            let len = to_be_append.row_count();
+            if let Some(batch) = batch {
+                let offset = batch.row_count();
+                batch.append_batch(to_be_append)?;
+                Ok((offset, len))
+            } else {
+                *batch = Some(to_be_append);
+                Ok((0, len))
             }
         }
+
+        let mut prev_cond: Option<Option<bool>> = None;
+        let mut prev_start_idx: Option<usize> = None;
+        // first put different conds' vector into different batches
+        for (idx, cond) in bool_conds.iter().enumerate() {
+            // if belong to same slice and not last one continue
+            if prev_cond == Some(cond) {
+                continue;
+            } else if let Some(prev_cond_idx) = prev_start_idx {
+                let prev_cond = prev_cond.unwrap();
+
+                // put a slice to corrsponding batch
+                let slice_offset = prev_cond_idx;
+                let slice_length = idx - prev_cond_idx;
+                let to_be_append = batch.slice(slice_offset, slice_length);
+
+                let to_put_back = match prev_cond {
+                    Some(true) => (
+                        Some(true),
+                        append_batch(&mut then_input_batch, to_be_append)?,
+                    ),
+                    Some(false) => (
+                        Some(false),
+                        append_batch(&mut else_input_batch, to_be_append)?,
+                    ),
+                    None => (None, append_batch(&mut null_input_batch, to_be_append)?),
+                };
+                assembly_idx.push(to_put_back);
+            }
+            prev_cond = Some(cond);
+            prev_start_idx = Some(idx);
+        }
+
+        // deal with empty and last slice case
+        if let Some(slice_offset) = prev_start_idx {
+            let prev_cond = prev_cond.unwrap();
+            let slice_length = bool_conds.len() - slice_offset;
+            let to_be_append = batch.slice(slice_offset, slice_length);
+            let to_put_back = match prev_cond {
+                Some(true) => (
+                    Some(true),
+                    append_batch(&mut then_input_batch, to_be_append)?,
+                ),
+                Some(false) => (
+                    Some(false),
+                    append_batch(&mut else_input_batch, to_be_append)?,
+                ),
+                None => (None, append_batch(&mut null_input_batch, to_be_append)?),
+            };
+            assembly_idx.push(to_put_back);
+        }
+
+        let then_output_vec = then_input_batch
+            .map(|batch| then.eval_batch(&batch))
+            .transpose()?;
+        let else_output_vec = else_input_batch
+            .map(|batch| els.eval_batch(&batch))
+            .transpose()?;
+        let null_output_vec = null_input_batch
+            .map(|null| NullVector::new(null.row_count()).slice(0, null.row_count()));
+
+        let dt = then_output_vec
+            .as_ref()
+            .map(|v| v.data_type())
+            .or(else_output_vec.as_ref().map(|v| v.data_type()))
+            .unwrap_or(ConcreteDataType::null_datatype());
+        let mut builder = dt.create_mutable_vector(conds.len());
+        for (cond, (offset, length)) in assembly_idx {
+            let slice = match cond {
+                Some(true) => then_output_vec.as_ref(),
+                Some(false) => else_output_vec.as_ref(),
+                None => null_output_vec.as_ref(),
+            }
+            .context(InternalSnafu {
+                reason: "Expect corrseponding output vector to exist",
+            })?;
+            // TODO(discord9): seems `extend_slice_of` doesn't support NullVector or ConstantVector
+            // consider adding it maybe?
+            if slice.data_type().is_null() {
+                builder.push_nulls(length);
+            } else if slice.is_const() {
+                let arr = slice.slice(offset, length).to_arrow_array();
+                let vector = Helper::try_into_vector(arr).context(DataTypeSnafu {
+                    msg: "Failed to convert arrow array to vector",
+                })?;
+                builder
+                    .extend_slice_of(vector.as_ref(), 0, vector.len())
+                    .context(DataTypeSnafu {
+                        msg: "Failed to build result vector for if-then expression",
+                    })?;
+            } else {
+                builder
+                    .extend_slice_of(slice.as_ref(), offset, length)
+                    .context(DataTypeSnafu {
+                        msg: "Failed to build result vector for if-then expression",
+                    })?;
+            }
+        }
+        let result_vec = builder.to_vector();
+
+        Ok(result_vec)
     }
 
     /// Eval this expression with the given values.
@@ -664,6 +750,10 @@ impl ScalarExpr {
 #[cfg(test)]
 mod test {
 
+    use arrow::ipc::Null;
+    use datatypes::vectors::Int32Vector;
+    use pretty_assertions::assert_eq;
+
     use super::*;
 
     #[test]
@@ -754,5 +844,70 @@ mod test {
         let permute_map = BTreeMap::from([(1, 2), (3, 4)]);
         let res = expr.permute_map(&permute_map);
         assert!(matches!(res, Err(Error::InvalidQuery { .. })));
+    }
+
+    #[test]
+    fn test_eval_batch() {
+        // TODO(discord9): add more tests
+        {
+            let expr = ScalarExpr::If {
+                cond: Box::new(ScalarExpr::Column(0).call_binary(
+                    ScalarExpr::literal(Value::from(0), ConcreteDataType::int32_datatype()),
+                    BinaryFunc::Eq,
+                )),
+                then: Box::new(ScalarExpr::literal(
+                    Value::from(42),
+                    ConcreteDataType::int32_datatype(),
+                )),
+                els: Box::new(ScalarExpr::literal(
+                    Value::from(37),
+                    ConcreteDataType::int32_datatype(),
+                )),
+            };
+            let raw = vec![
+                None,
+                Some(0),
+                Some(1),
+                None,
+                None,
+                Some(0),
+                Some(0),
+                Some(1),
+                Some(1),
+            ];
+            let raw_len = raw.len();
+            let vectors = vec![Int32Vector::from(raw).slice(0, raw_len)];
+
+            let batch = Batch::new(vectors, raw_len);
+            let expected = Int32Vector::from(vec![
+                None,
+                Some(42),
+                Some(37),
+                None,
+                None,
+                Some(42),
+                Some(42),
+                Some(37),
+                Some(37),
+            ])
+            .slice(0, raw_len);
+            assert_eq!(expr.eval_batch(&batch).unwrap(), expected);
+
+            let raw = vec![Some(0)];
+            let raw_len = raw.len();
+            let vectors = vec![Int32Vector::from(raw).slice(0, raw_len)];
+
+            let batch = Batch::new(vectors, raw_len);
+            let expected = Int32Vector::from(vec![Some(42)]).slice(0, raw_len);
+            assert_eq!(expr.eval_batch(&batch).unwrap(), expected);
+
+            let raw: Vec<Option<i32>> = vec![];
+            let raw_len = raw.len();
+            let vectors = vec![Int32Vector::from(raw).slice(0, raw_len)];
+
+            let batch = Batch::new(vectors, raw_len);
+            let expected = NullVector::new(raw_len).slice(0, raw_len);
+            assert_eq!(expr.eval_batch(&batch).unwrap(), expected);
+        }
     }
 }
