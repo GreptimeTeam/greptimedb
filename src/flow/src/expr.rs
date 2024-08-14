@@ -31,9 +31,6 @@ pub(crate) use id::{GlobalId, Id, LocalId};
 pub(crate) use linear::{MapFilterProject, MfpPlan, SafeMfpPlan};
 pub(crate) use relation::{AggregateExpr, AggregateFunc};
 pub(crate) use scalar::{ScalarExpr, TypedExpr};
-use snafu::ensure;
-
-use crate::expr::error::InternalSnafu;
 
 /// A batch of vectors with the same length but without schema, only useful in dataflow
 pub struct Batch {
