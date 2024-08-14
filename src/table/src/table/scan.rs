@@ -20,7 +20,6 @@ use std::time::Instant;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
-use common_telemetry::info;
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
 use datafusion::error::Result as DfResult;
