@@ -19,7 +19,6 @@ use std::sync::{Arc, OnceLock};
 
 use arrow::array::{ArrayRef, BooleanArray};
 use common_error::ext::BoxedError;
-use common_telemetry::debug;
 use common_time::timestamp::TimeUnit;
 use common_time::{DateTime, Timestamp};
 use datafusion_expr::Operator;
