@@ -168,6 +168,7 @@ impl ExecutionPlan for RegionScanExec {
                 .iter()
                 .map(|_| ColumnStatistics {
                     distinct_count: Precision::Exact(self.total_rows),
+                    null_count: Precision::Exact(0), // all null rows are counted for append-only table
                     ..Default::default()
                 })
                 .collect();
