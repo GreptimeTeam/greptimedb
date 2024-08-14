@@ -338,7 +338,7 @@ impl ScalarExpr {
             } else if let Some(prev_cond_idx) = prev_start_idx {
                 let prev_cond = prev_cond.unwrap();
 
-                // put a slice to corrsponding batch
+                // put a slice to corresponding batch
                 let slice_offset = prev_cond_idx;
                 let slice_length = idx - prev_cond_idx;
                 let to_be_append = batch.slice(slice_offset, slice_length);
@@ -401,7 +401,7 @@ impl ScalarExpr {
                 None => null_output_vec.as_ref(),
             }
             .context(InternalSnafu {
-                reason: "Expect corrseponding output vector to exist",
+                reason: "Expect corresponding output vector to exist",
             })?;
             // TODO(discord9): seems `extend_slice_of` doesn't support NullVector or ConstantVector
             // consider adding it maybe?
@@ -749,8 +749,6 @@ impl ScalarExpr {
 
 #[cfg(test)]
 mod test {
-
-    use arrow::ipc::Null;
     use datatypes::vectors::Int32Vector;
     use pretty_assertions::assert_eq;
 
