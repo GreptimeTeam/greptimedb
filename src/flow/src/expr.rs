@@ -23,9 +23,8 @@ mod relation;
 mod scalar;
 mod signature;
 
-use datatypes::prelude::DataType;
 use arrow::array::BooleanArray;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::vectors::VectorRef;
 pub(crate) use df_func::{DfScalarFunction, RawDfScalarFn};
 pub(crate) use error::{EvalError, InvalidArgumentSnafu};
@@ -35,12 +34,9 @@ use itertools::Itertools;
 pub(crate) use linear::{MapFilterProject, MfpPlan, SafeMfpPlan};
 pub(crate) use relation::{AggregateExpr, AggregateFunc};
 pub(crate) use scalar::{ScalarExpr, TypedExpr};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::expr::error::DataTypeSnafu;
-use snafu::OptionExt;
-
-use crate::expr::error::TypeMismatchSnafu;
+use crate::expr::error::{DataTypeSnafu, TypeMismatchSnafu};
 
 /// A batch of vectors with the same length but without schema, only useful in dataflow
 pub struct Batch {
