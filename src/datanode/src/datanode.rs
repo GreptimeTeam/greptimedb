@@ -401,6 +401,9 @@ impl DatanodeBuilder {
             .await
             .context(BuildMitoEngineSnafu)?,
             DatanodeWalConfig::Kafka(kafka_config) => {
+                if kafka_config.create_index && opts.node_id.is_none() {
+                    warn!("The WAL index creation only available in distributed mode.")
+                }
                 let global_index_collector = if kafka_config.create_index && opts.node_id.is_some()
                 {
                     let operator = new_object_store_without_cache(
