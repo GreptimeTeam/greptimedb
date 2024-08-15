@@ -27,11 +27,26 @@ use crate::compute::render::Context;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, Toff};
 use crate::error::{Error, PlanSnafu};
 use crate::expr::error::InternalSnafu;
-use crate::expr::EvalError;
+use crate::expr::{Batch, EvalError};
 use crate::repr::{DiffRow, Row, BROADCAST_CAP};
 
 #[allow(clippy::mutable_key_type)]
 impl<'referred, 'df> Context<'referred, 'df> {
+    /// simply send the batch to downstream, without fancy features like buffering
+    pub fn render_source_batch(
+        &mut self,
+        mut src_recv: broadcast::Receiver<Batch>,
+    ) -> Result<CollectionBundle<Batch>, Error> {
+        debug!("Rendering Source Batch");
+        let (send_port, recv_port) = self.df.make_edge::<_, Toff<Batch>>("source_batch");
+
+        let schd = self.compute_state.get_scheduler();
+        let inner_schd = schd.clone();
+        let now = self.compute_state.current_time_ref();
+        let err_collector = self.err_collector.clone();
+
+        todo!()
+    }
     /// Render a source which comes from brocast channel into the dataflow
     /// will immediately send updates not greater than `now` and buffer the rest in arrangement
     pub fn render_source(
