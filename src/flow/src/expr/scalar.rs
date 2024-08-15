@@ -30,7 +30,7 @@ use crate::expr::error::{
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::expr::{Batch, DfScalarFunction};
-use crate::repr::{ColumnType, RelationType};
+use crate::repr::ColumnType;
 /// A scalar expression with a known type.
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TypedExpr {

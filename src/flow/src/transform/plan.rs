@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use itertools::Itertools;
 use snafu::OptionExt;
@@ -23,9 +23,9 @@ use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{plan_rel, Plan as SubPlan, ProjectRel, Rel};
 
 use crate::error::{Error, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu};
-use crate::expr::{MapFilterProject, ScalarExpr, TypedExpr, UnaryFunc};
-use crate::plan::{KeyValPlan, Plan, TypedPlan};
-use crate::repr::{self, RelationDesc, RelationType};
+use crate::expr::{MapFilterProject, TypedExpr};
+use crate::plan::{Plan, TypedPlan};
+use crate::repr::{self, RelationType};
 use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedPlan {
@@ -235,7 +235,7 @@ mod test {
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::expr::{GlobalId, ScalarExpr};
+    use crate::expr::GlobalId;
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};

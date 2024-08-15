@@ -17,28 +17,18 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
-use common_query::error::InvalidFuncArgsSnafu;
-use common_telemetry::info;
-use datafusion::config::ConfigOptions;
-use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
-use datafusion::optimizer::simplify_expressions::SimplifyExpressions;
-use datafusion::optimizer::{AnalyzerRule, OptimizerContext, OptimizerRule};
 use datatypes::data_type::ConcreteDataType as CDT;
-use query::parser::QueryLanguageParser;
-use query::plan::LogicalPlan;
-use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
 /// rename it to `substrait_proto`
-use substrait::{substrait_proto_df as substrait_proto, DFLogicalSubstraitConvertor};
+use substrait::substrait_proto_df as substrait_proto;
 use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 use crate::adapter::FlownodeContext;
-use crate::error::{DatafusionSnafu, Error, ExternalSnafu, NotImplementedSnafu, UnexpectedSnafu};
-use crate::plan::TypedPlan;
+use crate::error::{Error, NotImplementedSnafu, UnexpectedSnafu};
 /// a simple macro to generate a not implemented error
 macro_rules! not_impl_err {
     ($($arg:tt)*)  => {
@@ -173,6 +163,7 @@ mod test {
     use prost::Message;
     use query::parser::QueryLanguageParser;
     use query::plan::LogicalPlan;
+    use query::query_engine::DefaultSerializer;
     use query::QueryEngine;
     use session::context::QueryContext;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -182,10 +173,9 @@ mod test {
 
     use super::*;
     use crate::adapter::node_context::IdToNameMap;
+    use crate::df_optimizer::apply_df_optimizer;
     use crate::expr::GlobalId;
     use crate::repr::{ColumnType, RelationType};
-    use crate::df_optimizer::apply_df_optimizer;
-    use crate::repr::ColumnType;
 
     pub fn create_test_ctx() -> FlownodeContext {
         let mut schemas = HashMap::new();

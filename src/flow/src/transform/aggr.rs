@@ -12,10 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
-
-use datatypes::data_type::DataType;
-use datatypes::value::Value;
 use itertools::Itertools;
 use snafu::OptionExt;
 use substrait_proto::proto::aggregate_function::AggregationInvocation;
@@ -25,7 +21,7 @@ use substrait_proto::proto::{self};
 
 use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
 use crate::expr::{
-    AggregateExpr, AggregateFunc, BinaryFunc, MapFilterProject, ScalarExpr, TypedExpr, UnaryFunc,
+    AggregateExpr, AggregateFunc, MapFilterProject, ScalarExpr, TypedExpr, UnaryFunc,
 };
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
@@ -348,13 +344,16 @@ impl TypedPlan {
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
+
     use bytes::BytesMut;
     use common_time::{DateTime, Interval};
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::value::Value;
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::expr::{DfScalarFunction, GlobalId, RawDfScalarFn};
+    use crate::expr::{BinaryFunc, DfScalarFunction, GlobalId, RawDfScalarFn};
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
