@@ -133,31 +133,3 @@ impl Iterator for CachedPageReader {
         self.get_next_page().transpose()
     }
 }
-
-/// Get [PageMetadata] from `page`.
-///
-/// The conversion is based on [decode_page()](https://github.com/apache/arrow-rs/blob/1d6feeacebb8d0d659d493b783ba381940973745/parquet/src/file/serialized_reader.rs#L438-L481)
-/// and [PageMetadata](https://github.com/apache/arrow-rs/blob/65f7be856099d389b0d0eafa9be47fad25215ee6/parquet/src/column/page.rs#L279-L301).
-fn page_to_page_meta(page: &Page) -> PageMetadata {
-    match page {
-        Page::DataPage { num_values, .. } => PageMetadata {
-            num_rows: None,
-            num_levels: Some(*num_values as usize),
-            is_dict: false,
-        },
-        Page::DataPageV2 {
-            num_values,
-            num_rows,
-            ..
-        } => PageMetadata {
-            num_rows: Some(*num_rows as usize),
-            num_levels: Some(*num_values as usize),
-            is_dict: false,
-        },
-        Page::DictionaryPage { .. } => PageMetadata {
-            num_rows: None,
-            num_levels: None,
-            is_dict: true,
-        },
-    }
-}
