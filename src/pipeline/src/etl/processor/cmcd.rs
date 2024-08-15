@@ -15,7 +15,8 @@
 use ahash::HashSet;
 use urlencoding::decode;
 
-use crate::etl::field::{Field, Fields};
+use super::{yaml_new_field, yaml_new_fileds, Processor, ProcessorBuilder, ProcessorKind};
+use crate::etl::field::{Field, Fields, NewFields, OneInputMultiOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_field, yaml_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
@@ -63,6 +64,27 @@ const CMCD_KEYS: [&str; 18] = [
     CMCD_KEY_V,
 ];
 
+#[derive(Debug, Default)]
+pub struct CmcdProcessorBuilder {
+    fields: NewFields,
+
+    ignore_missing: bool,
+}
+
+impl ProcessorBuilder for CmcdProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
+        todo!()
+    }
+}
+
 /// Common Media Client Data Specification:
 /// https://cdn.cta.tech/cta/media/media/resources/standards/pdfs/cta-5004-final.pdf
 ///
@@ -100,6 +122,7 @@ const CMCD_KEYS: [&str; 18] = [
 /// 12. Transport Layer Security SHOULD be used to protect all transmission of CMCD data.
 #[derive(Debug, Default)]
 pub struct CmcdProcessor {
+    real_fields: Vec<OneInputMultiOutputField>,
     fields: Fields,
 
     ignore_missing: bool,
@@ -187,11 +210,12 @@ impl CmcdProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = CmcdProcessor::default();
+        let mut fields = NewFields::default();
+        let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
             let key = k
@@ -199,21 +223,26 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessor {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?));
+                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
+                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
                 }
 
                 IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?);
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
 
                 _ => {}
             }
         }
 
-        Ok(processor)
+        let builder = CmcdProcessorBuilder {
+            fields,
+            ignore_missing,
+        };
+
+        Ok(builder)
     }
 }
 
@@ -234,20 +263,34 @@ impl crate::etl::processor::Processor for CmcdProcessor {
         &mut self.fields
     }
 
-    fn output_keys(&self) -> HashSet<String> {
-        self.fields
+    // fn output_keys(&self) -> HashSet<String> {
+    //     self.fields
+    //         .iter()
+    //         .map(|field| {
+    //             field
+    //                 .target_field
+    //                 .clone()
+    //                 .unwrap_or_else(|| field.get_field_name().to_string())
+    //         })
+    //         .flat_map(|keys| {
+    //             CMCD_KEYS
+    //                 .iter()
+    //                 .map(move |key| format!("{}_{}", keys, *key))
+    //         })
+    //         .collect()
+    // }
+
+    fn output_keys(&self) -> HashSet<&str> {
+        self.real_fields
             .iter()
-            .map(|field| {
-                field
-                    .target_field
-                    .clone()
-                    .unwrap_or_else(|| field.get_field_name().to_string())
-            })
-            .flat_map(|keys| {
-                CMCD_KEYS
-                    .iter()
-                    .map(move |key| format!("{}_{}", keys, *key))
-            })
+            .flat_map(|f| f.outputs().into_keys().map(|k| k.as_str()))
+            .collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.real_fields
+            .iter()
+            .map(|field| field.input().name.as_str())
             .collect()
     }
 

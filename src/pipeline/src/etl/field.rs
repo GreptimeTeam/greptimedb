@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::ops::Deref;
+use std::str::FromStr;
 
 use ahash::{HashSet, HashSetExt};
 use itertools::Itertools;
@@ -75,10 +77,19 @@ impl std::ops::DerefMut for Fields {
     }
 }
 
+enum IndexInfo {
+    Index(usize),
+    NotSet,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct InputFieldInfo {
     pub(crate) name: String,
     pub(crate) index: usize,
+}
+
+struct InputFieldInfoBuilder {
+    name: String,
 }
 
 impl InputFieldInfo {
@@ -94,6 +105,136 @@ impl InputFieldInfo {
             name: field.into(),
             index: 0,
         }
+    }
+}
+#[derive(Debug, Default, Clone)]
+pub struct OneInputOneOutPutField {
+    input: InputFieldInfo,
+    output: Option<(String, usize)>,
+}
+
+impl OneInputOneOutPutField {
+    pub(crate) fn new(input: InputFieldInfo, output: (String, usize)) -> Self {
+        OneInputOneOutPutField {
+            input,
+            output: Some(output),
+        }
+    }
+
+    pub(crate) fn input(&self) -> &InputFieldInfo {
+        &self.input
+    }
+
+    pub(crate) fn output(&self) -> (&String, &usize) {
+        if let Some((name, index)) = &self.output {
+            (name, index)
+        } else {
+            (&self.input.name, &self.input.index)
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct OneInputMultiOutputField {
+    input: InputFieldInfo,
+    outputs: Option<BTreeMap<String, usize>>,
+}
+
+impl OneInputMultiOutputField {
+    pub(crate) fn new(input: InputFieldInfo, outputs: BTreeMap<String, usize>) -> Self {
+        OneInputMultiOutputField {
+            input,
+            outputs: Some(outputs),
+        }
+    }
+
+    pub(crate) fn input(&self) -> &InputFieldInfo {
+        &self.input
+    }
+
+    pub(crate) fn outputs(&self) -> BTreeMap<&String, &usize> {
+        if let Some(outputs) = &self.outputs {
+            outputs.iter().collect()
+        } else {
+            let mut map = BTreeMap::new();
+            map.insert(&self.input.name, &self.input.index);
+            map
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct NewField {
+    input_field: String,
+    target_field: Option<String>,
+}
+
+impl FromStr for NewField {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parts = s.split(',');
+        let input_field = parts
+            .next()
+            .ok_or("input field is missing")?
+            .trim()
+            .to_string();
+        let target_field = parts.next().map(|x| x.trim().to_string());
+
+        Ok(NewField {
+            input_field,
+            target_field,
+        })
+    }
+}
+
+impl NewField {
+    pub(crate) fn new(input_field: impl Into<String>, target_field: Option<String>) -> Self {
+        NewField {
+            input_field: input_field.into(),
+            target_field,
+        }
+    }
+
+    pub(crate) fn input_field(&self) -> &str {
+        &self.input_field
+    }
+
+    pub(crate) fn target_field(&self) -> Option<&str> {
+        self.target_field.as_deref()
+    }
+
+    pub(crate) fn target_or_input_field(&self) -> &str {
+        self.target_field.as_deref().unwrap_or(&self.input_field)
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct NewFields(Vec<NewField>);
+
+impl NewFields {
+    pub(crate) fn new(fields: Vec<NewField>) -> Self {
+        NewFields(fields)
+    }
+
+    pub(crate) fn one(field: NewField) -> Self {
+        NewFields(vec![field])
+    }
+}
+
+impl Deref for NewFields {
+    type Target = Vec<NewField>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Iterator for NewFields {
+    type Item = NewField;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.pop()
     }
 }
 

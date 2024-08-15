@@ -19,7 +19,8 @@ use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
-use crate::etl::field::{Field, Fields};
+use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
+use crate::etl::field::{Field, Fields, InputFieldInfo, NewFields, OneInputOneOutPutField};
 use crate::etl::processor::{
     update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, yaml_strings,
     Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
@@ -76,16 +77,152 @@ impl std::ops::Deref for Formats {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct DateProcessorBuilder {
+    fields: NewFields,
+    formats: Formats,
+    timezone: Option<Arc<String>>,
+    locale: Option<Arc<String>>,
+    ignore_missing: bool,
+}
+
+impl ProcessorBuilder for DateProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.input_field())
+                // TODO (qtang): handler error
+                .unwrap();
+            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let output_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.target_or_input_field())
+                .unwrap();
+            let input = OneInputOneOutPutField::new(
+                input_field_info,
+                (field.target_or_input_field().to_string(), output_index),
+            );
+            real_fields.push(input);
+        }
+        let processor = DateProcessor {
+            fields: Fields::one(Field::new("test".to_string())),
+            real_fields,
+            formats: self.formats,
+            timezone: self.timezone,
+            locale: self.locale,
+            ignore_missing: self.ignore_missing,
+        };
+        ProcessorKind::Date(processor)
+    }
+}
+
+impl DateProcessorBuilder {
+    pub fn build(self, intermediate_keys: &[String]) -> DateProcessor {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.input_field())
+                // TODO (qtang): handler error
+                .unwrap();
+            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let output_index = intermediate_keys
+                .iter()
+                .position(|k| k == field.target_or_input_field())
+                .unwrap();
+            let input = OneInputOneOutPutField::new(
+                input_field_info,
+                (field.target_or_input_field().to_string(), output_index),
+            );
+            real_fields.push(input);
+        }
+        DateProcessor {
+            fields: Fields::one(Field::new("test".to_string())),
+            real_fields,
+            formats: self.formats,
+            timezone: self.timezone,
+            locale: self.locale,
+            ignore_missing: self.ignore_missing,
+        }
+    }
+}
+
+impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
+    type Error = String;
+
+    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
+        let mut fields = NewFields::default();
+        let mut formats = Formats::default();
+        let mut timezone = None;
+        let mut locale = None;
+        let mut ignore_missing = false;
+
+        for (k, v) in hash {
+            let key = k
+                .as_str()
+                .ok_or(format!("key must be a string, but got {k:?}"))?;
+
+            match key {
+                FIELD_NAME => {
+                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                }
+                FIELDS_NAME => {
+                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
+                }
+
+                FORMATS_NAME => {
+                    let format_strs = yaml_strings(v, FORMATS_NAME)?;
+                    if format_strs.is_empty() {
+                        formats = Formats::new(DEFAULT_FORMATS.clone());
+                    } else {
+                        formats = Formats::new(format_strs.into_iter().map(Arc::new).collect());
+                    }
+                }
+                TIMEZONE_NAME => {
+                    timezone = Some(Arc::new(yaml_string(v, TIMEZONE_NAME)?));
+                }
+                LOCALE_NAME => {
+                    locale = Some(Arc::new(yaml_string(v, LOCALE_NAME)?));
+                }
+                IGNORE_MISSING_NAME => {
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
+                }
+
+                _ => {}
+            }
+        }
+
+        let builder = DateProcessorBuilder {
+            fields,
+            formats,
+            timezone,
+            locale,
+            ignore_missing,
+        };
+
+        Ok(builder)
+    }
+}
+
 /// deprecated it should be removed in the future
 /// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct DateProcessor {
     fields: Fields,
-
+    real_fields: Vec<OneInputOneOutPutField>,
     formats: Formats,
     timezone: Option<Arc<String>>,
     locale: Option<Arc<String>>, // to support locale
-    output_format: Option<Arc<String>>,
 
     ignore_missing: bool,
     // description
@@ -123,12 +260,6 @@ impl DateProcessor {
         }
     }
 
-    fn with_output_format(&mut self, output_format: String) {
-        if !output_format.is_empty() {
-            self.output_format = Some(Arc::new(output_format));
-        }
-    }
-
     fn with_ignore_missing(&mut self, ignore_missing: bool) {
         self.ignore_missing = ignore_missing;
     }
@@ -155,55 +286,6 @@ impl DateProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessor {
-    type Error = String;
-
-    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = DateProcessor::default();
-
-        let mut formats_opt = None;
-
-        for (k, v) in hash {
-            let key = k
-                .as_str()
-                .ok_or(format!("key must be a string, but got {k:?}"))?;
-
-            match key {
-                FIELD_NAME => {
-                    processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?));
-                }
-                FIELDS_NAME => {
-                    processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
-                }
-
-                FORMATS_NAME => {
-                    let formats = yaml_strings(v, FORMATS_NAME)?;
-                    formats_opt = Some(formats.into_iter().map(Arc::new).collect());
-                }
-                TIMEZONE_NAME => {
-                    processor.with_timezone(yaml_string(v, TIMEZONE_NAME)?);
-                }
-                LOCALE_NAME => {
-                    processor.with_locale(yaml_string(v, LOCALE_NAME)?);
-                }
-                OUTPUT_FORMAT_NAME => {
-                    processor.with_output_format(yaml_string(v, OUTPUT_FORMAT_NAME)?);
-                }
-
-                IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?);
-                }
-
-                _ => {}
-            }
-        }
-
-        processor.with_formats(formats_opt);
-
-        Ok(processor)
-    }
-}
-
 impl Processor for DateProcessor {
     fn kind(&self) -> &str {
         PROCESSOR_DATE
@@ -221,10 +303,17 @@ impl Processor for DateProcessor {
         &mut self.fields
     }
 
-    fn output_keys(&self) -> HashSet<String> {
-        self.fields
+    fn output_keys(&self) -> HashSet<&str> {
+        self.real_fields
             .iter()
-            .map(|f| f.get_target_field().to_string())
+            .map(|f| f.output().0.as_str())
+            .collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.real_fields
+            .iter()
+            .map(|f| f.input().name.as_str())
             .collect()
     }
 

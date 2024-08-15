@@ -15,11 +15,12 @@
 use ahash::HashSet;
 use urlencoding::{decode, encode};
 
-use crate::etl::field::{Field, Fields};
-use crate::etl::processor::{
-    yaml_bool, yaml_field, yaml_fields, yaml_string, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
-    METHOD_NAME,
+use super::{
+    yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, ProcessorBuilder, ProcessorKind,
+    FIELDS_NAME,
 };
+use crate::etl::field::{Field, Fields, InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::processor::{FIELD_NAME, IGNORE_MISSING_NAME, METHOD_NAME};
 use crate::etl::value::{Map, Value};
 
 pub(crate) const PROCESSOR_URL_ENCODING: &str = "urlencoding";
@@ -52,10 +53,85 @@ impl std::str::FromStr for Method {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct UrlEncodingProcessorBuilder {
+    fields: NewFields,
+    method: Method,
+    ignore_missing: bool,
+}
+
+impl ProcessorBuilder for UrlEncodingProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.input_field())
+                // TODO (qtang): handler error
+                .unwrap();
+            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let output_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.target_or_input_field())
+                .unwrap();
+            let input = OneInputOneOutPutField::new(
+                input_field_info,
+                (field.target_or_input_field().to_string(), output_index),
+            );
+            real_fields.push(input);
+        }
+        let processor = UrlEncodingProcessor {
+            fields: Fields::one(Field::new("test".to_string())),
+            real_fields,
+            method: self.method,
+            ignore_missing: self.ignore_missing,
+        };
+        ProcessorKind::UrlEncoding(processor)
+    }
+}
+
+impl UrlEncodingProcessorBuilder {
+    fn build(self, intermediate_keys: &[String]) -> UrlEncodingProcessor {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.input_field())
+                // TODO (qtang): handler error
+                .unwrap();
+            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let output_index = intermediate_keys
+                .iter()
+                .position(|k| k == field.target_or_input_field())
+                .unwrap();
+            let input = OneInputOneOutPutField::new(
+                input_field_info,
+                (field.target_or_input_field().to_string(), output_index),
+            );
+            real_fields.push(input);
+        }
+        UrlEncodingProcessor {
+            fields: Fields::one(Field::new("test".to_string())),
+            real_fields,
+            method: self.method,
+            ignore_missing: self.ignore_missing,
+        }
+    }
+}
+
 /// only support string value
 #[derive(Debug, Default)]
 pub struct UrlEncodingProcessor {
     fields: Fields,
+    real_fields: Vec<OneInputOneOutPutField>,
     method: Method,
     ignore_missing: bool,
 }
@@ -95,11 +171,13 @@ impl UrlEncodingProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for UrlEncodingProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for UrlEncodingProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = UrlEncodingProcessor::default();
+        let mut fields = NewFields::default();
+        let mut method = Method::Decode;
+        let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
             let key = k
@@ -107,24 +185,29 @@ impl TryFrom<&yaml_rust::yaml::Hash> for UrlEncodingProcessor {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?));
+                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
+                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
                 }
 
                 IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?);
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
 
                 METHOD_NAME => {
-                    let method = yaml_string(v, METHOD_NAME)?;
-                    processor.with_method(method.parse()?);
+                    let method_str = yaml_string(v, METHOD_NAME)?;
+                    method = method_str.parse()?;
                 }
 
                 _ => {}
             }
         }
+        let processor = UrlEncodingProcessorBuilder {
+            fields,
+            method,
+            ignore_missing,
+        };
 
         Ok(processor)
     }
@@ -147,10 +230,17 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
         &mut self.fields
     }
 
-    fn output_keys(&self) -> HashSet<String> {
-        self.fields
+    fn output_keys(&self) -> HashSet<&str> {
+        self.real_fields
             .iter()
-            .map(|f| f.get_target_field().to_string())
+            .map(|f| f.output().0.as_str())
+            .collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.real_fields
+            .iter()
+            .map(|f| f.input().name.as_str())
             .collect()
     }
 

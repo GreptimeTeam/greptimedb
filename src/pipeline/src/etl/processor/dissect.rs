@@ -16,7 +16,8 @@ use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use common_telemetry::warn;
 use itertools::Itertools;
 
-use crate::etl::field::{Field, Fields};
+use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
+use crate::etl::field::{Field, Fields, NewFields, OneInputMultiOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_field, yaml_fields, yaml_parse_string, yaml_parse_strings, yaml_string,
     Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERNS_NAME, PATTERN_NAME,
@@ -386,8 +387,31 @@ impl std::fmt::Display for Pattern {
 }
 
 #[derive(Debug, Default)]
+pub struct DissectProcessorBuilder {
+    fields: NewFields,
+    patterns: Vec<Pattern>,
+    ignore_missing: bool,
+    append_separator: Option<String>,
+}
+
+impl ProcessorBuilder for DissectProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
+        todo!()
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct DissectProcessor {
     fields: Fields,
+    real_fields: Vec<OneInputMultiOutputField>,
     patterns: Vec<Pattern>,
     ignore_missing: bool,
 
@@ -573,11 +597,14 @@ impl DissectProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = Self::default();
+        let mut fields = NewFields::default();
+        let mut patterns = vec![];
+        let mut ignore_missing = false;
+        let mut append_separator = None;
 
         for (k, v) in value.iter() {
             let key = k
@@ -585,27 +612,36 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessor {
                 .ok_or(format!("key must be a string, but got '{k:?}'"))?;
 
             match key {
-                FIELD_NAME => processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?)),
-                FIELDS_NAME => processor.with_fields(yaml_fields(v, FIELDS_NAME)?),
+                FIELD_NAME => {
+                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                }
+                FIELDS_NAME => {
+                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
+                }
                 PATTERN_NAME => {
                     let pattern: Pattern = yaml_parse_string(v, PATTERN_NAME)?;
-                    processor.with_patterns(vec![pattern]);
+                    patterns = vec![pattern];
                 }
                 PATTERNS_NAME => {
-                    let patterns = yaml_parse_strings(v, PATTERNS_NAME)?;
-                    processor.with_patterns(patterns);
+                    patterns = yaml_parse_strings(v, PATTERNS_NAME)?;
                 }
                 IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?)
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
                 APPEND_SEPARATOR_NAME => {
-                    processor.with_append_separator(yaml_string(v, APPEND_SEPARATOR_NAME)?)
+                    append_separator = Some(yaml_string(v, APPEND_SEPARATOR_NAME)?);
                 }
                 _ => {}
             }
         }
-        processor.update_output_keys();
-        Ok(processor)
+        let builder = DissectProcessorBuilder {
+            fields,
+            patterns,
+            ignore_missing,
+            append_separator,
+        };
+
+        Ok(builder)
     }
 }
 
@@ -626,18 +662,32 @@ impl Processor for DissectProcessor {
         &mut self.fields
     }
 
-    fn output_keys(&self) -> HashSet<String> {
-        let mut result = HashSet::with_capacity(30);
-        for pattern in &self.patterns {
-            for part in pattern.iter() {
-                if let Part::Name(name) = part {
-                    if !name.is_empty() {
-                        result.insert(name.to_string());
-                    }
-                }
-            }
-        }
-        result
+    // fn output_keys(&self) -> HashSet<&str> {
+    //     let mut result = HashSet::with_capacity(30);
+    //     for pattern in &self.patterns {
+    //         for part in pattern.iter() {
+    //             if let Part::Name(name) = part {
+    //                 if !name.is_empty() {
+    //                     result.insert(name.to_string());
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     result
+    // }
+
+    fn output_keys(&self) -> HashSet<&str> {
+        self.real_fields
+            .iter()
+            .flat_map(|f| f.outputs().into_keys().map(|k| k.as_str()))
+            .collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.real_fields
+            .iter()
+            .map(|x| x.input().name.as_str())
+            .collect()
     }
 
     fn exec_field(&self, val: &Value, _field: &Field) -> Result<Map, String> {

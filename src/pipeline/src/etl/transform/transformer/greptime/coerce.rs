@@ -410,6 +410,7 @@ mod tests {
     fn test_coerce_string_without_on_failure() {
         let transform = Transform {
             fields: Fields::default(),
+            real_fields: vec![],
             type_: Value::Int32(0),
             default: None,
             index: None,
@@ -435,6 +436,7 @@ mod tests {
     fn test_coerce_string_with_on_failure_ignore() {
         let transform = Transform {
             fields: Fields::default(),
+            real_fields: vec![],
             type_: Value::Int32(0),
             default: None,
             index: None,
@@ -450,6 +452,7 @@ mod tests {
     fn test_coerce_string_with_on_failure_default() {
         let mut transform = Transform {
             fields: Fields::default(),
+            real_fields: vec![],
             type_: Value::Int32(0),
             default: None,
             index: None,

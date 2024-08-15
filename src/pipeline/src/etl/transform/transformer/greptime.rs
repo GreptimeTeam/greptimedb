@@ -20,7 +20,7 @@ use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 
-use crate::etl::field::{Field, Fields};
+use crate::etl::field::{Field, Fields, InputFieldInfo, OneInputOneOutPutField};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transformer, Transforms};
 use crate::etl::value::{Array, Map, Timestamp, Value};
@@ -36,21 +36,36 @@ pub struct GreptimeTransformer {
 }
 
 impl GreptimeTransformer {
-    fn default_greptime_timestamp_column() -> Transform {
+    fn add_greptime_timestamp_column(transforms: &mut Transforms) {
         let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let type_ = Value::Timestamp(Timestamp::Nanosecond(ns));
         let default = Some(type_.clone());
-        let mut field = Field::new(DEFAULT_GREPTIME_TIMESTAMP_COLUMN);
-        field.insert_output_index(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(), 0);
+        let field = Field::new(DEFAULT_GREPTIME_TIMESTAMP_COLUMN);
         let fields = Fields::new(vec![field]).unwrap();
 
-        Transform {
+        let transform = Transform {
             fields,
+            real_fields: vec![OneInputOneOutPutField::new(
+                InputFieldInfo {
+                    name: DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
+                    index: transforms.len(),
+                },
+                (
+                    DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
+                    transforms.len(),
+                ),
+            )],
             type_,
             default,
             index: Some(Index::Time),
             on_failure: Some(crate::etl::transform::OnFailure::Default),
-        }
+        };
+        let required_keys = transforms.required_keys_mut();
+        required_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
+
+        let output_keys = transforms.output_keys_mut();
+        output_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
+        transforms.push(transform);
     }
 
     fn schemas(transforms: &Transforms) -> Result<Vec<ColumnSchema>, String> {
@@ -159,13 +174,7 @@ impl Transformer for GreptimeTransformer {
 
         match timestamp_columns.len() {
             0 => {
-                transforms.push(GreptimeTransformer::default_greptime_timestamp_column());
-
-                let required_keys = transforms.required_keys_mut();
-                required_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
-
-                let output_keys = transforms.output_keys_mut();
-                output_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
+                GreptimeTransformer::add_greptime_timestamp_column(&mut transforms);
 
                 let schema = GreptimeTransformer::schemas(&transforms)?;
                 Ok(GreptimeTransformer { transforms, schema })

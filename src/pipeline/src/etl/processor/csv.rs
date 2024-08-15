@@ -19,7 +19,8 @@ use csv::{ReaderBuilder, Trim};
 use itertools::EitherOrBoth::{Both, Left, Right};
 use itertools::Itertools;
 
-use crate::etl::field::{Field, Fields};
+use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
+use crate::etl::field::{Field, Fields, NewFields, OneInputMultiOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_field, yaml_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
     IGNORE_MISSING_NAME,
@@ -32,6 +33,37 @@ const SEPARATOR_NAME: &str = "separator";
 const QUOTE_NAME: &str = "quote";
 const TRIM_NAME: &str = "trim";
 const EMPTY_VALUE_NAME: &str = "empty_value";
+const TARGET_FIELDS: &str = "target_fields";
+
+#[derive(Debug)]
+pub struct CsvProcessorBuilder {
+    reader: ReaderBuilder,
+
+    fields: NewFields,
+    ignore_missing: bool,
+
+    // Value used to fill empty fields, empty fields will be skipped if this is not provided.
+    empty_value: Option<String>,
+    // description
+    // if
+    // ignore_failure
+    // on_failure
+    // tag
+}
+
+impl ProcessorBuilder for CsvProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
+        todo!()
+    }
+}
 
 /// only support string value
 #[derive(Debug)]
@@ -39,6 +71,7 @@ pub struct CsvProcessor {
     reader: ReaderBuilder,
 
     fields: Fields,
+    real_fields: Vec<OneInputMultiOutputField>,
 
     ignore_missing: bool,
 
@@ -59,6 +92,7 @@ impl CsvProcessor {
         Self {
             reader,
             fields: Fields::default(),
+            real_fields: vec![],
             ignore_missing: false,
             empty_value: None,
         }
@@ -160,43 +194,78 @@ impl CsvProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessorBuilder {
     type Error = String;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = CsvProcessor::new();
+        let mut reader = ReaderBuilder::new();
+        reader.has_headers(false);
+
+        let mut fields = NewFields::default();
+        let mut ignore_missing = false;
+        let mut empty_value = None;
+
         for (k, v) in hash {
             let key = k
                 .as_str()
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?));
+                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
+                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
                 }
                 SEPARATOR_NAME => {
-                    processor.try_separator(yaml_string(v, SEPARATOR_NAME)?)?;
+                    let separator = yaml_string(v, SEPARATOR_NAME)?;
+                    if separator.len() != 1 {
+                        return Err(format!(
+                            "'{}' must be a single character, but got '{}'",
+                            SEPARATOR_NAME, separator
+                        ));
+                    } else {
+                        reader.delimiter(separator.as_bytes()[0]);
+                    }
                 }
                 QUOTE_NAME => {
-                    processor.try_quote(yaml_string(v, QUOTE_NAME)?)?;
+                    let quote = yaml_string(v, QUOTE_NAME)?;
+                    if quote.len() != 1 {
+                        return Err(format!(
+                            "'{}' must be a single character, but got '{}'",
+                            QUOTE_NAME, quote
+                        ));
+                    } else {
+                        reader.quote(quote.as_bytes()[0]);
+                    }
                 }
                 TRIM_NAME => {
-                    processor.with_trim(yaml_bool(v, TRIM_NAME)?);
+                    let trim = yaml_bool(v, TRIM_NAME)?;
+                    if trim {
+                        reader.trim(Trim::All);
+                    } else {
+                        reader.trim(Trim::None);
+                    }
                 }
                 IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?);
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
                 EMPTY_VALUE_NAME => {
-                    processor.with_empty_value(yaml_string(v, EMPTY_VALUE_NAME)?);
+                    empty_value = Some(yaml_string(v, EMPTY_VALUE_NAME)?);
                 }
 
                 _ => {}
             }
         }
-        processor.update_output_keys();
-        Ok(processor)
+        let builder = {
+            CsvProcessorBuilder {
+                reader,
+                fields,
+                ignore_missing,
+                empty_value,
+            }
+        };
+
+        Ok(builder)
     }
 }
 
@@ -217,10 +286,24 @@ impl Processor for CsvProcessor {
         &mut self.fields
     }
 
-    fn output_keys(&self) -> HashSet<String> {
-        self.fields
+    // fn output_keys(&self) -> HashSet<String> {
+    //     self.fields
+    //         .iter()
+    //         .flat_map(|f| f.target_fields.clone().unwrap_or_default())
+    //         .collect()
+    // }
+
+    fn output_keys(&self) -> HashSet<&str> {
+        self.real_fields
             .iter()
-            .flat_map(|f| f.target_fields.clone().unwrap_or_default())
+            .flat_map(|f| f.outputs().into_keys().map(|k| k.as_str()))
+            .collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.real_fields
+            .iter()
+            .map(|f| f.input().name.as_str())
             .collect()
     }
 

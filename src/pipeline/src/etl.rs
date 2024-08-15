@@ -22,14 +22,15 @@ pub mod value;
 use ahash::{HashMap, HashSet};
 use common_telemetry::{debug, warn};
 use itertools::{merge, Itertools};
-use processor::Processor;
-use transform::{Transformer, Transforms};
+use processor::{Processor, ProcessorBuilder, Processors};
+use transform::{TransformBuilders, Transformer, Transforms};
 use value::{Map, Value};
 use yaml_rust::YamlLoader;
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
 const TRANSFORM: &str = "transform";
+const TRANSFORMS: &str = "transforms";
 
 pub enum Content {
     Json(String),
@@ -117,24 +118,24 @@ where
 
             let description = doc[DESCRIPTION].as_str().map(|s| s.to_string());
 
-            let mut processors = if let Some(v) = doc[PROCESSORS].as_vec() {
+            let processor_builder_list = if let Some(v) = doc[PROCESSORS].as_vec() {
                 v.try_into()?
             } else {
-                processor::Processors::default()
+                processor::ProcessorBuilderList::default()
             };
 
-            let transforms = if let Some(v) = doc[TRANSFORM].as_vec() {
-                v.try_into()?
-            } else {
-                Transforms::default()
-            };
+            let transform_builders =
+                if let Some(v) = doc[TRANSFORMS].as_vec().or(doc[TRANSFORM].as_vec()) {
+                    v.try_into()?
+                } else {
+                    TransformBuilders::default()
+                };
 
-            let mut transformer = T::new(transforms)?;
-            let transforms = transformer.transforms_mut();
-
-            let processors_output_keys = processors.output_keys();
-            let processors_required_keys = processors.required_keys();
-            let processors_required_original_keys = processors.required_original_keys();
+            // let mut transformer = T::new(transforms)?;
+            // let transforms = transformer.transforms_mut();
+            let processors_required_keys = &processor_builder_list.input_keys;
+            let processors_output_keys = &processor_builder_list.output_keys;
+            let processors_required_original_keys = &processor_builder_list.original_input_keys;
 
             debug!(
                 "processors_required_original_keys: {:?}",
@@ -143,7 +144,7 @@ where
             debug!("processors_required_keys: {:?}", processors_required_keys);
             debug!("processors_output_keys: {:?}", processors_output_keys);
 
-            let transforms_required_keys = transforms.required_keys();
+            let transforms_required_keys = &transform_builders.required_keys;
             let mut tr_keys = Vec::with_capacity(50);
             for key in transforms_required_keys.iter() {
                 if !processors_output_keys.contains(key)
@@ -157,6 +158,7 @@ where
 
             required_keys.append(&mut tr_keys);
             required_keys.sort();
+            let required_keys = required_keys;
 
             debug!("required_keys: {:?}", required_keys);
 
@@ -183,9 +185,36 @@ where
 
             final_intermediate_keys.extend(intermediate_keys_exclude_original);
 
-            let output_keys = transforms.output_keys().clone();
-            set_processor_keys_index(&mut processors, &final_intermediate_keys)?;
-            set_transform_keys_index(transforms, &final_intermediate_keys, &output_keys)?;
+            let output_keys = (&transform_builders.output_keys).clone();
+
+            let processors_kind_list = processor_builder_list
+                .processor_builders
+                .into_iter()
+                .map(|builder| builder.build(&final_intermediate_keys))
+                .collect::<Vec<_>>();
+            let processors = Processors {
+                processors: processors_kind_list,
+                required_keys: processors_required_keys.clone(),
+                output_keys: processors_output_keys.clone(),
+                required_original_keys: processors_required_original_keys.clone(),
+            };
+
+            // set_processor_keys_index(&mut processors, &final_intermediate_keys)?;
+            // set_transform_keys_index(transforms, &final_intermediate_keys, &output_keys)?;
+
+            let transfor_list = transform_builders
+                .builders
+                .into_iter()
+                .map(|builder| builder.build(&final_intermediate_keys, &output_keys))
+                .collect::<Vec<_>>();
+
+            let transformers = Transforms {
+                transforms: transfor_list,
+                required_keys: transforms_required_keys.clone(),
+                output_keys: output_keys.clone(),
+            };
+
+            let transformer = T::new(transformers)?;
 
             Ok(Pipeline {
                 description,

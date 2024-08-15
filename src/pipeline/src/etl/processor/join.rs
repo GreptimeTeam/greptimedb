@@ -14,7 +14,8 @@
 
 use ahash::HashSet;
 
-use crate::etl::field::{Field, Fields};
+use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
+use crate::etl::field::{Field, Fields, InputFieldInfo, NewFields, OneInputOneOutPutField};
 use crate::etl::processor::{
     update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
     FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, SEPARATOR_NAME,
@@ -23,10 +24,95 @@ use crate::etl::value::{Array, Map, Value};
 
 pub(crate) const PROCESSOR_JOIN: &str = "join";
 
+#[derive(Debug, Default)]
+pub struct JoinProcessorBuilder {
+    fields: NewFields,
+    separator: Option<String>,
+    ignore_missing: bool,
+}
+
+impl ProcessorBuilder for JoinProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.input_field())
+                // TODO (qtang): handler error
+                .unwrap();
+            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let output_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.target_or_input_field())
+                .unwrap();
+            let input = OneInputOneOutPutField::new(
+                input_field_info,
+                (field.target_or_input_field().to_string(), output_index),
+            );
+            real_fields.push(input);
+        }
+
+        let processor = JoinProcessor {
+            fields: Fields::one(Field::new("test".to_string())),
+            real_fields,
+            separator: self.separator,
+            ignore_missing: self.ignore_missing,
+        };
+        ProcessorKind::Join(processor)
+    }
+}
+
+impl JoinProcessorBuilder {
+    fn check(self) -> Result<Self, String> {
+        if self.separator.is_none() {
+            return Err("separator is required".to_string());
+        }
+
+        Ok(self)
+    }
+
+    pub fn build(self, intermediate_keys: &[String]) -> JoinProcessor {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.input_field())
+                // TODO (qtang): handler error
+                .unwrap();
+            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let output_index = intermediate_keys
+                .iter()
+                .position(|k| k == field.target_or_input_field())
+                .unwrap();
+            let input = OneInputOneOutPutField::new(
+                input_field_info,
+                (field.target_or_input_field().to_string(), output_index),
+            );
+            real_fields.push(input);
+        }
+
+        JoinProcessor {
+            fields: Fields::one(Field::new("test".to_string())),
+            real_fields,
+            separator: self.separator,
+            ignore_missing: self.ignore_missing,
+        }
+    }
+}
+
 /// A processor to join each element of an array into a single string using a separator string between each element
 #[derive(Debug, Default)]
 pub struct JoinProcessor {
     fields: Fields,
+    real_fields: Vec<OneInputOneOutPutField>,
     separator: Option<String>,
     ignore_missing: bool,
 }
@@ -67,11 +153,13 @@ impl JoinProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for JoinProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for JoinProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = JoinProcessor::default();
+        let mut fields = NewFields::default();
+        let mut separator = None;
+        let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
             let key = k
@@ -79,22 +167,27 @@ impl TryFrom<&yaml_rust::yaml::Hash> for JoinProcessor {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?));
+                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
+                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
                 }
                 SEPARATOR_NAME => {
-                    processor.with_separator(yaml_string(v, SEPARATOR_NAME)?);
+                    separator = Some(yaml_string(v, SEPARATOR_NAME)?);
                 }
                 IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?);
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
                 _ => {}
             }
         }
 
-        processor.check()
+        let builder = JoinProcessorBuilder {
+            fields,
+            separator,
+            ignore_missing,
+        };
+        builder.check()
     }
 }
 
@@ -115,10 +208,17 @@ impl Processor for JoinProcessor {
         &mut self.fields
     }
 
-    fn output_keys(&self) -> HashSet<String> {
-        self.fields
+    fn output_keys(&self) -> HashSet<&str> {
+        self.real_fields
             .iter()
-            .map(|f| f.get_target_field().to_string())
+            .map(|x| x.output().0.as_str())
+            .collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.real_fields
+            .iter()
+            .map(|x| x.input().name.as_str())
             .collect()
     }
 

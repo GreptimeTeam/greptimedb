@@ -15,7 +15,8 @@
 use ahash::HashSet;
 use regex::Regex;
 
-use crate::etl::field::{Field, Fields};
+use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
+use crate::etl::field::{Field, Fields, InputFieldInfo, NewFields, OneInputOneOutPutField};
 use crate::etl::processor::{
     update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
     FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
@@ -26,10 +27,100 @@ pub(crate) const PROCESSOR_GSUB: &str = "gsub";
 
 const REPLACEMENT_NAME: &str = "replacement";
 
+#[derive(Debug, Default)]
+pub struct GsubProcessorBuilder {
+    fields: NewFields,
+    pattern: Option<Regex>,
+    replacement: Option<String>,
+    ignore_missing: bool,
+}
+
+impl ProcessorBuilder for GsubProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        todo!()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.input_field())
+                // TODO (qtang): handler error
+                .unwrap();
+            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let output_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.target_or_input_field())
+                .unwrap();
+            let input = OneInputOneOutPutField::new(
+                input_field_info,
+                (field.target_or_input_field().to_string(), output_index),
+            );
+            real_fields.push(input);
+        }
+        let processor = GsubProcessor {
+            fields: Fields::one(Field::new("test".to_string())),
+            real_fields,
+            pattern: self.pattern,
+            replacement: self.replacement,
+            ignore_missing: self.ignore_missing,
+        };
+        ProcessorKind::Gsub(processor)
+    }
+}
+
+impl GsubProcessorBuilder {
+    fn check(self) -> Result<Self, String> {
+        if self.pattern.is_none() {
+            return Err("pattern is required".to_string());
+        }
+
+        if self.replacement.is_none() {
+            return Err("replacement is required".to_string());
+        }
+
+        Ok(self)
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> GsubProcessor {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.input_field())
+                // TODO (qtang): handler error
+                .unwrap();
+            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let output_index = intermediate_keys
+                .iter()
+                .position(|k| k == field.target_or_input_field())
+                .unwrap();
+            let input = OneInputOneOutPutField::new(
+                input_field_info,
+                (field.target_or_input_field().to_string(), output_index),
+            );
+            real_fields.push(input);
+        }
+        GsubProcessor {
+            fields: Fields::one(Field::new("test".to_string())),
+            real_fields,
+            pattern: self.pattern,
+            replacement: self.replacement,
+            ignore_missing: self.ignore_missing,
+        }
+    }
+}
+
 /// A processor to replace all matches of a pattern in string by a replacement, only support string value, and array string value
 #[derive(Debug, Default)]
 pub struct GsubProcessor {
     fields: Fields,
+    real_fields: Vec<OneInputOneOutPutField>,
     pattern: Option<Regex>,
     replacement: Option<String>,
     ignore_missing: bool,
@@ -107,11 +198,14 @@ impl GsubProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = GsubProcessor::default();
+        let mut fields = NewFields::default();
+        let mut ignore_missing = false;
+        let mut pattern = None;
+        let mut replacement = None;
 
         for (k, v) in value.iter() {
             let key = k
@@ -119,27 +213,36 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessor {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?));
+                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
+                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
                 }
                 PATTERN_NAME => {
-                    processor.try_pattern(&yaml_string(v, PATTERN_NAME)?)?;
+                    let pattern_str = yaml_string(v, PATTERN_NAME)?;
+                    pattern = Some(Regex::new(&pattern_str).map_err(|e| e.to_string())?);
                 }
                 REPLACEMENT_NAME => {
-                    processor.with_replacement(yaml_string(v, REPLACEMENT_NAME)?);
+                    let replacement_str = yaml_string(v, REPLACEMENT_NAME)?;
+                    replacement = Some(replacement_str);
                 }
 
                 IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?);
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
 
                 _ => {}
             }
         }
 
-        processor.check()
+        let builder = GsubProcessorBuilder {
+            fields,
+            pattern,
+            replacement,
+            ignore_missing,
+        };
+
+        builder.check()
     }
 }
 
@@ -160,10 +263,17 @@ impl crate::etl::processor::Processor for GsubProcessor {
         &mut self.fields
     }
 
-    fn output_keys(&self) -> HashSet<String> {
-        self.fields
+    fn output_keys(&self) -> HashSet<&str> {
+        self.real_fields
             .iter()
-            .map(|f| f.get_target_field().to_string())
+            .map(|f| f.output().0.as_str())
+            .collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.real_fields
+            .iter()
+            .map(|f| f.input().name.as_str())
             .collect()
     }
 

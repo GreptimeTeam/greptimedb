@@ -31,6 +31,9 @@ const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
 pub use transformer::greptime::GreptimeTransformer;
 
+use super::field::{Field, InputFieldInfo, NewFields, OneInputOneOutPutField};
+use super::processor::{yaml_new_field, yaml_new_fileds};
+
 pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     type Output;
     type VecOutput;
@@ -74,12 +77,18 @@ impl std::fmt::Display for OnFailure {
         }
     }
 }
+#[derive(Debug, Default, Clone)]
+pub struct TransformBuilders {
+    pub(crate) builders: Vec<TransformBuilder>,
+    pub(crate) output_keys: Vec<String>,
+    pub(crate) required_keys: Vec<String>,
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct Transforms {
-    transforms: Vec<Transform>,
-    output_keys: Vec<String>,
-    required_keys: Vec<String>,
+    pub(crate) transforms: Vec<Transform>,
+    pub(crate) output_keys: Vec<String>,
+    pub(crate) required_keys: Vec<String>,
 }
 
 impl Transforms {
@@ -130,7 +139,7 @@ impl std::ops::DerefMut for Transforms {
     }
 }
 
-impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
+impl TryFrom<&Vec<yaml_rust::Yaml>> for TransformBuilders {
     type Error = String;
 
     fn try_from(docs: &Vec<yaml_rust::Yaml>) -> Result<Self, Self::Error> {
@@ -138,34 +147,74 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
         let mut all_output_keys: Vec<String> = Vec::with_capacity(100);
         let mut all_required_keys = Vec::with_capacity(100);
         for doc in docs {
-            let transform: Transform = doc
+            let transform_builder: TransformBuilder = doc
                 .as_hash()
                 .ok_or("transform element must be a map".to_string())?
                 .try_into()?;
-            let mut transform_output_keys = transform
+            let mut transform_output_keys = transform_builder
                 .fields
                 .iter()
-                .map(|f| f.get_target_field().to_string())
+                .map(|f| f.target_or_input_field().to_string())
                 .collect();
             all_output_keys.append(&mut transform_output_keys);
 
-            let mut transform_required_keys = transform
+            let mut transform_required_keys = transform_builder
                 .fields
                 .iter()
-                .map(|f| f.input_field.name.clone())
+                .map(|f| f.input_field().to_string())
                 .collect();
             all_required_keys.append(&mut transform_required_keys);
 
-            transforms.push(transform);
+            transforms.push(transform_builder);
         }
 
         all_required_keys.sort();
 
-        Ok(Transforms {
-            transforms,
+        Ok(TransformBuilders {
+            builders: transforms,
             output_keys: all_output_keys,
             required_keys: all_required_keys,
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TransformBuilder {
+    fields: NewFields,
+    type_: Value,
+    default: Option<Value>,
+    index: Option<Index>,
+    on_failure: Option<OnFailure>,
+}
+
+impl TransformBuilder {
+    pub fn build(self, intermediate_keys: &[String], output_keys: &[String]) -> Transform {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.input_field())
+                // TODO (qtang): handler error
+                .unwrap();
+            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let output_index = output_keys
+                .iter()
+                .position(|k| k == field.target_or_input_field())
+                .unwrap();
+            let input = OneInputOneOutPutField::new(
+                input_field_info,
+                (field.target_or_input_field().to_string(), output_index),
+            );
+            real_fields.push(input);
+        }
+        Transform {
+            fields: Fields::one(Field::new("test".to_string())),
+            real_fields,
+            type_: self.type_,
+            default: self.default,
+            index: self.index,
+            on_failure: self.on_failure,
+        }
     }
 }
 
@@ -173,6 +222,7 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
 #[derive(Debug, Clone)]
 pub struct Transform {
     pub fields: Fields,
+    pub real_fields: Vec<OneInputOneOutPutField>,
 
     pub type_: Value,
 
@@ -192,7 +242,7 @@ impl std::fmt::Display for Transform {
         };
 
         let type_ = format!("type: {}", self.type_);
-        let fields = format!("field(s): {}", self.fields);
+        let fields = format!("field(s): {:?}", self.real_fields);
         let default = if let Some(default) = &self.default {
             format!(", default: {}", default)
         } else {
@@ -213,6 +263,7 @@ impl Default for Transform {
     fn default() -> Self {
         Transform {
             fields: Fields::default(),
+            real_fields: Vec::new(),
             type_: Value::Null,
             default: None,
             index: None,
@@ -222,31 +273,31 @@ impl Default for Transform {
 }
 
 impl Transform {
-    fn with_fields(&mut self, mut fields: Fields) {
-        update_one_one_output_keys(&mut fields);
-        self.fields = fields;
-    }
+    // fn with_fields(&mut self, mut fields: Fields) {
+    //     update_one_one_output_keys(&mut fields);
+    //     self.fields = fields;
+    // }
 
     fn with_type(&mut self, type_: Value) {
         self.type_ = type_;
     }
 
-    fn try_default(&mut self, default: Value) -> Result<(), String> {
-        match (&self.type_, &default) {
-            (Value::Null, _) => Err(format!(
-                "transform {} type MUST BE set before default {}",
-                self.fields, &default,
-            )),
-            (_, Value::Null) => Ok(()), // if default is not set, then it will be regarded as default null
-            (_, _) => {
-                let target = self
-                    .type_
-                    .parse_str_value(default.to_str_value().as_str())?;
-                self.default = Some(target);
-                Ok(())
-            }
-        }
-    }
+    // fn try_default(&mut self, default: Value) -> Result<(), String> {
+    //     match (&self.type_, &default) {
+    //         (Value::Null, _) => Err(format!(
+    //             "transform {} type MUST BE set before default {}",
+    //             self.fields, &default,
+    //         )),
+    //         (_, Value::Null) => Ok(()), // if default is not set, then it will be regarded as default null
+    //         (_, _) => {
+    //             let target = self
+    //                 .type_
+    //                 .parse_str_value(default.to_str_value().as_str())?;
+    //             self.default = Some(target);
+    //             Ok(())
+    //         }
+    //     }
+    // }
 
     fn with_index(&mut self, index: Index) {
         self.index = Some(index);
@@ -265,52 +316,74 @@ impl Transform {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
+impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
     type Error = String;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut transform = Transform::default();
-
-        let mut default_opt = None;
+        let mut fields = NewFields::default();
+        let mut type_ = Value::Null;
+        let mut default = None;
+        let mut index = None;
+        let mut on_failure = None;
 
         for (k, v) in hash {
             let key = k.as_str().ok_or("key must be a string")?;
             match key {
                 TRANSFORM_FIELD => {
-                    transform.with_fields(Fields::one(yaml_field(v, TRANSFORM_FIELD)?));
+                    fields = NewFields::one(yaml_new_field(v, TRANSFORM_FIELD)?);
                 }
 
                 TRANSFORM_FIELDS => {
-                    transform.with_fields(yaml_fields(v, TRANSFORM_FIELDS)?);
+                    fields = yaml_new_fileds(v, TRANSFORM_FIELDS)?;
                 }
 
                 TRANSFORM_TYPE => {
                     let t = yaml_string(v, TRANSFORM_TYPE)?;
-                    transform.with_type(Value::parse_str_type(&t)?);
+                    type_ = Value::parse_str_type(&t)?;
                 }
 
                 TRANSFORM_INDEX => {
-                    let index = yaml_string(v, TRANSFORM_INDEX)?;
-                    transform.with_index(index.try_into()?);
+                    let index_str = yaml_string(v, TRANSFORM_INDEX)?;
+                    index = Some(index_str.try_into()?);
                 }
 
                 TRANSFORM_DEFAULT => {
-                    default_opt = Some(Value::try_from(v)?);
+                    default = Some(Value::try_from(v)?);
                 }
 
                 TRANSFORM_ON_FAILURE => {
-                    let on_failure = yaml_string(v, TRANSFORM_ON_FAILURE)?;
-                    transform.with_on_failure(on_failure.parse()?);
+                    let on_failure_str = yaml_string(v, TRANSFORM_ON_FAILURE)?;
+                    on_failure = Some(on_failure_str.parse()?);
                 }
 
                 _ => {}
             }
         }
+        let mut final_default = None;
 
-        if let Some(default) = default_opt {
-            transform.try_default(default)?;
+        if let Some(default_value) = default {
+            match (&type_, &default_value) {
+                (Value::Null, _) => {
+                    return Err(format!(
+                        "transform {:?} type MUST BE set before default {}",
+                        fields, &default_value,
+                    ));
+                }
+                (_, Value::Null) => {} // if default is not set, then it will be regarded as default null
+                (_, _) => {
+                    let target = type_.parse_str_value(default_value.to_str_value().as_str())?;
+                    final_default = Some(target);
+                }
+            }
         }
+        let builder = TransformBuilder {
+            fields,
+            type_,
+            default: final_default,
+            index,
+            on_failure,
+        };
 
-        Ok(transform)
+        Ok(builder)
     }
 }

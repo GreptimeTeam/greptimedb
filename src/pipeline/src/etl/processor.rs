@@ -25,20 +25,21 @@ pub mod timestamp;
 pub mod urlencoding;
 
 use ahash::{HashSet, HashSetExt};
-use cmcd::CmcdProcessor;
-use csv::CsvProcessor;
-use date::DateProcessor;
-use dissect::DissectProcessor;
+use cmcd::{CmcdProcessor, CmcdProcessorBuilder};
+use csv::{CsvProcessor, CsvProcessorBuilder};
+use date::{DateProcessor, DateProcessorBuilder};
+use dissect::{DissectProcessor, DissectProcessorBuilder};
 use enum_dispatch::enum_dispatch;
-use epoch::EpochProcessor;
-use gsub::GsubProcessor;
+use epoch::{EpochProcessor, EpochProcessorBuilder};
+use gsub::{GsubProcessor, GsubProcessorBuilder};
 use itertools::Itertools;
-use join::JoinProcessor;
-use letter::LetterProcessor;
-use regex::RegexProcessor;
-use timestamp::TimestampProcessor;
-use urlencoding::UrlEncodingProcessor;
+use join::{JoinProcessor, JoinProcessorBuilder};
+use letter::{LetterProcessor, LetterProcessorBuilder};
+use regex::{RegexProcessor, RegexProcessorBuilder};
+use timestamp::{TimestampProcessor, TimestampProcessorBuilder};
+use urlencoding::{UrlEncodingProcessor, UrlEncodingProcessorBuilder};
 
+use super::field::{NewField, NewFields};
 use crate::etl::field::{Field, Fields};
 use crate::etl::value::{Map, Value};
 
@@ -77,8 +78,9 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 
     /// processor all output keys
     /// if a processor has multiple output keys, it should return all of them
-    fn output_keys(&self) -> HashSet<String>;
+    fn output_keys(&self) -> HashSet<&str>;
 
+    fn input_keys(&self) -> HashSet<&str>;
     /// Execute the processor on a document
     /// and return a map of key-value pairs
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String>;
@@ -129,6 +131,37 @@ pub enum ProcessorKind {
     Date(DateProcessor),
 }
 
+#[enum_dispatch(ProcessorBuilders)]
+pub trait ProcessorBuilder: std::fmt::Debug + Send + Sync + 'static {
+    fn output_keys(&self) -> HashSet<&str>;
+    fn input_keys(&self) -> HashSet<&str>;
+    fn build(self, intermediate_keys: &[String]) -> ProcessorKind;
+}
+
+#[derive(Debug)]
+#[enum_dispatch]
+pub enum ProcessorBuilders {
+    Cmcd(CmcdProcessorBuilder),
+    Csv(CsvProcessorBuilder),
+    Dissect(DissectProcessorBuilder),
+    Gsub(GsubProcessorBuilder),
+    Join(JoinProcessorBuilder),
+    Letter(LetterProcessorBuilder),
+    Regex(RegexProcessorBuilder),
+    Timestamp(TimestampProcessorBuilder),
+    UrlEncoding(UrlEncodingProcessorBuilder),
+    Epoch(EpochProcessorBuilder),
+    Date(DateProcessorBuilder),
+}
+
+#[derive(Debug, Default)]
+pub struct ProcessorBuilderList {
+    pub(crate) processor_builders: Vec<ProcessorBuilders>,
+    pub(crate) input_keys: Vec<String>,
+    pub(crate) output_keys: Vec<String>,
+    pub(crate) original_input_keys: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct Processors {
     /// A ordered list of processors
@@ -174,52 +207,63 @@ impl Processors {
     }
 }
 
-impl TryFrom<&Vec<yaml_rust::Yaml>> for Processors {
+impl<'a> TryFrom<&Vec<yaml_rust::Yaml>> for ProcessorBuilderList {
     type Error = String;
 
     fn try_from(vec: &Vec<yaml_rust::Yaml>) -> Result<Self, Self::Error> {
-        let mut processors = vec![];
+        let mut processors_builders = vec![];
         let mut all_output_keys = HashSet::with_capacity(50);
         let mut all_required_keys = HashSet::with_capacity(50);
         let mut all_required_original_keys = HashSet::with_capacity(50);
         for doc in vec {
             let processor = parse_processor(doc)?;
-
-            // get all required keys
-            let processor_required_keys: Vec<String> = processor
-                .fields()
-                .iter()
-                .map(|f| f.input_field.name.clone())
-                .collect();
-
-            for key in &processor_required_keys {
-                if !all_output_keys.contains(key) {
-                    all_required_original_keys.insert(key.clone());
-                }
-            }
-
-            all_required_keys.extend(processor_required_keys);
-
-            let processor_output_keys = processor.output_keys().into_iter();
-            all_output_keys.extend(processor_output_keys);
-
-            processors.push(processor);
+            processors_builders.push(processor);
         }
 
-        let all_required_keys = all_required_keys.into_iter().sorted().collect();
-        let all_output_keys = all_output_keys.into_iter().sorted().collect();
-        let all_required_original_keys = all_required_original_keys.into_iter().sorted().collect();
+        for processor in processors_builders.iter() {
+            {
+                // get all required keys
+                let processor_required_keys = processor.input_keys();
 
-        Ok(Processors {
-            processors,
-            required_keys: all_required_keys,
+                for key in &processor_required_keys {
+                    if !all_output_keys.contains(key) {
+                        all_required_original_keys.insert(*key);
+                    }
+                }
+
+                all_required_keys.extend(processor_required_keys);
+
+                let processor_output_keys = processor.output_keys().into_iter();
+                all_output_keys.extend(processor_output_keys);
+            }
+        }
+
+        let all_required_keys = all_required_keys
+            .into_iter()
+            .map(|x| x.to_string())
+            .sorted()
+            .collect();
+        let all_output_keys = all_output_keys
+            .into_iter()
+            .map(|x| x.to_string())
+            .sorted()
+            .collect();
+        let all_required_original_keys = all_required_original_keys
+            .into_iter()
+            .map(|x| x.to_string())
+            .sorted()
+            .collect();
+
+        Ok(ProcessorBuilderList {
+            processor_builders: processors_builders,
+            input_keys: all_required_keys,
             output_keys: all_output_keys,
-            required_original_keys: all_required_original_keys,
+            original_input_keys: all_required_original_keys,
         })
     }
 }
 
-fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind, String> {
+fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorBuilders, String> {
     let map = doc.as_hash().ok_or("processor must be a map".to_string())?;
 
     let key = map
@@ -238,20 +282,24 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind, String> {
         .ok_or("processor key must be a string".to_string())?;
 
     let processor = match str_key {
-        cmcd::PROCESSOR_CMCD => ProcessorKind::Cmcd(CmcdProcessor::try_from(value)?),
-        csv::PROCESSOR_CSV => ProcessorKind::Csv(CsvProcessor::try_from(value)?),
-        dissect::PROCESSOR_DISSECT => ProcessorKind::Dissect(DissectProcessor::try_from(value)?),
-        epoch::PROCESSOR_EPOCH => ProcessorKind::Epoch(EpochProcessor::try_from(value)?),
-        date::PROCESSOR_DATE => ProcessorKind::Date(DateProcessor::try_from(value)?),
-        gsub::PROCESSOR_GSUB => ProcessorKind::Gsub(GsubProcessor::try_from(value)?),
-        join::PROCESSOR_JOIN => ProcessorKind::Join(JoinProcessor::try_from(value)?),
-        letter::PROCESSOR_LETTER => ProcessorKind::Letter(LetterProcessor::try_from(value)?),
-        regex::PROCESSOR_REGEX => ProcessorKind::Regex(RegexProcessor::try_from(value)?),
+        cmcd::PROCESSOR_CMCD => ProcessorBuilders::Cmcd(CmcdProcessorBuilder::try_from(value)?),
+        csv::PROCESSOR_CSV => ProcessorBuilders::Csv(CsvProcessorBuilder::try_from(value)?),
+        dissect::PROCESSOR_DISSECT => {
+            ProcessorBuilders::Dissect(DissectProcessorBuilder::try_from(value)?)
+        }
+        epoch::PROCESSOR_EPOCH => ProcessorBuilders::Epoch(EpochProcessorBuilder::try_from(value)?),
+        date::PROCESSOR_DATE => ProcessorBuilders::Date(DateProcessorBuilder::try_from(value)?),
+        gsub::PROCESSOR_GSUB => ProcessorBuilders::Gsub(GsubProcessorBuilder::try_from(value)?),
+        join::PROCESSOR_JOIN => ProcessorBuilders::Join(JoinProcessorBuilder::try_from(value)?),
+        letter::PROCESSOR_LETTER => {
+            ProcessorBuilders::Letter(LetterProcessorBuilder::try_from(value)?)
+        }
+        regex::PROCESSOR_REGEX => ProcessorBuilders::Regex(RegexProcessorBuilder::try_from(value)?),
         timestamp::PROCESSOR_TIMESTAMP => {
-            ProcessorKind::Timestamp(TimestampProcessor::try_from(value)?)
+            ProcessorBuilders::Timestamp(TimestampProcessorBuilder::try_from(value)?)
         }
         urlencoding::PROCESSOR_URL_ENCODING => {
-            ProcessorKind::UrlEncoding(UrlEncodingProcessor::try_from(value)?)
+            ProcessorBuilders::UrlEncoding(UrlEncodingProcessorBuilder::try_from(value)?)
         }
         _ => return Err(format!("unsupported {} processor", str_key)),
     };
@@ -304,6 +352,14 @@ where
 pub(crate) fn yaml_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields, String> {
     let v = yaml_parse_strings(v, field)?;
     Fields::new(v)
+}
+
+pub(crate) fn yaml_new_fileds(v: &yaml_rust::Yaml, field: &str) -> Result<NewFields, String> {
+    yaml_parse_strings(v, field).map(|v| NewFields::new(v))
+}
+
+pub(crate) fn yaml_new_field(v: &yaml_rust::Yaml, field: &str) -> Result<NewField, String> {
+    yaml_parse_string(v, field)
 }
 
 pub(crate) fn yaml_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field, String> {
