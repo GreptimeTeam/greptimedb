@@ -39,6 +39,9 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::expr::error::{DataTypeSnafu, TypeMismatchSnafu};
 
 /// A batch of vectors with the same length but without schema, only useful in dataflow
+///
+/// somewhere cheap to clone since it just contains a list of VectorRef(which is a `Arc`).
+#[derive(Debug, Clone)]
 pub struct Batch {
     batch: Vec<VectorRef>,
     row_count: usize,

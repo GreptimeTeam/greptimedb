@@ -121,13 +121,16 @@ pub struct CollectionBundle<T: 'static = DiffRow> {
     pub arranged: BTreeMap<Vec<ScalarExpr>, Arranged>,
 }
 
-impl CollectionBundle {
-    pub fn from_collection(collection: Collection<DiffRow>) -> Self {
+impl<T: 'static> CollectionBundle<T> {
+    pub fn from_collection(collection: Collection<T>) -> Self {
         Self {
             collection,
             arranged: BTreeMap::default(),
         }
     }
+}
+
+impl<T: 'static + Clone> CollectionBundle<T> {
     pub fn clone(&self, df: &mut Hydroflow) -> Self {
         Self {
             collection: self.collection.clone(df),
