@@ -53,10 +53,11 @@ pub trait IndexCollector: Send + Sync {
 
 /// The [`GlobalIndexCollector`] struct is responsible for managing index entries
 /// across multiple providers.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GlobalIndexCollector {
     providers: Arc<TokioMutex<HashMap<Arc<KafkaProvider>, Sender<WorkerRequest>>>>,
     operator: object_store::ObjectStore,
+    handle: CollectionTaskHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -104,7 +105,7 @@ impl CollectionTask {
     /// The background task performs two main operations:
     /// - Persists the WAL index to the specified `path` at every `dump_index_interval`.
     /// - Updates the latest index ID for each WAL provider at every `checkpoint_interval`.
-    fn run(&self) {
+    fn run(self) -> CollectionTaskHandle {
         let mut dump_index_interval = tokio::time::interval(self.dump_index_interval);
         let running = self.running.clone();
         let moved_self = self.clone();
@@ -123,13 +124,21 @@ impl CollectionTask {
                 }
             }
         });
+        CollectionTaskHandle {
+            running: self.running.clone(),
+        }
     }
 }
 
-impl Drop for CollectionTask {
+impl Drop for CollectionTaskHandle {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
     }
+}
+
+#[derive(Debug, Default)]
+struct CollectionTaskHandle {
+    running: Arc<AtomicBool>,
 }
 
 impl GlobalIndexCollector {
@@ -153,10 +162,11 @@ impl GlobalIndexCollector {
             path,
             running: Arc::new(AtomicBool::new(true)),
         };
-        task.run();
+        let handle = task.run();
         Self {
             providers,
             operator,
+            handle,
         }
     }
 
@@ -165,6 +175,7 @@ impl GlobalIndexCollector {
         Self {
             providers: Default::default(),
             operator,
+            handle: Default::default(),
         }
     }
 }
