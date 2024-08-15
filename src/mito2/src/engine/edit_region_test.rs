@@ -18,8 +18,7 @@ use object_store::ObjectStore;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
+use tokio::sync::Barrier;
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
@@ -100,21 +99,19 @@ async fn test_edit_region_concurrently() {
         tasks.push(task);
     }
 
-    let mut join_set = JoinSet::new();
-    // This semaphore is used to coordinate the tasks, making them started at roughly the same time.
-    let s = Arc::new(Semaphore::new(0));
+    let mut futures = Vec::with_capacity(tasks_count);
+    let barrier = Arc::new(Barrier::new(tasks_count));
     for task in tasks {
-        join_set.spawn({
-            let s = s.clone();
+        futures.push(tokio::spawn({
+            let barrier = barrier.clone();
             let engine = engine.clone();
             async move {
-                let _permit = s.acquire().await.unwrap();
+                barrier.wait().await;
                 task.edit_region(engine).await;
             }
-        });
+        }));
     }
-    s.add_permits(tasks_count);
-    while join_set.join_next().await.is_some() {}
+    futures::future::join_all(futures).await;
 
     assert_eq!(
         region.version().ssts.levels()[0].files.len(),
