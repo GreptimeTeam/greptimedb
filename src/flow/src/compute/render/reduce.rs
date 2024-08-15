@@ -23,14 +23,112 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::compute::render::{Context, SubgraphArg};
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
-use crate::error::{Error, PlanSnafu};
+use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
 use crate::expr::error::{DataAlreadyExpiredSnafu, DataTypeSnafu, InternalSnafu};
-use crate::expr::{EvalError, ScalarExpr};
+use crate::expr::{Batch, EvalError, ScalarExpr};
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, KeyExpiryManager};
 
 impl<'referred, 'df> Context<'referred, 'df> {
+    const REDUCE_BATCH: &'static str = "reduce_batch";
+    /// Like `render_reduce`, but for batch mode, and only barebone implementation
+    /// no support for distinct aggregation for now
+    // There is a false positive in using `Vec<ScalarExpr>` as key due to `Value` have `bytes` variant
+    #[allow(clippy::mutable_key_type)]
+    pub fn render_reduce_batch(
+        &mut self,
+        input: Box<TypedPlan>,
+        key_val_plan: &KeyValPlan,
+        reduce_plan: &ReducePlan,
+        output_type: &RelationType,
+    ) -> Result<CollectionBundle<Batch>, Error> {
+        let accum_plan = if let ReducePlan::Accumulable(accum_plan) = reduce_plan {
+            if !accum_plan.distinct_aggrs.is_empty() {
+                NotImplementedSnafu {
+                    reason: "Distinct aggregation is not supported in batch mode",
+                }
+                .fail()?
+            }
+            accum_plan.clone()
+        } else {
+            NotImplementedSnafu {
+                reason: "Only accumulable reduce plan is supported in batch mode",
+            }
+            .fail()?
+        };
+
+        let input = self.render_plan_batch(*input)?;
+
+        // first assembly key&val to separate key and val columns(since this is batch mode)
+        // Then stream kvs through a reduce operator
+
+        // the output is concat from key and val
+        let output_key_arity = key_val_plan.key_plan.output_arity();
+
+        // TODO(discord9): config global expire time from self
+        let arrange_handler = self.compute_state.new_arrange(None);
+
+        if let (Some(time_index), Some(expire_after)) =
+            (output_type.time_index, self.compute_state.expire_after())
+        {
+            let expire_man =
+                KeyExpiryManager::new(Some(expire_after), Some(ScalarExpr::Column(time_index)));
+            arrange_handler.write().set_expire_state(expire_man);
+        }
+
+        // reduce need full arrangement to be able to query all keys
+        let arrange_handler_inner = arrange_handler.clone_full_arrange().context(PlanSnafu {
+            reason: "No write is expected at this point",
+        })?;
+        let key_val_plan = key_val_plan.clone();
+
+        let now = self.compute_state.current_time_ref();
+
+        let err_collector = self.err_collector.clone();
+
+        // TODO(discord9): better way to schedule future run
+        let scheduler = self.compute_state.get_scheduler();
+        let scheduler_inner = scheduler.clone();
+
+        let (out_send_port, out_recv_port) =
+            self.df.make_edge::<_, Toff<Batch>>(Self::REDUCE_BATCH);
+
+        let subgraph = self.df.add_subgraph_in_out(
+            Self::REDUCE,
+            input.collection.into_inner(),
+            out_send_port,
+            move |_ctx, recv, send| {
+                // mfp only need to passively receive updates from recvs
+                let src_data = recv
+                    .take_inner()
+                    .into_iter()
+                    .flat_map(|v| v.into_iter())
+                    .collect_vec();
+
+                for batch in src_data {
+                    let key_val_batches =
+                        batch_split_by_key_val(&batch, &key_val_plan, &err_collector);
+                    todo!()
+                }
+            },
+        );
+
+        scheduler.set_cur_subgraph(subgraph);
+
+        // by default the key of output arrange
+        let arranged = BTreeMap::from([(
+            (0..output_key_arity).map(ScalarExpr::Column).collect_vec(),
+            Arranged::new(arrange_handler),
+        )]);
+
+        let bundle = CollectionBundle {
+            collection: Collection::from_port(out_recv_port),
+            arranged,
+        };
+        Ok(bundle)
+    }
+
     const REDUCE: &'static str = "reduce";
     /// render `Plan::Reduce` into executable dataflow
     // There is a false positive in using `Vec<ScalarExpr>` as key due to `Value` have `bytes` variant
@@ -160,33 +258,30 @@ pub struct ReduceArrange {
     distinct_input: Option<Vec<ArrangeHandler>>,
 }
 
-/// split a row into key and val by evaluate the key and val plan
-fn split_row_to_key_val(
-    row: Row,
-    sys_time: repr::Timestamp,
-    diff: repr::Diff,
+fn batch_split_by_key_val(
+    batch: &Batch,
     key_val_plan: &KeyValPlan,
-    row_buf: &mut Row,
-) -> Result<Option<KeyValDiffRow>, EvalError> {
-    if let Some(key) = key_val_plan
-        .key_plan
-        .evaluate_into(&mut row.inner.clone(), row_buf)?
-    {
-        // val_plan is not supported to carry any filter predicate,
-        let val = key_val_plan
-            .val_plan
-            .evaluate_into(&mut row.inner.clone(), row_buf)?
-            .context(InternalSnafu {
-                reason: "val_plan should not contain any filter predicate",
-            })?;
-        Ok(Some(((key, val), sys_time, diff)))
-    } else {
-        Ok(None)
-    }
+    err_collector: &ErrCollector,
+) -> (Batch, Batch) {
+    let mut key_batch = Batch::empty();
+    let mut val_batch = Batch::empty();
+
+    err_collector.run(|| {
+        if key_val_plan.key_plan.output_arity() != 0 {
+            key_batch = key_val_plan.key_plan.eval_batch_into(&mut batch.clone())?;
+        }
+
+        if key_val_plan.val_plan.output_arity() != 0 {
+            val_batch = key_val_plan.val_plan.eval_batch_into(&mut batch.clone())?;
+        }
+        Ok(())
+    });
+
+    (key_batch, val_batch)
 }
 
 /// split a row into key and val by evaluate the key and val plan
-fn batch_split_rows_to_key_val(
+fn split_rows_to_key_val(
     rows: impl IntoIterator<Item = DiffRow>,
     key_val_plan: KeyValPlan,
     err_collector: ErrCollector,
@@ -235,7 +330,7 @@ fn reduce_subgraph(
         send,
     }: SubgraphArg,
 ) {
-    let key_val = batch_split_rows_to_key_val(data, key_val_plan.clone(), err_collector.clone());
+    let key_val = split_rows_to_key_val(data, key_val_plan.clone(), err_collector.clone());
     // from here for distinct reduce and accum reduce, things are drastically different
     // for distinct reduce the arrange store the output,
     // but for accum reduce the arrange store the accum state, and output is
