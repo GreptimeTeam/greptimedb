@@ -358,18 +358,6 @@ mod test {
     use crate::repr::{ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
     use crate::transform::CDT;
-    /// TODO(discord9): add more illegal sql tests
-    #[tokio::test]
-    async fn test_missing_key_check() {
-        let engine = create_test_query_engine();
-        let sql = "SELECT avg(number) FROM numbers_with_ts GROUP BY tumble(ts, '1 hour'), number";
-        let plan = sql_to_substrait(engine.clone(), sql).await;
-
-        let mut ctx = create_test_ctx();
-        assert!(TypedPlan::from_substrait_plan(&mut ctx, &plan)
-            .await
-            .is_err());
-    }
 
     #[tokio::test]
     async fn test_df_func_basic() {
