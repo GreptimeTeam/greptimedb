@@ -40,16 +40,13 @@ use crate::sst::parquet::page_reader::CachedPageReader;
 pub struct InMemoryRowGroup<'a> {
     metadata: &'a RowGroupMetaData,
     page_locations: Option<&'a [Vec<PageLocation>]>,
+    /// Compressed page of each column.
     column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
     row_count: usize,
     region_id: RegionId,
     file_id: FileId,
     row_group_idx: usize,
     cache_manager: Option<CacheManagerRef>,
-    /// Cached pages for each column.
-    ///
-    /// `column_cached_pages.len()` equals to `column_chunks.len()`.
-    column_cached_pages: Vec<Option<Arc<PageValue>>>,
     file_path: &'a str,
     /// Object store.
     object_store: ObjectStore,
@@ -86,7 +83,6 @@ impl<'a> InMemoryRowGroup<'a> {
             file_id,
             row_group_idx,
             cache_manager,
-            column_cached_pages: vec![None; metadata.columns().len()],
             file_path,
             object_store,
         }
@@ -159,18 +155,15 @@ impl<'a> InMemoryRowGroup<'a> {
             }
         } else {
             // Now we only use cache in dense chunk data.
-            self.fetch_pages_from_cache(projection);
+            self.fetch_compressed_pages_from_cache(projection);
 
             let fetch_ranges = self
                 .column_chunks
                 .iter()
-                .zip(&self.column_cached_pages)
                 .enumerate()
                 // Don't need to fetch column data if we already cache the column's pages.
-                .filter(|&(idx, (chunk, cached_pages))| {
-                    chunk.is_none() && projection.leaf_included(idx) && cached_pages.is_none()
-                })
-                .map(|(idx, (_chunk, _cached_pages))| {
+                .filter(|&(idx, chunk)| chunk.is_none() && projection.leaf_included(idx))
+                .map(|(idx, _chunk)| {
                     let column = self.metadata.column(idx);
                     let (start, length) = column.byte_range();
                     start..(start + length)
@@ -184,17 +177,24 @@ impl<'a> InMemoryRowGroup<'a> {
 
             let mut chunk_data = self.fetch_bytes(&fetch_ranges).await?.into_iter();
 
-            for (idx, (chunk, cached_pages)) in self
-                .column_chunks
-                .iter_mut()
-                .zip(&self.column_cached_pages)
-                .enumerate()
-            {
-                if chunk.is_some() || !projection.leaf_included(idx) || cached_pages.is_some() {
+            for (idx, chunk) in self.column_chunks.iter_mut().enumerate() {
+                if chunk.is_some() || !projection.leaf_included(idx) {
                     continue;
                 }
 
                 if let Some(data) = chunk_data.next() {
+                    // Put the page to the cache.
+                    if let Some(cache) = &self.cache_manager {
+                        let page_key = PageKey::Compressed {
+                            region_id: self.region_id,
+                            file_id: self.file_id,
+                            row_group_idx: self.row_group_idx,
+                            column_idx: idx,
+                        };
+                        cache
+                            .put_pages(page_key, Arc::new(PageValue::new_compressed(data.clone())));
+                    }
+
                     *chunk = Some(Arc::new(ColumnChunkData::Dense {
                         offset: self.metadata.column(idx).byte_range().0 as usize,
                         data,
@@ -206,21 +206,28 @@ impl<'a> InMemoryRowGroup<'a> {
         Ok(())
     }
 
-    /// Fetches pages for columns if cache is enabled.
-    fn fetch_pages_from_cache(&mut self, projection: &ProjectionMask) {
+    /// Fetches compressed pages for columns if cache is enabled.
+    /// If a page is in the cache, sets the column chunk for the column.
+    fn fetch_compressed_pages_from_cache(&mut self, projection: &ProjectionMask) {
         self.column_chunks
-            .iter()
+            .iter_mut()
             .enumerate()
-            .filter(|&(idx, chunk)| chunk.is_none() && projection.leaf_included(idx))
-            .for_each(|(idx, _chunk)| {
+            .filter(|(idx, chunk)| chunk.is_none() && projection.leaf_included(*idx))
+            .for_each(|(idx, chunk)| {
                 if let Some(cache) = &self.cache_manager {
-                    let page_key = PageKey {
+                    let page_key = PageKey::Compressed {
                         region_id: self.region_id,
                         file_id: self.file_id,
                         row_group_idx: self.row_group_idx,
                         column_idx: idx,
                     };
-                    self.column_cached_pages[idx] = cache.get_pages(&page_key);
+
+                    *chunk = cache.get_pages(&page_key).map(|page_value| {
+                        Arc::new(ColumnChunkData::Dense {
+                            offset: self.metadata.column(idx).byte_range().0 as usize,
+                            data: page_value.compressed.clone(),
+                        })
+                    });
                 }
             });
     }
@@ -259,12 +266,6 @@ impl<'a> InMemoryRowGroup<'a> {
 
     /// Creates a page reader to read column at `i`.
     fn column_page_reader(&self, i: usize) -> Result<Box<dyn PageReader>> {
-        if let Some(cached_pages) = &self.column_cached_pages[i] {
-            // Already in cache.
-            return Ok(Box::new(CachedPageReader::new(&cached_pages.pages)));
-        }
-
-        // Cache miss.
         let page_reader = match &self.column_chunks[i] {
             None => {
                 return Err(ParquetError::General(format!(
@@ -283,22 +284,18 @@ impl<'a> InMemoryRowGroup<'a> {
         };
 
         let Some(cache) = &self.cache_manager else {
-            // Cache is disabled.
             return Ok(Box::new(page_reader));
         };
 
-        // We collect all pages and put them into the cache.
-        let pages = page_reader.collect::<Result<Vec<_>>>()?;
-        let page_value = Arc::new(PageValue::new(pages));
-        let page_key = PageKey {
-            region_id: self.region_id,
-            file_id: self.file_id,
-            row_group_idx: self.row_group_idx,
-            column_idx: i,
-        };
-        cache.put_pages(page_key, page_value.clone());
-
-        Ok(Box::new(CachedPageReader::new(&page_value.pages)))
+        let cached_reader = CachedPageReader::new(
+            cache.clone(),
+            page_reader,
+            self.region_id,
+            self.file_id,
+            self.row_group_idx,
+            i,
+        );
+        Ok(Box::new(cached_reader))
     }
 }
 
@@ -318,7 +315,7 @@ impl<'a> RowGroups for InMemoryRowGroup<'a> {
 
 /// An in-memory column chunk
 #[derive(Clone)]
-enum ColumnChunkData {
+pub(crate) enum ColumnChunkData {
     /// Column chunk data representing only a subset of data pages
     Sparse {
         /// Length of the full column chunk
