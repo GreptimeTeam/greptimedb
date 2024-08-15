@@ -23,12 +23,58 @@ use crate::compute::render::Context;
 use crate::compute::state::Scheduler;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
 use crate::error::{Error, PlanSnafu};
-use crate::expr::{EvalError, MapFilterProject, MfpPlan, ScalarExpr};
+use crate::expr::{Batch, EvalError, MapFilterProject, MfpPlan, ScalarExpr};
 use crate::plan::TypedPlan;
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
 use crate::utils::ArrangeHandler;
 
 impl<'referred, 'df> Context<'referred, 'df> {
+    /// Like `render_mfp` but in batch mode
+    pub fn render_mfp_batch(
+        &mut self,
+        input: Box<TypedPlan>,
+        mfp: MapFilterProject,
+    ) -> Result<CollectionBundle<Batch>, Error> {
+        let input = self.render_plan_batch(*input)?;
+
+        let (out_send_port, out_recv_port) = self.df.make_edge::<_, Toff<Batch>>("mfp");
+
+        // This closure capture following variables:
+        let mfp_plan = MfpPlan::create_from(mfp)?;
+
+        let err_collector = self.err_collector.clone();
+
+        // TODO(discord9): better way to schedule future run
+        let scheduler = self.compute_state.get_scheduler();
+
+        let subgraph = self.df.add_subgraph_in_out(
+            "mfp_batch",
+            input.collection.into_inner(),
+            out_send_port,
+            move |_ctx, recv, send| {
+                // mfp only need to passively receive updates from recvs
+                let src_data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
+                let mut output_batches = vec![];
+                for mut input_batch in src_data {
+                    err_collector.run(|| {
+                        let res_batch = mfp_plan.mfp.eval_batch_into(&mut input_batch)?;
+                        output_batches.push(res_batch);
+                        Ok(())
+                    });
+                }
+
+                send.give(output_batches);
+            },
+        );
+
+        // register current subgraph in scheduler for future scheduling
+        scheduler.set_cur_subgraph(subgraph);
+
+        let bundle =
+            CollectionBundle::from_collection(Collection::<Batch>::from_port(out_recv_port));
+        Ok(bundle)
+    }
+
     /// render MapFilterProject, will only emit the `rows` once. Assume all incoming row's sys time being `now`` and ignore the row's stated sys time
     /// TODO(discord9): schedule mfp operator to run when temporal filter need
     ///

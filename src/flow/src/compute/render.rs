@@ -28,7 +28,7 @@ use super::state::Scheduler;
 use crate::compute::state::DataflowState;
 use crate::compute::types::{Collection, CollectionBundle, ErrCollector, Toff};
 use crate::error::{Error, InvalidQuerySnafu, NotImplementedSnafu};
-use crate::expr::{self, GlobalId, LocalId};
+use crate::expr::{self, Batch, GlobalId, LocalId};
 use crate::plan::{Plan, TypedPlan};
 use crate::repr::{self, DiffRow};
 
@@ -87,9 +87,32 @@ impl<'referred, 'df> Context<'referred, 'df> {
 }
 
 impl<'referred, 'df> Context<'referred, 'df> {
-    /// Interpret and execute plan
+    /// Like `render_plan` but in Batch Mode
+    pub fn render_plan_batch(&mut self, plan: TypedPlan) -> Result<CollectionBundle<Batch>, Error> {
+        match plan.plan {
+            Plan::Constant { rows } => todo!(),
+            Plan::Get { id } => todo!(),
+            Plan::Let { id, value, body } => todo!(),
+            Plan::Mfp { input, mfp } => self.render_mfp_batch(input, mfp),
+            Plan::Reduce {
+                input,
+                key_val_plan,
+                reduce_plan,
+            } => todo!(),
+            Plan::Join { .. } => NotImplementedSnafu {
+                reason: "Join is still WIP",
+            }
+            .fail(),
+            Plan::Union { .. } => NotImplementedSnafu {
+                reason: "Union is still WIP",
+            }
+            .fail(),
+        }
+    }
+
+    /// Interpret plan to dataflow and prepare them for execution
     ///
-    /// return the output of this plan
+    /// return the output handler of this plan
     pub fn render_plan(&mut self, plan: TypedPlan) -> Result<CollectionBundle, Error> {
         match plan.plan {
             Plan::Constant { rows } => Ok(self.render_constant(rows)),
