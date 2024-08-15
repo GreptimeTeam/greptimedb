@@ -200,6 +200,7 @@ async fn test_gcs_backend() -> Result<()> {
                 .bucket(&env::var("GT_GCS_BUCKET").unwrap())
                 .scope(&env::var("GT_GCS_SCOPE").unwrap())
                 .credential_path(&env::var("GT_GCS_CREDENTIAL_PATH").unwrap())
+                .credential(&env::var("GT_GCS_CREDENTIAL").unwrap())
                 .endpoint(&env::var("GT_GCS_ENDPOINT").unwrap());
 
             let store = ObjectStore::new(builder).unwrap().finish();

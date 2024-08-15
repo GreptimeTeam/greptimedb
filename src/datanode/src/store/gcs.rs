@@ -34,6 +34,7 @@ pub(crate) async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<Objec
         .bucket(&gcs_config.bucket)
         .scope(&gcs_config.scope)
         .credential_path(gcs_config.credential_path.expose_secret())
+        .credential(gcs_config.credential.expose_secret())
         .endpoint(&gcs_config.endpoint)
         .http_client(build_http_client()?);
 

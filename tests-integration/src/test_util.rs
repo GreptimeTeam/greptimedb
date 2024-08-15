@@ -160,6 +160,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
                 bucket: env::var("GT_GCS_BUCKET").unwrap(),
                 scope: env::var("GT_GCS_SCOPE").unwrap(),
                 credential_path: env::var("GT_GCS_CREDENTIAL_PATH").unwrap().into(),
+                credential: env::var("GT_GCS_CREDENTIAL").unwrap().into(),
                 endpoint: env::var("GT_GCS_ENDPOINT").unwrap(),
                 ..Default::default()
             };
@@ -169,6 +170,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
                 .bucket(&gcs_config.bucket)
                 .scope(&gcs_config.scope)
                 .credential_path(gcs_config.credential_path.expose_secret())
+                .credential(gcs_config.credential.expose_secret())
                 .endpoint(&gcs_config.endpoint);
 
             let config = ObjectStoreConfig::Gcs(gcs_config);

@@ -286,6 +286,7 @@ retry_delay = "500ms"
 # root = "data"
 # scope = "test"
 # credential_path = "123456"
+# credential = "base64-credential"
 # endpoint = "https://storage.googleapis.com"
 
 ## The data storage options.
@@ -356,6 +357,11 @@ scope = "test"
 ## **It's only used when the storage type is `Gcs`**.
 ## +toml2docs:none-default
 credential_path = "test"
+
+## The credential of the google cloud storage.
+## **It's only used when the storage type is `Gcs`**.
+## +toml2docs:none-default
+credential = "base64-credential"
 
 ## The container of the azure account.
 ## **It's only used when the storage type is `Azblob`**.
