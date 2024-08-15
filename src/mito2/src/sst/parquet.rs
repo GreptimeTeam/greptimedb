@@ -218,7 +218,7 @@ mod tests {
 
         // Cache 4 row groups.
         for i in 0..4 {
-            let page_key = PageKey {
+            let page_key = PageKey::Compressed {
                 region_id: metadata.region_id,
                 file_id: handle.file_id(),
                 row_group_idx: i,
@@ -226,7 +226,7 @@ mod tests {
             };
             assert!(cache.as_ref().unwrap().get_pages(&page_key).is_some());
         }
-        let page_key = PageKey {
+        let page_key = PageKey::Compressed {
             region_id: metadata.region_id,
             file_id: handle.file_id(),
             row_group_idx: 5,

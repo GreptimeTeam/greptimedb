@@ -14,44 +14,115 @@
 
 //! Parquet page reader.
 
-use std::collections::VecDeque;
+use std::sync::Arc;
 
 use parquet::column::page::{Page, PageMetadata, PageReader};
 use parquet::errors::Result;
+use parquet::file::reader::SerializedPageReader;
+use store_api::storage::RegionId;
 
-/// A reader that reads from cached pages.
+use crate::cache::{CacheManagerRef, PageKey, PageValue};
+use crate::sst::file::FileId;
+use crate::sst::parquet::row_group::ColumnChunkData;
+
+/// A reader that reads pages from the cache.
 pub(crate) struct CachedPageReader {
-    /// Cached pages.
-    pages: VecDeque<Page>,
+    /// Page cache.
+    cache: CacheManagerRef,
+    /// Reader to fall back. `None` indicates the reader is exhausted.
+    reader: Option<SerializedPageReader<ColumnChunkData>>,
+    region_id: RegionId,
+    file_id: FileId,
+    row_group_idx: usize,
+    column_idx: usize,
+    /// Current page index.
+    current_page_idx: usize,
 }
 
 impl CachedPageReader {
-    /// Returns a new reader from existing pages.
-    pub(crate) fn new(pages: &[Page]) -> Self {
+    /// Returns a new reader from a cache and a reader.
+    pub(crate) fn new(
+        cache: CacheManagerRef,
+        reader: SerializedPageReader<ColumnChunkData>,
+        region_id: RegionId,
+        file_id: FileId,
+        row_group_idx: usize,
+        column_idx: usize,
+    ) -> Self {
         Self {
-            pages: pages.iter().cloned().collect(),
+            cache,
+            reader: Some(reader),
+            region_id,
+            file_id,
+            row_group_idx,
+            column_idx,
+            current_page_idx: 0,
         }
     }
 }
 
 impl PageReader for CachedPageReader {
     fn get_next_page(&mut self) -> Result<Option<Page>> {
-        Ok(self.pages.pop_front())
+        let Some(reader) = self.reader.as_mut() else {
+            // The reader is exhausted.
+            return Ok(None);
+        };
+
+        // Tries to get it from the cache first.
+        let key = PageKey::Uncompressed {
+            region_id: self.region_id,
+            file_id: self.file_id,
+            row_group_idx: self.row_group_idx,
+            column_idx: self.column_idx,
+            page_idx: self.current_page_idx,
+        };
+        if let Some(page) = self.cache.get_pages(&key) {
+            // Cache hit.
+            // Bumps the page index.
+            self.current_page_idx += 1;
+            // The reader skips this page.
+            reader.skip_next_page()?;
+            debug_assert!(page.uncompressed.is_some());
+            return Ok(page.uncompressed.clone());
+        }
+
+        // Cache miss, load the page from the reader.
+        let Some(page) = reader.get_next_page()? else {
+            // The reader is exhausted.
+            self.reader = None;
+            return Ok(None);
+        };
+        // Puts the page into the cache.
+        self.cache
+            .put_pages(key, Arc::new(PageValue::new_uncompressed(page.clone())));
+        // Bumps the page index.
+        self.current_page_idx += 1;
+
+        Ok(Some(page))
     }
 
     fn peek_next_page(&mut self) -> Result<Option<PageMetadata>> {
-        Ok(self.pages.front().map(page_to_page_meta))
+        // The reader is exhausted.
+        let Some(reader) = self.reader.as_mut() else {
+            return Ok(None);
+        };
+        // It only decodes the page header so we don't query the cache.
+        reader.peek_next_page()
     }
 
     fn skip_next_page(&mut self) -> Result<()> {
+        // The reader is exhausted.
+        let Some(reader) = self.reader.as_mut() else {
+            return Ok(());
+        };
         // When the `SerializedPageReader` is in `SerializedPageReaderState::Pages` state, it never pops
         // the dictionary page. So it always return the dictionary page as the first page. See:
         // https://github.com/apache/arrow-rs/blob/1d6feeacebb8d0d659d493b783ba381940973745/parquet/src/file/serialized_reader.rs#L766-L770
         // But the `GenericColumnReader` will read the dictionary page before skipping records so it won't skip dictionary page.
         // So we don't need to handle the dictionary page specifically in this method.
         // https://github.com/apache/arrow-rs/blob/65f7be856099d389b0d0eafa9be47fad25215ee6/parquet/src/column/reader.rs#L322-L331
-        self.pages.pop_front();
-        Ok(())
+        self.current_page_idx += 1;
+        reader.skip_next_page()
     }
 }
 
