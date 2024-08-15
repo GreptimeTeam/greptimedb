@@ -45,8 +45,49 @@ impl<'referred, 'df> Context<'referred, 'df> {
         let now = self.compute_state.current_time_ref();
         let err_collector = self.err_collector.clone();
 
-        todo!()
+        let sub = self
+            .df
+            .add_subgraph_source("source_batch", send_port, move |_ctx, send| {
+                loop {
+                    match src_recv.try_recv() {
+                        Ok(batch) => {
+                            send.give(vec![batch]);
+                        }
+                        Err(TryRecvError::Empty) => {
+                            break;
+                        }
+                        Err(TryRecvError::Lagged(lag_offset)) => {
+                            // use `err_collector` instead of `error!` to locate which operator caused the error
+                            err_collector.run(|| -> Result<(), EvalError> {
+                                InternalSnafu {
+                                    reason: format!("Flow missing {} rows behind", lag_offset),
+                                }
+                                .fail()
+                            });
+                            break;
+                        }
+                        Err(TryRecvError::Closed) => {
+                            err_collector.run(|| -> Result<(), EvalError> {
+                                InternalSnafu {
+                                    reason: "Source Batch Channel is closed".to_string(),
+                                }
+                                .fail()
+                            });
+                            break;
+                        }
+                    }
+                }
+
+                let now = *now.borrow();
+                // always schedule source to run at now so we can
+                // repeatedly run source if needed
+                inner_schd.schedule_at(now);
+            });
+        schd.set_cur_subgraph(sub);
+        let bundle = CollectionBundle::from_collection(Collection::<Batch>::from_port(recv_port));
+        Ok(bundle)
     }
+
     /// Render a source which comes from brocast channel into the dataflow
     /// will immediately send updates not greater than `now` and buffer the rest in arrangement
     pub fn render_source(
