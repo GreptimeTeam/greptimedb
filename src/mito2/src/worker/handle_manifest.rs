@@ -16,37 +16,88 @@
 //!
 //! It updates the manifest and applies the changes to the region in background.
 
+use std::collections::{HashMap, VecDeque};
+
 use common_telemetry::{info, warn};
 use snafu::ensure;
 use store_api::storage::RegionId;
-use tokio::sync::oneshot::Sender;
 
-use crate::error::{InvalidRequestSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
 use crate::region::{MitoRegionRef, RegionState};
 use crate::request::{
-    BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditResult, TruncateResult,
-    WorkerRequest,
+    BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
+    TruncateResult, WorkerRequest,
 };
 use crate::worker::RegionWorkerLoop;
 
+pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
+
+/// A queue for temporary store region edit requests, if the region is in the "Editing" state.
+/// When the current region edit request is completed, the next (if there exists) request in the
+/// queue will be processed.
+/// Everything is done in the region worker loop.
+pub(crate) struct RegionEditQueue {
+    region_id: RegionId,
+    requests: VecDeque<RegionEditRequest>,
+}
+
+impl RegionEditQueue {
+    const QUEUE_MAX_LEN: usize = 128;
+
+    fn new(region_id: RegionId) -> Self {
+        Self {
+            region_id,
+            requests: VecDeque::new(),
+        }
+    }
+
+    fn enqueue(&mut self, request: RegionEditRequest) {
+        if self.requests.len() > Self::QUEUE_MAX_LEN {
+            let _ = request.tx.send(
+                RegionBusySnafu {
+                    region_id: self.region_id,
+                }
+                .fail(),
+            );
+            return;
+        };
+        self.requests.push_back(request);
+    }
+
+    fn dequeue(&mut self) -> Option<RegionEditRequest> {
+        self.requests.pop_front()
+    }
+}
+
 impl<S> RegionWorkerLoop<S> {
     /// Handles region edit request.
-    pub(crate) async fn handle_region_edit(
-        &self,
-        region_id: RegionId,
-        edit: RegionEdit,
-        sender: Sender<Result<()>>,
-    ) {
-        let region = match self.regions.writable_region(region_id) {
-            Ok(region) => region,
-            Err(e) => {
-                let _ = sender.send(Err(e));
-                return;
-            }
+    pub(crate) async fn handle_region_edit(&mut self, request: RegionEditRequest) {
+        let region_id = request.region_id;
+        let Some(region) = self.regions.get_region(region_id) else {
+            let _ = request.tx.send(RegionNotFoundSnafu { region_id }.fail());
+            return;
         };
+
+        if !region.is_writable() {
+            if region.state() == RegionState::Editing {
+                self.region_edit_queues
+                    .entry(region_id)
+                    .or_insert_with(|| RegionEditQueue::new(region_id))
+                    .enqueue(request);
+            } else {
+                let _ = request.tx.send(RegionBusySnafu { region_id }.fail());
+            }
+            return;
+        }
+
+        let RegionEditRequest {
+            region_id: _,
+            edit,
+            tx: sender,
+        } = request;
 
         // Marks the region as editing.
         if let Err(e) = region.set_editing() {
@@ -79,7 +130,7 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// Handles region edit result.
-    pub(crate) fn handle_region_edit_result(&self, edit_result: RegionEditResult) {
+    pub(crate) async fn handle_region_edit_result(&mut self, edit_result: RegionEditResult) {
         let region = match self.regions.get_region(edit_result.region_id) {
             Some(region) => region,
             None => {
@@ -104,6 +155,12 @@ impl<S> RegionWorkerLoop<S> {
         region.switch_state_to_writable(RegionState::Editing);
 
         let _ = edit_result.sender.send(edit_result.result);
+
+        if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id) {
+            if let Some(request) = edit_queue.dequeue() {
+                self.handle_region_edit(request).await;
+            }
+        }
     }
 
     /// Writes truncate action to the manifest and then applies it to the region in background.

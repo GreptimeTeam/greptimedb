@@ -842,6 +842,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Region {} is busy", region_id))]
+    RegionBusy {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -973,6 +980,7 @@ impl ErrorExt for Error {
             | FulltextFinish { source, .. }
             | ApplyFulltextIndex { source, .. } => source.status_code(),
             DecodeStats { .. } | StatsNotPresent { .. } => StatusCode::Internal,
+            RegionBusy { .. } => StatusCode::RegionBusy,
         }
     }
 
