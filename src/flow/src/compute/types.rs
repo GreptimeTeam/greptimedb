@@ -105,6 +105,8 @@ impl Arranged {
 /// This type maintains the invariant that it does contain at least one(or both) valid
 /// source of data, either a collection or at least one arrangement. This is for convenience
 /// of reading the data from the collection.
+///
+// TODO(discord9): make T default to Batch and obsolete the Row Mode
 pub struct CollectionBundle<T: 'static = DiffRow> {
     /// This is useful for passively reading the new updates from the collection
     ///

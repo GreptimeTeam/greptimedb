@@ -45,11 +45,24 @@ use crate::expr::error::{DataTypeSnafu, TypeMismatchSnafu};
 pub struct Batch {
     batch: Vec<VectorRef>,
     row_count: usize,
+    /// describe if corresponding rows in batch is insert or delete, None means all rows are insert
+    diffs: Option<VectorRef>,
 }
 
 impl Batch {
+    pub fn empty() -> Self {
+        Self {
+            batch: vec![],
+            row_count: 0,
+            diffs: None,
+        }
+    }
     pub fn new(batch: Vec<VectorRef>, row_count: usize) -> Self {
-        Self { batch, row_count }
+        Self {
+            batch,
+            row_count,
+            diffs: None,
+        }
     }
 
     pub fn batch(&self) -> &[VectorRef] {
