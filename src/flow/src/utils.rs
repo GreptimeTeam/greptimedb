@@ -513,7 +513,7 @@ pub type ArrangeReader<'a> = tokio::sync::RwLockReadGuard<'a, Arrangement>;
 pub type ArrangeWriter<'a> = tokio::sync::RwLockWriteGuard<'a, Arrangement>;
 
 /// A handler to the inner Arrangement, can be cloned and shared, useful for query it's inner state
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ArrangeHandler {
     inner: Arc<RwLock<Arrangement>>,
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use datatypes::data_type::ConcreteDataType;
@@ -89,7 +89,6 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
         // TODO(discord9): better way to schedule future run
         let scheduler = self.compute_state.get_scheduler();
-        let scheduler_inner = scheduler.clone();
 
         let (out_send_port, out_recv_port) =
             self.df.make_edge::<_, Toff<Batch>>(Self::REDUCE_BATCH);
@@ -99,6 +98,8 @@ impl<'referred, 'df> Context<'referred, 'df> {
             input.collection.into_inner(),
             out_send_port,
             move |_ctx, recv, send| {
+                let now = *(now.borrow());
+                let arrange = arrange_handler_inner.clone();
                 // mfp only need to passively receive updates from recvs
                 let src_data = recv
                     .take_inner()
@@ -106,11 +107,65 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     .flat_map(|v| v.into_iter())
                     .collect_vec();
 
+                let mut key_to_many_vals = BTreeMap::<Row, Batch>::new();
                 for batch in src_data {
-                    let key_val_batches =
+                    let (key_batch, val_batch) =
                         batch_split_by_key_val(&batch, &key_val_plan, &err_collector);
+                    err_collector.run(|| {
+                        ensure!(
+                            key_batch.row_count() == val_batch.row_count(),
+                            InternalSnafu {
+                                reason: "Key and val batch should have the same row count"
+                            }
+                        );
+
+                        for row_idx in 0..key_batch.row_count() {
+                            let key_row = key_batch.get_row(row_idx).unwrap();
+                            let val_row = val_batch.slice(row_idx, 1);
+                            let val_batch = key_to_many_vals.entry(Row::new(key_row)).or_default();
+                            val_batch.append_batch(val_row)?;
+                        }
+
+                        Ok(())
+                    });
+
                     todo!()
                 }
+
+                // write lock the arrange for the rest of the function body
+                // to prevent wired race condition
+                let arrange = arrange.write();
+
+                for (key, val_batch) in key_to_many_vals {
+                    err_collector.run(|| -> Result<(), _> {
+                        let (accums, _, _) = arrange.get(now, &key).unwrap_or_default();
+                        let accum_list = from_accum_values_to_live_accums(
+                            accums.unpack(),
+                            accum_plan.simple_aggrs.len(),
+                        )?;
+
+                        let mut accum_output = AccumOutput::new();
+                        for AggrWithIndex {
+                            expr,
+                            input_idx,
+                            output_idx,
+                        } in accum_plan.simple_aggrs.iter()
+                        {
+                            let cur_old_accum = accum_list[*output_idx].clone();
+                            let cur_input = val_batch.batch()[*input_idx].clone();
+
+                            let (output, new_accum) =
+                                expr.func.eval_batch(cur_old_accum, cur_input, None)?;
+
+                            accum_output.insert_accum(*output_idx, new_accum);
+                            accum_output.insert_output(*output_idx, output);
+                        }
+
+                        todo!("update arrange and output");
+                    });
+                }
+
+                todo!("send output");
             },
         );
 
@@ -247,6 +302,18 @@ impl<'referred, 'df> Context<'referred, 'df> {
             }
         }
     }
+}
+
+fn from_accum_values_to_live_accums(
+    accums: Vec<Value>,
+    len: usize,
+) -> Result<Vec<Vec<Value>>, EvalError> {
+    let accum_ranges = from_val_to_slice_idx(accums.first().cloned(), len)?;
+    let mut accum_list = vec![];
+    for range in accum_ranges.iter() {
+        accum_list.push(accums[range.clone()].to_vec());
+    }
+    Ok(accum_list)
 }
 
 /// All arrange(aka state) used in reduce operator

@@ -25,6 +25,7 @@ mod signature;
 
 use arrow::array::BooleanArray;
 use datatypes::prelude::{ConcreteDataType, DataType};
+use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 pub(crate) use df_func::{DfScalarFunction, RawDfScalarFn};
 pub(crate) use error::{EvalError, InvalidArgumentSnafu};
@@ -47,6 +48,12 @@ pub struct Batch {
     row_count: usize,
     /// describe if corresponding rows in batch is insert or delete, None means all rows are insert
     diffs: Option<VectorRef>,
+}
+
+impl Default for Batch {
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
 impl Batch {
@@ -75,6 +82,23 @@ impl Batch {
 
     pub fn row_count(&self) -> usize {
         self.row_count
+    }
+
+    pub fn column_count(&self) -> usize {
+        self.batch.len()
+    }
+
+    pub fn get_row(&self, idx: usize) -> Result<Vec<Value>, EvalError> {
+        ensure!(
+            idx < self.row_count,
+            InvalidArgumentSnafu {
+                reason: format!(
+                    "Expect row index to be less than {}, found {}",
+                    self.row_count, idx
+                )
+            }
+        );
+        Ok(self.batch.iter().map(|v| v.get(idx)).collect_vec())
     }
 
     /// Slices the `Batch`, returning a new `Batch`.
