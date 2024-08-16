@@ -12,230 +12,58 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::{debug, warn};
-use futures::future::try_join_all;
-use rskafka::client::partition::Compression;
-use rskafka::client::producer::ProducerClient;
+use common_telemetry::warn;
+use rskafka::client::partition::{Compression, OffsetAt, PartitionClient};
 use rskafka::record::Record;
-use snafu::{OptionExt, ResultExt};
+use store_api::logstore::provider::KafkaProvider;
+use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::oneshot;
 
-use crate::error::{self, NoMaxValueSnafu, Result};
-
-pub struct ProduceRequest {
-    batch: Vec<Record>,
-    sender: oneshot::Sender<ProduceResultReceiver>,
-}
-
-#[derive(Default)]
-struct ProduceResultReceiver {
-    receivers: Vec<oneshot::Receiver<Result<Vec<i64>>>>,
-}
-
-impl ProduceResultReceiver {
-    fn add_receiver(&mut self, receiver: oneshot::Receiver<Result<Vec<i64>>>) {
-        self.receivers.push(receiver)
-    }
-
-    async fn wait(self) -> Result<u64> {
-        Ok(try_join_all(self.receivers)
-            .await
-            .into_iter()
-            .flatten()
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .max()
-            .context(NoMaxValueSnafu)? as u64)
-    }
-}
-
-struct BackgroundProducerWorker {
-    /// The [`ProducerClient`].
-    client: Arc<dyn ProducerClient>,
-    // The compression configuration.
-    compression: Compression,
-    // The running flag.
-    running: Arc<AtomicBool>,
-    /// Receiver of [ProduceRequest].
-    receiver: Receiver<ProduceRequest>,
-    /// Max batch size for a worker to handle requests.
-    request_batch_size: usize,
-    /// Max bytes size for a single flush.
-    max_batch_bytes: usize,
-    /// The [PendingRequest]s.
-    pending_requests: Vec<PendingRequest>,
-}
-
-struct PendingRequest {
-    batch: Vec<Record>,
-    size: usize,
-    sender: oneshot::Sender<Result<Vec<i64>>>,
-}
-
-/// ## Panic
-/// Panic if any [Record]'s `approximate_size` > `max_batch_bytes`.
-fn handle_produce_requests(
-    requests: &mut Vec<ProduceRequest>,
-    max_batch_bytes: usize,
-) -> Vec<PendingRequest> {
-    let mut records_buffer = vec![];
-    let mut batch_size = 0;
-    let mut pending_requests = Vec::with_capacity(requests.len());
-
-    for ProduceRequest { batch, sender } in requests.drain(..) {
-        let mut receiver = ProduceResultReceiver::default();
-        for record in batch {
-            assert!(record.approximate_size() <= max_batch_bytes);
-            // Yields the `PendingRequest` if buffer is full.
-            if batch_size + record.approximate_size() > max_batch_bytes {
-                let (tx, rx) = oneshot::channel();
-                pending_requests.push(PendingRequest {
-                    batch: std::mem::take(&mut records_buffer),
-                    size: batch_size,
-                    sender: tx,
-                });
-                batch_size = 0;
-                receiver.add_receiver(rx);
-            }
-
-            batch_size += record.approximate_size();
-            records_buffer.push(record);
-        }
-        // The remaining records.
-        if batch_size > 0 {
-            // Yields `PendingRequest`
-            let (tx, rx) = oneshot::channel();
-            pending_requests.push(PendingRequest {
-                batch: std::mem::take(&mut records_buffer),
-                size: batch_size,
-                sender: tx,
-            });
-            batch_size = 0;
-            receiver.add_receiver(rx);
-        }
-
-        let _ = sender.send(receiver);
-    }
-    pending_requests
-}
-
-async fn do_flush(
-    client: &Arc<dyn ProducerClient>,
-    PendingRequest {
-        batch,
-        sender,
-        size: _size,
-    }: PendingRequest,
-    compression: Compression,
-) {
-    let result = client
-        .produce(batch, compression)
-        .await
-        .context(error::BatchProduceSnafu);
-
-    if let Err(err) = sender.send(result) {
-        warn!(err; "BatchFlushState Receiver is dropped");
-    }
-}
-
-impl BackgroundProducerWorker {
-    async fn run(&mut self) {
-        let mut buffer = Vec::with_capacity(self.request_batch_size);
-        while self.running.load(Ordering::Relaxed) {
-            // Processes pending requests first.
-            if !self.pending_requests.is_empty() {
-                // TODO(weny): Considering merge `PendingRequest`s.
-                for req in self.pending_requests.drain(..) {
-                    do_flush(&self.client, req, self.compression).await
-                }
-            }
-            match self.receiver.recv().await {
-                Some(req) => {
-                    buffer.clear();
-                    buffer.push(req);
-                    for _ in 1..self.request_batch_size {
-                        match self.receiver.try_recv() {
-                            Ok(req) => buffer.push(req),
-                            Err(_) => break,
-                        }
-                    }
-                    self.pending_requests =
-                        handle_produce_requests(&mut buffer, self.max_batch_bytes);
-                }
-                None => {
-                    debug!("The sender is dropped, BackgroundProducerWorker exited");
-                    // Exits the loop if the `sender` is dropped.
-                    break;
-                }
-            }
-        }
-    }
-}
+use crate::error::{self, Result};
+use crate::kafka::index::IndexCollector;
+use crate::kafka::worker::{BackgroundProducerWorker, ProduceResultHandle, WorkerRequest};
 
 pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer>;
+
+// Max batch size for a `OrderedBatchProducer` to handle requests.
+const REQUEST_BATCH_SIZE: usize = 64;
+
+// Producer channel size
+const PRODUCER_CHANNEL_SIZE: usize = REQUEST_BATCH_SIZE * 2;
 
 /// [`OrderedBatchProducer`] attempts to aggregate multiple produce requests together
 #[derive(Debug)]
 pub(crate) struct OrderedBatchProducer {
-    sender: Sender<ProduceRequest>,
-    /// Used to control the [`BackgroundProducerWorker`].
-    running: Arc<AtomicBool>,
-}
-
-impl Drop for OrderedBatchProducer {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-    }
-}
-
-/// Receives the committed offsets when data has been committed to Kafka
-/// or an unrecoverable error has been encountered.
-pub(crate) struct ProduceResultHandle {
-    receiver: oneshot::Receiver<ProduceResultReceiver>,
-}
-
-impl ProduceResultHandle {
-    /// Waits for the data has been committed to Kafka.
-    /// Returns the **max** committed offsets.
-    pub(crate) async fn wait(self) -> Result<u64> {
-        self.receiver
-            .await
-            .context(error::WaitProduceResultReceiverSnafu)?
-            .wait()
-            .await
-    }
+    pub(crate) sender: Sender<WorkerRequest>,
 }
 
 impl OrderedBatchProducer {
+    pub(crate) fn channel() -> (Sender<WorkerRequest>, Receiver<WorkerRequest>) {
+        mpsc::channel(PRODUCER_CHANNEL_SIZE)
+    }
+
     /// Constructs a new [`OrderedBatchProducer`].
     pub(crate) fn new(
+        (tx, rx): (Sender<WorkerRequest>, Receiver<WorkerRequest>),
+        provider: Arc<KafkaProvider>,
         client: Arc<dyn ProducerClient>,
         compression: Compression,
-        channel_size: usize,
-        request_batch_size: usize,
         max_batch_bytes: usize,
+        index_collector: Box<dyn IndexCollector>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(channel_size);
-        let running = Arc::new(AtomicBool::new(true));
         let mut worker = BackgroundProducerWorker {
+            provider,
             client,
             compression,
-            running: running.clone(),
             receiver: rx,
-            request_batch_size,
+            request_batch_size: REQUEST_BATCH_SIZE,
             max_batch_bytes,
-            pending_requests: vec![],
+            index_collector,
         };
         tokio::spawn(async move { worker.run().await });
-        Self {
-            sender: tx,
-            running,
-        }
+        Self { sender: tx }
     }
 
     /// Writes `data` to the [`OrderedBatchProducer`].
@@ -245,17 +73,44 @@ impl OrderedBatchProducer {
     ///
     /// ## Panic
     /// Panic if any [Record]'s `approximate_size` > `max_batch_bytes`.
-    pub(crate) async fn produce(&self, batch: Vec<Record>) -> Result<ProduceResultHandle> {
-        let receiver = {
-            let (tx, rx) = oneshot::channel();
-            self.sender
-                .send(ProduceRequest { batch, sender: tx })
-                .await
-                .context(error::SendProduceRequestSnafu)?;
-            rx
-        };
+    pub(crate) async fn produce(
+        &self,
+        region_id: RegionId,
+        batch: Vec<Record>,
+    ) -> Result<ProduceResultHandle> {
+        let (req, handle) = WorkerRequest::new_produce_request(region_id, batch);
+        if self.sender.send(req).await.is_err() {
+            warn!("OrderedBatchProducer is already exited");
+            return error::OrderedBatchProducerStoppedSnafu {}.fail();
+        }
 
-        Ok(ProduceResultHandle { receiver })
+        Ok(handle)
+    }
+}
+
+#[async_trait::async_trait]
+pub trait ProducerClient: std::fmt::Debug + Send + Sync {
+    async fn produce(
+        &self,
+        records: Vec<Record>,
+        compression: Compression,
+    ) -> rskafka::client::error::Result<Vec<i64>>;
+
+    async fn get_offset(&self, at: OffsetAt) -> rskafka::client::error::Result<i64>;
+}
+
+#[async_trait::async_trait]
+impl ProducerClient for PartitionClient {
+    async fn produce(
+        &self,
+        records: Vec<Record>,
+        compression: Compression,
+    ) -> rskafka::client::error::Result<Vec<i64>> {
+        self.produce(records, compression).await
+    }
+
+    async fn get_offset(&self, at: OffsetAt) -> rskafka::client::error::Result<i64> {
+        self.get_offset(at).await
     }
 }
 
@@ -267,15 +122,16 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use common_base::readable_size::ReadableSize;
     use common_telemetry::debug;
-    use futures::future::BoxFuture;
     use futures::stream::FuturesUnordered;
     use futures::{FutureExt, StreamExt};
     use rskafka::client::error::{Error as ClientError, RequestContext};
     use rskafka::client::partition::Compression;
-    use rskafka::client::producer::ProducerClient;
     use rskafka::protocol::error::Error as ProtocolError;
     use rskafka::record::Record;
+    use store_api::storage::RegionId;
 
+    use super::*;
+    use crate::kafka::index::NoopCollector;
     use crate::kafka::producer::OrderedBatchProducer;
 
     #[derive(Debug)]
@@ -286,38 +142,41 @@ mod tests {
         batch_sizes: Mutex<Vec<usize>>,
     }
 
+    #[async_trait::async_trait]
     impl ProducerClient for MockClient {
-        fn produce(
+        async fn produce(
             &self,
             records: Vec<Record>,
             _compression: Compression,
-        ) -> BoxFuture<'_, Result<Vec<i64>, ClientError>> {
-            Box::pin(async move {
-                tokio::time::sleep(self.delay).await;
+        ) -> rskafka::client::error::Result<Vec<i64>> {
+            tokio::time::sleep(self.delay).await;
 
-                if let Some(e) = self.error {
-                    return Err(ClientError::ServerError {
-                        protocol_error: e,
-                        error_message: None,
-                        request: RequestContext::Partition("foo".into(), 1),
-                        response: None,
-                        is_virtual: false,
-                    });
-                }
+            if let Some(e) = self.error {
+                return Err(ClientError::ServerError {
+                    protocol_error: e,
+                    error_message: None,
+                    request: RequestContext::Partition("foo".into(), 1),
+                    response: None,
+                    is_virtual: false,
+                });
+            }
 
-                if let Some(p) = self.panic.as_ref() {
-                    panic!("{}", p);
-                }
+            if let Some(p) = self.panic.as_ref() {
+                panic!("{}", p);
+            }
 
-                let mut batch_sizes = self.batch_sizes.lock().unwrap();
-                let offset_base = batch_sizes.iter().sum::<usize>();
-                let offsets = (0..records.len())
-                    .map(|x| (x + offset_base) as i64)
-                    .collect();
-                batch_sizes.push(records.len());
-                debug!("Return offsets: {offsets:?}");
-                Ok(offsets)
-            })
+            let mut batch_sizes = self.batch_sizes.lock().unwrap();
+            let offset_base = batch_sizes.iter().sum::<usize>();
+            let offsets = (0..records.len())
+                .map(|x| (x + offset_base) as i64)
+                .collect();
+            batch_sizes.push(records.len());
+            debug!("Return offsets: {offsets:?}");
+            Ok(offsets)
+        }
+
+        async fn get_offset(&self, _at: OffsetAt) -> rskafka::client::error::Result<i64> {
+            todo!()
         }
     }
 
@@ -341,18 +200,23 @@ mod tests {
             delay,
             batch_sizes: Default::default(),
         });
-
+        let provider = Arc::new(KafkaProvider::new(String::new()));
         let producer = OrderedBatchProducer::new(
+            OrderedBatchProducer::channel(),
+            provider,
             client.clone(),
             Compression::NoCompression,
-            128,
-            64,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
+            Box::new(NoopCollector),
         );
 
+        let region_id = RegionId::new(1, 1);
         // Produces 3 records
         let handle = producer
-            .produce(vec![record.clone(), record.clone(), record.clone()])
+            .produce(
+                region_id,
+                vec![record.clone(), record.clone(), record.clone()],
+            )
             .await
             .unwrap();
         assert_eq!(handle.wait().await.unwrap(), 2);
@@ -360,14 +224,17 @@ mod tests {
 
         // Produces 2 records
         let handle = producer
-            .produce(vec![record.clone(), record.clone()])
+            .produce(region_id, vec![record.clone(), record.clone()])
             .await
             .unwrap();
         assert_eq!(handle.wait().await.unwrap(), 4);
         assert_eq!(client.batch_sizes.lock().unwrap().as_slice(), &[2, 1, 2]);
 
         // Produces 1 records
-        let handle = producer.produce(vec![record.clone()]).await.unwrap();
+        let handle = producer
+            .produce(region_id, vec![record.clone()])
+            .await
+            .unwrap();
         assert_eq!(handle.wait().await.unwrap(), 5);
         assert_eq!(client.batch_sizes.lock().unwrap().as_slice(), &[2, 1, 2, 1]);
     }
@@ -381,31 +248,42 @@ mod tests {
             delay: Duration::from_millis(1),
             batch_sizes: Default::default(),
         });
-
+        let provider = Arc::new(KafkaProvider::new(String::new()));
         let producer = OrderedBatchProducer::new(
+            OrderedBatchProducer::channel(),
+            provider,
             client.clone(),
             Compression::NoCompression,
-            128,
-            64,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
+            Box::new(NoopCollector),
         );
 
+        let region_id = RegionId::new(1, 1);
         let mut futures = FuturesUnordered::new();
         futures.push(
             producer
-                .produce(vec![record.clone(), record.clone(), record.clone()])
+                .produce(
+                    region_id,
+                    vec![record.clone(), record.clone(), record.clone()],
+                )
                 .await
                 .unwrap()
                 .wait(),
         );
         futures.push(
             producer
-                .produce(vec![record.clone(), record.clone()])
+                .produce(region_id, vec![record.clone(), record.clone()])
                 .await
                 .unwrap()
                 .wait(),
         );
-        futures.push(producer.produce(vec![record.clone()]).await.unwrap().wait());
+        futures.push(
+            producer
+                .produce(region_id, vec![record.clone()])
+                .await
+                .unwrap()
+                .wait(),
+        );
 
         futures.next().await.unwrap().unwrap_err();
         futures.next().await.unwrap().unwrap_err();
@@ -422,22 +300,33 @@ mod tests {
             batch_sizes: Default::default(),
         });
 
+        let provider = Arc::new(KafkaProvider::new(String::new()));
         let producer = OrderedBatchProducer::new(
+            OrderedBatchProducer::channel(),
+            provider,
             client.clone(),
             Compression::NoCompression,
-            128,
-            64,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
+            Box::new(NoopCollector),
         );
 
+        let region_id = RegionId::new(1, 1);
         let a = producer
-            .produce(vec![record.clone(), record.clone(), record.clone()])
+            .produce(
+                region_id,
+                vec![record.clone(), record.clone(), record.clone()],
+            )
             .await
             .unwrap()
             .wait()
             .fuse();
 
-        let b = producer.produce(vec![record]).await.unwrap().wait().fuse();
+        let b = producer
+            .produce(region_id, vec![record])
+            .await
+            .unwrap()
+            .wait()
+            .fuse();
 
         let mut b = Box::pin(b);
 

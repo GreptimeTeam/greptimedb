@@ -18,6 +18,7 @@ const PATTERNS_NAME: &str = "patterns";
 
 pub(crate) const PROCESSOR_REGEX: &str = "regex";
 
+use ahash::HashSet;
 use lazy_static::lazy_static;
 use regex::Regex;
 
@@ -117,6 +118,10 @@ impl RegexProcessor {
         Ok(self)
     }
 
+    fn generate_key(prefix: &str, group: &str) -> String {
+        format!("{prefix}_{group}")
+    }
+
     fn process_field(&self, val: &str, field: &Field, gr: &GroupRegex) -> Result<Map, String> {
         let mut map = Map::default();
 
@@ -124,12 +129,9 @@ impl RegexProcessor {
             for group in &gr.groups {
                 if let Some(capture) = captures.name(group) {
                     let value = capture.as_str().to_string();
-                    let prefix = match &field.target_field {
-                        Some(s) => s,
-                        None => &field.field,
-                    };
+                    let prefix = field.get_target_field();
 
-                    let key = format!("{prefix}_{group}");
+                    let key = Self::generate_key(prefix, group);
 
                     map.insert(key, Value::String(value));
                 }
@@ -137,6 +139,18 @@ impl RegexProcessor {
         }
 
         Ok(map)
+    }
+
+    fn update_output_keys(&mut self) {
+        for field in self.fields.iter_mut() {
+            for gr in &self.patterns {
+                for group in &gr.groups {
+                    field
+                        .output_fields_index_mapping
+                        .insert(Self::generate_key(field.get_target_field(), group), 0_usize);
+                }
+            }
+        }
     }
 }
 
@@ -170,7 +184,10 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessor {
             }
         }
 
-        processor.check()
+        processor.check().map(|mut p| {
+            p.update_output_keys();
+            p
+        })
     }
 }
 
@@ -185,6 +202,23 @@ impl Processor for RegexProcessor {
 
     fn fields(&self) -> &Fields {
         &self.fields
+    }
+
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .flat_map(|f| {
+                self.patterns.iter().flat_map(move |p| {
+                    p.groups
+                        .iter()
+                        .map(move |g| Self::generate_key(&f.input_field.name, g))
+                })
+            })
+            .collect()
     }
 
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
@@ -202,6 +236,48 @@ impl Processor for RegexProcessor {
                 self.kind()
             )),
         }
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                Some(Value::String(s)) => {
+                    let mut map = Map::default();
+                    for gr in &self.patterns {
+                        // TODO(qtang): Let this method use the intermediate state collection directly.
+                        let m = self.process_field(s, field, gr)?;
+                        map.extend(m);
+                    }
+
+                    field
+                        .output_fields_index_mapping
+                        .iter()
+                        .for_each(|(k, output_index)| {
+                            if let Some(v) = map.remove(k) {
+                                val[*output_index] = v;
+                            }
+                        });
+                }
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 #[cfg(test)]
@@ -228,18 +304,18 @@ mod tests {
 
         let mut map = Map::default();
         map.insert("a", Value::String("123".to_string()));
-        let processed_val = processor.exec_map(map).unwrap();
+        processor.exec_map(&mut map).unwrap();
 
-        let v = Value::Map(Map {
+        let v = Map {
             values: vec![
                 ("a_ar".to_string(), Value::String("1".to_string())),
                 ("a".to_string(), Value::String("123".to_string())),
             ]
             .into_iter()
             .collect(),
-        });
+        };
 
-        assert_eq!(v, processed_val);
+        assert_eq!(v, map);
     }
 
     #[test]
@@ -264,7 +340,7 @@ mod tests {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
-        let temporary_map = Map { values };
+        let mut temporary_map = Map { values };
 
         {
             // single field (with prefix), multiple patterns
@@ -287,9 +363,9 @@ mod tests {
 
             let mut map = Map::default();
             map.insert("breadcrumbs", breadcrumbs.clone());
-            let processed_val = processor.exec_map(map).unwrap();
+            processor.exec_map(&mut map).unwrap();
 
-            assert_eq!(processed_val, Value::Map(temporary_map.clone()));
+            assert_eq!(map, temporary_map);
         }
 
         {
@@ -337,11 +413,11 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v))
             .collect();
 
-            let actual_val = processor.exec_map(temporary_map.clone()).unwrap();
             let mut expected_map = temporary_map.clone();
+            processor.exec_map(&mut temporary_map).unwrap();
             expected_map.extend(Map { values: new_values });
 
-            assert_eq!(Value::Map(expected_map), actual_val);
+            assert_eq!(expected_map, temporary_map);
         }
     }
 }

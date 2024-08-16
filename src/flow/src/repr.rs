@@ -17,14 +17,10 @@
 
 mod relation;
 
-use std::borrow::Borrow;
-use std::slice::SliceIndex;
-
 use api::helper::{pb_value_to_value_ref, value_to_grpc_value};
 use api::v1::Row as ProtoRow;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
-use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
 use itertools::Itertools;
 pub(crate) use relation::{ColumnType, Key, RelationDesc, RelationType};
@@ -55,6 +51,9 @@ pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
 /// updates can be buffered in memory in the entire dataflow
 /// TODO(discord9): add config for this, so cpu&mem usage can be balanced and configured by this
 pub const BROADCAST_CAP: usize = 65535;
+
+/// The maximum capacity of the send buffer, to prevent the buffer from growing too large
+pub const SEND_BUF_CAP: usize = BROADCAST_CAP * 2;
 
 pub const BATCH_SIZE: usize = BROADCAST_CAP / 2;
 

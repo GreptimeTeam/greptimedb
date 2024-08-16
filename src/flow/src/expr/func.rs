@@ -15,17 +15,20 @@
 //! This module contains the definition of functions that can be used in expressions.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
+use arrow::array::{ArrayRef, BooleanArray};
 use common_error::ext::BoxedError;
-use common_telemetry::debug;
 use common_time::timestamp::TimeUnit;
 use common_time::{DateTime, Timestamp};
 use datafusion_expr::Operator;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::DataType;
 use datatypes::types::cast;
-use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
+use datatypes::vectors::{
+    BooleanVector, DateTimeVector, Helper, TimestampMillisecondVector, VectorRef,
+};
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -34,12 +37,12 @@ use substrait::df_logical_plan::consumer::name_to_op;
 
 use crate::error::{Error, ExternalSnafu, InvalidQuerySnafu, PlanSnafu};
 use crate::expr::error::{
-    CastValueSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu, OverflowSnafu,
+    ArrowSnafu, CastValueSnafu, DataTypeSnafu, DivisionByZeroSnafu, EvalError, OverflowSnafu,
     TryFromValueSnafu, TypeMismatchSnafu,
 };
 use crate::expr::signature::{GenericFn, Signature};
-use crate::expr::{InvalidArgumentSnafu, ScalarExpr, TypedExpr};
-use crate::repr::{self, value_to_internal_ts, Row};
+use crate::expr::{Batch, InvalidArgumentSnafu, ScalarExpr, TypedExpr};
+use crate::repr::{self, value_to_internal_ts};
 
 /// UnmaterializableFunc is a function that can't be eval independently,
 /// and require special handling
@@ -221,6 +224,129 @@ impl UnaryFunc {
         }
     }
 
+    pub fn eval_batch(&self, batch: &Batch, expr: &ScalarExpr) -> Result<VectorRef, EvalError> {
+        let arg_col = expr.eval_batch(batch)?;
+        match self {
+            Self::Not => {
+                let arrow_array = arg_col.to_arrow_array();
+                let bool_array = arrow_array
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .context({
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::boolean_datatype(),
+                            actual: arg_col.data_type(),
+                        }
+                    })?;
+                let ret = arrow::compute::not(bool_array).context(ArrowSnafu { context: "not" })?;
+                let ret = BooleanVector::from(ret);
+                Ok(Arc::new(ret))
+            }
+            Self::IsNull => {
+                let arrow_array = arg_col.to_arrow_array();
+                let ret = arrow::compute::is_null(&arrow_array)
+                    .context(ArrowSnafu { context: "is_null" })?;
+                let ret = BooleanVector::from(ret);
+                Ok(Arc::new(ret))
+            }
+            Self::IsTrue | Self::IsFalse => {
+                let arrow_array = arg_col.to_arrow_array();
+                let bool_array = arrow_array
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .context({
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::boolean_datatype(),
+                            actual: arg_col.data_type(),
+                        }
+                    })?;
+
+                if matches!(self, Self::IsTrue) {
+                    Ok(Arc::new(BooleanVector::from(bool_array.clone())))
+                } else {
+                    let ret =
+                        arrow::compute::not(bool_array).context(ArrowSnafu { context: "not" })?;
+                    Ok(Arc::new(BooleanVector::from(ret)))
+                }
+            }
+            Self::StepTimestamp => {
+                let datetime_array = get_datetime_array(&arg_col)?;
+                let date_array_ref = datetime_array
+                    .as_any()
+                    .downcast_ref::<arrow::array::Date64Array>()
+                    .context({
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::boolean_datatype(),
+                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                        }
+                    })?;
+
+                let ret = arrow::compute::unary(date_array_ref, |arr| arr + 1);
+                let ret = DateTimeVector::from(ret);
+                Ok(Arc::new(ret))
+            }
+            Self::Cast(to) => {
+                let arrow_array = arg_col.to_arrow_array();
+                let ret = arrow::compute::cast(&arrow_array, &to.as_arrow_type())
+                    .context(ArrowSnafu { context: "cast" })?;
+                let vector = Helper::try_into_vector(ret).context(DataTypeSnafu {
+                    msg: "Fail to convert to Vector",
+                })?;
+                Ok(vector)
+            }
+            Self::TumbleWindowFloor {
+                window_size,
+                start_time,
+            } => {
+                let datetime_array = get_datetime_array(&arg_col)?;
+                let date_array_ref = datetime_array
+                    .as_any()
+                    .downcast_ref::<arrow::array::Date64Array>()
+                    .context({
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::boolean_datatype(),
+                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                        }
+                    })?;
+
+                let start_time = start_time.map(|t| t.val());
+                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+
+                let ret = arrow::compute::unary(date_array_ref, |ts| {
+                    get_window_start(ts, window_size, start_time)
+                });
+
+                let ret = TimestampMillisecondVector::from(ret);
+                Ok(Arc::new(ret))
+            }
+            Self::TumbleWindowCeiling {
+                window_size,
+                start_time,
+            } => {
+                let datetime_array = get_datetime_array(&arg_col)?;
+                let date_array_ref = datetime_array
+                    .as_any()
+                    .downcast_ref::<arrow::array::Date64Array>()
+                    .context({
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::boolean_datatype(),
+                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                        }
+                    })?;
+
+                let start_time = start_time.map(|t| t.val());
+                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+
+                let ret = arrow::compute::unary(date_array_ref, |ts| {
+                    get_window_start(ts, window_size, start_time) + window_size
+                });
+
+                let ret = TimestampMillisecondVector::from(ret);
+                Ok(Arc::new(ret))
+            }
+        }
+    }
+
     /// Evaluate the function with given values and expression
     ///
     /// # Arguments
@@ -278,14 +404,12 @@ impl UnaryFunc {
             }
             Self::Cast(to) => {
                 let arg_ty = arg.data_type();
-                let res = cast(arg, to).context({
+                cast(arg, to).context({
                     CastValueSnafu {
                         from: arg_ty,
                         to: to.clone(),
                     }
-                });
-                debug!("Cast to type: {to:?}, result: {:?}", res);
-                res
+                })
             }
             Self::TumbleWindowFloor {
                 window_size,
@@ -314,6 +438,23 @@ impl UnaryFunc {
             }
         }
     }
+}
+
+fn get_datetime_array(vector: &VectorRef) -> Result<arrow::array::ArrayRef, EvalError> {
+    let arrow_array = vector.to_arrow_array();
+    let datetime_array =
+        if *arrow_array.data_type() == ConcreteDataType::datetime_datatype().as_arrow_type() {
+            arrow_array
+        } else {
+            arrow::compute::cast(
+                &arrow_array,
+                &ConcreteDataType::datetime_datatype().as_arrow_type(),
+            )
+            .context(ArrowSnafu {
+                context: "Trying to cast to datetime in StepTimestamp",
+            })?
+        };
+    Ok(datetime_array)
 }
 
 fn get_window_start(
@@ -694,6 +835,98 @@ impl BinaryFunc {
         Ok((spec_fn, signature))
     }
 
+    pub fn eval_batch(
+        &self,
+        batch: &Batch,
+        expr1: &ScalarExpr,
+        expr2: &ScalarExpr,
+    ) -> Result<VectorRef, EvalError> {
+        let left = expr1.eval_batch(batch)?;
+        let left = left.to_arrow_array();
+        let right = expr2.eval_batch(batch)?;
+        let right = right.to_arrow_array();
+
+        let arrow_array: ArrayRef = match self {
+            Self::Eq => Arc::new(
+                arrow::compute::kernels::cmp::eq(&left, &right)
+                    .context(ArrowSnafu { context: "eq" })?,
+            ),
+            Self::NotEq => Arc::new(
+                arrow::compute::kernels::cmp::neq(&left, &right)
+                    .context(ArrowSnafu { context: "neq" })?,
+            ),
+            Self::Lt => Arc::new(
+                arrow::compute::kernels::cmp::lt(&left, &right)
+                    .context(ArrowSnafu { context: "lt" })?,
+            ),
+            Self::Lte => Arc::new(
+                arrow::compute::kernels::cmp::lt_eq(&left, &right)
+                    .context(ArrowSnafu { context: "lte" })?,
+            ),
+            Self::Gt => Arc::new(
+                arrow::compute::kernels::cmp::gt(&left, &right)
+                    .context(ArrowSnafu { context: "gt" })?,
+            ),
+            Self::Gte => Arc::new(
+                arrow::compute::kernels::cmp::gt_eq(&left, &right)
+                    .context(ArrowSnafu { context: "gte" })?,
+            ),
+
+            Self::AddInt16
+            | Self::AddInt32
+            | Self::AddInt64
+            | Self::AddUInt16
+            | Self::AddUInt32
+            | Self::AddUInt64
+            | Self::AddFloat32
+            | Self::AddFloat64 => arrow::compute::kernels::numeric::add(&left, &right)
+                .context(ArrowSnafu { context: "add" })?,
+
+            Self::SubInt16
+            | Self::SubInt32
+            | Self::SubInt64
+            | Self::SubUInt16
+            | Self::SubUInt32
+            | Self::SubUInt64
+            | Self::SubFloat32
+            | Self::SubFloat64 => arrow::compute::kernels::numeric::sub(&left, &right)
+                .context(ArrowSnafu { context: "sub" })?,
+
+            Self::MulInt16
+            | Self::MulInt32
+            | Self::MulInt64
+            | Self::MulUInt16
+            | Self::MulUInt32
+            | Self::MulUInt64
+            | Self::MulFloat32
+            | Self::MulFloat64 => arrow::compute::kernels::numeric::mul(&left, &right)
+                .context(ArrowSnafu { context: "mul" })?,
+
+            Self::DivInt16
+            | Self::DivInt32
+            | Self::DivInt64
+            | Self::DivUInt16
+            | Self::DivUInt32
+            | Self::DivUInt64
+            | Self::DivFloat32
+            | Self::DivFloat64 => arrow::compute::kernels::numeric::mul(&left, &right)
+                .context(ArrowSnafu { context: "div" })?,
+
+            Self::ModInt16
+            | Self::ModInt32
+            | Self::ModInt64
+            | Self::ModUInt16
+            | Self::ModUInt32
+            | Self::ModUInt64 => arrow::compute::kernels::numeric::rem(&left, &right)
+                .context(ArrowSnafu { context: "rem" })?,
+        };
+
+        let vector = Helper::try_into_vector(arrow_array).context(DataTypeSnafu {
+            msg: "Fail to convert to Vector",
+        })?;
+        Ok(vector)
+    }
+
     /// Evaluate the function with given values and expression
     ///
     /// # Arguments
@@ -824,6 +1057,51 @@ impl VariadicFunc {
             }
             .fail(),
         }
+    }
+
+    pub fn eval_batch(&self, batch: &Batch, exprs: &[ScalarExpr]) -> Result<VectorRef, EvalError> {
+        ensure!(
+            !exprs.is_empty(),
+            InvalidArgumentSnafu {
+                reason: format!("Variadic function {:?} requires at least 1 arguments", self)
+            }
+        );
+        let args = exprs
+            .iter()
+            .map(|expr| expr.eval_batch(batch).map(|v| v.to_arrow_array()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut iter = args.into_iter();
+
+        let first = iter.next().unwrap();
+        let mut left = first
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .context({
+                TypeMismatchSnafu {
+                    expected: ConcreteDataType::boolean_datatype(),
+                    actual: ConcreteDataType::from_arrow_type(first.data_type()),
+                }
+            })?
+            .clone();
+
+        for right in iter {
+            let right = right.as_any().downcast_ref::<BooleanArray>().context({
+                TypeMismatchSnafu {
+                    expected: ConcreteDataType::boolean_datatype(),
+                    actual: ConcreteDataType::from_arrow_type(right.data_type()),
+                }
+            })?;
+            left = match self {
+                Self::And => {
+                    arrow::compute::and(&left, right).context(ArrowSnafu { context: "and" })?
+                }
+                Self::Or => {
+                    arrow::compute::or(&left, right).context(ArrowSnafu { context: "or" })?
+                }
+            }
+        }
+
+        Ok(Arc::new(BooleanVector::from(left)))
     }
 
     /// Evaluate the function with given values and expressions

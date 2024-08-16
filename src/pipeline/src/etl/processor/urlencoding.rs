@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ahash::HashSet;
 use urlencoding::{decode, encode};
 
 use crate::etl::field::{Field, Fields};
@@ -60,7 +61,8 @@ pub struct UrlEncodingProcessor {
 }
 
 impl UrlEncodingProcessor {
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        Self::update_output_keys(&mut fields);
         self.fields = fields;
     }
 
@@ -79,12 +81,17 @@ impl UrlEncodingProcessor {
         };
         let val = Value::String(processed);
 
-        let key = match field.target_field {
-            Some(ref target_field) => target_field,
-            None => field.get_field(),
-        };
+        let key = field.get_target_field();
 
         Ok(Map::one(key, val))
+    }
+
+    fn update_output_keys(fields: &mut Fields) {
+        for field in fields.iter_mut() {
+            field
+                .output_fields_index_mapping
+                .insert(field.get_target_field().to_string(), 0_usize);
+        }
     }
 }
 
@@ -136,6 +143,17 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
         &self.fields
     }
 
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .map(|f| f.get_target_field().to_string())
+            .collect()
+    }
+
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         match val {
             Value::String(val) => self.process_field(val, field),
@@ -144,6 +162,41 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
                 self.kind()
             )),
         }
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                Some(Value::String(s)) => {
+                    let mut map = self.process_field(s, field)?;
+                    field
+                        .output_fields_index_mapping
+                        .iter()
+                        .for_each(|(k, output_index)| {
+                            if let Some(v) = map.remove(k) {
+                                val[*output_index] = v;
+                            }
+                        });
+                }
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 

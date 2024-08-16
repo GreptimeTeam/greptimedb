@@ -2094,6 +2094,7 @@ dependencies = [
  "strum 0.25.0",
  "table",
  "tokio",
+ "tokio-postgres",
  "tonic 0.11.0",
  "typetag",
  "uuid",
@@ -2153,6 +2154,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
+ "futures-util",
  "serde",
  "snafu 0.8.4",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
@@ -3797,6 +3799,7 @@ name = "flow"
 version = "0.9.1"
 dependencies = [
  "api",
+ "arrow",
  "arrow-schema",
  "async-recursion",
  "async-trait",
@@ -3831,6 +3834,7 @@ dependencies = [
  "greptime-proto",
  "hydroflow",
  "itertools 0.10.5",
+ "lazy_static",
  "meta-client",
  "minstant",
  "nom",
@@ -3838,6 +3842,7 @@ dependencies = [
  "operator",
  "partition",
  "pretty_assertions",
+ "prometheus",
  "prost 0.12.6",
  "query",
  "serde",
@@ -5790,6 +5795,7 @@ version = "0.9.1"
 dependencies = [
  "async-stream",
  "async-trait",
+ "bytes",
  "chrono",
  "common-base",
  "common-error",
@@ -6125,6 +6131,7 @@ dependencies = [
  "api",
  "async-trait",
  "chrono",
+ "clap 4.5.7",
  "client",
  "common-base",
  "common-catalog",
@@ -6166,6 +6173,7 @@ dependencies = [
  "store-api",
  "table",
  "tokio",
+ "tokio-postgres",
  "tokio-stream",
  "toml 0.8.14",
  "tonic 0.11.0",
@@ -6179,7 +6187,7 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=049171eb16cb4249d8099751a0c46750d1fe88e7#049171eb16cb4249d8099751a0c46750d1fe88e7"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd#80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd"
 dependencies = [
  "anymap",
  "once_cell",
@@ -6189,7 +6197,7 @@ dependencies = [
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=049171eb16cb4249d8099751a0c46750d1fe88e7#049171eb16cb4249d8099751a0c46750d1fe88e7"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd#80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd"
 dependencies = [
  "meter-core",
 ]
@@ -7767,6 +7775,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 name = "pipeline"
 version = "0.9.1"
 dependencies = [
+ "ahash 0.8.11",
  "api",
  "arrow",
  "async-trait",
@@ -7783,6 +7792,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "criterion 0.4.0",
  "crossbeam-utils",
  "csv",
  "dashmap",
@@ -7792,6 +7802,7 @@ dependencies = [
  "datafusion-functions",
  "datafusion-physical-expr",
  "datatypes",
+ "enum_dispatch",
  "futures",
  "greptime-proto",
  "itertools 0.10.5",

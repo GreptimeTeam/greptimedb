@@ -19,24 +19,21 @@ use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, Peer};
 use common_error::ext::BoxedError;
-use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
-    HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
+    HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info, warn};
 use greptime_proto::v1::meta::NodeInfo;
-use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient, MetaClientBuilder};
-use meta_client::{MetaClientOptions, MetaClientType};
+use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
 use servers::addrs;
 use servers::heartbeat_options::HeartbeatOptions;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 
-use crate::error::{ExternalSnafu, MetaClientInitSnafu};
+use crate::error::ExternalSnafu;
 use crate::{Error, FlownodeOptions};
 
 /// The flownode heartbeat task which sending `[HeartbeatRequest]` to Metasrv periodically in background.

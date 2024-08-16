@@ -130,7 +130,6 @@ impl LogStore for KafkaLogStore {
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Entry>) -> Result<AppendBatchResponse> {
-        metrics::METRIC_KAFKA_APPEND_BATCH_CALLS_TOTAL.inc();
         metrics::METRIC_KAFKA_APPEND_BATCH_BYTES_TOTAL.inc_by(
             entries
                 .iter()
@@ -178,7 +177,8 @@ impl LogStore for KafkaLogStore {
         for (region_id, (producer, records)) in region_grouped_records {
             // Safety: `KafkaLogStore::entry` will ensure that the
             // `Record`'s `approximate_size` must be less or equal to `max_batch_bytes`.
-            region_grouped_result_receivers.push((region_id, producer.produce(records).await?))
+            region_grouped_result_receivers
+                .push((region_id, producer.produce(region_id, records).await?))
         }
 
         let region_grouped_max_offset =
@@ -208,7 +208,6 @@ impl LogStore for KafkaLogStore {
                 actual: provider.type_name(),
             })?;
 
-        metrics::METRIC_KAFKA_READ_CALLS_TOTAL.inc();
         let _timer = metrics::METRIC_KAFKA_READ_ELAPSED.start_timer();
 
         // Gets the client associated with the topic.
@@ -272,7 +271,7 @@ impl LogStore for KafkaLogStore {
                     })?;
                 let (kafka_record, offset) = (record_and_offset.record, record_and_offset.offset);
 
-                metrics::METRIC_KAFKA_READ_RECORD_BYTES_TOTAL
+                metrics::METRIC_KAFKA_READ_BYTES_TOTAL
                     .inc_by(kafka_record.approximate_size() as u64);
 
                 debug!(

@@ -220,6 +220,10 @@ impl FileHandle {
     pub fn size(&self) -> u64 {
         self.inner.meta.file_size
     }
+
+    pub fn num_rows(&self) -> usize {
+        self.inner.meta.num_rows as usize
+    }
 }
 
 /// Inner data of [FileHandle].

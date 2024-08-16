@@ -14,17 +14,15 @@
 
 //! define MapFilterProject which is a compound operator that can be applied row-by-row.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use common_telemetry::debug;
 use datatypes::value::Value;
-use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::ensure;
 
 use crate::error::{Error, InvalidQuerySnafu};
 use crate::expr::error::{EvalError, InternalSnafu};
-use crate::expr::{Id, InvalidArgumentSnafu, LocalId, ScalarExpr};
+use crate::expr::{InvalidArgumentSnafu, ScalarExpr};
 use crate::repr::{self, value_to_internal_ts, Diff, Row};
 
 /// A compound operator that can be applied row-by-row.
@@ -738,7 +736,6 @@ impl MfpPlan {
 #[cfg(test)]
 mod test {
     use datatypes::data_type::ConcreteDataType;
-    use itertools::Itertools;
 
     use super::*;
     use crate::expr::{BinaryFunc, UnaryFunc, UnmaterializableFunc};

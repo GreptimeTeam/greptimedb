@@ -12,49 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
-use common_decimal::Decimal128;
-use common_time::{Date, Timestamp};
-use datatypes::arrow::compute::kernels::window;
-use datatypes::arrow::ipc::Binary;
-use datatypes::data_type::{ConcreteDataType as CDT, DataType};
+use datatypes::data_type::DataType;
 use datatypes::value::Value;
-use hydroflow::futures::future::Map;
 use itertools::Itertools;
-use snafu::{OptionExt, ResultExt};
-use substrait::variation_const::{
-    DATE_32_TYPE_VARIATION_REF, DATE_64_TYPE_VARIATION_REF, DEFAULT_TYPE_VARIATION_REF,
-    TIMESTAMP_MICRO_TYPE_VARIATION_REF, TIMESTAMP_MILLI_TYPE_VARIATION_REF,
-    TIMESTAMP_NANO_TYPE_VARIATION_REF, TIMESTAMP_SECOND_TYPE_VARIATION_REF,
-    UNSIGNED_INTEGER_TYPE_VARIATION_REF,
-};
+use snafu::OptionExt;
 use substrait_proto::proto::aggregate_function::AggregationInvocation;
 use substrait_proto::proto::aggregate_rel::{Grouping, Measure};
-use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
-use substrait_proto::proto::expression::literal::LiteralType;
-use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
-use substrait_proto::proto::expression::{
-    IfThen, Literal, MaskExpression, RexType, ScalarFunction,
-};
-use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
-use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 use substrait_proto::proto::function_argument::ArgType;
-use substrait_proto::proto::r#type::Kind;
-use substrait_proto::proto::read_rel::ReadType;
-use substrait_proto::proto::rel::RelType;
-use substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
+use substrait_proto::proto::{self};
 
-use crate::error::{
-    DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu,
-    TableNotFoundSnafu,
-};
+use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
 use crate::expr::{
-    AggregateExpr, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
-    TypedExpr, UnaryFunc, UnmaterializableFunc, VariadicFunc,
+    AggregateExpr, AggregateFunc, BinaryFunc, MapFilterProject, ScalarExpr, TypedExpr, UnaryFunc,
 };
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
-use crate::repr::{self, ColumnType, RelationDesc, RelationType};
+use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedExpr {
@@ -472,13 +446,14 @@ mod test {
     use bytes::BytesMut;
     use common_time::{DateTime, Interval};
     use datatypes::prelude::ConcreteDataType;
-    use pretty_assertions::{assert_eq, assert_ne};
+    use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::expr::{DfScalarFunction, RawDfScalarFn};
+    use crate::expr::{DfScalarFunction, GlobalId, RawDfScalarFn};
     use crate::plan::{Plan, TypedPlan};
-    use crate::repr::{self, ColumnType, RelationType};
+    use crate::repr::{ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+    use crate::transform::CDT;
     /// TODO(discord9): add more illegal sql tests
     #[tokio::test]
     async fn test_missing_key_check() {

@@ -98,6 +98,7 @@
 | `storage.account_key` | String | `None` | The account key of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
 | `storage.scope` | String | `None` | The scope of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
 | `storage.credential_path` | String | `None` | The credential path of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
+| `storage.credential` | String | `None` | The credential of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
 | `storage.container` | String | `None` | The container of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
 | `storage.sas_token` | String | `None` | The sas token of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
 | `storage.endpoint` | String | `None` | The endpoint of the S3 service.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**. |
@@ -387,6 +388,7 @@
 | `storage.account_key` | String | `None` | The account key of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
 | `storage.scope` | String | `None` | The scope of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
 | `storage.credential_path` | String | `None` | The credential path of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
+| `storage.credential` | String | `None` | The credential of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
 | `storage.container` | String | `None` | The container of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
 | `storage.sas_token` | String | `None` | The sas token of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
 | `storage.endpoint` | String | `None` | The endpoint of the S3 service.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**. |

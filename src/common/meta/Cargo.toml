@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 testing = []
+pg_kvbackend = ["dep:tokio-postgres"]
 
 [lints]
 workspace = true
@@ -56,6 +57,7 @@ store-api.workspace = true
 strum.workspace = true
 table.workspace = true
 tokio.workspace = true
+tokio-postgres = { workspace = true, optional = true }
 tonic.workspace = true
 typetag = "0.2"
 

@@ -851,6 +851,36 @@ pub enum Error {
         #[snafu(source(from(common_config::error::Error, Box::new)))]
         source: Box<common_config::error::Error>,
     },
+
+    #[snafu(display("Failed to setup plugin"))]
+    SetupPlugin {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to start plugin"))]
+    StartPlugin {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to execute via postgres"))]
+    PostgresExecution {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to connect to PostgresSQL"))]
+    ConnectPostgres {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -902,7 +932,9 @@ impl ErrorExt for Error {
             | Error::Join { .. }
             | Error::WeightArray { .. }
             | Error::NotSetWeightArray { .. }
-            | Error::PeerUnavailable { .. } => StatusCode::Internal,
+            | Error::PeerUnavailable { .. }
+            | Error::SetupPlugin { .. }
+            | Error::StartPlugin { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -987,6 +1019,10 @@ impl ErrorExt for Error {
 
             Error::Other { source, .. } => source.status_code(),
             Error::LookupPeer { source, .. } => source.status_code(),
+            #[cfg(feature = "pg_kvbackend")]
+            Error::ConnectPostgres { .. } => StatusCode::Internal,
+            #[cfg(feature = "pg_kvbackend")]
+            Error::PostgresExecution { .. } => StatusCode::Internal,
         }
     }
 

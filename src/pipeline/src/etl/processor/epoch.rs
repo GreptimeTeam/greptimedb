@@ -12,17 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ahash::HashSet;
+
 use crate::etl::field::{Field, Fields};
 use crate::etl::processor::{
-    yaml_bool, yaml_field, yaml_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME,
+    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
+    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::time::{
     MICROSECOND_RESOLUTION, MICRO_RESOLUTION, MILLISECOND_RESOLUTION, MILLI_RESOLUTION,
     MS_RESOLUTION, NANOSECOND_RESOLUTION, NANO_RESOLUTION, NS_RESOLUTION, SECOND_RESOLUTION,
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
-use crate::etl::value::{Epoch, Map, Value};
+use crate::etl::value::{Map, Timestamp, Value};
 
 pub(crate) const PROCESSOR_EPOCH: &str = "epoch";
 const RESOLUTION_NAME: &str = "resolution";
@@ -51,6 +53,8 @@ impl TryFrom<&str> for Resolution {
 }
 
 /// support string, integer, float, time, epoch
+/// deprecated it should be removed in the future
+/// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct EpochProcessor {
     fields: Fields,
@@ -64,7 +68,8 @@ pub struct EpochProcessor {
 }
 
 impl EpochProcessor {
-    fn with_fields(&mut self, fields: Fields) {
+    fn with_fields(&mut self, mut fields: Fields) {
+        update_one_one_output_keys(&mut fields);
         self.fields = fields
     }
 
@@ -76,9 +81,11 @@ impl EpochProcessor {
         self.ignore_missing = ignore_missing;
     }
 
-    fn parse(&self, val: &Value) -> Result<Epoch, String> {
+    fn parse(&self, val: &Value) -> Result<Timestamp, String> {
         let t: i64 = match val {
-            Value::String(s) => s.parse::<i64>().map_err(|e| e.to_string())?,
+            Value::String(s) => s
+                .parse::<i64>()
+                .map_err(|e| format!("Failed to parse {} to number: {}", s, e))?,
             Value::Int16(i) => *i as i64,
             Value::Int32(i) => *i as i64,
             Value::Int64(i) => *i,
@@ -89,18 +96,11 @@ impl EpochProcessor {
             Value::Float32(f) => *f as i64,
             Value::Float64(f) => *f as i64,
 
-            Value::Time(t) => match self.resolution {
+            Value::Timestamp(t) => match self.resolution {
                 Resolution::Second => t.timestamp(),
                 Resolution::Milli => t.timestamp_millis(),
                 Resolution::Micro => t.timestamp_micros(),
                 Resolution::Nano => t.timestamp_nanos(),
-            },
-
-            Value::Epoch(e) => match self.resolution {
-                Resolution::Second => e.timestamp(),
-                Resolution::Milli => e.timestamp_millis(),
-                Resolution::Micro => e.timestamp_micros(),
-                Resolution::Nano => e.timestamp_nanos(),
             },
 
             _ => {
@@ -111,20 +111,17 @@ impl EpochProcessor {
         };
 
         match self.resolution {
-            Resolution::Second => Ok(Epoch::Second(t)),
-            Resolution::Milli => Ok(Epoch::Millisecond(t)),
-            Resolution::Micro => Ok(Epoch::Microsecond(t)),
-            Resolution::Nano => Ok(Epoch::Nanosecond(t)),
+            Resolution::Second => Ok(Timestamp::Second(t)),
+            Resolution::Milli => Ok(Timestamp::Millisecond(t)),
+            Resolution::Micro => Ok(Timestamp::Microsecond(t)),
+            Resolution::Nano => Ok(Timestamp::Nanosecond(t)),
         }
     }
 
     fn process_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        let key = match field.target_field {
-            Some(ref target_field) => target_field,
-            None => field.get_field(),
-        };
+        let key = field.get_target_field();
 
-        Ok(Map::one(key, Value::Epoch(self.parse(val)?)))
+        Ok(Map::one(key, Value::Timestamp(self.parse(val)?)))
     }
 }
 
@@ -175,8 +172,49 @@ impl Processor for EpochProcessor {
         &self.fields
     }
 
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .map(|f| f.get_target_field().to_string())
+            .collect()
+    }
+
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         self.process_field(val, field)
+    }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            let index = field.input_field.index;
+            match val.get(index) {
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+                Some(v) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
+                    let mut map = self.process_field(v, field)?;
+                    field
+                        .output_fields_index_mapping
+                        .iter()
+                        .for_each(|(k, output_index)| {
+                            if let Some(v) = map.remove(k) {
+                                val[*output_index] = v;
+                            }
+                        });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -199,7 +237,7 @@ mod tests {
 
         for value in values {
             let parsed = processor.parse(&value).unwrap();
-            assert_eq!(parsed, super::Epoch::Second(1573840000));
+            assert_eq!(parsed, super::Timestamp::Second(1573840000));
         }
     }
 }

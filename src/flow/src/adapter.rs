@@ -51,6 +51,9 @@ use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 use crate::expr::GlobalId;
+use crate::metrics::{
+    METRIC_FLOW_INPUT_BUF_SIZE, METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_RUN_INTERVAL_MS,
+};
 use crate::repr::{self, DiffRow, Row, BATCH_SIZE};
 use crate::transform::sql_to_flow_plan;
 
@@ -191,6 +194,15 @@ impl FlowWorkerManager {
 pub enum DiffRequest {
     Insert(Vec<(Row, repr::Timestamp)>),
     Delete(Vec<(Row, repr::Timestamp)>),
+}
+
+impl DiffRequest {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Insert(v) => v.len(),
+            Self::Delete(v) => v.len(),
+        }
+    }
 }
 
 /// iterate through the diff row and form continuous diff row with same diff type
@@ -544,6 +556,7 @@ impl FlowWorkerManager {
             let new_wait = BATCH_SIZE * 1000 / avg_spd.max(1); //in ms
             let new_wait = Duration::from_millis(new_wait as u64).min(default_interval);
             trace!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
+            METRIC_FLOW_RUN_INTERVAL_MS.set(new_wait.as_millis() as i64);
             since_last_run = tokio::time::Instant::now();
             tokio::time::sleep(new_wait).await;
         }
@@ -575,7 +588,7 @@ impl FlowWorkerManager {
                 }
             }
             // check row send and rows remain in send buf
-            let (flush_res, buf_len) = if blocking {
+            let (flush_res, _buf_len) = if blocking {
                 let ctx = self.node_context.read().await;
                 (ctx.flush_all_sender().await, ctx.get_send_buf_size().await)
             } else {
@@ -585,16 +598,19 @@ impl FlowWorkerManager {
                 }
             };
             match flush_res {
-                Ok(r) => row_cnt += r,
+                Ok(r) => {
+                    common_telemetry::trace!("Flushed {} rows", r);
+                    row_cnt += r;
+                    // send buf is likely to be somewhere empty now, wait
+                    if r < BATCH_SIZE / 2 {
+                        break;
+                    }
+                }
                 Err(err) => {
                     common_telemetry::error!("Flush send buf errors: {:?}", err);
                     break;
                 }
             };
-            // if not enough rows, break
-            if buf_len < BATCH_SIZE {
-                break;
-            }
         }
 
         Ok(row_cnt)
@@ -606,13 +622,17 @@ impl FlowWorkerManager {
         region_id: RegionId,
         rows: Vec<DiffRow>,
     ) -> Result<(), Error> {
-        debug!(
-            "Handling write request for region_id={:?} with {} rows",
-            region_id,
-            rows.len()
-        );
+        let rows_len = rows.len();
         let table_id = region_id.table_id();
+        METRIC_FLOW_INPUT_BUF_SIZE.add(rows_len as _);
+        let _timer = METRIC_FLOW_INSERT_ELAPSED
+            .with_label_values(&[table_id.to_string().as_str()])
+            .start_timer();
         self.node_context.read().await.send(table_id, rows).await?;
+        debug!(
+            "Handling write request for table_id={} with {} rows",
+            table_id, rows_len
+        );
         Ok(())
     }
 }

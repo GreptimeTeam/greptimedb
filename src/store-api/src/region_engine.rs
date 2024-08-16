@@ -157,30 +157,60 @@ pub struct PartitionRange {
 }
 
 /// Properties of the [RegionScanner].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ScannerProperties {
     /// A 2-dim partition ranges.
     ///
     /// The first dim vector's length represents the output partition number. The second
     /// dim is ranges within one partition.
     pub partitions: Vec<Vec<PartitionRange>>,
+
+    /// Whether scanner is in append-only mode.
+    append_mode: bool,
+
+    /// Total rows that **may** return by scanner. This field is only read iff
+    /// [ScannerProperties::append_mode] is true.
+    total_rows: usize,
 }
 
 impl ScannerProperties {
-    /// Creates a new [`ScannerProperties`] with the given partitioning.
-    pub fn new(partitions: Vec<Vec<PartitionRange>>) -> Self {
-        Self { partitions }
+    /// Initialize partitions with given parallelism for scanner.
+    pub fn with_parallelism(mut self, parallelism: usize) -> Self {
+        self.partitions = vec![vec![]; parallelism];
+        self
     }
 
-    /// Creates a new [`ScannerProperties`] with the given number of partitions.
-    pub fn new_with_partitions(partitions: usize) -> Self {
+    /// Set append mode for scanner.
+    pub fn with_append_mode(mut self, append_mode: bool) -> Self {
+        self.append_mode = append_mode;
+        self
+    }
+
+    /// Sets total rows for scanner.
+    pub fn with_total_rows(mut self, total_rows: usize) -> Self {
+        self.total_rows = total_rows;
+        self
+    }
+
+    /// Creates a new [`ScannerProperties`] with the given partitioning.
+    pub fn new(partitions: Vec<Vec<PartitionRange>>, append_mode: bool, total_rows: usize) -> Self {
         Self {
-            partitions: vec![vec![]; partitions],
+            partitions,
+            append_mode,
+            total_rows,
         }
     }
 
     pub fn num_partitions(&self) -> usize {
         self.partitions.len()
+    }
+
+    pub fn append_mode(&self) -> bool {
+        self.append_mode
+    }
+
+    pub fn total_rows(&self) -> usize {
+        self.total_rows
     }
 }
 
@@ -297,12 +327,14 @@ pub struct SinglePartitionScanner {
 
 impl SinglePartitionScanner {
     /// Creates a new [SinglePartitionScanner] with the given stream.
-    pub fn new(stream: SendableRecordBatchStream) -> Self {
+    pub fn new(stream: SendableRecordBatchStream, append_mode: bool) -> Self {
         let schema = stream.schema();
         Self {
             stream: Mutex::new(Some(stream)),
             schema,
-            properties: ScannerProperties::new_with_partitions(1),
+            properties: ScannerProperties::default()
+                .with_parallelism(1)
+                .with_append_mode(append_mode),
         }
     }
 }
@@ -323,7 +355,7 @@ impl RegionScanner for SinglePartitionScanner {
     }
 
     fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
-        self.properties = ScannerProperties::new(ranges);
+        self.properties.partitions = ranges;
         Ok(())
     }
 
