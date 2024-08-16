@@ -5020,6 +5020,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
+ "common-runtime",
  "common-telemetry",
  "common-test-util",
  "fst",
