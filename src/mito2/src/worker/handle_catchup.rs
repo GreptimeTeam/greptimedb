@@ -95,7 +95,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         if let Some(expected_last_entry_id) = request.entry_id {
             ensure!(
-                expected_last_entry_id == last_entry_id,
+                // The replayed last entry id may be greater than the `expected_last_entry_id`.
+                last_entry_id >= expected_last_entry_id,
                 error::UnexpectedReplaySnafu {
                     region_id,
                     expected_last_entry_id,
