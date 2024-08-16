@@ -48,8 +48,8 @@ use crate::compaction::picker::{new_picker, CompactionTask};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
-    CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
-    TimeRangePredicateOverflowSnafu,
+    CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu,
+    RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu,
 };
 use crate::metrics::COMPACTION_STAGE_ELAPSED;
 use crate::read::projection::ProjectionMapper;
@@ -314,6 +314,20 @@ impl CompactionScheduler {
                         return Ok(());
                     }
                     Err(e) => {
+                        if !current_version
+                            .options
+                            .compaction
+                            .fallback_to_local_compaction()
+                        {
+                            error!(e; "Failed to schedule remote compaction job for region {}", region_id);
+                            return RemoteCompactionSnafu {
+                                region_id,
+                                job_id: None,
+                                reason: e.reason,
+                            }
+                            .fail();
+                        }
+
                         error!(e; "Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id);
 
                         // Return the waiters back to the caller for local compaction.
