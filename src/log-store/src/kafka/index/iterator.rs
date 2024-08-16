@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt::Debug;
 use std::ops::Range;
@@ -234,8 +234,9 @@ pub fn build_region_wal_index_iterator(
                 let index = RegionWalVecIndex::new(region_indexes, min_window_size);
                 iterator.push(Box::new(index));
             }
-            if last_index < end_entry_id {
-                let range = last_index..end_entry_id;
+            let known_last_index = max(last_index, start_entry_id);
+            if known_last_index < end_entry_id {
+                let range = known_last_index..end_entry_id;
                 let index = RegionWalRange::new(range, max_batch_bytes);
                 iterator.push(Box::new(index));
             }
