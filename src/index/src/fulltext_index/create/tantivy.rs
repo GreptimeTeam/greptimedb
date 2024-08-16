@@ -31,9 +31,6 @@ pub const TEXT_FIELD_NAME: &str = "greptime_fulltext_text";
 pub const ROWID_FIELD_NAME: &str = "greptime_fulltext_rowid";
 
 /// `TantivyFulltextIndexCreator` is a fulltext index creator using tantivy.
-///
-/// Here use a single segment to store the index so the maximum capacity for
-/// the index is limited to 2<<31 rows (around 2 billion rows).
 pub struct TantivyFulltextIndexCreator {
     /// The tantivy index writer.
     writer: Option<IndexWriter>,
