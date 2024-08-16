@@ -494,11 +494,7 @@ pub(crate) enum WorkerRequest {
     Stop,
 
     /// Use [RegionEdit] to edit a region directly.
-    EditRegion {
-        region_id: RegionId,
-        edit: RegionEdit,
-        tx: Sender<Result<()>>,
-    },
+    EditRegion(RegionEditRequest),
 }
 
 impl WorkerRequest {
@@ -760,6 +756,15 @@ pub(crate) struct RegionChangeResult {
     pub(crate) sender: OptionOutputTx,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+}
+
+/// Request to edit a region directly.
+#[derive(Debug)]
+pub(crate) struct RegionEditRequest {
+    pub(crate) region_id: RegionId,
+    pub(crate) edit: RegionEdit,
+    /// The sender to notify the result to the region engine.
+    pub(crate) tx: Sender<Result<()>>,
 }
 
 /// Notifies the regin the result of editing region.

@@ -61,6 +61,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
+use crate::worker::handle_manifest::RegionEditQueues;
 
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
@@ -441,6 +442,7 @@ impl<S: LogStore> WorkerStarter<S> {
             flush_receiver: self.flush_receiver,
             stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&id_string]),
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
+            region_edit_queues: RegionEditQueues::default(),
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -629,6 +631,8 @@ struct RegionWorkerLoop<S> {
     stalled_count: IntGauge,
     /// Gauge of regions in the worker.
     region_count: IntGauge,
+    /// Queues for region edit requests.
+    region_edit_queues: RegionEditQueues,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -727,12 +731,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::SetReadonlyGracefully { region_id, sender } => {
                     self.set_readonly_gracefully(region_id, sender).await;
                 }
-                WorkerRequest::EditRegion {
-                    region_id,
-                    edit,
-                    tx,
-                } => {
-                    self.handle_region_edit(region_id, edit, tx).await;
+                WorkerRequest::EditRegion(request) => {
+                    self.handle_region_edit(request).await;
                 }
                 // We receive a stop signal, but we still want to process remaining
                 // requests. The worker thread will then check the running flag and
@@ -824,7 +824,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
             BackgroundNotify::RegionChange(req) => self.handle_manifest_region_change_result(req),
-            BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req),
+            BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
         }
     }
 

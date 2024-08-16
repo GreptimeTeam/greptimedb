@@ -33,6 +33,8 @@ mod create_test;
 #[cfg(test)]
 mod drop_test;
 #[cfg(test)]
+mod edit_region_test;
+#[cfg(test)]
 mod filter_deleted_test;
 #[cfg(test)]
 mod flush_test;
@@ -88,7 +90,7 @@ use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
 use crate::region::RegionUsage;
-use crate::request::WorkerRequest;
+use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::wal::entry_distributor::{
     build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
 };
@@ -196,11 +198,11 @@ impl MitoEngine {
         );
 
         let (tx, rx) = oneshot::channel();
-        let request = WorkerRequest::EditRegion {
+        let request = WorkerRequest::EditRegion(RegionEditRequest {
             region_id,
             edit,
             tx,
-        };
+        });
         self.inner
             .workers
             .submit_to_worker(region_id, request)
