@@ -20,6 +20,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use api::v1::CreateTableExpr;
+use catalog_protocol::CatalogProtocol;
 use futures::future::BoxFuture;
 use futures_util::stream::BoxStream;
 use table::metadata::TableId;
@@ -27,6 +28,7 @@ use table::TableRef;
 
 use crate::error::Result;
 
+pub mod catalog_protocol;
 pub mod error;
 pub mod kvbackend;
 pub mod memory;
@@ -44,13 +46,22 @@ pub trait CatalogManager: Send + Sync {
 
     async fn catalog_names(&self) -> Result<Vec<String>>;
 
-    async fn schema_names(&self, catalog: &str) -> Result<Vec<String>>;
+    async fn schema_names(
+        &self,
+        catalog: &str,
+        catalog_protocol: CatalogProtocol,
+    ) -> Result<Vec<String>>;
 
     async fn table_names(&self, catalog: &str, schema: &str) -> Result<Vec<String>>;
 
     async fn catalog_exists(&self, catalog: &str) -> Result<bool>;
 
-    async fn schema_exists(&self, catalog: &str, schema: &str) -> Result<bool>;
+    async fn schema_exists(
+        &self,
+        catalog: &str,
+        schema: &str,
+        catalog_protocol: CatalogProtocol,
+    ) -> Result<bool>;
 
     async fn table_exists(&self, catalog: &str, schema: &str, table: &str) -> Result<bool>;
 
@@ -60,6 +71,7 @@ pub trait CatalogManager: Send + Sync {
         catalog: &str,
         schema: &str,
         table_name: &str,
+        catalog_protocol: CatalogProtocol,
     ) -> Result<Option<TableRef>>;
 
     /// Returns all tables with a stream by catalog and schema.

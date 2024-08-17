@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use catalog::catalog_protocol::CatalogProtocol;
 use client::{OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::key::{RegionDistribution, TableMetadataManagerRef};
 use common_meta::peer::Peer;
@@ -1013,7 +1014,12 @@ async fn prepare_testing_metric_table(cluster: &GreptimeDbCluster) -> TableId {
     let table = cluster
         .frontend
         .catalog_manager()
-        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy")
+        .table(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            "phy",
+            CatalogProtocol::Other,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -1039,7 +1045,12 @@ async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
     let table = cluster
         .frontend
         .catalog_manager()
-        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, TEST_TABLE_NAME)
+        .table(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            TEST_TABLE_NAME,
+            CatalogProtocol::Other,
+        )
         .await
         .unwrap()
         .unwrap();

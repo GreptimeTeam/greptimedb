@@ -20,6 +20,7 @@ use api::prom_store::remote::{Query, QueryResult, ReadRequest, ReadResponse};
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use catalog::catalog_protocol::CatalogProtocol;
 use client::OutputData;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
@@ -100,9 +101,10 @@ impl Instance {
         table_name: &str,
         query: &Query,
     ) -> Result<Output> {
+        let catalog_protocol = CatalogProtocol::from_query_dialect(ctx.sql_dialect());
         let table = self
             .catalog_manager
-            .table(catalog_name, schema_name, table_name)
+            .table(catalog_name, schema_name, table_name, catalog_protocol)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

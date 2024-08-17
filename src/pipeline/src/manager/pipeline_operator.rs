@@ -17,6 +17,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use api::v1::CreateTableExpr;
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{default_engine, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_telemetry::info;
@@ -96,6 +97,7 @@ impl PipelineOperator {
 
     async fn create_pipeline_table_if_not_exists(&self, ctx: QueryContextRef) -> Result<()> {
         let catalog = ctx.current_catalog();
+        let catalog_protocol = CatalogProtocol::from_query_dialect(ctx.sql_dialect());
 
         // exist in cache
         if self.get_pipeline_table_from_cache(catalog).is_some() {
@@ -110,7 +112,12 @@ impl PipelineOperator {
         // exist in catalog, just open
         if let Some(table) = self
             .catalog_manager
-            .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
+            .table(
+                &expr.catalog_name,
+                &expr.schema_name,
+                &expr.table_name,
+                catalog_protocol,
+            )
             .await
             .context(CatalogSnafu)?
         {
@@ -130,7 +137,7 @@ impl PipelineOperator {
         // get from catalog
         let table = self
             .catalog_manager
-            .table(catalog, schema, table_name)
+            .table(catalog, schema, table_name, catalog_protocol)
             .await
             .context(CatalogSnafu)?
             .context(PipelineTableNotFoundSnafu)?;

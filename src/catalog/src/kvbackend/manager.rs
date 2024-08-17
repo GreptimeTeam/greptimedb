@@ -42,6 +42,7 @@ use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::table_name::TableName;
 use table::TableRef;
 
+use crate::catalog_protocol::CatalogProtocol;
 use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
@@ -152,7 +153,11 @@ impl CatalogManager for KvBackendCatalogManager {
         Ok(keys)
     }
 
-    async fn schema_names(&self, catalog: &str) -> Result<Vec<String>> {
+    async fn schema_names(
+        &self,
+        catalog: &str,
+        catalog_protocol: CatalogProtocol,
+    ) -> Result<Vec<String>> {
         let stream = self
             .table_metadata_manager
             .schema_manager()
@@ -163,7 +168,7 @@ impl CatalogManager for KvBackendCatalogManager {
             .map_err(BoxedError::new)
             .context(ListSchemasSnafu { catalog })?;
 
-        keys.extend(self.system_catalog.schema_names());
+        keys.extend(self.system_catalog.schema_names(catalog_protocol));
 
         Ok(keys.into_iter().collect())
     }
@@ -194,8 +199,13 @@ impl CatalogManager for KvBackendCatalogManager {
             .context(TableMetadataManagerSnafu)
     }
 
-    async fn schema_exists(&self, catalog: &str, schema: &str) -> Result<bool> {
-        if self.system_catalog.schema_exists(schema) {
+    async fn schema_exists(
+        &self,
+        catalog: &str,
+        schema: &str,
+        catalog_protocol: CatalogProtocol,
+    ) -> Result<bool> {
+        if self.system_catalog.schema_exists(schema, catalog_protocol) {
             return Ok(true);
         }
 
@@ -225,6 +235,7 @@ impl CatalogManager for KvBackendCatalogManager {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
+        catalog_protocol: CatalogProtocol,
     ) -> Result<Option<TableRef>> {
         if let Some(table) = self
             .system_catalog
@@ -236,15 +247,29 @@ impl CatalogManager for KvBackendCatalogManager {
         let table_cache: TableCacheRef = self.cache_registry.get().context(CacheNotFoundSnafu {
             name: "table_cache",
         })?;
-
-        table_cache
+        if let Some(table) = table_cache
             .get_by_ref(&TableName {
                 catalog_name: catalog_name.to_string(),
                 schema_name: schema_name.to_string(),
                 table_name: table_name.to_string(),
             })
             .await
-            .context(GetTableCacheSnafu)
+            .context(GetTableCacheSnafu)?
+        {
+            return Ok(Some(table));
+        }
+
+        if catalog_protocol == CatalogProtocol::PostgreSQL {
+            // falldown to pg_catalog
+            if let Some(table) =
+                self.system_catalog
+                    .table(catalog_name, PG_CATALOG_NAME, table_name)
+            {
+                return Ok(Some(table));
+            }
+        }
+
+        return Ok(None);
     }
 
     fn tables<'a>(&'a self, catalog: &'a str, schema: &'a str) -> BoxStream<'a, Result<TableRef>> {
@@ -320,12 +345,21 @@ struct SystemCatalog {
 }
 
 impl SystemCatalog {
-    // TODO(j0hn50n133): remove the duplicated hard-coded table names logic
-    fn schema_names(&self) -> Vec<String> {
-        vec![
-            INFORMATION_SCHEMA_NAME.to_string(),
-            PG_CATALOG_NAME.to_string(),
-        ]
+    fn schema_names(&self, catalog_protocol: CatalogProtocol) -> Vec<String> {
+        match catalog_protocol {
+            // pg_catalog only visible under postgres protocol
+            CatalogProtocol::PostgreSQL => vec![PG_CATALOG_NAME.to_string()],
+            // information_schema visible for mysql protocol and other
+            CatalogProtocol::MySQL => {
+                vec![INFORMATION_SCHEMA_NAME.to_string()]
+            }
+            CatalogProtocol::Other => {
+                vec![
+                    PG_CATALOG_NAME.to_string(),
+                    INFORMATION_SCHEMA_NAME.to_string(),
+                ]
+            }
+        }
     }
 
     fn table_names(&self, schema: &str) -> Vec<String> {
@@ -339,8 +373,14 @@ impl SystemCatalog {
         }
     }
 
-    fn schema_exists(&self, schema: &str) -> bool {
-        schema == INFORMATION_SCHEMA_NAME || schema == PG_CATALOG_NAME
+    fn schema_exists(&self, schema: &str, catalog_protocol: CatalogProtocol) -> bool {
+        match catalog_protocol {
+            CatalogProtocol::PostgreSQL => schema == PG_CATALOG_NAME,
+            CatalogProtocol::MySQL => schema == INFORMATION_SCHEMA_NAME,
+            CatalogProtocol::Other => {
+                schema == PG_CATALOG_NAME || schema == INFORMATION_SCHEMA_NAME
+            }
+        }
     }
 
     fn table_exists(&self, schema: &str, table: &str) -> bool {

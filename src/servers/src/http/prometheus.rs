@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Form};
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -409,7 +410,10 @@ async fn get_all_column_names(
 
     let mut labels = HashSet::new();
     for table_name in table_names {
-        let Some(table) = manager.table(catalog, schema, &table_name).await? else {
+        let Some(table) = manager
+            .table(catalog, schema, &table_name, CatalogProtocol::Other)
+            .await?
+        else {
             continue;
         };
         for column in table.primary_key_columns() {
@@ -429,6 +433,7 @@ async fn retrieve_series_from_query_result(
     metrics: &mut HashMap<String, u64>,
 ) -> Result<()> {
     let result = result?;
+    let catalog_protocol = CatalogProtocol::from_query_dialect(query_ctx.sql_dialect());
 
     // fetch tag list
     let table = manager
@@ -436,6 +441,7 @@ async fn retrieve_series_from_query_result(
             query_ctx.current_catalog(),
             &query_ctx.current_schema(),
             table_name,
+            catalog_protocol,
         )
         .await
         .context(CatalogSnafu)?
@@ -773,6 +779,7 @@ async fn retrieve_field_names(
 ) -> Result<HashSet<String>> {
     let mut field_columns = HashSet::new();
     let catalog = query_ctx.current_catalog();
+    let catalog_protocol = CatalogProtocol::from_query_dialect(query_ctx.sql_dialect());
     let schema = query_ctx.current_schema();
 
     if matches.is_empty() {
@@ -788,7 +795,7 @@ async fn retrieve_field_names(
 
     for table_name in matches {
         let table = manager
-            .table(catalog, &schema, &table_name)
+            .table(catalog, &schema, &table_name, catalog_protocol)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

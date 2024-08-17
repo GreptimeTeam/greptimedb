@@ -17,6 +17,7 @@ mod show_create_table;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::information_schema::{
     columns, flows, key_column_usage, schemata, tables, CHARACTER_SETS, COLLATIONS, COLUMNS, FLOWS,
     KEY_COLUMN_USAGE, SCHEMATA, TABLES, VIEWS,
@@ -215,11 +216,13 @@ async fn query_from_information_schema_table(
     sort: Vec<Expr>,
     kind: ShowKind,
 ) -> Result<Output> {
+    let catalog_protocol = CatalogProtocol::from_query_dialect(query_ctx.sql_dialect());
     let table = catalog_manager
         .table(
             query_ctx.current_catalog(),
             INFORMATION_SCHEMA_NAME,
             table_name,
+            catalog_protocol,
         )
         .await
         .context(error::CatalogSnafu)?

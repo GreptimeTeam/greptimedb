@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datafusion::common::Result;
@@ -128,6 +129,7 @@ impl DistExtensionPlanner {
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
+                CatalogProtocol::Other,
             )
             .await
             .context(CatalogSnafu)?

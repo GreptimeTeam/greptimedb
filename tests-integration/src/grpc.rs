@@ -26,6 +26,7 @@ mod test {
         CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DeleteRequests,
         DropTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
     };
+    use catalog::catalog_protocol::CatalogProtocol;
     use client::OutputData;
     use common_catalog::consts::MITO_ENGINE;
     use common_meta::rpc::router::region_distribution;
@@ -181,7 +182,8 @@ mod test {
             .table(
                 "greptime",
                 "database_created_through_grpc",
-                "table_created_through_grpc"
+                "table_created_through_grpc",
+                CatalogProtocol::Other,
             )
             .await
             .unwrap()
@@ -510,7 +512,7 @@ CREATE TABLE {table_name} (
         let table = instance
             .frontend()
             .catalog_manager()
-            .table("greptime", "public", table_name)
+            .table("greptime", "public", table_name, CatalogProtocol::Other)
             .await
             .unwrap()
             .unwrap();

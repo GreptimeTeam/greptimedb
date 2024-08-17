@@ -18,6 +18,7 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr};
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_catalog::consts::{is_readonly_schema, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -104,9 +105,10 @@ impl StatementExecutor {
         let (catalog, schema, table) = table_idents_to_full_name(&stmt.source_name, &ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
+        let catalog_protocol = CatalogProtocol::from_query_dialect(ctx.sql_dialect());
         let table_ref = self
             .catalog_manager
-            .table(&catalog, &schema, &table)
+            .table(&catalog, &schema, &table, catalog_protocol)
             .await
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu { table_name: &table })?;
@@ -200,6 +202,7 @@ impl StatementExecutor {
             .fail();
         };
 
+        let catalog_protocol = CatalogProtocol::from_query_dialect(query_ctx.sql_dialect());
         // if table exists.
         if let Some(table) = self
             .catalog_manager
@@ -207,6 +210,7 @@ impl StatementExecutor {
                 &create_table.catalog_name,
                 &create_table.schema_name,
                 &create_table.table_name,
+                catalog_protocol,
             )
             .await
             .context(CatalogSnafu)?
@@ -485,10 +489,16 @@ impl StatementExecutor {
             }
         );
 
+        let catalog_protocol = CatalogProtocol::from_query_dialect(ctx.sql_dialect());
         // if view or table exists.
         if let Some(table) = self
             .catalog_manager
-            .table(&expr.catalog_name, &expr.schema_name, &expr.view_name)
+            .table(
+                &expr.catalog_name,
+                &expr.schema_name,
+                &expr.view_name,
+                catalog_protocol,
+            )
             .await
             .context(CatalogSnafu)?
         {
@@ -657,7 +667,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let view_info = if let Some(view) = self
             .catalog_manager
-            .table(&catalog, &schema, &view)
+            .table(&catalog, &schema, &view, CatalogProtocol::Other)
             .await
             .context(CatalogSnafu)?
         {
@@ -761,12 +771,14 @@ impl StatementExecutor {
                 }
             );
 
+            let catalog_protocol = CatalogProtocol::from_query_dialect(query_context.sql_dialect());
             if let Some(table) = self
                 .catalog_manager
                 .table(
                     &table_name.catalog_name,
                     &table_name.schema_name,
                     &table_name.table_name,
+                    catalog_protocol,
                 )
                 .await
                 .context(CatalogSnafu)?
@@ -817,7 +829,7 @@ impl StatementExecutor {
 
         if self
             .catalog_manager
-            .schema_exists(&catalog, &schema)
+            .schema_exists(&catalog, &schema, CatalogProtocol::Other)
             .await
             .context(CatalogSnafu)?
         {
@@ -853,12 +865,14 @@ impl StatementExecutor {
             }
         );
 
+        let catalog_protocol = CatalogProtocol::from_query_dialect(query_context.sql_dialect());
         let table = self
             .catalog_manager
             .table(
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
+                catalog_protocol,
             )
             .await
             .context(CatalogSnafu)?
@@ -943,9 +957,10 @@ impl StatementExecutor {
 
         let table_name = expr.table_name.clone();
 
+        let catalog_protocol = CatalogProtocol::from_query_dialect(query_context.sql_dialect());
         let table = self
             .catalog_manager
-            .table(&catalog_name, &schema_name, &table_name)
+            .table(&catalog_name, &schema_name, &table_name, catalog_protocol)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
@@ -1168,7 +1183,7 @@ impl StatementExecutor {
 
         if !self
             .catalog_manager
-            .schema_exists(catalog, database)
+            .schema_exists(catalog, database, CatalogProtocol::Other)
             .await
             .context(CatalogSnafu)?
         {

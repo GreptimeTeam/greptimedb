@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
@@ -354,9 +355,14 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+    async fn is_valid_schema(
+        &self,
+        catalog: &str,
+        schema: &str,
+        catalog_protocol: CatalogProtocol,
+    ) -> Result<bool> {
         self.catalog_manager
-            .schema_exists(catalog, schema)
+            .schema_exists(catalog, schema, catalog_protocol)
             .await
             .context(error::CatalogSnafu)
     }

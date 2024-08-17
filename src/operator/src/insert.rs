@@ -21,6 +21,7 @@ use api::v1::{
     AlterExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests, RowInsertRequest,
     RowInsertRequests, SemanticType,
 };
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
@@ -608,7 +609,7 @@ impl Inserter {
         table: &str,
     ) -> Result<Option<TableRef>> {
         self.catalog_manager
-            .table(catalog, schema, table)
+            .table(catalog, schema, table, CatalogProtocol::Other)
             .await
             .context(CatalogSnafu)
     }

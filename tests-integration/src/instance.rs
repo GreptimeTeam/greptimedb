@@ -20,6 +20,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::region::QueryRequest;
+    use catalog::catalog_protocol::CatalogProtocol;
     use client::OutputData;
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -278,7 +279,7 @@ mod tests {
         assert!(instance
             .frontend()
             .catalog_manager()
-            .table("greptime", "public", "demo")
+            .table("greptime", "public", "demo", CatalogProtocol::Other)
             .await
             .unwrap()
             .is_none())

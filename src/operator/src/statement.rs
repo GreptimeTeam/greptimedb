@@ -24,6 +24,7 @@ mod tql;
 
 use std::sync::Arc;
 
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use client::RecordBatches;
 use common_error::ext::BoxedError;
@@ -256,9 +257,10 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
 
+                let catalog_protocol = CatalogProtocol::from_query_dialect(query_ctx.sql_dialect());
                 let table_ref = self
                     .catalog_manager
-                    .table(&catalog, &schema, &table)
+                    .table(&catalog, &schema, &table, catalog_protocol)
                     .await
                     .context(CatalogSnafu)?
                     .context(TableNotFoundSnafu { table_name: &table })?;
@@ -284,7 +286,7 @@ impl StatementExecutor {
         let catalog = query_ctx.current_catalog();
         ensure!(
             self.catalog_manager
-                .schema_exists(catalog, db.as_ref())
+                .schema_exists(catalog, db.as_ref(), CatalogProtocol::MySQL)
                 .await
                 .context(CatalogSnafu)?,
             SchemaNotFoundSnafu { schema_info: &db }
@@ -353,7 +355,7 @@ impl StatementExecutor {
             table,
         } = table_ref;
         self.catalog_manager
-            .table(catalog, schema, table)
+            .table(catalog, schema, table, CatalogProtocol::Other)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

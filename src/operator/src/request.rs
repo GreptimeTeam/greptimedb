@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use api::v1::region::region_request::Body as RegionRequestBody;
 use api::v1::region::{CompactRequest, FlushRequest, RegionRequestHeader};
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
@@ -219,7 +220,7 @@ impl Requester {
     ) -> Result<Vec<PartitionInfo>> {
         let table = self
             .catalog_manager
-            .table(catalog, schema, table_name)
+            .table(catalog, schema, table_name, CatalogProtocol::Other)
             .await
             .context(CatalogSnafu)?;
 

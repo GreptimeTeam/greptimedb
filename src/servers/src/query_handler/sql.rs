@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use catalog::catalog_protocol::CatalogProtocol;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
 use query::parser::PromQuery;
@@ -61,6 +62,7 @@ pub trait SqlQueryHandler {
         &self,
         catalog: &str,
         schema: &str,
+        catalog_protocol: CatalogProtocol,
     ) -> std::result::Result<bool, Self::Error>;
 }
 
@@ -121,9 +123,14 @@ where
             .context(error::DescribeStatementSnafu)
     }
 
-    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+    async fn is_valid_schema(
+        &self,
+        catalog: &str,
+        schema: &str,
+        catalog_protocol: CatalogProtocol,
+    ) -> Result<bool> {
         self.0
-            .is_valid_schema(catalog, schema)
+            .is_valid_schema(catalog, schema, catalog_protocol)
             .await
             .map_err(BoxedError::new)
             .context(error::CheckDatabaseValiditySnafu)

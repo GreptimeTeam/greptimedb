@@ -18,6 +18,7 @@ use std::{iter, mem};
 
 use api::v1::region::{DeleteRequests as RegionDeleteRequests, RegionRequestHeader};
 use api::v1::{DeleteRequests, RowDeleteRequests};
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
@@ -232,7 +233,7 @@ impl Deleter {
 
     async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {
         self.catalog_manager
-            .table(catalog, schema, table)
+            .table(catalog, schema, table, CatalogProtocol::Other)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

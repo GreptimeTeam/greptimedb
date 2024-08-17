@@ -16,6 +16,7 @@ use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
 use api::v1::column_def::options_from_column_schema;
 use api::v1::region::InsertRequests as RegionInsertRequests;
 use api::v1::{ColumnSchema as GrpcColumnSchema, Row, Rows, Value as GrpcValue};
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManager;
 use common_time::Timezone;
 use datatypes::schema::{ColumnSchema, SchemaRef};
@@ -139,7 +140,7 @@ impl<'a> StatementToRegion<'a> {
 
     async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {
         self.catalog_manager
-            .table(catalog, schema, table)
+            .table(catalog, schema, table, CatalogProtocol::Other)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

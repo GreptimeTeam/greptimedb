@@ -25,6 +25,7 @@ use datafusion::datasource::TableProvider;
 use snafu::OptionExt;
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::catalog_protocol::CatalogProtocol;
 use crate::error::TableNotExistSnafu;
 use crate::CatalogManagerRef;
 
@@ -112,7 +113,12 @@ impl SchemaProvider for DummySchemaProvider {
     async fn table(&self, name: &str) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
         let table = self
             .catalog_manager
-            .table(&self.catalog_name, &self.schema_name, name)
+            .table(
+                &self.catalog_name,
+                &self.schema_name,
+                name,
+                CatalogProtocol::Other,
+            )
             .await?
             .with_context(|| TableNotExistSnafu {
                 table: format_full_table_name(&self.catalog_name, &self.schema_name, name),

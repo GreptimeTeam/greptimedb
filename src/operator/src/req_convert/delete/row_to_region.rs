@@ -14,6 +14,7 @@
 
 use api::v1::region::DeleteRequests as RegionDeleteRequests;
 use api::v1::RowDeleteRequests;
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManager;
 use partition::manager::PartitionRuleManager;
 use session::context::QueryContext;
@@ -64,7 +65,12 @@ impl<'a> RowToRegion<'a> {
         let catalog_name = self.ctx.current_catalog();
         let schema_name = self.ctx.current_schema();
         self.catalog_manager
-            .table(catalog_name, &schema_name, table_name)
+            .table(
+                catalog_name,
+                &schema_name,
+                table_name,
+                CatalogProtocol::Other,
+            )
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

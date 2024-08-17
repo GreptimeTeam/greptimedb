@@ -17,6 +17,7 @@ use std::sync::Exclusive;
 
 use ::auth::{userinfo_by_name, Identity, Password, UserInfoRef, UserProviderRef};
 use async_trait::async_trait;
+use catalog::catalog_protocol::CatalogProtocol;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use futures::{Sink, SinkExt};
@@ -241,7 +242,7 @@ where
     if let Some(db) = db_ref {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
         if query_handler
-            .is_valid_schema(&catalog, &schema)
+            .is_valid_schema(&catalog, &schema, CatalogProtocol::PostgreSQL)
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?
         {

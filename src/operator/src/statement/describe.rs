@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use catalog::catalog_protocol::CatalogProtocol;
 use common_error::ext::BoxedError;
 use common_query::Output;
 use common_telemetry::tracing;
@@ -39,7 +40,7 @@ impl StatementExecutor {
 
         let table = self
             .catalog_manager
-            .table(&catalog, &schema, &table)
+            .table(&catalog, &schema, &table, CatalogProtocol::MySQL)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

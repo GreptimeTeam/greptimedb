@@ -33,6 +33,7 @@ use table::metadata::TableType;
 
 use super::pg_namespace::oid_map::PGNamespaceOidMapRef;
 use super::{OID_COLUMN_NAME, PG_CLASS};
+use crate::catalog_protocol::CatalogProtocol::PostgreSQL;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
@@ -202,7 +203,10 @@ impl PGClassBuilder {
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
         let predicates = Predicates::from_scan_request(&request);
-        for schema_name in catalog_manager.schema_names(&catalog_name).await? {
+        for schema_name in catalog_manager
+            .schema_names(&catalog_name, PostgreSQL)
+            .await?
+        {
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
             while let Some(table) = stream.try_next().await? {
                 let table_info = table.table_info();

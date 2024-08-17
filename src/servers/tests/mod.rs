@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
+use catalog::catalog_protocol::CatalogProtocol;
 use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
@@ -108,7 +109,12 @@ impl SqlQueryHandler for DummyInstance {
         }
     }
 
-    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+    async fn is_valid_schema(
+        &self,
+        catalog: &str,
+        schema: &str,
+        _catalog_protocol: CatalogProtocol,
+    ) -> Result<bool> {
         Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
     }
 }

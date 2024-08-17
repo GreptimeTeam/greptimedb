@@ -32,6 +32,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 
 use super::{PGNamespaceOidMapRef, OID_COLUMN_NAME, PG_NAMESPACE};
+use crate::catalog_protocol::CatalogProtocol::PostgreSQL;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
@@ -180,7 +181,10 @@ impl PGNamespaceBuilder {
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
         let predicates = Predicates::from_scan_request(&request);
-        for schema_name in catalog_manager.schema_names(&catalog_name).await? {
+        for schema_name in catalog_manager
+            .schema_names(&catalog_name, PostgreSQL)
+            .await?
+        {
             self.add_namespace(&predicates, &schema_name);
         }
         self.finish()

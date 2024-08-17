@@ -32,6 +32,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
 use super::SCHEMATA;
+use crate::catalog_protocol::CatalogProtocol::MySQL;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, TableMetadataManagerSnafu,
     UpgradeWeakCatalogManagerRefSnafu,
@@ -171,7 +172,7 @@ impl InformationSchemaSchemataBuilder {
         let table_metadata_manager = utils::table_meta_manager(&self.catalog_manager)?;
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager.schema_names(&catalog_name).await? {
+        for schema_name in catalog_manager.schema_names(&catalog_name, MySQL).await? {
             let opts = if let Some(table_metadata_manager) = &table_metadata_manager {
                 table_metadata_manager
                     .schema_manager()

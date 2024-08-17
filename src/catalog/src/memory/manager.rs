@@ -29,6 +29,7 @@ use futures_util::stream::BoxStream;
 use snafu::OptionExt;
 use table::TableRef;
 
+use crate::catalog_protocol::CatalogProtocol;
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::information_schema::InformationSchemaProvider;
 use crate::system_schema::SystemSchemaProvider;
@@ -53,7 +54,11 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(self.catalogs.read().unwrap().keys().cloned().collect())
     }
 
-    async fn schema_names(&self, catalog: &str) -> Result<Vec<String>> {
+    async fn schema_names(
+        &self,
+        catalog: &str,
+        _catalog_protocol: CatalogProtocol,
+    ) -> Result<Vec<String>> {
         Ok(self
             .catalogs
             .read()
@@ -87,7 +92,12 @@ impl CatalogManager for MemoryCatalogManager {
         self.catalog_exist_sync(catalog)
     }
 
-    async fn schema_exists(&self, catalog: &str, schema: &str) -> Result<bool> {
+    async fn schema_exists(
+        &self,
+        catalog: &str,
+        schema: &str,
+        _catalog_protocol: CatalogProtocol,
+    ) -> Result<bool> {
         self.schema_exist_sync(catalog, schema)
     }
 
@@ -108,6 +118,7 @@ impl CatalogManager for MemoryCatalogManager {
         catalog: &str,
         schema: &str,
         table_name: &str,
+        _catalog_protocol: CatalogProtocol,
     ) -> Result<Option<TableRef>> {
         let result = try {
             self.catalogs
@@ -371,6 +382,7 @@ mod tests {
                 DEFAULT_CATALOG_NAME,
                 DEFAULT_SCHEMA_NAME,
                 NUMBERS_TABLE_NAME,
+                CatalogProtocol::Other,
             )
             .await
             .unwrap()
@@ -384,7 +396,12 @@ mod tests {
         );
 
         assert!(catalog_list
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "not_exists")
+            .table(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "not_exists",
+                CatalogProtocol::Other
+            )
             .await
             .unwrap()
             .is_none());
@@ -411,7 +428,12 @@ mod tests {
         };
         catalog.register_table_sync(register_table_req).unwrap();
         assert!(catalog
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
+            .table(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                table_name,
+                CatalogProtocol::Other
+            )
             .await
             .unwrap()
             .is_some());
@@ -423,7 +445,12 @@ mod tests {
         };
         catalog.deregister_table_sync(deregister_table_req).unwrap();
         assert!(catalog
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
+            .table(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                table_name,
+                CatalogProtocol::Other
+            )
             .await
             .unwrap()
             .is_none());

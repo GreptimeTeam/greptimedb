@@ -951,6 +951,7 @@ mod test {
     use axum::handler::Handler;
     use axum::http::StatusCode;
     use axum::routing::get;
+    use catalog::catalog_protocol::CatalogProtocol;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
@@ -1017,7 +1018,12 @@ mod test {
             unimplemented!()
         }
 
-        async fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
+        async fn is_valid_schema(
+            &self,
+            _catalog: &str,
+            _schema: &str,
+            _catalog_protocol: CatalogProtocol,
+        ) -> Result<bool> {
             Ok(true)
         }
     }

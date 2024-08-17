@@ -21,6 +21,7 @@ use api::v1::greptime_request::Request;
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use axum::Router;
+use catalog::catalog_protocol::CatalogProtocol;
 use common_query::Output;
 use common_test_util::ports;
 use prost::Message;
@@ -124,7 +125,12 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
-    async fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
+    async fn is_valid_schema(
+        &self,
+        _catalog: &str,
+        _schema: &str,
+        _catalog_protocol: CatalogProtocol,
+    ) -> Result<bool> {
         Ok(true)
     }
 }

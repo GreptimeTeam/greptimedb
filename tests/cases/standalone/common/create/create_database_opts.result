@@ -10,7 +10,6 @@ SHOW DATABASES;
 | greptime_private   |
 | information_schema |
 | mydb               |
-| pg_catalog         |
 | public             |
 +--------------------+
 
@@ -22,7 +21,6 @@ SHOW FULL DATABASES;
 | greptime_private   |          |
 | information_schema |          |
 | mydb               | ttl='1h' |
-| pg_catalog         |          |
 | public             |          |
 +--------------------+----------+
 
@@ -67,7 +65,6 @@ SHOW DATABASES;
 +--------------------+
 | greptime_private   |
 | information_schema |
-| pg_catalog         |
 | public             |
 +--------------------+
 
