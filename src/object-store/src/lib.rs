@@ -24,3 +24,4 @@ pub mod manager;
 mod metrics;
 pub mod test_util;
 pub mod util;
+pub use opendal;
