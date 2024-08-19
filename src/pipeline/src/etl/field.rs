@@ -125,6 +125,22 @@ impl OneInputOneOutPutField {
         &self.input
     }
 
+    pub(crate) fn input_index(&self) -> usize {
+        self.input.index
+    }
+
+    pub(crate) fn input_name(&self) -> &str {
+        &self.input.name
+    }
+
+    pub(crate) fn output_index(&self) -> usize {
+        *self.output().1
+    }
+
+    pub(crate) fn output_name(&self) -> &str {
+        self.output().0
+    }
+
     pub(crate) fn output(&self) -> (&String, &usize) {
         if let Some((name, index)) = &self.output {
             (name, index)
@@ -150,6 +166,14 @@ impl OneInputMultiOutputField {
 
     pub(crate) fn input(&self) -> &InputFieldInfo {
         &self.input
+    }
+
+    pub(crate) fn input_index(&self) -> usize {
+        self.input.index
+    }
+
+    pub(crate) fn input_name(&self) -> &str {
+        &self.input.name
     }
 
     pub(crate) fn outputs(&self) -> BTreeMap<&String, &usize> {
@@ -230,11 +254,12 @@ impl Deref for NewFields {
     }
 }
 
-impl Iterator for NewFields {
+impl IntoIterator for NewFields {
     type Item = NewField;
+    type IntoIter = std::vec::IntoIter<NewField>;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.pop()
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 

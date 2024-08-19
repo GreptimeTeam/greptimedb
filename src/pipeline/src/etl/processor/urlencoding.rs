@@ -62,38 +62,18 @@ pub struct UrlEncodingProcessorBuilder {
 
 impl ProcessorBuilder for UrlEncodingProcessorBuilder {
     fn output_keys(&self) -> HashSet<&str> {
-        todo!()
+        self.fields
+            .iter()
+            .map(|f| f.target_or_input_field())
+            .collect()
     }
 
     fn input_keys(&self) -> HashSet<&str> {
-        todo!()
+        self.fields.iter().map(|f| f.input_field()).collect()
     }
 
     fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
-        let mut real_fields = vec![];
-        for field in self.fields.into_iter() {
-            let input_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.input_field())
-                // TODO (qtang): handler error
-                .unwrap();
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
-            let output_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.target_or_input_field())
-                .unwrap();
-            let input = OneInputOneOutPutField::new(
-                input_field_info,
-                (field.target_or_input_field().to_string(), output_index),
-            );
-            real_fields.push(input);
-        }
-        let processor = UrlEncodingProcessor {
-            fields: Fields::one(Field::new("test".to_string())),
-            real_fields,
-            method: self.method,
-            ignore_missing: self.ignore_missing,
-        };
+        let processor = Self::build(self, intermediate_keys);
         ProcessorKind::UrlEncoding(processor)
     }
 }
@@ -104,7 +84,7 @@ impl UrlEncodingProcessorBuilder {
         for field in self.fields.into_iter() {
             let input_index = intermediate_keys
                 .iter()
-                .position(|k| *k == field.input_field())
+                .position(|k| k == field.input_field())
                 // TODO (qtang): handler error
                 .unwrap();
             let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
@@ -119,7 +99,6 @@ impl UrlEncodingProcessorBuilder {
             real_fields.push(input);
         }
         UrlEncodingProcessor {
-            fields: Fields::one(Field::new("test".to_string())),
             real_fields,
             method: self.method,
             ignore_missing: self.ignore_missing,
@@ -130,45 +109,31 @@ impl UrlEncodingProcessorBuilder {
 /// only support string value
 #[derive(Debug, Default)]
 pub struct UrlEncodingProcessor {
-    fields: Fields,
     real_fields: Vec<OneInputOneOutPutField>,
     method: Method,
     ignore_missing: bool,
 }
 
 impl UrlEncodingProcessor {
-    fn with_fields(&mut self, mut fields: Fields) {
-        Self::update_output_keys(&mut fields);
-        self.fields = fields;
-    }
-
-    fn with_ignore_missing(&mut self, ignore_missing: bool) {
-        self.ignore_missing = ignore_missing;
-    }
-
-    fn with_method(&mut self, method: Method) {
-        self.method = method;
-    }
-
-    fn process_field(&self, val: &str, field: &Field) -> Result<Map, String> {
+    fn process_field(&self, val: &str) -> Result<Value, String> {
         let processed = match self.method {
             Method::Encode => encode(val).to_string(),
             Method::Decode => decode(val).map_err(|e| e.to_string())?.into_owned(),
         };
-        let val = Value::String(processed);
+        Ok(Value::String(processed))
 
-        let key = field.get_target_field();
+        // let key = field.get_target_field();
 
-        Ok(Map::one(key, val))
+        // Ok(Map::one(key, val))
     }
 
-    fn update_output_keys(fields: &mut Fields) {
-        for field in fields.iter_mut() {
-            field
-                .output_fields_index_mapping
-                .insert(field.get_target_field().to_string(), 0_usize);
-        }
-    }
+    // fn update_output_keys(fields: &mut Fields) {
+    //     for field in fields.iter_mut() {
+    //         field
+    //             .output_fields_index_mapping
+    //             .insert(field.get_target_field().to_string(), 0_usize);
+    //     }
+    // }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for UrlEncodingProcessorBuilder {
@@ -222,59 +187,21 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
         self.ignore_missing
     }
 
-    fn fields(&self) -> &Fields {
-        &self.fields
-    }
-
-    fn fields_mut(&mut self) -> &mut Fields {
-        &mut self.fields
-    }
-
-    fn output_keys(&self) -> HashSet<&str> {
-        self.real_fields
-            .iter()
-            .map(|f| f.output().0.as_str())
-            .collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.real_fields
-            .iter()
-            .map(|f| f.input().name.as_str())
-            .collect()
-    }
-
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        match val {
-            Value::String(val) => self.process_field(val, field),
-            _ => Err(format!(
-                "{} processor: expect string value, but got {val:?}",
-                self.kind()
-            )),
-        }
-    }
-
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.fields.iter() {
-            let index = field.input_field.index;
+        for field in self.real_fields.iter() {
+            let index = field.input_index();
             match val.get(index) {
                 Some(Value::String(s)) => {
-                    let mut map = self.process_field(s, field)?;
-                    field
-                        .output_fields_index_mapping
-                        .iter()
-                        .for_each(|(k, output_index)| {
-                            if let Some(v) = map.remove(k) {
-                                val[*output_index] = v;
-                            }
-                        });
+                    let result = self.process_field(s)?;
+                    let output_index = field.output_index();
+                    val[output_index] = result;
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return Err(format!(
                             "{} processor: missing field: {}",
                             self.kind(),
-                            field.get_field_name()
+                            field.output_name()
                         ));
                     }
                 }
@@ -292,29 +219,28 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
 
 #[cfg(test)]
 mod tests {
-    use crate::etl::field::{Field, Fields};
+
     use crate::etl::processor::urlencoding::UrlEncodingProcessor;
-    use crate::etl::value::{Map, Value};
+    use crate::etl::value::Value;
 
     #[test]
     fn test_decode_url() {
-        let field = "url";
-        let ff: Field = field.parse().unwrap();
-
         let decoded = "//BC/[a=6.7.8.9,c=g,k=0,l=1]";
         let encoded = "%2F%2FBC%2F%5Ba%3D6.7.8.9%2Cc%3Dg%2Ck%3D0%2Cl%3D1%5D";
 
-        let mut processor = UrlEncodingProcessor::default();
-        processor.with_fields(Fields::one(ff.clone()));
-
         {
-            let result = processor.process_field(encoded, &ff).unwrap();
-            assert_eq!(Map::one(field, Value::String(decoded.into())), result)
+            let processor = UrlEncodingProcessor::default();
+            let result = processor.process_field(encoded).unwrap();
+            assert_eq!(Value::String(decoded.into()), result)
         }
         {
-            processor.with_method(super::Method::Encode);
-            let result = processor.process_field(decoded, &ff).unwrap();
-            assert_eq!(Map::one(field, Value::String(encoded.into())), result)
+            let processor = UrlEncodingProcessor {
+                real_fields: vec![],
+                method: super::Method::Encode,
+                ignore_missing: false,
+            };
+            let result = processor.process_field(decoded).unwrap();
+            assert_eq!(Value::String(encoded.into()), result)
         }
     }
 }

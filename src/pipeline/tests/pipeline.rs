@@ -464,10 +464,7 @@ fn test_simple_data() {
     "line": "2024-05-25 20:16:37.217 hello world"
 }
 "#;
-    let input_value: Value = serde_json::from_str::<serde_json::Value>(input_value_str)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let input_value = serde_json::from_str::<serde_json::Value>(input_value_str).unwrap();
 
     let pipeline_yaml = r#"
 processors:
@@ -493,11 +490,13 @@ transform:
 
     let yaml_content = Content::Yaml(pipeline_yaml.into());
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
-    let output = pipeline.exec(input_value).unwrap();
-    let r = output
-        .rows
+
+    let mut status = pipeline.init_intermediate_state();
+    pipeline.prepare(input_value, &mut status).unwrap();
+    let row = pipeline.exec_mut(&mut status).unwrap();
+    let r = row
+        .values
         .into_iter()
-        .flat_map(|v| v.values)
         .map(|v| v.value_data.unwrap())
         .collect::<Vec<_>>();
 

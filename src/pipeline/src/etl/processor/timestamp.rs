@@ -22,8 +22,7 @@ use lazy_static::lazy_static;
 use super::{yaml_new_field, yaml_new_fileds, yaml_strings, ProcessorBuilder, ProcessorKind};
 use crate::etl::field::{Field, Fields, InputFieldInfo, NewFields, OneInputOneOutPutField};
 use crate::etl::processor::{
-    update_one_one_output_keys, yaml_bool, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME,
+    yaml_bool, yaml_string, Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::time::{
     MICROSECOND_RESOLUTION, MICRO_RESOLUTION, MILLISECOND_RESOLUTION, MILLI_RESOLUTION,
@@ -110,19 +109,22 @@ impl std::ops::Deref for Formats {
 
 #[derive(Debug)]
 pub struct TimestampProcessorBuilder {
-    pub(crate) fields: NewFields,
-    pub(crate) formats: Formats,
-    pub(crate) resolution: Resolution,
-    pub(crate) ignore_missing: bool,
+    fields: NewFields,
+    formats: Formats,
+    resolution: Resolution,
+    ignore_missing: bool,
 }
 
 impl ProcessorBuilder for TimestampProcessorBuilder {
     fn output_keys(&self) -> HashSet<&str> {
-        todo!()
+        self.fields
+            .iter()
+            .map(|f| f.target_or_input_field())
+            .collect()
     }
 
     fn input_keys(&self) -> HashSet<&str> {
-        todo!()
+        self.fields.iter().map(|f| f.input_field()).collect()
     }
 
     fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
@@ -145,7 +147,6 @@ impl ProcessorBuilder for TimestampProcessorBuilder {
             real_fields.push(input);
         }
         let processor = TimestampProcessor {
-            fields: Fields::one(Field::new("test".to_string())),
             real_fields: real_fields,
             formats: self.formats,
             resolution: self.resolution,
@@ -176,7 +177,6 @@ impl TimestampProcessorBuilder {
             real_fields.push(input);
         }
         TimestampProcessor {
-            fields: Fields::one(Field::new("test".to_string())),
             real_fields: real_fields,
             formats: self.formats,
             resolution: self.resolution,
@@ -188,7 +188,6 @@ impl TimestampProcessorBuilder {
 /// support string, integer, float, time, epoch
 #[derive(Debug, Default)]
 pub struct TimestampProcessor {
-    fields: Fields,
     real_fields: Vec<OneInputOneOutPutField>,
     formats: Formats,
     resolution: Resolution,
@@ -201,29 +200,6 @@ pub struct TimestampProcessor {
 }
 
 impl TimestampProcessor {
-    fn with_fields(&mut self, mut fields: Fields) {
-        update_one_one_output_keys(&mut fields);
-        self.fields = fields
-    }
-
-    fn with_resolution(&mut self, resolution: Resolution) {
-        self.resolution = resolution;
-    }
-
-    fn with_formats(&mut self, v: Option<Vec<(Arc<String>, Tz)>>) {
-        let v = match v {
-            Some(v) if !v.is_empty() => v,
-            _ => DEFAULT_FORMATS.clone(),
-        };
-
-        let formats = Formats::new(v);
-        self.formats = formats;
-    }
-
-    fn with_ignore_missing(&mut self, ignore_missing: bool) {
-        self.ignore_missing = ignore_missing;
-    }
-
     /// try to parse val with timezone first, if failed, parse without timezone
     fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<i64, String> {
         if let Ok(dt) = DateTime::parse_from_str(val, fmt) {
@@ -383,32 +359,6 @@ impl Processor for TimestampProcessor {
         self.ignore_missing
     }
 
-    fn fields(&self) -> &Fields {
-        &self.fields
-    }
-
-    fn fields_mut(&mut self) -> &mut Fields {
-        &mut self.fields
-    }
-
-    fn output_keys(&self) -> HashSet<&str> {
-        self.real_fields
-            .iter()
-            .map(|f| f.output().0.as_str())
-            .collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.real_fields
-            .iter()
-            .map(|f| f.input().name.as_str())
-            .collect()
-    }
-
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        self.process_field(val, field)
-    }
-
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
         for field in self.real_fields.iter() {
             let index = field.input().index;
@@ -438,12 +388,10 @@ mod tests {
     use yaml_rust::YamlLoader;
 
     use super::{TimestampProcessor, TimestampProcessorBuilder};
-    use crate::etl::field::Fields;
     use crate::etl::value::{Timestamp, Value};
 
     fn builder_to_native_processor(builder: TimestampProcessorBuilder) -> TimestampProcessor {
         TimestampProcessor {
-            fields: Fields::default(),
             real_fields: vec![],
             formats: builder.formats,
             resolution: builder.resolution,

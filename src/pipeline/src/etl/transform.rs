@@ -17,8 +17,7 @@ pub mod transformer;
 
 use itertools::Itertools;
 
-use crate::etl::field::Fields;
-use crate::etl::processor::{update_one_one_output_keys, yaml_field, yaml_fields, yaml_string};
+use crate::etl::processor::yaml_string;
 use crate::etl::transform::index::Index;
 use crate::etl::value::Value;
 
@@ -31,7 +30,7 @@ const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
 pub use transformer::greptime::GreptimeTransformer;
 
-use super::field::{Field, InputFieldInfo, NewFields, OneInputOneOutPutField};
+use super::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
 use super::processor::{yaml_new_field, yaml_new_fileds};
 
 pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
@@ -47,7 +46,7 @@ pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
 }
 
 /// On Failure behavior when transform fails
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Copy)]
 pub enum OnFailure {
     // Return None if transform fails
     #[default]
@@ -190,7 +189,7 @@ pub struct TransformBuilder {
 impl TransformBuilder {
     pub fn build(self, intermediate_keys: &[String], output_keys: &[String]) -> Transform {
         let mut real_fields = vec![];
-        for field in self.fields.into_iter() {
+        for field in self.fields {
             let input_index = intermediate_keys
                 .iter()
                 .position(|k| *k == field.input_field())
@@ -208,7 +207,6 @@ impl TransformBuilder {
             real_fields.push(input);
         }
         Transform {
-            fields: Fields::one(Field::new("test".to_string())),
             real_fields,
             type_: self.type_,
             default: self.default,
@@ -221,7 +219,6 @@ impl TransformBuilder {
 /// only field is required
 #[derive(Debug, Clone)]
 pub struct Transform {
-    pub fields: Fields,
     pub real_fields: Vec<OneInputOneOutPutField>,
 
     pub type_: Value,
@@ -262,7 +259,6 @@ impl std::fmt::Display for Transform {
 impl Default for Transform {
     fn default() -> Self {
         Transform {
-            fields: Fields::default(),
             real_fields: Vec::new(),
             type_: Value::Null,
             default: None,

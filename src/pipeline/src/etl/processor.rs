@@ -63,56 +63,14 @@ const SEPARATOR_NAME: &str = "separator";
 /// The output of a processor is a map of key-value pairs that will be merged into the document when you use exec_map method.
 #[enum_dispatch(ProcessorKind)]
 pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
-    /// Get the processor's fields
-    /// fields is just the same processor for multiple keys. It is not the case that a processor has multiple inputs
-    fn fields(&self) -> &Fields;
-
-    /// Get the processor's fields mutably
-    fn fields_mut(&mut self) -> &mut Fields;
-
     /// Get the processor's kind
     fn kind(&self) -> &str;
 
     /// Whether to ignore missing
     fn ignore_missing(&self) -> bool;
 
-    /// processor all output keys
-    /// if a processor has multiple output keys, it should return all of them
-    fn output_keys(&self) -> HashSet<&str>;
-
-    fn input_keys(&self) -> HashSet<&str>;
-    /// Execute the processor on a document
-    /// and return a map of key-value pairs
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String>;
-
     /// Execute the processor on a vector which be preprocessed by the pipeline
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String>;
-
-    /// Execute the processor on a map
-    /// and merge the output into the original map
-    fn exec_map(&self, map: &mut Map) -> Result<(), String> {
-        for ff @ Field {
-            input_field: field_info,
-            ..
-        } in self.fields().iter()
-        {
-            match map.get(&field_info.name) {
-                Some(v) => {
-                    map.extend(self.exec_field(v, ff)?);
-                }
-                None if self.ignore_missing() => {}
-                None => {
-                    return Err(format!(
-                        "{} processor: field '{}' is required but missing in {map}",
-                        self.kind(),
-                        field_info.name,
-                    ))
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
 
 #[derive(Debug)]

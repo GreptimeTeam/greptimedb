@@ -15,10 +15,11 @@
 use ahash::HashSet;
 use urlencoding::decode;
 
-use super::{yaml_new_field, yaml_new_fileds, Processor, ProcessorBuilder, ProcessorKind};
+// use super::{yaml_new_field, yaml_new_fileds, Processor, ProcessorBuilder, ProcessorKind};
 use crate::etl::field::{Field, Fields, NewFields, OneInputMultiOutputField};
 use crate::etl::processor::{
-    yaml_bool, yaml_field, yaml_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fileds, Processor, ProcessorBuilder, ProcessorKind,
+    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::{Map, Value};
 
@@ -77,10 +78,10 @@ impl ProcessorBuilder for CmcdProcessorBuilder {
     }
 
     fn input_keys(&self) -> HashSet<&str> {
-        todo!()
+        self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
+    fn build(self, _intermediate_keys: &[String]) -> ProcessorKind {
         todo!()
     }
 }
@@ -246,7 +247,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessorBuilder {
     }
 }
 
-impl crate::etl::processor::Processor for CmcdProcessor {
+impl Processor for CmcdProcessor {
     fn kind(&self) -> &str {
         PROCESSOR_CMCD
     }
@@ -255,54 +256,37 @@ impl crate::etl::processor::Processor for CmcdProcessor {
         self.ignore_missing
     }
 
-    fn fields(&self) -> &Fields {
-        &self.fields
-    }
-
-    fn fields_mut(&mut self) -> &mut Fields {
-        &mut self.fields
-    }
-
-    // fn output_keys(&self) -> HashSet<String> {
-    //     self.fields
-    //         .iter()
-    //         .map(|field| {
-    //             field
-    //                 .target_field
-    //                 .clone()
-    //                 .unwrap_or_else(|| field.get_field_name().to_string())
-    //         })
-    //         .flat_map(|keys| {
-    //             CMCD_KEYS
-    //                 .iter()
-    //                 .map(move |key| format!("{}_{}", keys, *key))
-    //         })
-    //         .collect()
+    //TODO (qtang): Implement this method.
+    // fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+    //     for field in self.real_fields.iter() {
+    //         match val.get(field.input().index) {
+    //             Some(Value::String(v)) => {
+    //                 let map = Self::p(v, field)?;
+    //                 for (k, v) in map.values.into_iter() {
+    //                     if let Some(index) = field.outputs().get(&k) {
+    //                         val[*index] = v;
+    //                     }
+    //                 }
+    //             }
+    //             Some(Value::Null) | None => {
+    //                 if !self.ignore_missing {
+    //                     return Err(format!(
+    //                         "{} processor: missing field: {}",
+    //                         self.kind(),
+    //                         field.input().name
+    //                     ));
+    //                 }
+    //             }
+    //             Some(v) => {
+    //                 return Err(format!(
+    //                     "{} processor: expect string value, but got {v:?}",
+    //                     self.kind()
+    //                 ));
+    //             }
+    //         }
+    //     }
+    //     Ok(())
     // }
-
-    fn output_keys(&self) -> HashSet<&str> {
-        self.real_fields
-            .iter()
-            .flat_map(|f| f.outputs().into_keys().map(|k| k.as_str()))
-            .collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.real_fields
-            .iter()
-            .map(|field| field.input().name.as_str())
-            .collect()
-    }
-
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        match val {
-            Value::String(val) => self.process_field(val, field),
-            _ => Err(format!(
-                "{} processor: expect string value, but got {val:?}",
-                self.kind()
-            )),
-        }
-    }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
         for field in self.fields.iter() {
