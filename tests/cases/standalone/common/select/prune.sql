@@ -25,6 +25,6 @@ select * from demo where collector='disk' order by ts;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
-explain analyze select * from demo where idc='idc1' order by ts;
+explain analyze select * from demo where idc='idc1';
 
 drop table demo;
