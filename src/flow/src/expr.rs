@@ -23,8 +23,7 @@ mod relation;
 mod scalar;
 mod signature;
 
-use arrow::array::BooleanArray;
-use datatypes::prelude::{ConcreteDataType, DataType};
+use datatypes::prelude::DataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 pub(crate) use df_func::{DfScalarFunction, RawDfScalarFn};
@@ -35,9 +34,9 @@ use itertools::Itertools;
 pub(crate) use linear::{MapFilterProject, MfpPlan, SafeMfpPlan};
 pub(crate) use relation::{AggregateExpr, AggregateFunc};
 pub(crate) use scalar::{ScalarExpr, TypedExpr};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 
-use crate::expr::error::{DataTypeSnafu, TypeMismatchSnafu};
+use crate::expr::error::DataTypeSnafu;
 
 /// A batch of vectors with the same length but without schema, only useful in dataflow
 ///
