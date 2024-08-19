@@ -30,7 +30,6 @@ tokio.workspace = true
 object-store.workspace = true
 bytes.workspace = true
 
-
 [dev-dependencies]
 async-stream.workspace = true
 common-meta.workspace = true
