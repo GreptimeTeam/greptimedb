@@ -12,14 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::collections::VecDeque;
-use std::iter::Peekable;
-use std::marker::PhantomData;
-use std::ops::{Add, Mul, Range, Sub};
+use std::ops::Range;
 
-use chrono::format::Item;
-use itertools::Itertools;
 use store_api::logstore::EntryId;
 
 use crate::kafka::util::range::{ConvertIndexToRange, MergeRange};
@@ -197,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_region_wal_range() {
-        let mut range = RegionWalRange::new(0..1024, 1024);
+        let range = RegionWalRange::new(0..1024, 1024);
         assert_eq!(
             range.next_batch_hint(10),
             Some(NextBatchHint {

@@ -16,11 +16,12 @@ use common_telemetry::error;
 use rskafka::client::partition::OffsetAt;
 use snafu::ResultExt;
 
+use super::DumpIndexRequest;
 use crate::error;
 use crate::kafka::worker::BackgroundProducerWorker;
 
 impl BackgroundProducerWorker {
-    pub(crate) async fn do_checkpoint(&mut self) {
+    pub(crate) async fn dump_index(&mut self, req: DumpIndexRequest) {
         match self
             .client
             .get_offset(OffsetAt::Latest)
@@ -28,7 +29,11 @@ impl BackgroundProducerWorker {
             .context(error::GetOffsetSnafu {
                 topic: &self.provider.topic,
             }) {
-            Ok(offset) => self.index_collector.set_latest_entry_id(offset as u64),
+            Ok(offset) => {
+                self.index_collector.set_latest_entry_id(offset as u64);
+                self.index_collector.dump(req.encoder.as_ref());
+                let _ = req.sender.send(());
+            }
             Err(err) => error!(err; "Failed to do checkpoint"),
         }
     }

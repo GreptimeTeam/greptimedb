@@ -417,7 +417,12 @@ impl LogStore for RaftEngineLogStore {
         }))
     }
 
-    async fn obsolete(&self, provider: &Provider, entry_id: EntryId) -> Result<()> {
+    async fn obsolete(
+        &self,
+        provider: &Provider,
+        _region_id: RegionId,
+        entry_id: EntryId,
+    ) -> Result<()> {
         let ns = provider
             .as_raft_engine_provider()
             .with_context(|| InvalidProviderSnafu {
@@ -637,7 +642,8 @@ mod tests {
         let dir = create_temp_dir("raft-engine-logstore-test");
         let logstore = new_test_log_store(&dir).await;
 
-        let namespace_id = 42;
+        let region_id = RegionId::new(1, 1);
+        let namespace_id = region_id.as_u64();
         let namespace = Provider::raft_engine_provider(namespace_id);
         for id in 0..4096 {
             let entry = EntryImpl::create(id, namespace_id, [b'x'; 4096].to_vec()).into();
@@ -645,7 +651,10 @@ mod tests {
         }
 
         let before_purge = wal_dir_usage(dir.path().to_str().unwrap()).await;
-        logstore.obsolete(&namespace, 4000).await.unwrap();
+        logstore
+            .obsolete(&namespace, region_id, 4000)
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_secs(6)).await;
         let after_purge = wal_dir_usage(dir.path().to_str().unwrap()).await;
@@ -662,14 +671,15 @@ mod tests {
         let dir = create_temp_dir("raft-engine-logstore-test");
         let logstore = new_test_log_store(&dir).await;
 
-        let namespace_id = 42;
+        let region_id = RegionId::new(1, 1);
+        let namespace_id = region_id.as_u64();
         let namespace = Provider::raft_engine_provider(namespace_id);
         for id in 0..1024 {
             let entry = EntryImpl::create(id, namespace_id, [b'x'; 4096].to_vec()).into();
             let _ = logstore.append(entry).await.unwrap();
         }
 
-        logstore.obsolete(&namespace, 100).await.unwrap();
+        logstore.obsolete(&namespace, region_id, 100).await.unwrap();
         assert_eq!(101, logstore.engine.first_index(namespace_id).unwrap());
 
         let res = logstore.read(&namespace, 100).await.unwrap();
