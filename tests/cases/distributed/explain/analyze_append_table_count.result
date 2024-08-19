@@ -18,17 +18,21 @@ WITH(
 Affected Rows: 0
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN ANALYZE SELECT count(*) FROM test_table;
 
-+-------+------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| stage | node | plan                                                                                                                                                                               |
-+-------+------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| 0     | 0    |  MergeScanExec: REDACTED
-|       |      |                                                                                                                                                                                    |
-| 1     | 0    |  ProjectionExec: expr=[0 as COUNT(test_table.timestamp)] REDACTED
-|       |      |   common_recordbatch::adapter::MetricCollector REDACTED
-|       |      |                                                                                                                                                                                    |
-|       |      | Total rows: 1                                                                                                                                                                      |
-+-------+------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[0 as COUNT(test_table.timestamp)] REDACTED
+|_|_|_common_recordbatch::adapter::MetricCollector REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
 
