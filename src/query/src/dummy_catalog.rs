@@ -17,7 +17,9 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
+use api::v1::SemanticType;
 use async_trait::async_trait;
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_recordbatch::OrderOption;
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList};
@@ -177,7 +179,27 @@ impl TableProvider for DummyTableProvider {
         &self,
         filters: &[&Expr],
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
-        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
+        let supported = filters
+            .iter()
+            .map(|e| {
+                // Simple filter on primary key columns are precisely evaluated.
+                if let Some(simple_filter) = SimpleFilterEvaluator::try_new(e) {
+                    if self
+                        .metadata
+                        .column_by_name(simple_filter.column_name())
+                        .and_then(|c| (c.semantic_type == SemanticType::Tag).then_some(()))
+                        .is_some()
+                    {
+                        TableProviderFilterPushDown::Exact
+                    } else {
+                        TableProviderFilterPushDown::Inexact
+                    }
+                } else {
+                    TableProviderFilterPushDown::Inexact
+                }
+            })
+            .collect();
+        Ok(supported)
     }
 }
 
