@@ -125,5 +125,14 @@ pub const fn version() -> &'static str {
 }
 
 pub const fn short_version() -> &'static str {
-    const_format::formatcp!("{}-{}", BUILD_INFO.branch, BUILD_INFO.commit_short,)
+    const BRANCH: &str = BUILD_INFO.branch;
+    const COMMIT_ID: &str = BUILD_INFO.commit_short;
+
+    // When git checkout to a commit, the branch is empty.
+    #[allow(clippy::const_is_empty)]
+    if !BRANCH.is_empty() {
+        const_format::formatcp!("{}-{}", BRANCH, COMMIT_ID)
+    } else {
+        COMMIT_ID
+    }
 }

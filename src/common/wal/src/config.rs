@@ -30,6 +30,7 @@ pub enum MetasrvWalConfig {
     Kafka(MetasrvKafkaConfig),
 }
 
+#[allow(clippy::large_enum_variant)]
 /// Wal configurations for datanode.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "provider", rename_all = "snake_case")]
@@ -223,6 +224,7 @@ mod tests {
                 replication_factor: 1,
                 create_topic_timeout: Duration::from_secs(30),
             },
+            ..Default::default()
         };
         assert_eq!(datanode_wal_config, DatanodeWalConfig::Kafka(expected));
     }

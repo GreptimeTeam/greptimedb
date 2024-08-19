@@ -89,7 +89,7 @@ impl<S: LogStore> Wal<S> {
         move |region_id, last_entry_id, provider| -> BoxFuture<'_, Result<()>> {
             Box::pin(async move {
                 store
-                    .obsolete(provider, last_entry_id)
+                    .obsolete(provider, region_id, last_entry_id)
                     .await
                     .map_err(BoxedError::new)
                     .context(DeleteWalSnafu { region_id })
@@ -142,7 +142,7 @@ impl<S: LogStore> Wal<S> {
         provider: &Provider,
     ) -> Result<()> {
         self.store
-            .obsolete(provider, last_id)
+            .obsolete(provider, region_id, last_id)
             .await
             .map_err(BoxedError::new)
             .context(DeleteWalSnafu { region_id })

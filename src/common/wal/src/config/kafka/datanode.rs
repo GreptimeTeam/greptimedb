@@ -40,6 +40,9 @@ pub struct DatanodeKafkaConfig {
     /// The kafka topic config.
     #[serde(flatten)]
     pub kafka_topic: KafkaTopicConfig,
+    pub create_index: bool,
+    #[serde(with = "humantime_serde")]
+    pub dump_index_interval: Duration,
 }
 
 impl Default for DatanodeKafkaConfig {
@@ -51,6 +54,8 @@ impl Default for DatanodeKafkaConfig {
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig::default(),
             kafka_topic: KafkaTopicConfig::default(),
+            create_index: true,
+            dump_index_interval: Duration::from_secs(60),
         }
     }
 }

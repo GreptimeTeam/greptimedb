@@ -68,7 +68,10 @@ pub(crate) struct ClientManager {
 
 impl ClientManager {
     /// Tries to create a ClientManager.
-    pub(crate) async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
+    pub(crate) async fn try_new(
+        config: &DatanodeKafkaConfig,
+        global_index_collector: Option<GlobalIndexCollector>,
+    ) -> Result<Self> {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
         let backoff_config = BackoffConfig {
             init_backoff: config.backoff.init,
@@ -97,7 +100,7 @@ impl ClientManager {
             instances: RwLock::new(HashMap::new()),
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
             compression: Compression::Lz4,
-            global_index_collector: None,
+            global_index_collector,
         })
     }
 
@@ -148,7 +151,9 @@ impl ClientManager {
 
         let (tx, rx) = OrderedBatchProducer::channel();
         let index_collector = if let Some(global_collector) = self.global_index_collector.as_ref() {
-            global_collector.provider_level_index_collector(provider.clone(), tx.clone())
+            global_collector
+                .provider_level_index_collector(provider.clone(), tx.clone())
+                .await
         } else {
             Box::new(NoopCollector)
         };
@@ -162,6 +167,10 @@ impl ClientManager {
         ));
 
         Ok(Client { client, producer })
+    }
+
+    pub(crate) fn global_index_collector(&self) -> Option<&GlobalIndexCollector> {
+        self.global_index_collector.as_ref()
     }
 }
 
@@ -219,7 +228,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let manager = ClientManager::try_new(&config).await.unwrap();
+        let manager = ClientManager::try_new(&config, None).await.unwrap();
 
         (manager, topics)
     }

@@ -13,18 +13,19 @@
 // limitations under the License.
 
 pub(crate) mod client_manager;
-// TODO(weny): remove it
-#[allow(dead_code)]
 pub(crate) mod consumer;
-#[allow(unused)]
+/// TODO(weny): remove it.
+#[allow(dead_code)]
+#[allow(unused_imports)]
 pub(crate) mod index;
 pub mod log_store;
 pub(crate) mod producer;
 pub(crate) mod util;
-// TODO(weny): remove it
+/// TODO(weny): remove it.
 #[allow(dead_code)]
 pub(crate) mod worker;
 
+pub use index::{default_index_file, GlobalIndexCollector};
 use serde::{Deserialize, Serialize};
 use store_api::logstore::entry::Id as EntryId;
 

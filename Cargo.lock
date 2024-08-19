@@ -3171,6 +3171,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "delta-encoding"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f8513a5eeb3d7b9149563409dc4ab6fd9de5767fd285af5b4d0ee1b778fbce0"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "der"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5806,10 +5815,12 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-wal",
+ "delta-encoding",
  "futures",
  "futures-util",
  "itertools 0.10.5",
  "lazy_static",
+ "object-store",
  "pin-project",
  "prometheus",
  "protobuf",
