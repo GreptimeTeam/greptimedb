@@ -90,15 +90,21 @@ impl<'referred, 'df> Context<'referred, 'df> {
     /// Like `render_plan` but in Batch Mode
     pub fn render_plan_batch(&mut self, plan: TypedPlan) -> Result<CollectionBundle<Batch>, Error> {
         match plan.plan {
-            Plan::Constant { rows } => todo!(),
-            Plan::Get { id } => todo!(),
-            Plan::Let { id, value, body } => todo!(),
+            Plan::Constant { rows } => Ok(self.render_constant_batch(rows)),
+            Plan::Get { .. } => NotImplementedSnafu {
+                reason: "Get is still WIP in batchmode",
+            }
+            .fail(),
+            Plan::Let { .. } => NotImplementedSnafu {
+                reason: "Let is still WIP in batchmode",
+            }
+            .fail(),
             Plan::Mfp { input, mfp } => self.render_mfp_batch(input, mfp),
             Plan::Reduce {
                 input,
                 key_val_plan,
                 reduce_plan,
-            } => todo!(),
+            } => self.render_reduce_batch(input, &key_val_plan, &reduce_plan, &plan.schema.typ),
             Plan::Join { .. } => NotImplementedSnafu {
                 reason: "Join is still WIP",
             }
@@ -133,6 +139,53 @@ impl<'referred, 'df> Context<'referred, 'df> {
             }
             .fail(),
         }
+    }
+
+    /// render Constant, take all rows that have a timestamp not greater than the current time
+    ///
+    /// Always assume input is sorted by timestamp
+    pub fn render_constant_batch(&mut self, rows: Vec<DiffRow>) -> CollectionBundle<Batch> {
+        let (send_port, recv_port) = self.df.make_edge::<_, Toff<Batch>>("constant_batch");
+        let mut per_time: BTreeMap<repr::Timestamp, Vec<DiffRow>> = rows
+            .into_iter()
+            .group_by(|(_row, ts, _diff)| *ts)
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect_vec()))
+            .collect();
+        let now = self.compute_state.current_time_ref();
+        // TODO(discord9): better way to schedule future run
+        let scheduler = self.compute_state.get_scheduler();
+        let scheduler_inner = scheduler.clone();
+
+        let err_collector = self.err_collector.clone();
+
+        let subgraph_id =
+            self.df
+                .add_subgraph_source("ConstantBatch", send_port, move |_ctx, send_port| {
+                    // find the first timestamp that is greater than now
+                    // use filter_map
+
+                    let mut after = per_time.split_off(&(*now.borrow() + 1));
+                    // swap
+                    std::mem::swap(&mut per_time, &mut after);
+                    let not_great_than_now = after;
+
+                    not_great_than_now.into_iter().for_each(|(_ts, rows)| {
+                        err_collector.run(|| {
+                            let rows = rows.into_iter().map(|(row, _ts, _diff)| row).collect();
+                            let batch = Batch::try_from_rows(rows)?;
+                            send_port.give(vec![batch]);
+                            Ok(())
+                        });
+                    });
+                    // schedule the next run
+                    if let Some(next_run_time) = per_time.keys().next().copied() {
+                        scheduler_inner.schedule_at(next_run_time);
+                    }
+                });
+        scheduler.set_cur_subgraph(subgraph_id);
+
+        CollectionBundle::from_collection(Collection::from_port(recv_port))
     }
 
     /// render Constant, take all rows that have a timestamp not greater than the current time

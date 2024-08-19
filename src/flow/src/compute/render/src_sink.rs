@@ -186,7 +186,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
             move |_ctx, recv| {
                 let data = recv.take_inner();
                 for batch in data.into_iter().flat_map(|i| i.into_iter()) {
-                    // if the sender is closed unexpectly, stop sending
+                    // if the sender is closed unexpectedly, stop sending
                     if sender.is_closed() || sender.send(batch).is_err() {
                         common_telemetry::error!("UnboundedSinkBatch is closed");
                         break;
