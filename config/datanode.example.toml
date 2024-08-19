@@ -187,6 +187,14 @@ backoff_base = 2
 ## **It's only used when the provider is `kafka`**.
 backoff_deadline = "5mins"
 
+## Whether to enable WAL index creation.
+## **It's only used when the provider is `kafka`**.
+create_index = true
+
+## The interval for dumping WAL indexes.
+## **It's only used when the provider is `kafka`**.
+dump_index_interval = "60s"
+
 # The Kafka SASL configuration.
 # **It's only used when the provider is `kafka`**.
 # Available SASL mechanisms:

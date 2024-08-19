@@ -25,10 +25,12 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
+delta-encoding = "0.4"
 futures.workspace = true
 futures-util.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
+object-store.workspace = true
 pin-project.workspace = true
 prometheus.workspace = true
 protobuf = { version = "2", features = ["bytes"] }

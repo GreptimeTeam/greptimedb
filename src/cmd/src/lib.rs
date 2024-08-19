@@ -30,7 +30,7 @@ pub mod standalone;
 
 lazy_static::lazy_static! {
     static ref APP_VERSION: prometheus::IntGaugeVec =
-        prometheus::register_int_gauge_vec!("greptime_app_version", "app version", &["short_version", "version"]).unwrap();
+        prometheus::register_int_gauge_vec!("greptime_app_version", "app version", &["version", "short_version"]).unwrap();
 }
 
 #[async_trait]
@@ -74,16 +74,16 @@ pub trait App: Send {
 }
 
 /// Log the versions of the application, and the arguments passed to the cli.
-/// `version_string` should be the same as the output of cli "--version";
-/// and the `app_version` is the short version of the codes, often consist of git branch and commit.
-pub fn log_versions(version_string: &str, app_version: &str) {
+/// `version` should be the same as the output of cli "--version";
+/// and the `short_version` is the short version of the codes, often consist of git branch and commit.
+pub fn log_versions(version: &str, short_version: &str) {
     // Report app version as gauge.
     APP_VERSION
-        .with_label_values(&[env!("CARGO_PKG_VERSION"), app_version])
+        .with_label_values(&[env!("CARGO_PKG_VERSION"), short_version])
         .inc();
 
     // Log version and argument flags.
-    info!("GreptimeDB version: {}", version_string);
+    info!("GreptimeDB version: {}", version);
 
     log_env_flags();
 }

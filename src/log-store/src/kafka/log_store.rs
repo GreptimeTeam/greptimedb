@@ -32,6 +32,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
+use crate::kafka::index::GlobalIndexCollector;
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
     convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
@@ -51,8 +52,12 @@ pub struct KafkaLogStore {
 
 impl KafkaLogStore {
     /// Tries to create a Kafka log store.
-    pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
-        let client_manager = Arc::new(ClientManager::try_new(config).await?);
+    pub async fn try_new(
+        config: &DatanodeKafkaConfig,
+        global_index_collector: Option<GlobalIndexCollector>,
+    ) -> Result<Self> {
+        let client_manager =
+            Arc::new(ClientManager::try_new(config, global_index_collector).await?);
 
         Ok(Self {
             client_manager,
@@ -329,7 +334,21 @@ impl LogStore for KafkaLogStore {
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, _provider: &Provider, _entry_id: EntryId) -> Result<()> {
+    async fn obsolete(
+        &self,
+        provider: &Provider,
+        region_id: RegionId,
+        entry_id: EntryId,
+    ) -> Result<()> {
+        if let Some(collector) = self.client_manager.global_index_collector() {
+            let provider = provider
+                .as_kafka_provider()
+                .with_context(|| InvalidProviderSnafu {
+                    expected: KafkaProvider::type_name(),
+                    actual: provider.type_name(),
+                })?;
+            collector.truncate(provider, region_id, entry_id).await?;
+        }
         Ok(())
     }
 
@@ -468,7 +487,7 @@ mod tests {
             max_batch_bytes: ReadableSize::kb(32),
             ..Default::default()
         };
-        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
+        let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
         let topic_name = uuid::Uuid::new_v4().to_string();
         let provider = Provider::kafka_provider(topic_name);
         let region_entries = (0..5)
@@ -540,7 +559,7 @@ mod tests {
             max_batch_bytes: ReadableSize::kb(8),
             ..Default::default()
         };
-        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
+        let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
         let topic_name = uuid::Uuid::new_v4().to_string();
         let provider = Provider::kafka_provider(topic_name);
         let region_entries = (0..5)
