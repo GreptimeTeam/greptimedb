@@ -597,6 +597,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - if: matrix.mode.kafka
+        name: Setup kafka server
+        working-directory: tests-integration/fixtures/kafka
+        run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -604,10 +608,6 @@ jobs:
           path: .
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
-      - if: matrix.mode.kafka
-        name: Setup kafka server
-        working-directory: tests-integration/fixtures/kafka
-        run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
         run: RUST_BACKTRACE=1 ./bins/sqlness-runner ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
       - name: Upload sqlness logs
