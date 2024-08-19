@@ -14,9 +14,10 @@
 
 use std::mem::size_of;
 
+use object_store::opendal::Buffer;
+
 use crate::logstore::provider::Provider;
 use crate::storage::RegionId;
-use object_store::opendal::Buffer;
 
 /// An entry's id.
 /// Different log store implementations may interpret the id to different meanings.
@@ -147,11 +148,11 @@ impl Entry {
     pub fn into_buffer(self) -> Buffer {
         match self {
             Entry::Naive(entry) => Buffer::from(entry.data),
-            Entry::MultiplePart(entry) => Buffer::from(bytes::Bytes::from_iter(entry.parts.into_iter().flatten())),
-
+            Entry::MultiplePart(entry) => {
+                Buffer::from(bytes::Bytes::from_iter(entry.parts.into_iter().flatten()))
+            }
         }
     }
-
 
     pub fn estimated_size(&self) -> usize {
         match self {
