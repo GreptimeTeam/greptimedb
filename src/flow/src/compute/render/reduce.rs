@@ -123,7 +123,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
                             for row_idx in 0..key_batch.row_count() {
                                 let key_row = key_batch.get_row(row_idx).unwrap();
-                                let val_row = val_batch.slice(row_idx, 1);
+                                let val_row = val_batch.slice(row_idx, 1)?;
                                 let val_batch =
                                     key_to_many_vals.entry(Row::new(key_row)).or_default();
                                 val_batch.append_batch(val_row)?;
@@ -224,7 +224,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                                 .map(|mut b| b.to_vector())
                                 .collect_vec();
 
-                            let output_batch = Batch::new(output_columns, row_cnt);
+                            let output_batch = Batch::try_new(output_columns, row_cnt)?;
                             send.give(vec![output_batch]);
 
                             Ok(())

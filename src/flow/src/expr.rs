@@ -50,6 +50,30 @@ pub struct Batch {
     diffs: Option<VectorRef>,
 }
 
+impl PartialEq for Batch {
+    fn eq(&self, other: &Self) -> bool {
+        let mut batch_eq = true;
+        if self.batch.len() != other.batch.len() {
+            return false;
+        }
+        for (left, right) in self.batch.iter().zip(other.batch.iter()) {
+            batch_eq = batch_eq
+                && <dyn arrow::array::Array>::eq(&left.to_arrow_array(), &right.to_arrow_array());
+        }
+
+        let diff_eq = match (&self.diffs, &other.diffs) {
+            (Some(left), Some(right)) => {
+                <dyn arrow::array::Array>::eq(&left.to_arrow_array(), &right.to_arrow_array())
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        batch_eq && diff_eq && self.row_count == other.row_count
+    }
+}
+
+impl Eq for Batch {}
+
 impl Default for Batch {
     fn default() -> Self {
         Self::empty()
@@ -89,7 +113,7 @@ impl Batch {
         }
 
         let columns = builder.into_iter().map(|mut b| b.to_vector()).collect_vec();
-        let batch = Self::new(columns, len);
+        let batch = Self::try_new(columns, len)?;
         Ok(batch)
     }
 
@@ -100,12 +124,19 @@ impl Batch {
             diffs: None,
         }
     }
-    pub fn new(batch: Vec<VectorRef>, row_count: usize) -> Self {
-        Self {
+    pub fn try_new(batch: Vec<VectorRef>, row_count: usize) -> Result<Self, EvalError> {
+        ensure!(
+            batch.iter().map(|v| v.len()).all_equal()
+                && batch.first().map(|v| v.len() == row_count).unwrap_or(true),
+            InvalidArgumentSnafu {
+                reason: "All columns should have same length".to_string()
+            }
+        );
+        Ok(Self {
             batch,
             row_count,
             diffs: None,
-        }
+        })
     }
 
     pub fn batch(&self) -> &[VectorRef] {
@@ -141,13 +172,13 @@ impl Batch {
     ///
     /// # Panics
     /// This function panics if `offset + length > self.row_count()`.
-    pub fn slice(&self, offset: usize, length: usize) -> Batch {
+    pub fn slice(&self, offset: usize, length: usize) -> Result<Batch, EvalError> {
         let batch = self
             .batch()
             .iter()
             .map(|v| v.slice(offset, length))
             .collect_vec();
-        Batch::new(batch, length)
+        Batch::try_new(batch, length)
     }
 
     /// append another batch to self
@@ -192,13 +223,4 @@ impl Batch {
         self.row_count = zelf_row_count + other_row_count;
         Ok(())
     }
-}
-
-pub fn to_bool_array(input: &VectorRef) -> Result<&BooleanArray, EvalError> {
-    input.as_any().downcast_ref::<BooleanArray>().context({
-        TypeMismatchSnafu {
-            expected: ConcreteDataType::boolean_datatype(),
-            actual: input.data_type(),
-        }
-    })
 }

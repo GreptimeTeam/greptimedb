@@ -16,16 +16,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use arrow::array::BooleanArray;
 use arrow::compute::FilterBuilder;
 use common_telemetry::debug;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper};
 use itertools::Itertools;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{Error, InvalidQuerySnafu};
-use crate::expr::error::{ArrowSnafu, DataTypeSnafu, EvalError, InternalSnafu};
-use crate::expr::{to_bool_array, Batch, InvalidArgumentSnafu, ScalarExpr};
+use crate::expr::error::{ArrowSnafu, DataTypeSnafu, EvalError, InternalSnafu, TypeMismatchSnafu};
+use crate::expr::{Batch, InvalidArgumentSnafu, ScalarExpr};
 use crate::repr::{self, value_to_internal_ts, Diff, Row};
 
 /// A compound operator that can be applied row-by-row.
@@ -502,7 +504,7 @@ impl SafeMfpPlan {
             .collect_vec();
         let row_count = pred.count();
 
-        Ok(Batch::new(projected, row_count))
+        Ok(Batch::try_new(projected, row_count))
     }
 
     /// similar to [`MapFilterProject::evaluate_into`], just in batch.
@@ -520,7 +522,13 @@ impl SafeMfpPlan {
                 expression += 1;
             }
             let pred_vec = predicate.eval_batch(batch)?;
-            let pred_arr = to_bool_array(&pred_vec)?;
+            let pred_arr = pred_vec.to_arrow_array();
+            let pred_arr = pred_arr.as_any().downcast_ref::<BooleanArray>().context({
+                TypeMismatchSnafu {
+                    expected: ConcreteDataType::boolean_datatype(),
+                    actual: pred_vec.data_type(),
+                }
+            })?;
             let all_arr = all_preds.as_boolean_array();
             let res_arr = arrow::compute::and(all_arr, pred_arr).context(ArrowSnafu {
                 context: format!("failed to compute predicate for mfp operator {:?}", self),
@@ -800,10 +808,15 @@ impl MfpPlan {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use datatypes::data_type::ConcreteDataType;
+    use datatypes::vectors::Int32Vector;
+    use pretty_assertions::assert_eq;
 
     use super::*;
     use crate::expr::{BinaryFunc, UnaryFunc, UnmaterializableFunc};
+
     #[test]
     fn test_mfp_with_time() {
         use crate::expr::func::BinaryFunc;
@@ -909,6 +922,21 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(ret, Row::pack(vec![Value::from(false), Value::from(true)]));
+
+        // batch mode
+        let mut batch = Batch::try_from_rows(vec![Row::from(vec![
+            Value::from(4),
+            Value::from(2),
+            Value::from(3),
+        ])])
+        .unwrap();
+        let ret = safe_mfp.eval_batch_into(&mut batch).unwrap();
+
+        assert_eq!(
+            ret,
+            Batch::try_from_rows(vec![Row::from(vec![Value::from(false), Value::from(true)])])
+                .unwrap()
+        );
     }
 
     #[test]
@@ -930,7 +958,7 @@ mod test {
                 BinaryFunc::Gt,
             )])
             .unwrap();
-        let mut input1 = vec![
+        let input1 = vec![
             Value::from(4),
             Value::from(2),
             Value::from(3),
@@ -938,19 +966,34 @@ mod test {
         ];
         let safe_mfp = SafeMfpPlan { mfp };
         let ret = safe_mfp
-            .evaluate_into(&mut input1, &mut Row::empty())
+            .evaluate_into(&mut input1.clone(), &mut Row::empty())
             .unwrap();
         assert_eq!(ret, None);
-        let mut input2 = vec![
+
+        let mut input1_batch = Batch::try_from_rows(vec![Row::new(input1)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input1_batch).unwrap();
+        assert_eq!(
+            ret_batch,
+            Batch::try_new(vec![Arc::new(Int32Vector::from_vec(vec![]))], 0).unwrap()
+        );
+
+        let input2 = vec![
             Value::from(5),
             Value::from(2),
             Value::from(4),
             Value::from("abc"),
         ];
         let ret = safe_mfp
-            .evaluate_into(&mut input2, &mut Row::empty())
+            .evaluate_into(&mut input2.clone(), &mut Row::empty())
             .unwrap();
         assert_eq!(ret, Some(Row::pack(vec![Value::from(11)])));
+
+        let mut input2_batch = Batch::try_from_rows(vec![Row::new(input2)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input2_batch).unwrap();
+        assert_eq!(
+            ret_batch,
+            Batch::try_new(vec![Arc::new(Int32Vector::from_vec(vec![11]))], 1).unwrap()
+        );
     }
 
     #[test]
