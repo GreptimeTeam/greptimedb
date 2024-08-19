@@ -118,7 +118,7 @@ impl IndexEncoder for JsonIndexEncoder {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap, HashSet};
+    use std::collections::{BTreeSet, HashMap};
 
     use store_api::logstore::provider::KafkaProvider;
     use store_api::storage::RegionId;

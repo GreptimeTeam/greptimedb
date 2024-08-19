@@ -20,9 +20,10 @@ pub use collector::GlobalIndexCollector;
 pub(crate) use collector::{IndexCollector, NoopCollector};
 pub(crate) use encoder::{IndexEncoder, JsonIndexEncoder};
 pub(crate) use iterator::{
-    build_region_wal_index_iterator, MultipleRegionWalIndexIterator, NextBatchHint,
-    RegionWalIndexIterator, RegionWalRange, RegionWalVecIndex, MIN_BATCH_WINDOW_SIZE,
+    build_region_wal_index_iterator, NextBatchHint, RegionWalIndexIterator, MIN_BATCH_WINDOW_SIZE,
 };
+#[cfg(test)]
+pub(crate) use iterator::{MultipleRegionWalIndexIterator, RegionWalRange, RegionWalVecIndex};
 
 pub fn default_index_file(datanode_id: u64) -> String {
     format!("__datanode/{datanode_id}/index.json")

@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::cmp::{max, min};
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt::Debug;
 use std::ops::Range;
 
-use common_telemetry::debug;
 use store_api::logstore::EntryId;
 
 use crate::kafka::util::range::{ConvertIndexToRange, MergeRange};
@@ -40,7 +38,8 @@ pub trait RegionWalIndexIterator: Send + Sync + Debug {
     // Advances the iterator and returns the next EntryId.
     fn next(&mut self) -> Option<EntryId>;
 
-    fn as_any(&self) -> &dyn Any;
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Represents a range [next_entry_id, end_entry_id) of WAL entries for a region.
@@ -103,7 +102,8 @@ impl RegionWalIndexIterator for RegionWalRange {
         }
     }
 
-    fn as_any(&self) -> &dyn Any {
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 }
@@ -148,7 +148,8 @@ impl RegionWalIndexIterator for RegionWalVecIndex {
         self.index.pop_front()
     }
 
-    fn as_any(&self) -> &dyn Any {
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 }
@@ -204,7 +205,8 @@ impl RegionWalIndexIterator for MultipleRegionWalIndexIterator {
         self.iterator.front_mut().and_then(|iter| iter.next())
     }
 
-    fn as_any(&self) -> &dyn Any {
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 }

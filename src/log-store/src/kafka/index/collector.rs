@@ -57,7 +57,7 @@ pub trait IndexCollector: Send + Sync {
 pub struct GlobalIndexCollector {
     providers: Arc<TokioMutex<HashMap<Arc<KafkaProvider>, Sender<WorkerRequest>>>>,
     operator: object_store::ObjectStore,
-    handle: CollectionTaskHandle,
+    _handle: CollectionTaskHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -166,7 +166,7 @@ impl GlobalIndexCollector {
         Self {
             providers,
             operator,
-            handle,
+            _handle: handle,
         }
     }
 
@@ -175,7 +175,7 @@ impl GlobalIndexCollector {
         Self {
             providers: Default::default(),
             operator,
-            handle: Default::default(),
+            _handle: Default::default(),
         }
     }
 }
@@ -333,9 +333,7 @@ impl IndexCollector for NoopCollector {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap};
-    use std::sync::Arc;
 
-    use object_store::services::Memory;
     use store_api::logstore::provider::KafkaProvider;
     use store_api::storage::RegionId;
 
