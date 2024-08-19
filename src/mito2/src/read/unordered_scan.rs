@@ -263,7 +263,7 @@ async fn maybe_init_parts(
     if part_list.0.is_none() {
         let now = Instant::now();
         let mut distributor = UnorderedDistributor::default();
-        input.prune_file_ranges(&mut distributor).await?;
+        let reader_metrics = input.prune_file_ranges(&mut distributor).await?;
         distributor.append_mem_ranges(
             &input.memtables,
             Some(input.mapper.column_ids()),
@@ -275,7 +275,7 @@ async fn maybe_init_parts(
         let build_part_cost = now.elapsed();
         part_list.1 = build_part_cost;
 
-        metrics.observe_init_part(build_part_cost);
+        metrics.observe_init_part(build_part_cost, &reader_metrics);
     } else {
         // Updates the cost of building parts.
         metrics.build_parts_cost = part_list.1;

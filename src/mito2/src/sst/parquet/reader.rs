@@ -174,14 +174,19 @@ impl ParquetReaderBuilder {
     ///
     /// This needs to perform IO operation.
     pub async fn build(&self) -> Result<ParquetReader> {
-        let (context, row_groups) = self.build_reader_input().await?;
+        let mut metrics = ReaderMetrics::default();
+
+        let (context, row_groups) = self.build_reader_input(&mut metrics).await?;
         ParquetReader::new(Arc::new(context), row_groups).await
     }
 
     /// Builds a [FileRangeContext] and collects row groups to read.
     ///
     /// This needs to perform IO operation.
-    pub(crate) async fn build_reader_input(&self) -> Result<(FileRangeContext, RowGroupMap)> {
+    pub(crate) async fn build_reader_input(
+        &self,
+        metrics: &mut ReaderMetrics,
+    ) -> Result<(FileRangeContext, RowGroupMap)> {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.file_dir);
@@ -219,10 +224,8 @@ impl ParquetReaderBuilder {
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
                 .context(ReadParquetSnafu { path: &file_path })?;
 
-        let mut metrics = ReaderMetrics::default();
-
         let row_groups = self
-            .row_groups_to_read(&read_format, &parquet_meta, &mut metrics)
+            .row_groups_to_read(&read_format, &parquet_meta, metrics)
             .await;
 
         let reader_builder = RowGroupReaderBuilder {

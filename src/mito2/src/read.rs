@@ -56,6 +56,7 @@ use crate::error::{
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::prune::PruneReader;
+use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -752,11 +753,27 @@ pub(crate) struct ScannerMetrics {
     num_batches: usize,
     /// Number of rows returned.
     num_rows: usize,
+    /// Number of row groups before filtering.
+    num_row_groups_before_filtering: usize,
+    /// Number of row groups filtered by fulltext index.
+    num_row_groups_fulltext_index_filtered: usize,
+    /// Number of row groups filtered by inverted index.
+    num_row_groups_inverted_index_filtered: usize,
+    /// Number of row groups filtered by min-max index.
+    num_row_groups_min_max_filtered: usize,
+    /// Number of rows filtered by precise filter.
+    num_rows_precise_filtered: usize,
+    /// Number of rows in row group before filtering.
+    num_rows_in_row_group_before_filtering: usize,
+    /// Number of rows in row group filtered by fulltext index.
+    num_rows_in_row_group_fulltext_index_filtered: usize,
+    /// Number of rows in row group filtered by inverted index.
+    num_rows_in_row_group_inverted_index_filtered: usize,
 }
 
 impl ScannerMetrics {
     /// Sets and observes metrics on initializing parts.
-    fn observe_init_part(&mut self, build_parts_cost: Duration) {
+    fn observe_init_part(&mut self, build_parts_cost: Duration, reader_metrics: &ReaderMetrics) {
         self.build_parts_cost = build_parts_cost;
 
         // Observes metrics.
@@ -766,6 +783,20 @@ impl ScannerMetrics {
         READ_STAGE_ELAPSED
             .with_label_values(&["build_parts"])
             .observe(self.build_parts_cost.as_secs_f64());
+
+        self.num_row_groups_before_filtering = reader_metrics.num_row_groups_before_filtering;
+        self.num_row_groups_fulltext_index_filtered =
+            reader_metrics.num_row_groups_fulltext_index_filtered;
+        self.num_row_groups_inverted_index_filtered =
+            reader_metrics.num_row_groups_inverted_index_filtered;
+        self.num_row_groups_min_max_filtered = reader_metrics.num_row_groups_min_max_filtered;
+        self.num_rows_precise_filtered = reader_metrics.num_rows_precise_filtered;
+        self.num_rows_in_row_group_before_filtering =
+            reader_metrics.num_rows_in_row_group_before_filtering;
+        self.num_rows_in_row_group_fulltext_index_filtered =
+            reader_metrics.num_rows_in_row_group_fulltext_index_filtered;
+        self.num_rows_in_row_group_inverted_index_filtered =
+            reader_metrics.num_rows_in_row_group_inverted_index_filtered;
     }
 
     /// Observes metrics on scanner finish.

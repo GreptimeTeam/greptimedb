@@ -50,6 +50,7 @@ use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::FileRange;
+use crate::sst::parquet::reader::ReaderMetrics;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -606,8 +607,9 @@ impl ScanInput {
     pub(crate) async fn prune_file_ranges(
         &self,
         collector: &mut impl FileRangeCollector,
-    ) -> Result<()> {
+    ) -> Result<ReaderMetrics> {
         let mut file_prune_cost = Duration::ZERO;
+        let mut reader_metrics = ReaderMetrics::default();
         for file in &self.files {
             let prune_start = Instant::now();
             let res = self
@@ -620,7 +622,7 @@ impl ScanInput {
                 .inverted_index_applier(self.inverted_index_applier.clone())
                 .fulltext_index_applier(self.fulltext_index_applier.clone())
                 .expected_metadata(Some(self.mapper.metadata().clone()))
-                .build_reader_input()
+                .build_reader_input(&mut reader_metrics)
                 .await;
             file_prune_cost += prune_start.elapsed();
             let (mut file_range_ctx, row_groups) = match res {
@@ -665,7 +667,7 @@ impl ScanInput {
             file_prune_cost
         );
 
-        Ok(())
+        Ok(reader_metrics)
     }
 
     /// Scans the input source in another task and sends batches to the sender.
