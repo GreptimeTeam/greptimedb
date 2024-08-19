@@ -29,7 +29,6 @@ pub(crate) fn decode_raw_entry(raw_entry: Entry) -> Result<(EntryId, WalEntry)> 
     let entry_id = raw_entry.entry_id();
     let region_id = raw_entry.region_id();
     ensure!(raw_entry.is_complete(), CorruptedEntrySnafu { region_id });
-    // TODO(weny): implement the [Buf] for return value, avoid extra memory allocation.
     let buffer = raw_entry_buffer(raw_entry);
     let wal_entry = WalEntry::decode(buffer).context(DecodeWalSnafu { region_id })?;
     Ok((entry_id, wal_entry))
