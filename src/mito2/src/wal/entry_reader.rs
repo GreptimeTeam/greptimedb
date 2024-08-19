@@ -15,7 +15,7 @@
 use api::v1::WalEntry;
 use async_stream::stream;
 use futures::StreamExt;
-use object_store::opendal::Buffer;
+use object_store::Buffer;
 use prost::Message;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::Entry;
