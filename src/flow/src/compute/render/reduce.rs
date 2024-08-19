@@ -182,7 +182,9 @@ impl<'referred, 'df> Context<'referred, 'df> {
                         arrange.compact_to(now)
                     });
 
-                    // this output part is not supposed to be resource intensive, so we can do some costly operation here
+                    // this output part is not supposed to be resource intensive
+                    // (because for every batch there wouldn't usually be as many output row?), 
+                    // so we can do some costly operation here
                     let output_types = all_output_rows.first().map(|(row, _, _)| {
                         row.iter()
                             .map(|v| v.data_type())

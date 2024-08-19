@@ -170,6 +170,32 @@ impl<'referred, 'df> Context<'referred, 'df> {
         })
     }
 
+    pub fn render_unbounded_sink_batch(
+        &mut self,
+        bundle: CollectionBundle<Batch>,
+        sender: mpsc::UnboundedSender<Batch>,
+    ) {
+        let CollectionBundle {
+            collection,
+            arranged: _,
+        } = bundle;
+
+        let _sink = self.df.add_subgraph_sink(
+            "UnboundedSinkBatch",
+            collection.into_inner(),
+            move |_ctx, recv| {
+                let data = recv.take_inner();
+                for batch in data.into_iter().flat_map(|i| i.into_iter()) {
+                    // if the sender is closed unexpectly, stop sending
+                    if sender.is_closed() || sender.send(batch).is_err() {
+                        common_telemetry::error!("UnboundedSinkBatch is closed");
+                        break;
+                    }
+                }
+            },
+        );
+    }
+
     pub fn render_unbounded_sink(
         &mut self,
         bundle: CollectionBundle,
