@@ -482,6 +482,17 @@ impl SafeMfpPlan {
     ///
     /// so it's not guaranteed that the output will have the same number of rows as the input.
     pub fn eval_batch_into(&self, batch: &mut Batch) -> Result<Batch, EvalError> {
+        ensure!(
+            batch.column_count() == self.mfp.input_arity,
+            InvalidArgumentSnafu {
+                reason: format!(
+                    "batch column length {} is not equal to input_arity {}",
+                    batch.column_count(),
+                    self.mfp.input_arity
+                ),
+            }
+        );
+
         let passed_predicates = self.eval_batch_inner(batch)?;
         let filter = FilterBuilder::new(passed_predicates.as_boolean_array());
         let pred = filter.build();
@@ -504,7 +515,7 @@ impl SafeMfpPlan {
             .collect_vec();
         let row_count = pred.count();
 
-        Ok(Batch::try_new(projected, row_count))
+        Batch::try_new(projected, row_count)
     }
 
     /// similar to [`MapFilterProject::evaluate_into`], just in batch.
@@ -811,7 +822,7 @@ mod test {
     use std::sync::Arc;
 
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::vectors::Int32Vector;
+    use datatypes::vectors::{Int32Vector, Int64Vector};
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -1031,27 +1042,50 @@ mod test {
             .unwrap()
             .project([0, 1, 2])
             .unwrap();
-        let mut input1 = vec![
+        let input1 = vec![
             Value::from(4i64),
             Value::from(2),
             Value::from(3),
             Value::from(53),
         ];
         let safe_mfp = SafeMfpPlan { mfp };
-        let ret = safe_mfp.evaluate_into(&mut input1, &mut Row::empty());
+        let ret = safe_mfp.evaluate_into(&mut input1.clone(), &mut Row::empty());
         assert!(matches!(ret, Err(EvalError::InvalidArgument { .. })));
+
+        let mut input1_batch = Batch::try_from_rows(vec![Row::new(input1)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input1_batch);
+        assert!(matches!(ret_batch, Err(EvalError::InvalidArgument { .. })));
 
         let input2 = vec![Value::from(4i64), Value::from(2), Value::from(3)];
         let ret = safe_mfp
             .evaluate_into(&mut input2.clone(), &mut Row::empty())
             .unwrap();
-        assert_eq!(ret, Some(Row::new(input2)));
+        assert_eq!(ret, Some(Row::new(input2.clone())));
 
-        let mut input3 = vec![Value::from(4i64), Value::from(5), Value::from(2)];
+        let input2_batch = Batch::try_from_rows(vec![Row::new(input2)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input2_batch.clone()).unwrap();
+        assert_eq!(ret_batch, input2_batch);
+
+        let input3 = vec![Value::from(4i64), Value::from(5), Value::from(2)];
         let ret = safe_mfp
-            .evaluate_into(&mut input3, &mut Row::empty())
+            .evaluate_into(&mut input3.clone(), &mut Row::empty())
             .unwrap();
         assert_eq!(ret, None);
+
+        let input3_batch = Batch::try_from_rows(vec![Row::new(input3)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input3_batch.clone()).unwrap();
+        assert_eq!(
+            ret_batch,
+            Batch::try_new(
+                vec![
+                    Arc::new(Int64Vector::from_vec(Default::default())),
+                    Arc::new(Int32Vector::from_vec(Default::default())),
+                    Arc::new(Int32Vector::from_vec(Default::default()))
+                ],
+                0
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1069,10 +1103,18 @@ mod test {
             .unwrap()
             .project(vec![3])
             .unwrap();
-        let mut input1 = vec![Value::from(2), Value::from(3), Value::from(4)];
+        let input1 = vec![Value::from(2), Value::from(3), Value::from(4)];
         let safe_mfp = SafeMfpPlan { mfp };
-        let ret = safe_mfp.evaluate_into(&mut input1, &mut Row::empty());
+        let ret = safe_mfp.evaluate_into(&mut input1.clone(), &mut Row::empty());
         assert_eq!(ret.unwrap(), Some(Row::new(vec![Value::from(false)])));
+
+        let mut input1_batch = Batch::try_from_rows(vec![Row::new(input1)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input1_batch).unwrap();
+
+        assert_eq!(
+            ret_batch,
+            Batch::try_new(vec![Arc::new(BooleanVector::from(vec![false]))], 1).unwrap()
+        );
     }
     #[test]
     fn test_mfp_chore() {
