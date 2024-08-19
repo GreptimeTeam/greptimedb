@@ -34,7 +34,7 @@ pub(crate) fn decode_raw_entry(raw_entry: Entry) -> Result<(EntryId, WalEntry)> 
     Ok((entry_id, wal_entry))
 }
 
-fn raw_entry_buffer(raw_entry: Entry) -> Buffer {
+fn into_buffer(raw_entry: Entry) -> Buffer {
     match raw_entry {
         Entry::Naive(entry) => Buffer::from(entry.data),
         Entry::MultiplePart(entry) => {
