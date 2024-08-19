@@ -52,9 +52,9 @@ pub struct IndexOutput {
     pub fulltext_index: FulltextIndexOutput,
 }
 
-/// Output of the inverted index creation.
+/// Base output of the index creation.
 #[derive(Debug, Clone, Default)]
-pub struct InvertedIndexOutput {
+pub struct IndexBaseOutput {
     /// Size of the index.
     pub index_size: ByteCount,
     /// Number of rows in the index.
@@ -63,28 +63,14 @@ pub struct InvertedIndexOutput {
     pub columns: Vec<ColumnId>,
 }
 
-/// Output of the fulltext index creation.
-#[derive(Debug, Clone, Default)]
-pub struct FulltextIndexOutput {
-    /// Size of the index.
-    pub index_size: ByteCount,
-    /// Number of rows in the index.
-    pub row_count: RowCount,
-    /// Available columns in the index.
-    pub columns: Vec<ColumnId>,
-}
-
-impl InvertedIndexOutput {
+impl IndexBaseOutput {
     pub fn is_available(&self) -> bool {
         self.index_size > 0
     }
 }
 
-impl FulltextIndexOutput {
-    pub fn is_available(&self) -> bool {
-        self.index_size > 0
-    }
-}
+pub type InvertedIndexOutput = IndexBaseOutput;
+pub type FulltextIndexOutput = IndexBaseOutput;
 
 /// The index creator that hides the error handling details.
 #[derive(Default)]
