@@ -124,7 +124,7 @@ humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "049171eb16cb4249d8099751a0c46750d1fe88e7" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd" }
 mockall = "0.11.4"
 moka = "0.12"
 notify = "6.1"
@@ -174,6 +174,7 @@ sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "5
 strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
 tokio = { version = "1.36", features = ["full"] }
+tokio-postgres = "0.7"
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
@@ -243,7 +244,7 @@ table = { path = "src/table" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "049171eb16cb4249d8099751a0c46750d1fe88e7"
+rev = "80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd"
 
 [profile.release]
 debug = 1

@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap};
-
 use datafusion_common::DFSchema;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
@@ -22,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{DatafusionSnafu, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedSnafu};
-use crate::expr::{MapFilterProject, SafeMfpPlan, ScalarExpr};
+use crate::expr::{SafeMfpPlan, ScalarExpr};
 
 /// a set of column indices that are "keys" for the collection.
 #[derive(Default, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]

@@ -213,7 +213,6 @@ impl LogStore for RaftEngineLogStore {
     /// Appends a batch of entries to logstore. `RaftEngineLogStore` assures the atomicity of
     /// batch append.
     async fn append_batch(&self, entries: Vec<Entry>) -> Result<AppendBatchResponse> {
-        metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_CALLS_TOTAL.inc();
         metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_BYTES_TOTAL.inc_by(
             entries
                 .iter()
@@ -261,7 +260,6 @@ impl LogStore for RaftEngineLogStore {
                 actual: provider.type_name(),
             })?;
         let namespace_id = ns.id;
-        metrics::METRIC_RAFT_ENGINE_READ_CALLS_TOTAL.inc();
         let _timer = metrics::METRIC_RAFT_ENGINE_READ_ELAPSED.start_timer();
 
         ensure!(self.started(), IllegalStateSnafu);

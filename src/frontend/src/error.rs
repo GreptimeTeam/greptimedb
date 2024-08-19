@@ -364,6 +364,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to setup plugin"))]
+    SetupPlugin {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to start plugin"))]
+    StartPlugin {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -416,7 +430,10 @@ impl ErrorExt for Error {
 
             Error::FindDatanode { .. } => StatusCode::RegionNotReady,
 
-            Error::VectorToGrpcColumn { .. } | Error::CacheRequired { .. } => StatusCode::Internal,
+            Error::VectorToGrpcColumn { .. }
+            | Error::CacheRequired { .. }
+            | Error::SetupPlugin { .. }
+            | Error::StartPlugin { .. } => StatusCode::Internal,
 
             Error::InvalidRegionRequest { .. } => StatusCode::IllegalState,
 

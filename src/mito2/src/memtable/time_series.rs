@@ -15,7 +15,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, Bound, HashSet};
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -101,6 +101,8 @@ pub struct TimeSeriesMemtable {
     min_timestamp: AtomicI64,
     dedup: bool,
     merge_mode: MergeMode,
+    /// Total written rows in memtable. This also includes deleted and duplicated rows.
+    num_rows: AtomicUsize,
 }
 
 impl TimeSeriesMemtable {
@@ -133,6 +135,7 @@ impl TimeSeriesMemtable {
             min_timestamp: AtomicI64::new(i64::MAX),
             dedup,
             merge_mode,
+            num_rows: Default::default(),
         }
     }
 
@@ -232,6 +235,8 @@ impl Memtable for TimeSeriesMemtable {
         // We may lift the primary key length check out of Memtable::write
         // so that we can ensure writing to memtable will succeed.
         self.update_stats(local_stats);
+
+        self.num_rows.fetch_add(kvs.num_rows(), Ordering::Relaxed);
         Ok(())
     }
 
@@ -241,6 +246,7 @@ impl Memtable for TimeSeriesMemtable {
         local_stats.allocated += std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>();
 
         self.update_stats(local_stats);
+        self.num_rows.fetch_add(1, Ordering::Relaxed);
         res
     }
 
@@ -320,6 +326,7 @@ impl Memtable for TimeSeriesMemtable {
             return MemtableStats {
                 estimated_bytes,
                 time_range: None,
+                num_rows: 0,
             };
         }
         let ts_type = self
@@ -335,6 +342,7 @@ impl Memtable for TimeSeriesMemtable {
         MemtableStats {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
+            num_rows: self.num_rows.load(Ordering::Relaxed),
         }
     }
 

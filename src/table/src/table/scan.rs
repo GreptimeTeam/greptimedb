@@ -29,7 +29,8 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
     RecordBatchStream as DfRecordBatchStream,
 };
-use datafusion_common::DataFusionError;
+use datafusion_common::stats::Precision;
+use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use futures::{Stream, StreamExt};
@@ -46,6 +47,8 @@ pub struct RegionScanExec {
     output_ordering: Option<Vec<PhysicalSortExpr>>,
     metric: ExecutionPlanMetricsSet,
     properties: PlanProperties,
+    append_mode: bool,
+    total_rows: usize,
 }
 
 impl RegionScanExec {
@@ -64,12 +67,16 @@ impl RegionScanExec {
             Partitioning::UnknownPartitioning(num_output_partition),
             ExecutionMode::Bounded,
         );
+        let append_mode = scanner_props.append_mode();
+        let total_rows = scanner_props.total_rows();
         Self {
             scanner: Mutex::new(scanner),
             arrow_schema,
             output_ordering: None,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
+            append_mode,
+            total_rows,
         }
     }
 
@@ -151,6 +158,29 @@ impl ExecutionPlan for RegionScanExec {
 
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
+    }
+
+    fn statistics(&self) -> DfResult<Statistics> {
+        let statistics = if self.append_mode {
+            let column_statistics = self
+                .arrow_schema
+                .fields
+                .iter()
+                .map(|_| ColumnStatistics {
+                    distinct_count: Precision::Exact(self.total_rows),
+                    null_count: Precision::Exact(0), // all null rows are counted for append-only table
+                    ..Default::default()
+                })
+                .collect();
+            Statistics {
+                num_rows: Precision::Exact(self.total_rows),
+                total_byte_size: Default::default(),
+                column_statistics,
+            }
+        } else {
+            Statistics::new_unknown(&self.arrow_schema)
+        };
+        Ok(statistics)
     }
 }
 
@@ -257,7 +287,7 @@ mod test {
             RecordBatches::try_new(schema.clone(), vec![batch1.clone(), batch2.clone()]).unwrap();
         let stream = recordbatches.as_stream();
 
-        let scanner = Box::new(SinglePartitionScanner::new(stream));
+        let scanner = Box::new(SinglePartitionScanner::new(stream, false));
         let plan = RegionScanExec::new(scanner);
         let actual: SchemaRef = Arc::new(
             plan.properties

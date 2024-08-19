@@ -20,35 +20,27 @@ use std::sync::Arc;
 use api::v1::{RowDeleteRequests, RowInsertRequests};
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
-use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
-use common_grpc::channel_manager::ChannelConfig;
-use common_meta::cache::{
-    LayeredCacheRegistry, LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef,
-};
-use common_meta::ddl::{table_meta, ProcedureExecutorRef};
-use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
+use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::node_manager::{self, Flownode, NodeManagerRef};
+use common_meta::node_manager::{Flownode, NodeManagerRef};
 use common_query::Output;
 use common_telemetry::tracing::info;
-use futures::{FutureExt, StreamExt, TryStreamExt};
+use futures::{FutureExt, TryStreamExt};
 use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
 use itertools::Itertools;
-use meta_client::client::MetaClient;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
 use operator::statement::StatementExecutor;
 use partition::manager::PartitionRuleManager;
 use query::{QueryEngine, QueryEngineFactory};
-use serde::de::Unexpected;
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
-use servers::heartbeat_options::HeartbeatOptions;
 use servers::server::Server;
-use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
+use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot, Mutex};
@@ -398,13 +390,15 @@ impl FlownodeBuilder {
         let (tx, rx) = oneshot::channel();
 
         let node_id = self.opts.node_id.map(|id| id as u32);
-        let _handle = std::thread::spawn(move || {
-            let (flow_node_manager, mut worker) =
-                FlowWorkerManager::new_with_worker(node_id, query_engine, table_meta);
-            let _ = tx.send(flow_node_manager);
-            info!("Flow Worker started in new thread");
-            worker.run();
-        });
+        let _handle = std::thread::Builder::new()
+            .name("flow-worker".to_string())
+            .spawn(move || {
+                let (flow_node_manager, mut worker) =
+                    FlowWorkerManager::new_with_worker(node_id, query_engine, table_meta);
+                let _ = tx.send(flow_node_manager);
+                info!("Flow Worker started in new thread");
+                worker.run();
+            });
         let man = rx.await.map_err(|_e| {
             UnexpectedSnafu {
                 reason: "sender is dropped, failed to create flow node manager",

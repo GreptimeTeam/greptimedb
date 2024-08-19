@@ -21,24 +21,26 @@ pub mod gsub;
 pub mod join;
 pub mod letter;
 pub mod regex;
+pub mod timestamp;
 pub mod urlencoding;
 
-use std::sync::Arc;
-
-use cmcd::CMCDProcessor;
-use common_telemetry::warn;
+use ahash::{HashSet, HashSetExt};
+use cmcd::CmcdProcessor;
 use csv::CsvProcessor;
 use date::DateProcessor;
 use dissect::DissectProcessor;
+use enum_dispatch::enum_dispatch;
 use epoch::EpochProcessor;
 use gsub::GsubProcessor;
+use itertools::Itertools;
 use join::JoinProcessor;
 use letter::LetterProcessor;
 use regex::RegexProcessor;
+use timestamp::TimestampProcessor;
 use urlencoding::UrlEncodingProcessor;
 
 use crate::etl::field::{Field, Fields};
-use crate::etl::value::{Array, Map, Value};
+use crate::etl::value::{Map, Value};
 
 const FIELD_NAME: &str = "field";
 const FIELDS_NAME: &str = "fields";
@@ -53,94 +55,122 @@ const SEPARATOR_NAME: &str = "separator";
 // const ON_FAILURE_NAME: &str = "on_failure";
 // const TAG_NAME: &str = "tag";
 
+/// Processor trait defines the interface for all processors
+/// A processor is a transformation that can be applied to a field in a document
+/// It can be used to extract, transform, or enrich data
+/// Now Processor only have one input field. In the future, we may support multiple input fields.
+/// The output of a processor is a map of key-value pairs that will be merged into the document when you use exec_map method.
+#[enum_dispatch(ProcessorKind)]
 pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
+    /// Get the processor's fields
+    /// fields is just the same processor for multiple keys. It is not the case that a processor has multiple inputs
     fn fields(&self) -> &Fields;
+
+    /// Get the processor's fields mutably
+    fn fields_mut(&mut self) -> &mut Fields;
+
+    /// Get the processor's kind
     fn kind(&self) -> &str;
+
+    /// Whether to ignore missing
     fn ignore_missing(&self) -> bool;
 
-    fn ignore_processor_array_failure(&self) -> bool {
-        true
-    }
+    /// processor all output keys
+    /// if a processor has multiple output keys, it should return all of them
+    fn output_keys(&self) -> HashSet<String>;
 
-    /// default behavior does nothing and returns the input value
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        Ok(Map::one(field.get_field(), val.clone()))
-    }
+    /// Execute the processor on a document
+    /// and return a map of key-value pairs
+    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String>;
 
-    fn exec_map(&self, mut map: Map) -> Result<Value, String> {
-        for ff @ Field { field, .. } in self.fields().iter() {
-            match map.get(field) {
+    /// Execute the processor on a vector which be preprocessed by the pipeline
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String>;
+
+    /// Execute the processor on a map
+    /// and merge the output into the original map
+    fn exec_map(&self, map: &mut Map) -> Result<(), String> {
+        for ff @ Field {
+            input_field: field_info,
+            ..
+        } in self.fields().iter()
+        {
+            match map.get(&field_info.name) {
                 Some(v) => {
                     map.extend(self.exec_field(v, ff)?);
                 }
                 None if self.ignore_missing() => {}
                 None => {
                     return Err(format!(
-                        "{} processor: field '{field}' is required but missing in {map}",
+                        "{} processor: field '{}' is required but missing in {map}",
                         self.kind(),
+                        field_info.name,
                     ))
                 }
             }
         }
 
-        Ok(Value::Map(map))
-    }
-
-    fn exec_array(&self, arr: Array) -> Result<Value, String> {
-        let mut values = vec![];
-        for val in arr.into_iter() {
-            match val {
-                Value::Map(map) => {
-                    values.push(self.exec_map(map)?);
-                }
-                Value::String(_) => {
-                    let fields = self.fields();
-                    if fields.len() != 1 {
-                        return Err(format!(
-                            "{} processor: expected fields length 1 when processing line input, but got {}",
-                            self.kind(),
-                            fields.len()
-                        ));
-                    }
-                    let field = fields.first().unwrap();
-
-                    values.push(self.exec_field(&val, field).map(Value::Map)?);
-                }
-                _ if self.ignore_processor_array_failure() => {
-                    warn!("expected a map, but got {val}")
-                }
-                _ => return Err(format!("expected a map, but got {}", val)),
-            }
-        }
-
-        Ok(Value::Array(Array { values }))
-    }
-
-    fn exec(&self, val: Value) -> Result<Value, String> {
-        match val {
-            Value::Map(map) => self.exec_map(map),
-            Value::Array(arr) => self.exec_array(arr),
-            _ => Err(format!("expected a map or array, but got {}", val)),
-        }
+        Ok(())
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug)]
+#[enum_dispatch]
+pub enum ProcessorKind {
+    Cmcd(CmcdProcessor),
+    Csv(CsvProcessor),
+    Dissect(DissectProcessor),
+    Gsub(GsubProcessor),
+    Join(JoinProcessor),
+    Letter(LetterProcessor),
+    Regex(RegexProcessor),
+    Timestamp(TimestampProcessor),
+    UrlEncoding(UrlEncodingProcessor),
+    Epoch(EpochProcessor),
+    Date(DateProcessor),
+}
+
+#[derive(Debug, Default)]
 pub struct Processors {
-    pub processors: Vec<Arc<dyn Processor>>,
-}
-
-impl Processors {
-    pub fn new() -> Self {
-        Processors { processors: vec![] }
-    }
+    /// A ordered list of processors
+    /// The order of processors is important
+    /// The output of the first processor will be the input of the second processor
+    pub processors: Vec<ProcessorKind>,
+    /// all required keys in all processors
+    pub required_keys: Vec<String>,
+    /// all required keys in user-supplied data, not pipeline output fields
+    pub required_original_keys: Vec<String>,
+    /// all output keys in all processors
+    pub output_keys: Vec<String>,
 }
 
 impl std::ops::Deref for Processors {
-    type Target = Vec<Arc<dyn Processor>>;
+    type Target = Vec<ProcessorKind>;
 
     fn deref(&self) -> &Self::Target {
         &self.processors
+    }
+}
+
+impl std::ops::DerefMut for Processors {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.processors
+    }
+}
+
+impl Processors {
+    /// A collection of all the processor's required input fields
+    pub fn required_keys(&self) -> &Vec<String> {
+        &self.required_keys
+    }
+
+    /// A collection of all the processor's output fields
+    pub fn output_keys(&self) -> &Vec<String> {
+        &self.output_keys
+    }
+
+    /// Required fields in user-supplied data, not pipeline output fields.
+    pub fn required_original_keys(&self) -> &Vec<String> {
+        &self.required_original_keys
     }
 }
 
@@ -149,16 +179,47 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Processors {
 
     fn try_from(vec: &Vec<yaml_rust::Yaml>) -> Result<Self, Self::Error> {
         let mut processors = vec![];
-
+        let mut all_output_keys = HashSet::with_capacity(50);
+        let mut all_required_keys = HashSet::with_capacity(50);
+        let mut all_required_original_keys = HashSet::with_capacity(50);
         for doc in vec {
-            processors.push(parse_processor(doc)?);
+            let processor = parse_processor(doc)?;
+
+            // get all required keys
+            let processor_required_keys: Vec<String> = processor
+                .fields()
+                .iter()
+                .map(|f| f.input_field.name.clone())
+                .collect();
+
+            for key in &processor_required_keys {
+                if !all_output_keys.contains(key) {
+                    all_required_original_keys.insert(key.clone());
+                }
+            }
+
+            all_required_keys.extend(processor_required_keys);
+
+            let processor_output_keys = processor.output_keys().into_iter();
+            all_output_keys.extend(processor_output_keys);
+
+            processors.push(processor);
         }
 
-        Ok(Processors { processors })
+        let all_required_keys = all_required_keys.into_iter().sorted().collect();
+        let all_output_keys = all_output_keys.into_iter().sorted().collect();
+        let all_required_original_keys = all_required_original_keys.into_iter().sorted().collect();
+
+        Ok(Processors {
+            processors,
+            required_keys: all_required_keys,
+            output_keys: all_output_keys,
+            required_original_keys: all_required_original_keys,
+        })
     }
 }
 
-fn parse_processor(doc: &yaml_rust::Yaml) -> Result<Arc<dyn Processor>, String> {
+fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind, String> {
     let map = doc.as_hash().ok_or("processor must be a map".to_string())?;
 
     let key = map
@@ -176,17 +237,22 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<Arc<dyn Processor>, String> 
         .as_str()
         .ok_or("processor key must be a string".to_string())?;
 
-    let processor: Arc<dyn Processor> = match str_key {
-        cmcd::PROCESSOR_CMCD => Arc::new(CMCDProcessor::try_from(value)?),
-        csv::PROCESSOR_CSV => Arc::new(CsvProcessor::try_from(value)?),
-        date::PROCESSOR_DATE => Arc::new(DateProcessor::try_from(value)?),
-        dissect::PROCESSOR_DISSECT => Arc::new(DissectProcessor::try_from(value)?),
-        epoch::PROCESSOR_EPOCH => Arc::new(EpochProcessor::try_from(value)?),
-        gsub::PROCESSOR_GSUB => Arc::new(GsubProcessor::try_from(value)?),
-        join::PROCESSOR_JOIN => Arc::new(JoinProcessor::try_from(value)?),
-        letter::PROCESSOR_LETTER => Arc::new(LetterProcessor::try_from(value)?),
-        regex::PROCESSOR_REGEX => Arc::new(RegexProcessor::try_from(value)?),
-        urlencoding::PROCESSOR_URL_ENCODING => Arc::new(UrlEncodingProcessor::try_from(value)?),
+    let processor = match str_key {
+        cmcd::PROCESSOR_CMCD => ProcessorKind::Cmcd(CmcdProcessor::try_from(value)?),
+        csv::PROCESSOR_CSV => ProcessorKind::Csv(CsvProcessor::try_from(value)?),
+        dissect::PROCESSOR_DISSECT => ProcessorKind::Dissect(DissectProcessor::try_from(value)?),
+        epoch::PROCESSOR_EPOCH => ProcessorKind::Epoch(EpochProcessor::try_from(value)?),
+        date::PROCESSOR_DATE => ProcessorKind::Date(DateProcessor::try_from(value)?),
+        gsub::PROCESSOR_GSUB => ProcessorKind::Gsub(GsubProcessor::try_from(value)?),
+        join::PROCESSOR_JOIN => ProcessorKind::Join(JoinProcessor::try_from(value)?),
+        letter::PROCESSOR_LETTER => ProcessorKind::Letter(LetterProcessor::try_from(value)?),
+        regex::PROCESSOR_REGEX => ProcessorKind::Regex(RegexProcessor::try_from(value)?),
+        timestamp::PROCESSOR_TIMESTAMP => {
+            ProcessorKind::Timestamp(TimestampProcessor::try_from(value)?)
+        }
+        urlencoding::PROCESSOR_URL_ENCODING => {
+            ProcessorKind::UrlEncoding(UrlEncodingProcessor::try_from(value)?)
+        }
         _ => return Err(format!("unsupported {} processor", str_key)),
     };
 
@@ -242,4 +308,12 @@ pub(crate) fn yaml_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields, St
 
 pub(crate) fn yaml_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field, String> {
     yaml_parse_string(v, field)
+}
+
+pub(crate) fn update_one_one_output_keys(fields: &mut Fields) {
+    for field in fields.iter_mut() {
+        field
+            .output_fields_index_mapping
+            .insert(field.get_target_field().to_string(), 0_usize);
+    }
 }

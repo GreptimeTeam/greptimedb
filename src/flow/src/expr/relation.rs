@@ -15,7 +15,6 @@
 //! Describes an aggregation function and it's input expression.
 
 pub(crate) use func::AggregateFunc;
-use serde::{Deserialize, Serialize};
 
 use crate::expr::ScalarExpr;
 

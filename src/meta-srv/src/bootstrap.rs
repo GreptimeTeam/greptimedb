@@ -24,6 +24,8 @@ use common_config::Configurable;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
+#[cfg(feature = "pg_kvbackend")]
+use common_meta::kv_backend::postgres::PgStore;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use etcd_client::Client;
@@ -33,17 +35,23 @@ use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
+#[cfg(feature = "pg_kvbackend")]
+use snafu::OptionExt;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+#[cfg(feature = "pg_kvbackend")]
+use tokio_postgres::NoTls;
 use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
+#[cfg(feature = "pg_kvbackend")]
+use crate::error::InvalidArgumentsSnafu;
 use crate::error::{InitExportMetricsTaskSnafu, TomlFormatSnafu};
 use crate::lock::etcd::EtcdLock;
 use crate::lock::memory::MemLock;
 use crate::metasrv::builder::MetasrvBuilder;
-use crate::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
+use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectorRef};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
@@ -185,14 +193,14 @@ pub async fn metasrv_builder(
     plugins: Plugins,
     kv_backend: Option<KvBackendRef>,
 ) -> Result<MetasrvBuilder> {
-    let (kv_backend, election, lock) = match (kv_backend, opts.use_memory_store) {
+    let (kv_backend, election, lock) = match (kv_backend, &opts.backend) {
         (Some(kv_backend), _) => (kv_backend, None, Some(Arc::new(MemLock::default()) as _)),
-        (None, true) => (
+        (None, BackendImpl::MemoryStore) => (
             Arc::new(MemoryKvBackend::new()) as _,
             None,
             Some(Arc::new(MemLock::default()) as _),
         ),
-        (None, false) => {
+        (None, BackendImpl::EtcdStore) => {
             let etcd_client = create_etcd_client(opts).await?;
             let kv_backend = {
                 let etcd_backend =
@@ -221,6 +229,13 @@ pub async fn metasrv_builder(
                     opts.store_key_prefix.clone(),
                 )?),
             )
+        }
+        #[cfg(feature = "pg_kvbackend")]
+        (None, BackendImpl::PostgresStore) => {
+            let pg_client = create_postgres_client(opts).await?;
+            let kv_backend = PgStore::with_pg_client(pg_client).await.unwrap();
+            // TODO: implement locking and leader election for pg backend.
+            (kv_backend, None, None)
         }
     };
 
@@ -252,4 +267,15 @@ async fn create_etcd_client(opts: &MetasrvOptions) -> Result<Client> {
     Client::connect(&etcd_endpoints, None)
         .await
         .context(error::ConnectEtcdSnafu)
+}
+
+#[cfg(feature = "pg_kvbackend")]
+async fn create_postgres_client(opts: &MetasrvOptions) -> Result<tokio_postgres::Client> {
+    let postgres_url = opts.store_addrs.first().context(InvalidArgumentsSnafu {
+        err_msg: "empty store addrs",
+    })?;
+    let (client, _) = tokio_postgres::connect(postgres_url, NoTls)
+        .await
+        .context(error::ConnectPostgresSnafu)?;
+    Ok(client)
 }

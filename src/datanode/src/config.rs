@@ -179,6 +179,8 @@ pub struct GcsConfig {
     pub scope: String,
     #[serde(skip_serializing)]
     pub credential_path: SecretString,
+    #[serde(skip_serializing)]
+    pub credential: SecretString,
     pub endpoint: String,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
@@ -190,6 +192,7 @@ impl PartialEq for GcsConfig {
             && self.bucket == other.bucket
             && self.scope == other.scope
             && self.credential_path.expose_secret() == other.credential_path.expose_secret()
+            && self.credential.expose_secret() == other.credential.expose_secret()
             && self.endpoint == other.endpoint
             && self.cache == other.cache
     }
@@ -243,6 +246,7 @@ impl Default for GcsConfig {
             bucket: String::default(),
             scope: String::default(),
             credential_path: SecretString::from(String::default()),
+            credential: SecretString::from(String::default()),
             endpoint: String::default(),
             cache: ObjectStorageCacheConfig::default(),
         }

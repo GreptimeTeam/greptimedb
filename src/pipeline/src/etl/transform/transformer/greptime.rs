@@ -23,7 +23,7 @@ use itertools::Itertools;
 use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transformer, Transforms};
-use crate::etl::value::{Array, Epoch, Map, Value};
+use crate::etl::value::{Array, Map, Timestamp, Value};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 
@@ -32,46 +32,62 @@ const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 #[derive(Debug, Clone)]
 pub struct GreptimeTransformer {
     transforms: Transforms,
+    schema: Vec<ColumnSchema>,
 }
 
 impl GreptimeTransformer {
     fn default_greptime_timestamp_column() -> Transform {
         let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        let type_ = Value::Epoch(Epoch::Nanosecond(ns));
+        let type_ = Value::Timestamp(Timestamp::Nanosecond(ns));
         let default = Some(type_.clone());
-        let field = Field::new(DEFAULT_GREPTIME_TIMESTAMP_COLUMN);
+        let mut field = Field::new(DEFAULT_GREPTIME_TIMESTAMP_COLUMN);
+        field.insert_output_index(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(), 0);
         let fields = Fields::new(vec![field]).unwrap();
 
         Transform {
             fields,
             type_,
             default,
-            index: Some(Index::Timestamp),
-            on_failure: None,
+            index: Some(Index::Time),
+            on_failure: Some(crate::etl::transform::OnFailure::Default),
         }
     }
 
-    fn schemas(&self) -> Result<Vec<ColumnSchema>, String> {
+    fn schemas(transforms: &Transforms) -> Result<Vec<ColumnSchema>, String> {
         let mut schema = vec![];
-        for transform in self.transforms.iter() {
+        for transform in transforms.iter() {
             schema.extend(coerce_columns(transform)?);
         }
         Ok(schema)
     }
 
     fn transform_map(&self, map: &Map) -> Result<Row, String> {
-        let mut values = vec![];
-
+        let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         for transform in self.transforms.iter() {
             for field in transform.fields.iter() {
-                let value_data = match map.get(field.get_field()) {
+                let value_data = match map.get(field.get_field_name()) {
                     Some(val) => coerce_value(val, transform)?,
-                    None if transform.get_default().is_some() => {
-                        coerce_value(transform.get_default().unwrap(), transform)?
+                    None => {
+                        let default = transform.get_default();
+                        match default {
+                            Some(default) => coerce_value(default, transform)?,
+                            None => None,
+                        }
                     }
-                    None => None,
                 };
-                values.push(GreptimeValue { value_data });
+                if let Some(i) = field
+                    .output_fields_index_mapping
+                    .iter()
+                    .next()
+                    .map(|kv| kv.1)
+                {
+                    values[*i] = GreptimeValue { value_data }
+                } else {
+                    return Err(format!(
+                        "field: {} output_fields is empty.",
+                        field.get_field_name()
+                    ));
+                }
             }
         }
 
@@ -79,7 +95,7 @@ impl GreptimeTransformer {
     }
 
     fn transform_array(&self, arr: &Array) -> Result<Vec<Row>, String> {
-        let mut rows = vec![];
+        let mut rows = Vec::with_capacity(arr.len());
         for v in arr.iter() {
             match v {
                 Value::Map(map) => {
@@ -101,6 +117,7 @@ impl std::fmt::Display for GreptimeTransformer {
 
 impl Transformer for GreptimeTransformer {
     type Output = Rows;
+    type VecOutput = Row;
 
     fn new(mut transforms: Transforms) -> Result<Self, String> {
         if transforms.is_empty() {
@@ -128,9 +145,9 @@ impl Transformer for GreptimeTransformer {
             column_names_set.extend(target_fields_set);
 
             if let Some(idx) = transform.index {
-                if idx == Index::Timestamp {
+                if idx == Index::Time {
                     match transform.fields.len() {
-                        1 => timestamp_columns.push(transform.fields.first().unwrap().get_field()),
+                        1 => timestamp_columns.push(transform.fields.first().unwrap().get_field_name()),
                         _ => return Err(format!(
                             "Illegal to set multiple timestamp Index columns, please set only one: {}",
                             transform.fields.get_target_fields().join(", ")
@@ -143,9 +160,20 @@ impl Transformer for GreptimeTransformer {
         match timestamp_columns.len() {
             0 => {
                 transforms.push(GreptimeTransformer::default_greptime_timestamp_column());
-                Ok(GreptimeTransformer { transforms })
+
+                let required_keys = transforms.required_keys_mut();
+                required_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
+
+                let output_keys = transforms.output_keys_mut();
+                output_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
+
+                let schema = GreptimeTransformer::schemas(&transforms)?;
+                Ok(GreptimeTransformer { transforms, schema })
             }
-            1 => Ok(GreptimeTransformer { transforms }),
+            1 => {
+                let schema = GreptimeTransformer::schemas(&transforms)?;
+                Ok(GreptimeTransformer { transforms, schema })
+            }
             _ => {
                 let columns: String = timestamp_columns.iter().map(|s| s.to_string()).join(", ");
                 let count = timestamp_columns.len();
@@ -157,17 +185,69 @@ impl Transformer for GreptimeTransformer {
     }
 
     fn transform(&self, value: Value) -> Result<Self::Output, String> {
-        let schema = self.schemas()?;
         match value {
             Value::Map(map) => {
                 let rows = vec![self.transform_map(&map)?];
-                Ok(Rows { schema, rows })
+                Ok(Rows {
+                    schema: self.schema.clone(),
+                    rows,
+                })
             }
             Value::Array(arr) => {
                 let rows = self.transform_array(&arr)?;
-                Ok(Rows { schema, rows })
+                Ok(Rows {
+                    schema: self.schema.clone(),
+                    rows,
+                })
             }
             _ => Err(format!("Expected map or array, found: {}", value)),
         }
+    }
+
+    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput, String> {
+        let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
+        for transform in self.transforms.iter() {
+            for field in transform.fields.iter() {
+                let index = field.input_field.index;
+                match val.get(index) {
+                    Some(v) => {
+                        let value_data = coerce_value(v, transform)
+                            .map_err(|e| format!("{} processor: {}", field.get_field_name(), e))?;
+                        // every transform fields has only one output field
+                        if let Some(i) = field
+                            .output_fields_index_mapping
+                            .iter()
+                            .next()
+                            .map(|kv| kv.1)
+                        {
+                            values[*i] = GreptimeValue { value_data }
+                        } else {
+                            return Err(format!(
+                                "field: {} output_fields is empty.",
+                                field.get_field_name()
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "Get field not in the array field: {field:?}, {val:?}"
+                        ))
+                    }
+                }
+            }
+        }
+        Ok(Row { values })
+    }
+
+    fn transforms(&self) -> &Transforms {
+        &self.transforms
+    }
+
+    fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema> {
+        &self.schema
+    }
+
+    fn transforms_mut(&mut self) -> &mut Transforms {
+        &mut self.transforms
     }
 }

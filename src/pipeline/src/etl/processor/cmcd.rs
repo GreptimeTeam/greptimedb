@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ahash::HashSet;
 use urlencoding::decode;
 
 use crate::etl::field::{Field, Fields};
@@ -40,6 +41,27 @@ const CMCD_KEY_ST: &str = "st"; // Stream type, Token - one of [v,l]
 const CMCD_KEY_SU: &str = "su"; // Startup, Boolean
 const CMCD_KEY_TB: &str = "tb"; // Top bitrate, Integer kbps
 const CMCD_KEY_V: &str = "v"; // Version
+
+const CMCD_KEYS: [&str; 18] = [
+    CMCD_KEY_BR,
+    CMCD_KEY_BL,
+    CMCD_KEY_BS,
+    CMCD_KEY_CID,
+    CMCD_KEY_D,
+    CMCD_KEY_DL,
+    CMCD_KEY_MTP,
+    CMCD_KEY_NOR,
+    CMCD_KEY_NRR,
+    CMCD_KEY_OT,
+    CMCD_KEY_PR,
+    CMCD_KEY_RTP,
+    CMCD_KEY_SF,
+    CMCD_KEY_SID,
+    CMCD_KEY_ST,
+    CMCD_KEY_SU,
+    CMCD_KEY_TB,
+    CMCD_KEY_V,
+];
 
 /// Common Media Client Data Specification:
 /// https://cdn.cta.tech/cta/media/media/resources/standards/pdfs/cta-5004-final.pdf
@@ -77,19 +99,24 @@ const CMCD_KEY_V: &str = "v"; // Version
 /// 11. The data payload syntax is intended to be compliant with Structured Field Values for HTTP [6].
 /// 12. Transport Layer Security SHOULD be used to protect all transmission of CMCD data.
 #[derive(Debug, Default)]
-pub struct CMCDProcessor {
+pub struct CmcdProcessor {
     fields: Fields,
 
     ignore_missing: bool,
 }
 
-impl CMCDProcessor {
-    fn with_fields(&mut self, fields: Fields) {
+impl CmcdProcessor {
+    fn with_fields(&mut self, mut fields: Fields) {
+        Self::update_output_keys(&mut fields);
         self.fields = fields;
     }
 
     fn with_ignore_missing(&mut self, ignore_missing: bool) {
         self.ignore_missing = ignore_missing;
+    }
+
+    fn generate_key(prefix: &str, key: &str) -> String {
+        format!("{}_{}", prefix, key)
     }
 
     fn parse(prefix: &str, s: &str) -> Result<Map, String> {
@@ -100,7 +127,7 @@ impl CMCDProcessor {
             let k = kv.next().ok_or(format!("{part} missing key in {s}"))?;
             let v = kv.next();
 
-            let key = format!("{prefix}_{k}");
+            let key = Self::generate_key(prefix, k);
             match k {
                 CMCD_KEY_BS | CMCD_KEY_SU => {
                     map.insert(key, Value::Boolean(true));
@@ -144,20 +171,27 @@ impl CMCDProcessor {
     }
 
     fn process_field(&self, val: &str, field: &Field) -> Result<Map, String> {
-        let prefix = match field.target_field {
-            Some(ref target_field) => target_field,
-            None => field.get_field(),
-        };
+        let prefix = field.get_target_field();
 
         Self::parse(prefix, val)
     }
+
+    fn update_output_keys(fields: &mut Fields) {
+        for field in fields.iter_mut() {
+            for key in CMCD_KEYS.iter() {
+                field
+                    .output_fields_index_mapping
+                    .insert(Self::generate_key(field.get_target_field(), key), 0);
+            }
+        }
+    }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for CMCDProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessor {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = CMCDProcessor::default();
+        let mut processor = CmcdProcessor::default();
 
         for (k, v) in value.iter() {
             let key = k
@@ -183,7 +217,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CMCDProcessor {
     }
 }
 
-impl crate::etl::processor::Processor for CMCDProcessor {
+impl crate::etl::processor::Processor for CmcdProcessor {
     fn kind(&self) -> &str {
         PROCESSOR_CMCD
     }
@@ -196,6 +230,27 @@ impl crate::etl::processor::Processor for CMCDProcessor {
         &self.fields
     }
 
+    fn fields_mut(&mut self) -> &mut Fields {
+        &mut self.fields
+    }
+
+    fn output_keys(&self) -> HashSet<String> {
+        self.fields
+            .iter()
+            .map(|field| {
+                field
+                    .target_field
+                    .clone()
+                    .unwrap_or_else(|| field.get_field_name().to_string())
+            })
+            .flat_map(|keys| {
+                CMCD_KEYS
+                    .iter()
+                    .map(move |key| format!("{}_{}", keys, *key))
+            })
+            .collect()
+    }
+
     fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
         match val {
             Value::String(val) => self.process_field(val, field),
@@ -205,15 +260,46 @@ impl crate::etl::processor::Processor for CMCDProcessor {
             )),
         }
     }
+
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+        for field in self.fields.iter() {
+            match val.get(field.input_field.index) {
+                Some(Value::String(v)) => {
+                    // TODO(qtang): Let this method use the intermediate state collection directly.
+                    let map = self.process_field(v, field)?;
+                    for (k, v) in map.values.into_iter() {
+                        if let Some(index) = field.output_fields_index_mapping.get(&k) {
+                            val[*index] = v;
+                        }
+                    }
+                }
+                Some(Value::Null) | None => {
+                    if !self.ignore_missing {
+                        return Err(format!(
+                            "{} processor: missing field: {}",
+                            self.kind(),
+                            field.get_field_name()
+                        ));
+                    }
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "{} processor: expect string value, but got {v:?}",
+                        self.kind()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
+    use ahash::HashMap;
     use urlencoding::decode;
 
-    use super::CMCDProcessor;
+    use super::CmcdProcessor;
     use crate::etl::value::{Map, Value};
 
     #[test]
@@ -354,7 +440,7 @@ mod tests {
                 .collect::<HashMap<String, Value>>();
             let expected = Map { values };
 
-            let actual = CMCDProcessor::parse("prefix", &decoded).unwrap();
+            let actual = CmcdProcessor::parse("prefix", &decoded).unwrap();
             assert_eq!(actual, expected);
         }
     }

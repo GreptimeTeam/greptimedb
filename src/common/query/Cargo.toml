@@ -31,4 +31,5 @@ store-api.workspace = true
 
 [dev-dependencies]
 common-base.workspace = true
+futures-util.workspace = true
 tokio.workspace = true

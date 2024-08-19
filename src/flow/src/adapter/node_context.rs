@@ -15,6 +15,7 @@
 //! Node context, prone to change with every incoming requests
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use common_telemetry::debug;
@@ -27,7 +28,8 @@ use crate::adapter::{FlowId, TableName, TableSource};
 use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
-use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP};
+use crate::metrics::METRIC_FLOW_INPUT_BUF_SIZE;
+use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP, SEND_BUF_CAP};
 
 /// A context that holds the information of the dataflow
 #[derive(Default, Debug)]
@@ -67,18 +69,20 @@ pub struct FlownodeContext {
 pub struct SourceSender {
     // TODO(discord9): make it all Vec<DiffRow>?
     sender: broadcast::Sender<DiffRow>,
-    send_buf_tx: mpsc::UnboundedSender<Vec<DiffRow>>,
-    send_buf_rx: RwLock<mpsc::UnboundedReceiver<Vec<DiffRow>>>,
+    send_buf_tx: mpsc::Sender<Vec<DiffRow>>,
+    send_buf_rx: RwLock<mpsc::Receiver<Vec<DiffRow>>>,
+    send_buf_row_cnt: AtomicUsize,
 }
 
 impl Default for SourceSender {
     fn default() -> Self {
-        let (send_buf_tx, send_buf_rx) = mpsc::unbounded_channel();
+        let (send_buf_tx, send_buf_rx) = mpsc::channel(SEND_BUF_CAP);
         Self {
             // TODO(discord9): found a better way then increase this to prevent lagging and hence missing input data
             sender: broadcast::Sender::new(BROADCAST_CAP * 2),
             send_buf_tx,
             send_buf_rx: RwLock::new(send_buf_rx),
+            send_buf_row_cnt: AtomicUsize::new(0),
         }
     }
 }
@@ -94,15 +98,18 @@ impl SourceSender {
     /// until send buf is empty or broadchannel is full
     pub async fn try_flush(&self) -> Result<usize, Error> {
         let mut row_cnt = 0;
-        let mut iterations = 0;
-        while iterations < Self::MAX_ITERATIONS {
+        loop {
             let mut send_buf = self.send_buf_rx.write().await;
             // if inner sender channel is empty or send buf is empty, there
             // is nothing to do for now, just break
             if self.sender.len() >= BROADCAST_CAP || send_buf.is_empty() {
                 break;
             }
+            // TODO(discord9): send rows instead so it's just moving a point
             if let Some(rows) = send_buf.recv().await {
+                let len = rows.len();
+                self.send_buf_row_cnt
+                    .fetch_sub(len, std::sync::atomic::Ordering::SeqCst);
                 for row in rows {
                     self.sender
                         .send(row)
@@ -116,10 +123,10 @@ impl SourceSender {
                     row_cnt += 1;
                 }
             }
-            iterations += 1;
         }
         if row_cnt > 0 {
             debug!("Send {} rows", row_cnt);
+            METRIC_FLOW_INPUT_BUF_SIZE.sub(row_cnt as _);
             debug!(
                 "Remaining Send buf.len() = {}",
                 self.send_buf_rx.read().await.len()
@@ -131,13 +138,12 @@ impl SourceSender {
 
     /// return number of rows it actual send(including what's in the buffer)
     pub async fn send_rows(&self, rows: Vec<DiffRow>) -> Result<usize, Error> {
-        self.send_buf_tx.send(rows).map_err(|e| {
+        self.send_buf_tx.send(rows).await.map_err(|e| {
             crate::error::InternalSnafu {
                 reason: format!("Failed to send row, error = {:?}", e),
             }
             .build()
         })?;
-
         Ok(0)
     }
 }
@@ -153,7 +159,8 @@ impl FlownodeContext {
             .with_context(|| TableNotFoundSnafu {
                 name: table_id.to_string(),
             })?;
-        // debug!("FlownodeContext::send: trying to send {} rows", rows.len());
+
+        debug!("FlownodeContext::send: trying to send {} rows", rows.len());
         sender.send_rows(rows).await
     }
 
@@ -169,6 +176,7 @@ impl FlownodeContext {
     }
 
     /// Return the sum number of rows in all send buf
+    /// TODO(discord9): remove this since we can't get correct row cnt anyway
     pub async fn get_send_buf_size(&self) -> usize {
         let mut sum = 0;
         for sender in self.source_sender.values() {
