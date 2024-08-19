@@ -14,10 +14,12 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::{ListValue, Value};
+use datatypes::vectors::NullVector;
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -111,13 +113,17 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
                     let mut key_to_many_vals = BTreeMap::<Row, Batch>::new();
                     for batch in src_data {
-                        let (key_batch, val_batch) =
-                            batch_split_by_key_val(&batch, &key_val_plan, &err_collector);
                         err_collector.run(|| {
+                            let (key_batch, val_batch) =
+                                batch_split_by_key_val(&batch, &key_val_plan, &err_collector);
                             ensure!(
                                 key_batch.row_count() == val_batch.row_count(),
                                 InternalSnafu {
-                                    reason: "Key and val batch should have the same row count"
+                                    reason: format!(
+                                        "Key and val batch should have the same row count, found {} and {}", 
+                                        key_batch.row_count(),
+                                        val_batch.row_count()
+                                    )
                                 }
                             );
 
@@ -154,8 +160,9 @@ impl<'referred, 'df> Context<'referred, 'df> {
                                 output_idx,
                             } in accum_plan.simple_aggrs.iter()
                             {
-                                let cur_old_accum = accum_list[*output_idx].clone();
-                                let cur_input = val_batch.batch()[*input_idx].clone();
+                                let cur_old_accum = accum_list.get(*output_idx).cloned().unwrap_or_default();
+                                // if batch is empty, input null instead
+                                let cur_input = val_batch.batch().get(*input_idx).cloned().unwrap_or_else(||Arc::new(NullVector::new(val_batch.row_count())));
 
                                 let (output, new_accum) =
                                     expr.func.eval_batch(cur_old_accum, cur_input, None)?;
@@ -375,7 +382,7 @@ fn from_accum_values_to_live_accums(
     let accum_ranges = from_val_to_slice_idx(accums.first().cloned(), len)?;
     let mut accum_list = vec![];
     for range in accum_ranges.iter() {
-        accum_list.push(accums[range.clone()].to_vec());
+        accum_list.push(accums.get(range.clone()).unwrap_or_default().to_vec());
     }
     Ok(accum_list)
 }
@@ -394,6 +401,7 @@ fn batch_split_by_key_val(
     key_val_plan: &KeyValPlan,
     err_collector: &ErrCollector,
 ) -> (Batch, Batch) {
+    let row_count = batch.row_count();
     let mut key_batch = Batch::empty();
     let mut val_batch = Batch::empty();
 
@@ -407,6 +415,15 @@ fn batch_split_by_key_val(
         }
         Ok(())
     });
+
+    // deal with empty key or val
+    if key_batch.row_count() == 0 && key_batch.column_count() == 0 {
+        key_batch.set_row_count(row_count);
+    }
+
+    if val_batch.row_count() == 0 && val_batch.column_count() == 0 {
+        val_batch.set_row_count(row_count);
+    }
 
     (key_batch, val_batch)
 }
@@ -1351,6 +1368,105 @@ mod test {
             ],
         )]);
         run_and_check(&mut state, &mut df, 6..7, expected, output);
+    }
+
+    /// Batch Mode Reduce Evaluation
+    /// SELECT SUM(col) FROM table
+    ///
+    /// table schema:
+    /// | name | type  |
+    /// |------|-------|
+    /// | col  | Int64 |
+    #[test]
+    fn test_basic_batch_reduce_accum() {
+        let mut df = Hydroflow::new();
+        let mut state = DataflowState::default();
+        let now = state.current_time_ref();
+        let mut ctx = harness_test_ctx(&mut df, &mut state);
+
+        let rows = vec![
+            (Row::new(vec![1i64.into()]), 1, 1),
+            (Row::new(vec![2i64.into()]), 2, 1),
+            (Row::new(vec![3i64.into()]), 3, 1),
+            (Row::new(vec![1i64.into()]), 4, 1),
+            (Row::new(vec![2i64.into()]), 5, 1),
+            (Row::new(vec![3i64.into()]), 6, 1),
+        ];
+        let input_plan = Plan::Constant { rows: rows.clone() };
+
+        let typ = RelationType::new(vec![ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
+        let key_val_plan = KeyValPlan {
+            key_plan: MapFilterProject::new(1).project([]).unwrap().into_safe(),
+            val_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
+        };
+
+        let simple_aggrs = vec![AggrWithIndex::new(
+            AggregateExpr {
+                func: AggregateFunc::SumInt64,
+                expr: ScalarExpr::Column(0),
+                distinct: false,
+            },
+            0,
+            0,
+        )];
+        let accum_plan = AccumulablePlan {
+            full_aggrs: vec![AggregateExpr {
+                func: AggregateFunc::SumInt64,
+                expr: ScalarExpr::Column(0),
+                distinct: false,
+            }],
+            simple_aggrs,
+            distinct_aggrs: vec![],
+        };
+
+        let reduce_plan = ReducePlan::Accumulable(accum_plan);
+        let bundle = ctx
+            .render_reduce_batch(
+                Box::new(input_plan.with_types(typ.into_unnamed())),
+                &key_val_plan,
+                &reduce_plan,
+                &RelationType::empty(),
+            )
+            .unwrap();
+
+        {
+            let now_inner = now.clone();
+            let expected = BTreeMap::<i64, Vec<i64>>::from([
+                (1, vec![1i64]),
+                (2, vec![3i64]),
+                (3, vec![6i64]),
+                (4, vec![7i64]),
+                (5, vec![9i64]),
+                (6, vec![12i64]),
+            ]);
+            let collection = bundle.collection;
+            ctx.df
+                .add_subgraph_sink("test_sink", collection.into_inner(), move |_ctx, recv| {
+                    let now = *now_inner.borrow();
+                    let data = recv.take_inner();
+                    let res = data.into_iter().flat_map(|v| v.into_iter()).collect_vec();
+                    dbg!(&res);
+                    if let Some(expected) = expected.get(&now) {
+                        let batch = expected.iter().map(|v| Value::from(*v)).collect_vec();
+                        let batch = Batch::try_from_rows(vec![batch.into()]).unwrap();
+                        assert_eq!(res.first(), Some(&batch));
+                    }
+                });
+            drop(ctx);
+
+            for now in 1..7 {
+                state.set_current_ts(now);
+                state.run_available_with_schedule(&mut df);
+                if !state.get_err_collector().is_empty() {
+                    panic!(
+                        "Errors occur: {:?}",
+                        state.get_err_collector().get_all_blocking()
+                    )
+                }
+            }
+        }
     }
 
     /// SELECT SUM(col) FROM table

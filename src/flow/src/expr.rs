@@ -138,6 +138,14 @@ impl Batch {
         })
     }
 
+    pub fn new(batch: Vec<VectorRef>, row_count: usize) -> Self {
+        Self {
+            batch,
+            row_count,
+            diffs: None,
+        }
+    }
+
     pub fn batch(&self) -> &[VectorRef] {
         &self.batch
     }
@@ -148,6 +156,10 @@ impl Batch {
 
     pub fn row_count(&self) -> usize {
         self.row_count
+    }
+
+    pub fn set_row_count(&mut self, row_count: usize) {
+        self.row_count = row_count;
     }
 
     pub fn column_count(&self) -> usize {
@@ -183,7 +195,9 @@ impl Batch {
     /// append another batch to self
     pub fn append_batch(&mut self, other: Batch) -> Result<(), EvalError> {
         ensure!(
-            self.batch.len() == other.batch.len(),
+            self.batch.len() == other.batch.len()
+                || self.batch.is_empty()
+                || other.batch.is_empty(),
             InvalidArgumentSnafu {
                 reason: format!(
                     "Expect two batch to have same numbers of column, found {} and {} columns",
@@ -193,13 +207,23 @@ impl Batch {
             }
         );
 
-        let batch_builders = self
-            .batch
+        if self.batch.is_empty() {
+            self.batch = other.batch;
+            self.row_count = other.row_count;
+            return Ok(());
+        } else if other.batch.is_empty() {
+            return Ok(());
+        }
+
+        let dts = if self.batch.is_empty() {
+            other.batch.iter().map(|v| v.data_type()).collect_vec()
+        } else {
+            self.batch.iter().map(|v| v.data_type()).collect_vec()
+        };
+
+        let batch_builders = dts
             .iter()
-            .map(|v| {
-                v.data_type()
-                    .create_mutable_vector(self.row_count() + other.row_count())
-            })
+            .map(|dt| dt.create_mutable_vector(self.row_count() + other.row_count()))
             .collect_vec();
 
         let mut result = vec![];
