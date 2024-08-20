@@ -180,7 +180,7 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
         err: Option<&opendal::Error>,
     ) {
         if let Some(err) = err {
-            // Print error if it's unexpected, otherwise in warn.
+            // Print error if it's unexpected, otherwise in error.
             if err.kind() == ErrorKind::Unexpected {
                 error!(
                     target: LOGGING_TARGET,
