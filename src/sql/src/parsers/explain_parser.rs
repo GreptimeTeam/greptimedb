@@ -27,7 +27,6 @@ impl<'a> ParserContext<'a> {
             .parser
             .parse_explain(DescribeAlias::Explain)
             .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "a query statement",
                 actual: self.peek_token_as_string(),
             })?;
