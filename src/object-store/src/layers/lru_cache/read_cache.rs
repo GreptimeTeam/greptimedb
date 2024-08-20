@@ -146,7 +146,7 @@ impl<C: Access> ReadCache<C> {
         let mut entries = op
             .list_with("/")
             .metakey(Metakey::Mode)
-            .concurrent(10)
+            .concurrent(1)
             .await?;
 
         while let Some(entry) = entries.pop() {
