@@ -131,7 +131,11 @@ impl SeqScan {
             let iter = mem.build_iter()?;
             sources.push(Source::Iter(iter));
         }
-        let read_type = if compaction { "compaction" } else { "seq_scan" };
+        let read_type = if compaction {
+            "compaction"
+        } else {
+            "seq_scan_files"
+        };
         // Read files.
         for file in &part.file_ranges {
             if file.is_empty() {
