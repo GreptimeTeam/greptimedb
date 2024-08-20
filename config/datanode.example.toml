@@ -407,7 +407,8 @@ experimental_write_cache_path = ""
 experimental_write_cache_size = "512MB"
 
 ## TTL for write cache.
-experimental_write_cache_ttl = "1h"
+## +toml2docs:none-default
+experimental_write_cache_ttl = "8h"
 
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
