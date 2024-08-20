@@ -82,6 +82,7 @@ fn test_load_datanode_example_config() {
                     vector_cache_size: ReadableSize::mb(512),
                     page_cache_size: ReadableSize::mb(512),
                     max_background_jobs: 4,
+                    experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(EngineConfig {}),
@@ -218,6 +219,7 @@ fn test_load_standalone_example_config() {
                     vector_cache_size: ReadableSize::mb(512),
                     page_cache_size: ReadableSize::mb(512),
                     max_background_jobs: 4,
+                    experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(EngineConfig {}),
