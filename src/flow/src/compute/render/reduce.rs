@@ -98,7 +98,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
         let subgraph =
             self.df.add_subgraph_in_out(
-                Self::REDUCE,
+                Self::REDUCE_BATCH,
                 input.collection.into_inner(),
                 out_send_port,
                 move |_ctx, recv, send| {

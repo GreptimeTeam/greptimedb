@@ -146,12 +146,11 @@ impl<'referred, 'df> Context<'referred, 'df> {
     /// Always assume input is sorted by timestamp
     pub fn render_constant_batch(&mut self, rows: Vec<DiffRow>) -> CollectionBundle<Batch> {
         let (send_port, recv_port) = self.df.make_edge::<_, Toff<Batch>>("constant_batch");
-        let mut per_time: BTreeMap<repr::Timestamp, Vec<DiffRow>> = rows
-            .into_iter()
-            .group_by(|(_row, ts, _diff)| *ts)
-            .into_iter()
-            .map(|(k, v)| (k, v.into_iter().collect_vec()))
-            .collect();
+        let mut per_time: BTreeMap<repr::Timestamp, Vec<DiffRow>> = Default::default();
+        for (key, group) in &rows.into_iter().group_by(|(_row, ts, _diff)| *ts) {
+            per_time.entry(key).or_default().extend(group);
+        }
+
         let now = self.compute_state.current_time_ref();
         // TODO(discord9): better way to schedule future run
         let scheduler = self.compute_state.get_scheduler();
@@ -192,12 +191,11 @@ impl<'referred, 'df> Context<'referred, 'df> {
     /// Always assume input is sorted by timestamp
     pub fn render_constant(&mut self, rows: Vec<DiffRow>) -> CollectionBundle {
         let (send_port, recv_port) = self.df.make_edge::<_, Toff>("constant");
-        let mut per_time: BTreeMap<repr::Timestamp, Vec<DiffRow>> = rows
-            .into_iter()
-            .group_by(|(_row, ts, _diff)| *ts)
-            .into_iter()
-            .map(|(k, v)| (k, v.into_iter().collect_vec()))
-            .collect();
+        let mut per_time: BTreeMap<repr::Timestamp, Vec<DiffRow>> = Default::default();
+        for (key, group) in &rows.into_iter().group_by(|(_row, ts, _diff)| *ts) {
+            per_time.entry(key).or_default().extend(group);
+        }
+
         let now = self.compute_state.current_time_ref();
         // TODO(discord9): better way to schedule future run
         let scheduler = self.compute_state.get_scheduler();

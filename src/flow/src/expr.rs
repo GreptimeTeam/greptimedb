@@ -138,7 +138,7 @@ impl Batch {
         })
     }
 
-    pub fn new(batch: Vec<VectorRef>, row_count: usize) -> Self {
+    pub fn new_unchecked(batch: Vec<VectorRef>, row_count: usize) -> Self {
         Self {
             batch,
             row_count,

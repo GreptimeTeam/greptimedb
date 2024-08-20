@@ -37,7 +37,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
     ) -> Result<CollectionBundle<Batch>, Error> {
         let input = self.render_plan_batch(*input)?;
 
-        let (out_send_port, out_recv_port) = self.df.make_edge::<_, Toff<Batch>>("mfp");
+        let (out_send_port, out_recv_port) = self.df.make_edge::<_, Toff<Batch>>("mfp_batch");
 
         // This closure capture following variables:
         let mfp_plan = MfpPlan::create_from(mfp)?;
@@ -54,14 +54,15 @@ impl<'referred, 'df> Context<'referred, 'df> {
             move |_ctx, recv, send| {
                 // mfp only need to passively receive updates from recvs
                 let src_data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
-                let mut output_batches = vec![];
-                for mut input_batch in src_data {
-                    err_collector.run(|| {
-                        let res_batch = mfp_plan.mfp.eval_batch_into(&mut input_batch)?;
-                        output_batches.push(res_batch);
-                        Ok(())
-                    });
-                }
+
+                let output_batches = src_data
+                    .filter_map(|mut input_batch| {
+                        err_collector.run(|| {
+                            let res_batch = mfp_plan.mfp.eval_batch_into(&mut input_batch)?;
+                            Ok(res_batch)
+                        })
+                    })
+                    .collect_vec();
 
                 send.give(output_batches);
             },
