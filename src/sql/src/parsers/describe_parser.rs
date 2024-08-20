@@ -33,7 +33,6 @@ impl<'a> ParserContext<'a> {
         let raw_table_idents =
             self.parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
                     expected: "a table name",
                     actual: self.peek_token_as_string(),
                 })?;

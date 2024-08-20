@@ -100,7 +100,6 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .parse_object_name(false)
                 .context(error::UnexpectedSnafu {
-                    sql: self.sql,
                     expected: "a table name",
                     actual: self.parser.peek_token().to_string(),
                 })?;
@@ -171,7 +170,6 @@ impl<'a> ParserContext<'a> {
 
                         let database_name = self.parser.parse_identifier(false).context(
                             error::UnexpectedSnafu {
-                                sql: self.sql,
                                 expected: "a database name",
                                 actual: self.peek_token_as_string(),
                             },
@@ -213,11 +211,7 @@ impl<'a> ParserContext<'a> {
 
     /// Raises an "unsupported statement" error.
     pub fn unsupported<T>(&self, keyword: String) -> Result<T> {
-        error::UnsupportedSnafu {
-            sql: self.sql,
-            keyword,
-        }
-        .fail()
+        error::UnsupportedSnafu { keyword }.fail()
     }
 
     // Report unexpected token

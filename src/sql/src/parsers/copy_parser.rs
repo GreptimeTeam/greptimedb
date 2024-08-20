@@ -50,7 +50,6 @@ impl<'a> ParserContext<'a> {
         let database_name = self
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "a database name",
                 actual: self.peek_token_as_string(),
             })?;
@@ -98,7 +97,6 @@ impl<'a> ParserContext<'a> {
         let raw_table_name = self
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "a table name",
                 actual: self.peek_token_as_string(),
             })?;
@@ -133,7 +131,6 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .parse_literal_string()
                 .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
                     expected: "a file name",
                     actual: self.peek_token_as_string(),
                 })?;
@@ -163,7 +160,6 @@ impl<'a> ParserContext<'a> {
                 self.parser
                     .parse_literal_uint()
                     .with_context(|_| error::UnexpectedSnafu {
-                        sql: self.sql,
                         expected: "the number of maximum rows",
                         actual: self.peek_token_as_string(),
                     })?,
