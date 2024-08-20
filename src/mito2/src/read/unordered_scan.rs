@@ -211,6 +211,7 @@ impl RegionScanner for UnorderedScan {
                 }
             }
 
+            reader_metrics.observe_rows("unordered_scan");
             metrics.total_cost = query_start.elapsed();
             metrics.observe_metrics_on_finish();
             debug!(
