@@ -89,6 +89,8 @@ impl<'subgraph> ActiveDataflowState<'subgraph> {
             err_collector: self.err_collector.clone(),
             input_collection: Default::default(),
             local_scope: Default::default(),
+            input_collection_batch: Default::default(),
+            local_scope_batch: Default::default(),
         }
     }
 
