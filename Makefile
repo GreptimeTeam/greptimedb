@@ -106,7 +106,7 @@ strip-android-bin: build-android-bin ## Strip greptime binary for android.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-android:latest \
-	bash -c '$${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip /greptimedb/target/aarch64-linux-android/release/greptime'
+	bash -c '$${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-debug /greptimedb/target/aarch64-linux-android/release/greptime'
 
 .PHONY: clean
 clean: ## Clean the project.
