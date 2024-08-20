@@ -15,6 +15,7 @@
 use api::v1::WalEntry;
 use async_stream::stream;
 use futures::StreamExt;
+use object_store::Buffer;
 use prost::Message;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::Entry;
@@ -28,11 +29,18 @@ pub(crate) fn decode_raw_entry(raw_entry: Entry) -> Result<(EntryId, WalEntry)> 
     let entry_id = raw_entry.entry_id();
     let region_id = raw_entry.region_id();
     ensure!(raw_entry.is_complete(), CorruptedEntrySnafu { region_id });
-    // TODO(weny): implement the [Buf] for return value, avoid extra memory allocation.
-    let bytes = raw_entry.into_bytes();
-    let wal_entry = WalEntry::decode(bytes.as_slice()).context(DecodeWalSnafu { region_id })?;
-
+    let buffer = into_buffer(raw_entry);
+    let wal_entry = WalEntry::decode(buffer).context(DecodeWalSnafu { region_id })?;
     Ok((entry_id, wal_entry))
+}
+
+fn into_buffer(raw_entry: Entry) -> Buffer {
+    match raw_entry {
+        Entry::Naive(entry) => Buffer::from(entry.data),
+        Entry::MultiplePart(entry) => {
+            Buffer::from_iter(entry.parts.into_iter().map(bytes::Bytes::from))
+        }
+    }
 }
 
 /// [WalEntryReader] provides the ability to read and decode entries from the underlying store.
