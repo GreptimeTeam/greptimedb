@@ -69,7 +69,9 @@ impl IndexBaseOutput {
     }
 }
 
+/// Output of the inverted index creation.
 pub type InvertedIndexOutput = IndexBaseOutput;
+/// Output of the fulltext index creation.
 pub type FulltextIndexOutput = IndexBaseOutput;
 
 /// The index creator that hides the error handling details.
