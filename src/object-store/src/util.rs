@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use common_telemetry::{debug, error, trace};
 use futures::TryStreamExt;
 use opendal::layers::{LoggingInterceptor, LoggingLayer, TracingLayer};
@@ -149,6 +151,21 @@ pub fn with_instrument_layers(object_store: ObjectStore, path_label: bool) -> Ob
 
 static LOGGING_TARGET: &str = "opendal::services";
 
+struct LoggingContext<'a>(&'a [(&'a str, &'a str)]);
+
+impl<'a> Display for LoggingContext<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, (k, v)) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, " {}={}", k, v)?;
+            } else {
+                write!(f, "{}={}", k, v)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Copy, Clone, Default)]
 pub struct DefaultLoggingInterceptor;
 
@@ -163,42 +180,22 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
         err: Option<&opendal::Error>,
     ) {
         if let Some(err) = err {
-            // Print error if it's unexpected, otherwise in debug.
+            // Print error if it's unexpected, otherwise in warn.
             if err.kind() == ErrorKind::Unexpected {
                 error!(
                     target: LOGGING_TARGET,
-                    "service={} name={} {}: {operation} {message} {}",
+                    "service={} name={} {}: {operation} {message} {err:#?}",
                     info.scheme(),
                     info.name(),
-                    format_args!(
-                        "{}",
-                        context.iter().enumerate().map(|(i, (k, v))| {
-                            if i > 0 {
-                                format!(" {}={}", k, v)
-                            } else {
-                                format!("{}={}", k, v)
-                            }
-                        }).collect::<String>()
-                    ),
-                    format!("{err:?}")
+                    LoggingContext(context),
                 );
             } else {
                 debug!(
                     target: LOGGING_TARGET,
-                    "service={} name={} {}: {operation} {message} {}",
+                    "service={} name={} {}: {operation} {message} {err}",
                     info.scheme(),
                     info.name(),
-                    format_args!(
-                        "{}",
-                        context.iter().enumerate().map(|(i, (k, v))| {
-                            if i > 0 {
-                                format!(" {}={}", k, v)
-                            } else {
-                                format!("{}={}", k, v)
-                            }
-                        }).collect::<String>()
-                    ),
-                    format!("{err:?}")
+                    LoggingContext(context),
                 );
             };
         }
@@ -210,16 +207,7 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
                 "service={} name={} {}: {operation} {message}",
                 info.scheme(),
                 info.name(),
-                format_args!(
-                    "{}",
-                    context.iter().enumerate().map(|(i, (k, v))| {
-                        if i > 0 {
-                            format!(" {}={}", k, v)
-                        } else {
-                            format!("{}={}", k, v)
-                        }
-                    }).collect::<String>()
-                ),
+                LoggingContext(context),
             );
         } else {
             trace!(
@@ -227,16 +215,7 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
                 "service={} name={} {}: {operation} {message}",
                 info.scheme(),
                 info.name(),
-                format_args!(
-                    "{}",
-                    context.iter().enumerate().map(|(i, (k, v))| {
-                        if i > 0 {
-                            format!(" {}={}", k, v)
-                        } else {
-                            format!("{}={}", k, v)
-                        }
-                    }).collect::<String>()
-                ),
+                LoggingContext(context),
             );
         };
     }
