@@ -4,7 +4,7 @@ Error: 1002(Unexpected), Unexpected, violated: Invalid database name: ㊙️data
 
 create database illegal-database;
 
-Error: 1001(Unsupported), SQL statement is not supported: create database illegal-database;, keyword: -
+Error: 1001(Unsupported), SQL statement is not supported, keyword: -
 
 create database 'illegal-database';
 

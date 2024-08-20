@@ -193,7 +193,6 @@ impl<'a> ParserContext<'a> {
         let _ = self.parser.next_token();
         let if_not_exists = self.parse_if_not_exist()?;
         let database_name = self.parse_object_name().context(error::UnexpectedSnafu {
-            sql: self.sql,
             expected: "a database name",
             actual: self.peek_token_as_string(),
         })?;
@@ -350,18 +349,13 @@ impl<'a> ParserContext<'a> {
                 .expect_keyword(Keyword::EXISTS)
                 .map(|_| true)
                 .context(UnexpectedSnafu {
-                    sql: self.sql,
                     expected: "EXISTS",
                     actual: self.peek_token_as_string(),
                 });
         }
 
         if self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]) {
-            return UnsupportedSnafu {
-                sql: self.sql,
-                keyword: "EXISTS",
-            }
-            .fail();
+            return UnsupportedSnafu { keyword: "EXISTS" }.fail();
         }
 
         Ok(false)
@@ -394,7 +388,6 @@ impl<'a> ParserContext<'a> {
         self.parser
             .expect_keywords(&[Keyword::ON, Keyword::COLUMNS])
             .context(error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "ON, COLUMNS",
                 actual: self.peek_token_as_string(),
             })?;
@@ -425,7 +418,6 @@ impl<'a> ParserContext<'a> {
         self.parser
             .expect_token(&Token::LParen)
             .context(error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "(",
                 actual: self.peek_token_as_string(),
             })?;
@@ -441,7 +433,6 @@ impl<'a> ParserContext<'a> {
         self.parser
             .expect_token(&Token::RParen)
             .context(error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: ")",
                 actual: self.peek_token_as_string(),
             })?;
@@ -758,7 +749,6 @@ impl<'a> ParserContext<'a> {
                 self.parser
                     .expect_keyword(Keyword::KEY)
                     .context(error::UnexpectedSnafu {
-                        sql: self.sql,
                         expected: "KEY",
                         actual: self.peek_token_as_string(),
                     })?;
@@ -786,7 +776,6 @@ impl<'a> ParserContext<'a> {
                 self.parser
                     .expect_keyword(Keyword::INDEX)
                     .context(error::UnexpectedSnafu {
-                        sql: self.sql,
                         expected: "INDEX",
                         actual: self.peek_token_as_string(),
                     })?;
@@ -842,7 +831,6 @@ impl<'a> ParserContext<'a> {
         self.parser
             .expect_token(&Token::Eq)
             .context(error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "=",
                 actual: self.peek_token_as_string(),
             })?;

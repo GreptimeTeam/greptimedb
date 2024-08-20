@@ -13,7 +13,7 @@ Affected Rows: 0
 
 SHOW COLUMNS;
 
-Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement: SHOW COLUMNS;, expected: '{FROM | IN} table', found: ;
+Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: ;
 
 SHOW COLUMNS FROM system_metrics;
 
