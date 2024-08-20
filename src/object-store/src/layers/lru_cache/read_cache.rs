@@ -18,9 +18,9 @@ use common_telemetry::debug;
 use futures::FutureExt;
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
-use opendal::raw::oio::{List, Read, Reader, Write};
-use opendal::raw::{Access, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
-use opendal::{Error as OpendalError, ErrorKind, Result};
+use opendal::raw::oio::{Read, Reader, Write};
+use opendal::raw::{Access, OpDelete, OpRead, OpStat, OpWrite, RpRead};
+use opendal::{Error as OpendalError, ErrorKind, Metakey, OperatorBuilder, Result};
 
 use crate::metrics::{
     OBJECT_STORE_LRU_CACHE_BYTES, OBJECT_STORE_LRU_CACHE_ENTRIES, OBJECT_STORE_LRU_CACHE_HIT,
@@ -142,9 +142,14 @@ impl<C: Access> ReadCache<C> {
     /// Recover existing cache items from `file_cache` to `mem_cache`.
     /// Return entry count and total approximate entry size in bytes.
     pub(crate) async fn recover_cache(&self) -> Result<(u64, u64)> {
-        let (_, mut pager) = self.file_cache.list("/", OpList::default()).await?;
+        let op = OperatorBuilder::new(self.file_cache.clone()).finish();
+        let mut entries = op
+            .list_with("/")
+            .metakey(Metakey::Mode)
+            .concurrent(10)
+            .await?;
 
-        while let Some(entry) = pager.next().await? {
+        while let Some(entry) = entries.pop() {
             let read_key = entry.path();
 
             // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
