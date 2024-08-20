@@ -59,6 +59,8 @@ pub struct SeqScan {
     /// Semaphore to control scan parallelism of files.
     /// Streams created by the scanner share the same semaphore.
     semaphore: Arc<Semaphore>,
+    /// The scanner is used for compaction.
+    compaction: bool,
 }
 
 impl SeqScan {
@@ -75,7 +77,14 @@ impl SeqScan {
             properties,
             stream_ctx,
             semaphore: Arc::new(Semaphore::new(parallelism)),
+            compaction: false,
         }
+    }
+
+    /// Sets the scanner to be used for compaction.
+    pub(crate) fn with_compaction(mut self) -> Self {
+        self.compaction = true;
+        self
     }
 
     /// Builds a stream for the query.
@@ -97,9 +106,13 @@ impl SeqScan {
             prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
             ..Default::default()
         };
-        let maybe_reader =
-            Self::build_all_merge_reader(&self.stream_ctx, self.semaphore.clone(), &mut metrics)
-                .await?;
+        let maybe_reader = Self::build_all_merge_reader(
+            &self.stream_ctx,
+            self.semaphore.clone(),
+            &mut metrics,
+            self.compaction,
+        )
+        .await?;
         // Safety: `build_merge_reader()` always returns a reader if partition is None.
         let reader = maybe_reader.unwrap();
         Ok(Box::new(reader))
@@ -110,6 +123,7 @@ impl SeqScan {
         part: &ScanPart,
         sources: &mut Vec<Source>,
         row_selector: Option<TimeSeriesRowSelector>,
+        compaction: bool,
     ) -> Result<()> {
         sources.reserve(part.memtable_ranges.len() + part.file_ranges.len());
         // Read memtables.
@@ -117,6 +131,7 @@ impl SeqScan {
             let iter = mem.build_iter()?;
             sources.push(Source::Iter(iter));
         }
+        let read_type = if compaction { "seq_scan" } else { "compaction" };
         // Read files.
         for file in &part.file_ranges {
             if file.is_empty() {
@@ -148,6 +163,8 @@ impl SeqScan {
                     "Seq scan region {}, file {}, {} ranges finished, metrics: {:?}",
                     region_id, file_id, range_num, reader_metrics
                 );
+                // Reports metrics.
+                reader_metrics.observe_rows(read_type);
             };
             let stream = Box::pin(stream);
             sources.push(Source::Stream(stream));
@@ -161,6 +178,7 @@ impl SeqScan {
         stream_ctx: &StreamContext,
         semaphore: Arc<Semaphore>,
         metrics: &mut ScannerMetrics,
+        compaction: bool,
     ) -> Result<Option<BoxedBatchReader>> {
         // initialize parts list
         let mut parts = stream_ctx.parts.lock().await;
@@ -173,7 +191,7 @@ impl SeqScan {
                 return Ok(None);
             };
 
-            Self::build_part_sources(part, &mut sources, None)?;
+            Self::build_part_sources(part, &mut sources, None, compaction)?;
         }
 
         Self::build_reader_from_sources(stream_ctx, sources, semaphore).await
@@ -187,6 +205,7 @@ impl SeqScan {
         range_id: usize,
         semaphore: Arc<Semaphore>,
         metrics: &mut ScannerMetrics,
+        compaction: bool,
     ) -> Result<Option<BoxedBatchReader>> {
         let mut sources = Vec::new();
         let build_start = {
@@ -198,7 +217,12 @@ impl SeqScan {
             };
 
             let build_start = Instant::now();
-            Self::build_part_sources(part, &mut sources, stream_ctx.input.series_row_selector)?;
+            Self::build_part_sources(
+                part,
+                &mut sources,
+                stream_ctx.input.series_row_selector,
+                compaction,
+            )?;
 
             build_start
         };
@@ -281,12 +305,13 @@ impl SeqScan {
         let stream_ctx = self.stream_ctx.clone();
         let semaphore = self.semaphore.clone();
         let partition_ranges = self.properties.partitions[partition].clone();
+        let compaction = self.compaction;
         let stream = try_stream! {
             let first_poll = stream_ctx.query_start.elapsed();
 
             for partition_range in partition_ranges {
                 let maybe_reader =
-                    Self::build_merge_reader(&stream_ctx, partition_range.identifier, semaphore.clone(), &mut metrics)
+                    Self::build_merge_reader(&stream_ctx, partition_range.identifier, semaphore.clone(), &mut metrics, compaction)
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
@@ -359,6 +384,7 @@ impl SeqScan {
         };
         let stream_ctx = self.stream_ctx.clone();
         let semaphore = self.semaphore.clone();
+        let compaction = self.compaction;
 
         // build stream
         let stream = try_stream! {
@@ -379,6 +405,7 @@ impl SeqScan {
                     id,
                     semaphore.clone(),
                     &mut metrics,
+                    compaction,
                 )
                 .await
                 .map_err(BoxedError::new)

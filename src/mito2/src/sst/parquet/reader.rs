@@ -819,6 +819,13 @@ impl ReaderMetrics {
         self.num_batches += other.num_batches;
         self.num_rows += other.num_rows;
     }
+
+    /// Reports total rows.
+    pub(crate) fn observe_rows(&self, read_type: &str) {
+        READ_ROWS_TOTAL
+            .with_label_values(&[read_type])
+            .inc_by(self.num_rows as u64);
+    }
 }
 
 /// Builder to build a [ParquetRecordBatchReader] for a row group.
@@ -1067,9 +1074,7 @@ impl Drop for ParquetReader {
         READ_STAGE_ELAPSED
             .with_label_values(&["scan_row_groups"])
             .observe(metrics.scan_cost.as_secs_f64());
-        READ_ROWS_TOTAL
-            .with_label_values(&["parquet"])
-            .inc_by(metrics.num_rows as u64);
+        metrics.observe_rows("parquet_reader");
         metrics.filter_metrics.observe();
     }
 }
