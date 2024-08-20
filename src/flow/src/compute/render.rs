@@ -142,7 +142,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
     }
 
     /// render Constant, take all rows that have a timestamp not greater than the current time
-    ///
+    /// This function is primarily used for testing
     /// Always assume input is sorted by timestamp
     pub fn render_constant_batch(&mut self, rows: Vec<DiffRow>) -> CollectionBundle<Batch> {
         let (send_port, recv_port) = self.df.make_edge::<_, Toff<Batch>>("constant_batch");
@@ -156,7 +156,6 @@ impl<'referred, 'df> Context<'referred, 'df> {
         // TODO(discord9): better way to schedule future run
         let scheduler = self.compute_state.get_scheduler();
         let scheduler_inner = scheduler.clone();
-
         let err_collector = self.err_collector.clone();
 
         let subgraph_id =

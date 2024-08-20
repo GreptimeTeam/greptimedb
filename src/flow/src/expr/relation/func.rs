@@ -214,6 +214,7 @@ impl std::iter::Iterator for VectorDiffIter {
             if let Ok(diff_at) = diff.get(self.idx).try_into() {
                 diff_at
             } else {
+                common_telemetry::warn!("Invalid diff value at index {}", self.idx);
                 return None;
             }
         } else {
