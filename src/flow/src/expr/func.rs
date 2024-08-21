@@ -967,7 +967,7 @@ impl BinaryFunc {
             | Self::DivUInt32
             | Self::DivUInt64
             | Self::DivFloat32
-            | Self::DivFloat64 => arrow::compute::kernels::numeric::mul(&left, &right)
+            | Self::DivFloat64 => arrow::compute::kernels::numeric::div(&left, &right)
                 .context(ArrowSnafu { context: "div" })?,
 
             Self::ModInt16
