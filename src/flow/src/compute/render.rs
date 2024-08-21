@@ -75,6 +75,19 @@ impl<'referred, 'df> Drop for Context<'referred, 'df> {
             bundle.collection.into_inner().drop(self.df);
             drop(bundle.arranged);
         }
+
+        for bundle in std::mem::take(&mut self.input_collection_batch)
+            .into_values()
+            .chain(
+                std::mem::take(&mut self.local_scope_batch)
+                    .into_iter()
+                    .flat_map(|v| v.into_iter())
+                    .map(|(_k, v)| v),
+            )
+        {
+            bundle.collection.into_inner().drop(self.df);
+            drop(bundle.arranged);
+        }
         // The automatically generated "drop glue" which recursively calls the destructors of all the fields (including the now empty `input_collection`)
     }
 }
