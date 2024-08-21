@@ -104,7 +104,8 @@ impl<'a> InMemoryRowGroup<'a> {
                 .iter()
                 .zip(self.metadata.columns())
                 .enumerate()
-                .filter(|&(idx, (chunk, _chunk_meta))| {
+                .filter(|&(idx, (chunk, chunk_meta))| {
+                    common_telemetry::info!("chunk meta of {idx} is {chunk_meta:?}");
                     chunk.is_none() && projection.leaf_included(idx)
                 })
                 .flat_map(|(idx, (_chunk, chunk_meta))| {
