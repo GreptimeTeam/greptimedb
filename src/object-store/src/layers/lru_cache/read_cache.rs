@@ -26,7 +26,7 @@ use crate::metrics::{
     OBJECT_STORE_LRU_CACHE_BYTES, OBJECT_STORE_LRU_CACHE_ENTRIES, OBJECT_STORE_LRU_CACHE_HIT,
     OBJECT_STORE_LRU_CACHE_MISS, OBJECT_STORE_READ_ERROR,
 };
-
+const RECOVER_CACHE_CONCURRENT: usize = 8;
 /// Cache value for read file
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 enum ReadResult {
@@ -146,7 +146,7 @@ impl<C: Access> ReadCache<C> {
         let mut entries = op
             .list_with("/")
             .metakey(Metakey::ContentLength | Metakey::ContentType)
-            .concurrent(8)
+            .concurrent(RECOVER_CACHE_CONCURRENT)
             .await?;
 
         while let Some(entry) = entries.pop() {
