@@ -145,7 +145,7 @@ impl<C: Access> ReadCache<C> {
         let op = OperatorBuilder::new(self.file_cache.clone()).finish();
         let mut entries = op
             .list_with("/")
-            .metakey(Metakey::Mode)
+            .metakey(Metakey::ContentLength | Metakey::ContentType)
             .concurrent(1)
             .await?;
 
@@ -154,11 +154,8 @@ impl<C: Access> ReadCache<C> {
 
             // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
             // because it's private field.
-            let size = {
-                let stat = self.file_cache.stat(read_key, OpStat::default()).await?;
-
-                stat.into_metadata().content_length()
-            };
+            // let size = entry.
+            let size = entry.metadata().content_length();
 
             OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
