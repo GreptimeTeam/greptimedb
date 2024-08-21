@@ -104,8 +104,7 @@ impl<'a> InMemoryRowGroup<'a> {
                 .iter()
                 .zip(self.metadata.columns())
                 .enumerate()
-                .filter(|&(idx, (chunk, chunk_meta))| {
-                    common_telemetry::info!("chunk meta of {idx} is {chunk_meta:?}");
+                .filter(|&(idx, (chunk, _chunk_meta))| {
                     chunk.is_none() && projection.leaf_included(idx)
                 })
                 .flat_map(|(idx, (_chunk, chunk_meta))| {
@@ -166,6 +165,7 @@ impl<'a> InMemoryRowGroup<'a> {
                 .filter(|&(idx, chunk)| chunk.is_none() && projection.leaf_included(idx))
                 .map(|(idx, _chunk)| {
                     let column = self.metadata.column(idx);
+                    common_telemetry::info!("chunk meta of {idx} is {column:?}");
                     let (start, length) = column.byte_range();
                     start..(start + length)
                 })
