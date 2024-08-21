@@ -117,6 +117,7 @@ pub enum EvalError {
 
     #[snafu(display("DataFusion error: {raw:?}, context: {context}"))]
     Datafusion {
+        #[snafu(source)]
         raw: DataFusionError,
         context: String,
         #[snafu(implicit)]

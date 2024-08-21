@@ -16,18 +16,20 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
+use arrow::array::BooleanArray;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::{ListValue, Value};
-use datatypes::vectors::NullVector;
+use datatypes::vectors::{BooleanVector, Helper, NullVector};
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
+use query::error::DataFusionSnafu;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::compute::render::{Context, SubgraphArg};
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
 use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
-use crate::expr::error::{DataAlreadyExpiredSnafu, DataTypeSnafu, InternalSnafu};
+use crate::expr::error::{ArrowSnafu, DataAlreadyExpiredSnafu, DataTypeSnafu, InternalSnafu};
 use crate::expr::{Batch, EvalError, ScalarExpr};
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
@@ -376,12 +378,87 @@ fn reduce_batch_subgraph(
                 }
             );
 
+            // optimize use bool mask to avoid unnecessary slice
             for row_idx in 0..key_batch.row_count() {
                 let key_row = key_batch.get_row(row_idx).unwrap();
-                let val_row = val_batch.slice(row_idx, 1)?;
-                let val_batch = key_to_many_vals.entry(Row::new(key_row)).or_default();
-                // TODO(discord9): somehow not append_batch here?
-                val_batch.push(val_row);
+                if key_to_many_vals.contains_key(&Row::new(key_row.clone())) {
+                    continue;
+                }
+                let key_eq_mask = {
+                    let mut key_scalar_value = Vec::with_capacity(key_row.len());
+                    for key in &key_row {
+                        let v = key.clone().try_to_scalar_value(&key.data_type()).context(
+                            DataTypeSnafu {
+                                msg: "can't convert key values to datafusion value",
+                            },
+                        )?;
+                        let arrow_value =
+                            v.to_scalar().context(crate::expr::error::DatafusionSnafu {
+                                context: "can't convert key values to arrow value",
+                            })?;
+                        key_scalar_value.push(arrow_value);
+                    }
+                    let key_scalar_value = key_scalar_value;
+
+                    let eq_results = key_scalar_value
+                        .into_iter()
+                        .zip(key_batch.batch().iter())
+                        .map(|(key, col)| {
+                            arrow::compute::kernels::cmp::eq(
+                                &key,
+                                &col.to_arrow_array().as_ref() as _,
+                            )
+                        })
+                        .try_collect::<_, Vec<_>, _>()
+                        .context(ArrowSnafu {
+                            context: "Failed to compare key values",
+                        })?;
+
+                    let eq_mask = eq_results
+                        .into_iter()
+                        .fold(None, |acc, v| match acc {
+                            Some(Ok(acc)) => Some(arrow::compute::kernels::boolean::and(&acc, &v)),
+                            Some(Err(_)) => acc,
+                            None => Some(Ok(v)),
+                        })
+                        .transpose()
+                        .context(ArrowSnafu {
+                            context: "Failed to combine key comparison results",
+                        })?;
+
+                    if let Some(eq_mask) = eq_mask {
+                        eq_mask
+                    } else {
+                        // if None, meaning key_batch's column number is zero, which means
+                        // the key is empty, so we just return a mask of all true
+                        // meaning taking all values
+                        BooleanVector::from(vec![true; key_batch.row_count()])
+                            .as_boolean_array()
+                            .clone()
+                    }
+                };
+
+                let val_slice = val_batch
+                    .batch()
+                    .iter()
+                    .map(|col| arrow::compute::filter(col.to_arrow_array().as_ref(), &key_eq_mask))
+                    .try_collect::<_, Vec<_>, _>()
+                    .context(ArrowSnafu {
+                        context: "Failed to filter val batches",
+                    })?;
+
+                let val_slice_vector =
+                    Helper::try_into_vectors(&val_slice).context(DataTypeSnafu {
+                        msg: "can't convert arrow array to vector",
+                    })?;
+
+                let cur_val_batch = Batch::try_new(val_slice_vector, key_eq_mask.true_count())?;
+
+                let val_batch = key_to_many_vals
+                    .entry(Row::new(key_row.clone()))
+                    .or_default();
+
+                val_batch.push(cur_val_batch);
             }
 
             Ok(())
