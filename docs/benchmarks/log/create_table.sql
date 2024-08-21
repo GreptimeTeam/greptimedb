@@ -51,6 +51,6 @@ CREATE TABLE IF NOT EXISTS test_table
     message String,
     timestamp String,
     INDEX inv_idx(message) TYPE full_text(0) GRANULARITY 1
-) 
+)
 ENGINE = MergeTree()
 ORDER BY tuple();
