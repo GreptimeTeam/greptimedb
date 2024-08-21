@@ -277,6 +277,7 @@ impl StatementExecutor {
             Statement::ShowIndex(show_index) => self.show_index(show_index, query_ctx).await,
             Statement::ShowStatus(_) => self.show_status(query_ctx).await,
             Statement::Use(db) => self.use_database(db, query_ctx).await,
+            Statement::Admin(_admin) => todo!(),
         }
     }
 

@@ -19,6 +19,7 @@ use sqlparser::ast::Statement as SpStatement;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::error::{ConvertToDfStatementSnafu, Error};
+use crate::statements::admin::Admin;
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{
     CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView,
@@ -110,6 +111,8 @@ pub enum Statement {
     ShowVariables(ShowVariables),
     // USE
     Use(String),
+    // Admin statement(extension)
+    Admin(Admin),
 }
 
 impl Display for Statement {
@@ -154,6 +157,7 @@ impl Display for Statement {
             }
             Statement::CreateView(s) => s.fmt(f),
             Statement::Use(s) => s.fmt(f),
+            Statement::Admin(admin) => admin.fmt(f),
         }
     }
 }
