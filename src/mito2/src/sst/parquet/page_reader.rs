@@ -69,7 +69,7 @@ impl PageReader for CachedPageReader {
         };
 
         // Tries to get it from the cache first.
-        let key = PageKey::Uncompressed {
+        let key = PageKey::Single {
             region_id: self.region_id,
             file_id: self.file_id,
             row_group_idx: self.row_group_idx,
@@ -82,8 +82,8 @@ impl PageReader for CachedPageReader {
             self.current_page_idx += 1;
             // The reader skips this page.
             reader.skip_next_page()?;
-            debug_assert!(page.uncompressed.is_some());
-            return Ok(page.uncompressed.clone());
+            debug_assert!(page.single.is_some());
+            return Ok(page.single.clone());
         }
 
         // Cache miss, load the page from the reader.
@@ -94,7 +94,7 @@ impl PageReader for CachedPageReader {
         };
         // Puts the page into the cache.
         self.cache
-            .put_pages(key, Arc::new(PageValue::new_uncompressed(page.clone())));
+            .put_pages(key, Arc::new(PageValue::new_single(page.clone())));
         // Bumps the page index.
         self.current_page_idx += 1;
 

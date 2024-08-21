@@ -165,7 +165,6 @@ impl<'a> InMemoryRowGroup<'a> {
                 .filter(|&(idx, chunk)| chunk.is_none() && projection.leaf_included(idx))
                 .map(|(idx, _chunk)| {
                     let column = self.metadata.column(idx);
-                    common_telemetry::info!("chunk meta of {idx} is {column:?}");
                     let (start, length) = column.byte_range();
                     start..(start + length)
                 })

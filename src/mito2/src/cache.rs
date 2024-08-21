@@ -409,8 +409,8 @@ pub enum PageKey {
         /// Index of the column in the row group.
         column_idx: usize,
     },
-    /// Cache key for an uncompressed page.
-    Uncompressed {
+    /// Cache key for one uncompressed page.
+    Single {
         /// Region id of the SST file to cache.
         region_id: RegionId,
         /// Id of the SST file to cache.
@@ -422,6 +422,17 @@ pub enum PageKey {
         /// Index of the page.
         page_idx: usize,
     },
+    /// Cache key for all uncompressed page in a row group.
+    RowGroup {
+        /// Region id of the SST file to cache.
+        region_id: RegionId,
+        /// Id of the SST file to cache.
+        file_id: FileId,
+        /// Index of the row group.
+        row_group_idx: usize,
+        /// Index of the column in the row group.
+        column_idx: usize,
+    },
 }
 
 impl PageKey {
@@ -432,14 +443,16 @@ impl PageKey {
 }
 
 /// Cached row group pages for a column.
+// We don't use enum here to make it easier to mock and use the struct.
 #[derive(Default)]
 pub struct PageValue {
     /// Compressed page of the column in the row group.
     pub compressed: Bytes,
     /// Uncompressed page of the column in the row group. It's always
     /// `Some` if the key is for uncompressed page except in tests.
-    // We don't use enum here to make it easier to mock the struct.
-    pub uncompressed: Option<Page>,
+    pub single: Option<Page>,
+    /// All pages of the column in the row group.
+    pub row_group: Vec<Page>,
 }
 
 impl PageValue {
@@ -447,15 +460,26 @@ impl PageValue {
     pub fn new_compressed(bytes: Bytes) -> PageValue {
         PageValue {
             compressed: bytes,
-            uncompressed: None,
+            single: None,
+            row_group: vec![],
         }
     }
 
     /// Creates a new value from an uncompressed page.
-    pub fn new_uncompressed(page: Page) -> PageValue {
+    pub fn new_single(page: Page) -> PageValue {
         PageValue {
             compressed: Bytes::new(),
-            uncompressed: Some(page),
+            single: Some(page),
+            row_group: vec![],
+        }
+    }
+
+    /// Creates a new value from all pages in a row group.
+    pub fn new_row_group(pages: Vec<Page>) -> PageValue {
+        PageValue {
+            compressed: Bytes::new(),
+            single: None,
+            row_group: pages,
         }
     }
 
@@ -463,10 +487,12 @@ impl PageValue {
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
             + self.compressed.len()
+            + self.single.as_ref().map_or(0, |page| page.buffer().len())
             + self
-                .uncompressed
-                .as_ref()
-                .map_or(0, |page| page.buffer().len())
+                .row_group
+                .iter()
+                .map(|page| page.buffer().len())
+                .sum::<usize>()
     }
 }
 
@@ -545,7 +571,7 @@ mod tests {
             .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
             .is_none());
 
-        let key = PageKey::Uncompressed {
+        let key = PageKey::Single {
             region_id,
             file_id,
             row_group_idx: 0,
