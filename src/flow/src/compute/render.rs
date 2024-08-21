@@ -337,11 +337,11 @@ impl<'referred, 'df> Context<'referred, 'df> {
 }
 
 /// The Common argument for all `Subgraph` in the render process
-struct SubgraphArg<'a> {
+struct SubgraphArg<'a, T = Toff> {
     now: repr::Timestamp,
     err_collector: &'a ErrCollector,
     scheduler: &'a Scheduler,
-    send: &'a PortCtx<SEND, Toff>,
+    send: &'a PortCtx<SEND, T>,
 }
 
 #[cfg(test)]

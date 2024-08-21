@@ -93,152 +93,39 @@ impl<'referred, 'df> Context<'referred, 'df> {
         // TODO(discord9): better way to schedule future run
         let scheduler = self.compute_state.get_scheduler();
 
+        let scheduler_inner = scheduler.clone();
+
         let (out_send_port, out_recv_port) =
             self.df.make_edge::<_, Toff<Batch>>(Self::REDUCE_BATCH);
 
-        let subgraph =
-            self.df.add_subgraph_in_out(
-                Self::REDUCE_BATCH,
-                input.collection.into_inner(),
-                out_send_port,
-                move |_ctx, recv, send| {
-                    let now = *(now.borrow());
-                    let arrange = arrange_handler_inner.clone();
-                    // mfp only need to passively receive updates from recvs
-                    let src_data = recv
-                        .take_inner()
-                        .into_iter()
-                        .flat_map(|v| v.into_iter())
-                        .collect_vec();
+        let subgraph = self.df.add_subgraph_in_out(
+            Self::REDUCE_BATCH,
+            input.collection.into_inner(),
+            out_send_port,
+            move |_ctx, recv, send| {
+                let now = *(now.borrow());
+                let arrange = arrange_handler_inner.clone();
+                // mfp only need to passively receive updates from recvs
+                let src_data = recv
+                    .take_inner()
+                    .into_iter()
+                    .flat_map(|v| v.into_iter())
+                    .collect_vec();
 
-                    let mut key_to_many_vals = BTreeMap::<Row, Batch>::new();
-                    for batch in src_data {
-                        err_collector.run(|| {
-                            let (key_batch, val_batch) =
-                                batch_split_by_key_val(&batch, &key_val_plan, &err_collector);
-                            ensure!(
-                                key_batch.row_count() == val_batch.row_count(),
-                                InternalSnafu {
-                                    reason: format!(
-                                        "Key and val batch should have the same row count, found {} and {}", 
-                                        key_batch.row_count(),
-                                        val_batch.row_count()
-                                    )
-                                }
-                            );
-
-                            for row_idx in 0..key_batch.row_count() {
-                                let key_row = key_batch.get_row(row_idx).unwrap();
-                                let val_row = val_batch.slice(row_idx, 1)?;
-                                let val_batch =
-                                    key_to_many_vals.entry(Row::new(key_row)).or_default();
-                                val_batch.append_batch(val_row)?;
-                            }
-
-                            Ok(())
-                        });
-                    }
-
-                    // write lock the arrange for the rest of the function body
-                    // to prevent wired race condition
-                    let mut arrange = arrange.write();
-                    let mut all_arrange_updates = Vec::with_capacity(key_to_many_vals.len());
-                    let mut all_output_rows = Vec::with_capacity(key_to_many_vals.len());
-
-                    for (key, val_batch) in key_to_many_vals {
-                        err_collector.run(|| -> Result<(), _> {
-                            let (accums, _, _) = arrange.get(now, &key).unwrap_or_default();
-                            let accum_list = from_accum_values_to_live_accums(
-                                accums.unpack(),
-                                accum_plan.simple_aggrs.len(),
-                            )?;
-
-                            let mut accum_output = AccumOutput::new();
-                            for AggrWithIndex {
-                                expr,
-                                input_idx,
-                                output_idx,
-                            } in accum_plan.simple_aggrs.iter()
-                            {
-                                let cur_old_accum = accum_list.get(*output_idx).cloned().unwrap_or_default();
-                                // if batch is empty, input null instead
-                                let cur_input = val_batch.batch().get(*input_idx).cloned().unwrap_or_else(||Arc::new(NullVector::new(val_batch.row_count())));
-
-                                let (output, new_accum) =
-                                    expr.func.eval_batch(cur_old_accum, cur_input, None)?;
-
-                                accum_output.insert_accum(*output_idx, new_accum);
-                                accum_output.insert_output(*output_idx, output);
-                            }
-
-                            let (new_accums, res_val_row) = accum_output.into_accum_output()?;
-
-                            let arrange_update = ((key.clone(), Row::new(new_accums)), now, 1);
-                            all_arrange_updates.push(arrange_update);
-
-                            let mut key_val = key;
-                            key_val.extend(res_val_row);
-                            all_output_rows.push((key_val, now, 1));
-
-                            Ok(())
-                        });
-                    }
-
-                    err_collector.run(|| {
-                        arrange.apply_updates(now, all_arrange_updates)?;
-                        arrange.compact_to(now)
-                    });
-
-                    // this output part is not supposed to be resource intensive
-                    // (because for every batch there wouldn't usually be as many output row?), 
-                    // so we can do some costly operation here
-                    let output_types = all_output_rows.first().map(|(row, _, _)| {
-                        row.iter()
-                            .map(|v| v.data_type())
-                            .collect::<Vec<ConcreteDataType>>()
-                    });
-
-                    if let Some(output_types) = output_types {
-                        err_collector.run(|| {
-                            let column_cnt = output_types.len();
-                            let row_cnt = all_output_rows.len();
-
-                            let mut output_builder = output_types
-                                .into_iter()
-                                .map(|t| t.create_mutable_vector(row_cnt))
-                                .collect_vec();
-
-                            for (row, _, _) in all_output_rows {
-                                for (i, v) in row.into_iter().enumerate() {
-                                    output_builder
-                                    .get_mut(i)
-                                    .context(InternalSnafu{
-                                        reason: format!(
-                                            "Output builder should have the same length as the row, expected at most {} but got {}", 
-                                            column_cnt-1,
-                                            i
-                                        )
-                                    })?
-                                    .try_push_value_ref(v.as_value_ref())
-                                    .context(DataTypeSnafu {
-                                        msg: "Failed to push value",
-                                    })?;
-                                }
-                            }
-
-                            let output_columns = output_builder
-                                .into_iter()
-                                .map(|mut b| b.to_vector())
-                                .collect_vec();
-
-                            let output_batch = Batch::try_new(output_columns, row_cnt)?;
-                            send.give(vec![output_batch]);
-
-                            Ok(())
-                        });
-                    }
-                },
-            );
+                reduce_batch_subgraph(
+                    &arrange,
+                    src_data,
+                    &key_val_plan,
+                    &accum_plan,
+                    SubgraphArg {
+                        now,
+                        err_collector: &err_collector,
+                        scheduler: &scheduler_inner,
+                        send,
+                    },
+                )
+            },
+        );
 
         scheduler.set_cur_subgraph(subgraph);
 
@@ -459,6 +346,155 @@ fn split_rows_to_key_val(
             })?
         },
     )
+}
+
+fn reduce_batch_subgraph(
+    arrange: &ArrangeHandler,
+    src_data: impl IntoIterator<Item = Batch>,
+    key_val_plan: &KeyValPlan,
+    accum_plan: &AccumulablePlan,
+    SubgraphArg {
+        now,
+        err_collector,
+        scheduler: _,
+        send,
+    }: SubgraphArg<Toff<Batch>>,
+) {
+    let mut key_to_many_vals = BTreeMap::<Row, Vec<Batch>>::new();
+    for batch in src_data {
+        err_collector.run(|| {
+            let (key_batch, val_batch) =
+                batch_split_by_key_val(&batch, key_val_plan, err_collector);
+            ensure!(
+                key_batch.row_count() == val_batch.row_count(),
+                InternalSnafu {
+                    reason: format!(
+                        "Key and val batch should have the same row count, found {} and {}",
+                        key_batch.row_count(),
+                        val_batch.row_count()
+                    )
+                }
+            );
+
+            for row_idx in 0..key_batch.row_count() {
+                let key_row = key_batch.get_row(row_idx).unwrap();
+                let val_row = val_batch.slice(row_idx, 1)?;
+                let val_batch = key_to_many_vals.entry(Row::new(key_row)).or_default();
+                // TODO(discord9): somehow not append_batch here?
+                val_batch.push(val_row);
+            }
+
+            Ok(())
+        });
+    }
+
+    // write lock the arrange for the rest of the function body
+    // to prevent wired race condition
+    let mut arrange = arrange.write();
+    let mut all_arrange_updates = Vec::with_capacity(key_to_many_vals.len());
+    let mut all_output_rows = Vec::with_capacity(key_to_many_vals.len());
+
+    for (key, val_batches) in key_to_many_vals {
+        err_collector.run(|| -> Result<(), _> {
+            let (accums, _, _) = arrange.get(now, &key).unwrap_or_default();
+            let accum_list =
+                from_accum_values_to_live_accums(accums.unpack(), accum_plan.simple_aggrs.len())?;
+
+            let mut accum_output = AccumOutput::new();
+            for AggrWithIndex {
+                expr,
+                input_idx,
+                output_idx,
+            } in accum_plan.simple_aggrs.iter()
+            {
+                let mut cur_accum = accum_list.get(*output_idx).cloned().unwrap_or_default();
+                let mut cur_output = None;
+
+                for val_batch in val_batches.iter() {
+                    // if batch is empty, input null instead
+                    let cur_input = val_batch
+                        .batch()
+                        .get(*input_idx)
+                        .cloned()
+                        .unwrap_or_else(|| Arc::new(NullVector::new(val_batch.row_count())));
+
+                    let (output, new_accum) = expr.func.eval_batch(cur_accum, cur_input, None)?;
+                    cur_accum = new_accum;
+                    cur_output = Some(output);
+                }
+
+                accum_output.insert_accum(*output_idx, cur_accum);
+                if let Some(final_output) = cur_output {
+                    accum_output.insert_output(*output_idx, final_output);
+                }
+            }
+
+            let (new_accums, res_val_row) = accum_output.into_accum_output()?;
+
+            let arrange_update = ((key.clone(), Row::new(new_accums)), now, 1);
+            all_arrange_updates.push(arrange_update);
+
+            let mut key_val = key;
+            key_val.extend(res_val_row);
+            all_output_rows.push((key_val, now, 1));
+
+            Ok(())
+        });
+    }
+
+    err_collector.run(|| {
+        arrange.apply_updates(now, all_arrange_updates)?;
+        arrange.compact_to(now)
+    });
+
+    // this output part is not supposed to be resource intensive
+    // (because for every batch there wouldn't usually be as many output row?),
+    // so we can do some costly operation here
+    let output_types = all_output_rows.first().map(|(row, _, _)| {
+        row.iter()
+            .map(|v| v.data_type())
+            .collect::<Vec<ConcreteDataType>>()
+    });
+
+    if let Some(output_types) = output_types {
+        err_collector.run(|| {
+            let column_cnt = output_types.len();
+            let row_cnt = all_output_rows.len();
+
+            let mut output_builder = output_types
+                .into_iter()
+                .map(|t| t.create_mutable_vector(row_cnt))
+                .collect_vec();
+
+            for (row, _, _) in all_output_rows {
+                for (i, v) in row.into_iter().enumerate() {
+                    output_builder
+                    .get_mut(i)
+                    .context(InternalSnafu{
+                        reason: format!(
+                            "Output builder should have the same length as the row, expected at most {} but got {}", 
+                            column_cnt-1,
+                            i
+                        )
+                    })?
+                    .try_push_value_ref(v.as_value_ref())
+                    .context(DataTypeSnafu {
+                        msg: "Failed to push value",
+                    })?;
+                }
+            }
+
+            let output_columns = output_builder
+                .into_iter()
+                .map(|mut b| b.to_vector())
+                .collect_vec();
+
+            let output_batch = Batch::try_new(output_columns, row_cnt)?;
+            send.give(vec![output_batch]);
+
+            Ok(())
+        });
+    }
 }
 
 /// reduce subgraph, reduce the input data into a single row
