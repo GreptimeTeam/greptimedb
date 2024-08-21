@@ -146,17 +146,12 @@ impl<C: Access> ReadCache<C> {
         let mut entries = op
             .list_with("/")
             .metakey(Metakey::ContentLength | Metakey::ContentType)
-            .concurrent(1)
+            .concurrent(8)
             .await?;
 
         while let Some(entry) = entries.pop() {
             let read_key = entry.path();
-
-            // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
-            // because it's private field.
-            // let size = entry.
             let size = entry.metadata().content_length();
-
             OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
             self.mem_cache
