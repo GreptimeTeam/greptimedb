@@ -1,4 +1,4 @@
-# Log benchmark comparison for GreptimeDB
+# Log benchmark configuration
 This repo holds the configuration we used to benchmark GreptimeDB, Clickhouse and Elastic Search.
 
 Here are the versions of databases we used in the benchmark
