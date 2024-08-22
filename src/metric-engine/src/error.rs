@@ -223,7 +223,7 @@ pub enum Error {
 
     #[snafu(display("Unsupported region request: {}", request))]
     UnsupportedRegionRequest {
-        request: RegionRequest,
+        request: Box<RegionRequest>,
         #[snafu(implicit)]
         location: Location,
     },

@@ -30,7 +30,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: nightly-2024-08-07
+  RUST_TOOLCHAIN: nightly-2024-06-06
 
 jobs:
   check-typos-and-docs:
