@@ -159,9 +159,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
         let create_res = self.inner.create_dir(path, args).await;
 
         timer.observe_duration();
-        create_res.map_err(|e| {
+        create_res.inspect_err(|e| {
             increment_errors_total(Operation::CreateDir, e.kind());
-            e
         })
     }
 
@@ -175,9 +174,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
             .with_label_values(&[&self.scheme, Operation::Read.into_static(), path_label])
             .start_timer();
 
-        let (rp, r) = self.inner.read(path, args).await.map_err(|e| {
+        let (rp, r) = self.inner.read(path, args).await.inspect_err(|e| {
             increment_errors_total(Operation::Read, e.kind());
-            e
         })?;
 
         Ok((
@@ -205,9 +203,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
             .with_label_values(&[&self.scheme, Operation::Write.into_static(), path_label])
             .start_timer();
 
-        let (rp, r) = self.inner.write(path, args).await.map_err(|e| {
+        let (rp, r) = self.inner.write(path, args).await.inspect_err(|e| {
             increment_errors_total(Operation::Write, e.kind());
-            e
         })?;
 
         Ok((
@@ -236,9 +233,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
 
         let stat_res = self.inner.stat(path, args).await;
         timer.observe_duration();
-        stat_res.map_err(|e| {
+        stat_res.inspect_err(|e| {
             increment_errors_total(Operation::Stat, e.kind());
-            e
         })
     }
 
@@ -254,9 +250,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
 
         let delete_res = self.inner.delete(path, args).await;
         timer.observe_duration();
-        delete_res.map_err(|e| {
+        delete_res.inspect_err(|e| {
             increment_errors_total(Operation::Delete, e.kind());
-            e
         })
     }
 
@@ -273,9 +268,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
         let list_res = self.inner.list(path, args).await;
 
         timer.observe_duration();
-        list_res.map_err(|e| {
+        list_res.inspect_err(|e| {
             increment_errors_total(Operation::List, e.kind());
-            e
         })
     }
 
@@ -290,9 +284,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
         let result = self.inner.batch(args).await;
 
         timer.observe_duration();
-        result.map_err(|e| {
+        result.inspect_err(|e| {
             increment_errors_total(Operation::Batch, e.kind());
-            e
         })
     }
 
@@ -308,9 +301,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
         let result = self.inner.presign(path, args).await;
         timer.observe_duration();
 
-        result.map_err(|e| {
+        result.inspect_err(|e| {
             increment_errors_total(Operation::Presign, e.kind());
-            e
         })
     }
 
@@ -335,9 +327,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
 
         timer.observe_duration();
 
-        result.map_err(|e| {
+        result.inspect_err(|e| {
             increment_errors_total(Operation::BlockingCreateDir, e.kind());
-            e
         })
     }
 
@@ -376,9 +367,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
                     ),
                 )
             })
-            .map_err(|e| {
+            .inspect_err(|e| {
                 increment_errors_total(Operation::BlockingRead, e.kind());
-                e
             })
     }
 
@@ -417,9 +407,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
                     ),
                 )
             })
-            .map_err(|e| {
+            .inspect_err(|e| {
                 increment_errors_total(Operation::BlockingWrite, e.kind());
-                e
             })
     }
 
@@ -442,9 +431,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
             .start_timer();
         let result = self.inner.blocking_stat(path, args);
         timer.observe_duration();
-        result.map_err(|e| {
+        result.inspect_err(|e| {
             increment_errors_total(Operation::BlockingStat, e.kind());
-            e
         })
     }
 
@@ -468,9 +456,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
         let result = self.inner.blocking_delete(path, args);
         timer.observe_duration();
 
-        result.map_err(|e| {
+        result.inspect_err(|e| {
             increment_errors_total(Operation::BlockingDelete, e.kind());
-            e
         })
     }
 
@@ -494,9 +481,8 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
         let result = self.inner.blocking_list(path, args);
         timer.observe_duration();
 
-        result.map_err(|e| {
+        result.inspect_err(|e| {
             increment_errors_total(Operation::BlockingList, e.kind());
-            e
         })
     }
 }
@@ -535,18 +521,16 @@ impl<R> PrometheusMetricWrapper<R> {
 
 impl<R: oio::Read> oio::Read for PrometheusMetricWrapper<R> {
     async fn read(&mut self) -> Result<Buffer> {
-        self.inner.read().await.map_err(|err| {
+        self.inner.read().await.inspect_err(|err| {
             increment_errors_total(self.op, err.kind());
-            err
         })
     }
 }
 
 impl<R: oio::BlockingRead> oio::BlockingRead for PrometheusMetricWrapper<R> {
     fn read(&mut self) -> opendal::Result<Buffer> {
-        self.inner.read().map_err(|err| {
+        self.inner.read().inspect_err(|err| {
             increment_errors_total(self.op, err.kind());
-            err
         })
     }
 }
@@ -567,16 +551,14 @@ impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.inner.close().await.map_err(|err| {
+        self.inner.close().await.inspect_err(|err| {
             increment_errors_total(self.op, err.kind());
-            err
         })
     }
 
     async fn abort(&mut self) -> Result<()> {
-        self.inner.close().await.map_err(|err| {
+        self.inner.close().await.inspect_err(|err| {
             increment_errors_total(self.op, err.kind());
-            err
         })
     }
 }
@@ -589,16 +571,14 @@ impl<R: oio::BlockingWrite> oio::BlockingWrite for PrometheusMetricWrapper<R> {
             .map(|_| {
                 self.bytes += bytes as u64;
             })
-            .map_err(|err| {
+            .inspect_err(|err| {
                 increment_errors_total(self.op, err.kind());
-                err
             })
     }
 
     fn close(&mut self) -> Result<()> {
-        self.inner.close().map_err(|err| {
+        self.inner.close().inspect_err(|err| {
             increment_errors_total(self.op, err.kind());
-            err
         })
     }
 }

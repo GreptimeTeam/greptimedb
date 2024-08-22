@@ -175,7 +175,7 @@ coprocessor = copr
 /// constants will be broadcast to length of `col_len`
 /// accept and convert if obj is of two types:
 /// 1. tuples of PyVector/PyList of literals/single literal of same type
-/// or a mixed tuple of PyVector and PyList of same type Literals
+///    or a mixed tuple of PyVector and PyList of same type Literals
 /// 2. a single PyVector
 /// 3. a PyList of same type Literals
 /// 4. a single constant, will be expanded to a PyVector of length of `col_len`

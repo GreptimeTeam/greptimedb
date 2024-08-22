@@ -15,7 +15,6 @@
 #![feature(async_closure)]
 #![feature(result_flattening)]
 #![feature(assert_matches)]
-#![feature(option_take_if)]
 #![feature(extract_if)]
 
 pub mod bootstrap;

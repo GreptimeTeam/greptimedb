@@ -666,6 +666,7 @@ impl PromPlanner {
     /// Name rule:
     /// - if `name` is some, then the matchers MUST NOT contain `__name__` matcher.
     /// - if `name` is none, then the matchers MAY contain NONE OR MULTIPLE `__name__` matchers.
+    #[allow(clippy::mutable_key_type)]
     fn preprocess_label_matchers(
         &mut self,
         label_matchers: &Matchers,

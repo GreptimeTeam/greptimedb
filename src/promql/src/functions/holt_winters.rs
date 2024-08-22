@@ -32,11 +32,12 @@ use crate::range_array::RangeArray;
 
 /// There are 3 variants of smoothing functions:
 /// 1) "Simple exponential smoothing": only the `level` component (the weighted average of the observations) is used to make forecasts.
-///   This method is applied for time-series data that does not exhibit trend or seasonality.
+///    This method is applied for time-series data that does not exhibit trend or seasonality.
 /// 2) "Holt's linear method" (a.k.a. "double exponential smoothing"): `level` and `trend` components are used to make forecasts.
-///   This method is applied for time-series data that exhibits trend but not seasonality.
+///    This method is applied for time-series data that exhibits trend but not seasonality.
 /// 3) "Holt-Winter's method" (a.k.a. "triple exponential smoothing"): `level`, `trend`, and `seasonality` are used to make forecasts.
-///   This method is applied for time-series data that exhibits both trend and seasonality.
+///
+/// This method is applied for time-series data that exhibits both trend and seasonality.
 ///
 /// In order to keep the parity with the Prometheus functions we had to follow the same naming ("HoltWinters"), however
 /// the "Holt's linear"("double exponential smoothing") suits better and reflects implementation.

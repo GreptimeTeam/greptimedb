@@ -70,7 +70,7 @@ impl QueryEngineContext {
     }
 
     /// Mock an engine context for unit tests.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub fn mock() -> Self {
         use common_base::Plugins;
         use session::context::QueryContext;
