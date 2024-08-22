@@ -16,14 +16,12 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use arrow::array::BooleanArray;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::{ListValue, Value};
 use datatypes::vectors::{BooleanVector, Helper, NullVector};
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
-use query::error::DataFusionSnafu;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::compute::render::{Context, SubgraphArg};
@@ -381,17 +379,20 @@ fn reduce_batch_subgraph(
             // optimize use bool mask to avoid unnecessary slice
             for row_idx in 0..key_batch.row_count() {
                 let key_row = key_batch.get_row(row_idx).unwrap();
-                if key_to_many_vals.contains_key(&Row::new(key_row.clone())) {
+                let key_row = Row::new(key_row);
+
+                // if the same key exist then it's already filtered all values in this batch
+                if key_to_many_vals.contains_key(&key_row) {
                     continue;
                 }
                 let key_eq_mask = {
                     let mut key_scalar_value = Vec::with_capacity(key_row.len());
-                    for key in &key_row {
-                        let v = key.clone().try_to_scalar_value(&key.data_type()).context(
-                            DataTypeSnafu {
-                                msg: "can't convert key values to datafusion value",
-                            },
-                        )?;
+                    for key in key_row.iter() {
+                        let v =
+                            key.try_to_scalar_value(&key.data_type())
+                                .context(DataTypeSnafu {
+                                    msg: "can't convert key values to datafusion value",
+                                })?;
                         let arrow_value =
                             v.to_scalar().context(crate::expr::error::DatafusionSnafu {
                                 context: "can't convert key values to arrow value",
@@ -454,9 +455,7 @@ fn reduce_batch_subgraph(
 
                 let cur_val_batch = Batch::try_new(val_slice_vector, key_eq_mask.true_count())?;
 
-                let val_batch = key_to_many_vals
-                    .entry(Row::new(key_row.clone()))
-                    .or_default();
+                let val_batch = key_to_many_vals.entry(key_row).or_default();
 
                 val_batch.push(cur_val_batch);
             }

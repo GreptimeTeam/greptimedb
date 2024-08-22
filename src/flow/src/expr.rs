@@ -179,7 +179,9 @@ impl Batch {
                 )
             }
         );
-        Ok(self.batch.iter().map(|v| v.get(idx)).collect_vec())
+        let mut ret = Vec::with_capacity(self.column_count());
+        ret.extend(self.batch.iter().map(|v| v.get(idx)));
+        Ok(ret)
     }
 
     /// Slices the `Batch`, returning a new `Batch`.

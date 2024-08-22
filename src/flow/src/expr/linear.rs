@@ -500,7 +500,7 @@ impl SafeMfpPlan {
         for col in batch.batch() {
             let filtered = pred
                 .filter(col.to_arrow_array().as_ref())
-                .context(ArrowSnafu {
+                .with_context(|_| ArrowSnafu {
                     context: format!("failed to filter column for mfp operator {:?}", self),
                 })?;
             result.push(Helper::try_into_vector(filtered).context(DataTypeSnafu {
