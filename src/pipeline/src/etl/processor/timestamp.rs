@@ -20,7 +20,7 @@ use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
 use super::{yaml_new_field, yaml_new_fields, yaml_strings, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, Fields, OneInputOneOutPutField};
+use crate::etl::field::{Fields, InputFieldInfo, OneInputOneOutPutField};
 use crate::etl::processor::{
     yaml_bool, yaml_string, Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };

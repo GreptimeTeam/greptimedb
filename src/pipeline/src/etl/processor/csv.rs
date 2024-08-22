@@ -19,7 +19,7 @@ use csv::{ReaderBuilder, Trim};
 use itertools::EitherOrBoth::{Both, Left, Right};
 use itertools::Itertools;
 
-use crate::etl::field::{InputFieldInfo, Fields, OneInputMultiOutputField};
+use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
     ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
