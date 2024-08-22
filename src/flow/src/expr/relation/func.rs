@@ -210,6 +210,7 @@ impl std::iter::Iterator for VectorDiffIter {
             return None;
         }
         let value = self.vector.get(self.idx);
+        // +1 means insert, -1 means delete, and default to +1 insert when diff is not provided
         let diff = if let Some(diff) = self.diff.as_ref() {
             if let Ok(diff_at) = diff.get(self.idx).try_into() {
                 diff_at
