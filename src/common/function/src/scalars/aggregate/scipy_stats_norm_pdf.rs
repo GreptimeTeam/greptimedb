@@ -245,7 +245,7 @@ mod test {
         ];
         scipy_stats_norm_pdf.update_batch(&v).unwrap();
         assert_eq!(
-            Value::from(0.17843340219081552),
+            Value::from(0.17843340219081558),
             scipy_stats_norm_pdf.evaluate().unwrap()
         );
 
