@@ -38,7 +38,7 @@ impl SystemFunction {
         registry.register(Arc::new(VersionFunction));
         registry.register(Arc::new(DatabaseFunction));
         registry.register(Arc::new(TimezoneFunction));
-        registry.register(Arc::new(ProcedureStateFunction));
+        registry.register_async(Arc::new(ProcedureStateFunction));
         PGCatalogFunction::register(registry);
     }
 }

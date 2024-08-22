@@ -110,7 +110,7 @@ mod test {
     use session::context::QueryContext;
 
     use super::*;
-    use crate::function::{Function, FunctionContext};
+    use crate::function::{AsyncFunction, FunctionContext};
 
     #[test]
     fn test_flush_flow_metadata() {
@@ -130,8 +130,8 @@ mod test {
         );
     }
 
-    #[test]
-    fn test_missing_flow_service() {
+    #[tokio::test]
+    async fn test_missing_flow_service() {
         let f = FlushFlowFunction;
 
         let args = vec!["flow_name"];
@@ -140,7 +140,7 @@ mod test {
             .map(|arg| Arc::new(StringVector::from_slice(&[arg])) as _)
             .collect::<Vec<_>>();
 
-        let result = f.eval(FunctionContext::default(), &args).unwrap_err();
+        let result = f.eval(FunctionContext::default(), &args).await.unwrap_err();
         assert_eq!(
             "Missing FlowServiceHandler, not expected",
             result.to_string()
