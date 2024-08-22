@@ -314,11 +314,7 @@ impl CompactionScheduler {
                         return Ok(());
                     }
                     Err(e) => {
-                        if !current_version
-                            .options
-                            .compaction
-                            .fallback_to_local_compaction()
-                        {
+                        if !current_version.options.compaction.fallback_to_local() {
                             error!(e; "Failed to schedule remote compaction job for region {}", region_id);
                             return RemoteCompactionSnafu {
                                 region_id,
