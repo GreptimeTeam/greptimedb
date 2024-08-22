@@ -197,9 +197,15 @@ impl<'a> InMemoryRowGroup<'a> {
                     continue;
                 }
 
-                if let Some(data) = chunk_data.next() {
-                    // Put the page to the cache.
-                    if let Some(cache) = &self.cache_manager {
+                // Get the fetched page.
+                let Some(data) = chunk_data.next() else {
+                    continue;
+                };
+
+                if let Some(cache) = &self.cache_manager {
+                    let column = self.metadata.column(idx);
+                    // Put the page to the cache if we don't cache the whole row group.
+                    if !cache_row_group_pages(column) {
                         let page_key = PageKey::Compressed {
                             region_id: self.region_id,
                             file_id: self.file_id,
@@ -209,12 +215,12 @@ impl<'a> InMemoryRowGroup<'a> {
                         cache
                             .put_pages(page_key, Arc::new(PageValue::new_compressed(data.clone())));
                     }
-
-                    *chunk = Some(Arc::new(ColumnChunkData::Dense {
-                        offset: self.metadata.column(idx).byte_range().0 as usize,
-                        data,
-                    }));
                 }
+
+                *chunk = Some(Arc::new(ColumnChunkData::Dense {
+                    offset: self.metadata.column(idx).byte_range().0 as usize,
+                    data,
+                }));
             }
         }
 
