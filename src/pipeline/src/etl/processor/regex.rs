@@ -155,12 +155,12 @@ impl RegexProcessorBuilder {
         real_fields: &[OneInputMultiOutputField],
         patterns: &[GroupRegex],
         intermediate_keys: &[String],
-    ) -> Result<RegexPorcessorOutputInfo, String> {
+    ) -> Result<RegexProcessorOutputInfo, String> {
         let inner = real_fields
             .iter()
             .map(|om_field| Self::build_group_output_infos(patterns, om_field, intermediate_keys))
             .collect::<Result<Vec<_>, String>>();
-        inner.map(|inner| RegexPorcessorOutputInfo { inner })
+        inner.map(|inner| RegexProcessorOutputInfo { inner })
     }
 
     fn build(self, intermediate_keys: &[String]) -> Result<RegexProcessor, String> {
@@ -250,11 +250,11 @@ struct OutPutInfo {
 }
 
 #[derive(Debug, Default)]
-struct RegexPorcessorOutputInfo {
+struct RegexProcessorOutputInfo {
     pub inner: Vec<Vec<Vec<OutPutInfo>>>,
 }
 
-impl RegexPorcessorOutputInfo {
+impl RegexProcessorOutputInfo {
     fn get_output_index(
         &self,
         field_index: usize,
@@ -269,7 +269,7 @@ impl RegexPorcessorOutputInfo {
 #[derive(Debug, Default)]
 pub struct RegexProcessor {
     fields: Vec<OneInputMultiOutputField>,
-    output_info: RegexPorcessorOutputInfo,
+    output_info: RegexProcessorOutputInfo,
     patterns: Vec<GroupRegex>,
     ignore_missing: bool,
 }
