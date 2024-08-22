@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Value};
+use pipeline::{parse, Content, GreptimeTransformer, Pipeline};
 
 /// test util function to parse and execute pipeline
 pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {

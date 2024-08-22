@@ -20,7 +20,7 @@ use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
 use super::{yaml_new_field, yaml_new_fileds, yaml_strings, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{Field, Fields, InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
 use crate::etl::processor::{
     yaml_bool, yaml_string, Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
@@ -29,7 +29,7 @@ use crate::etl::value::time::{
     MS_RESOLUTION, NANOSECOND_RESOLUTION, NANO_RESOLUTION, NS_RESOLUTION, SECOND_RESOLUTION,
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
-use crate::etl::value::{Map, Timestamp, Value};
+use crate::etl::value::{Timestamp, Value};
 
 pub(crate) const PROCESSOR_TIMESTAMP: &str = "timestamp";
 const RESOLUTION_NAME: &str = "resolution";
@@ -147,7 +147,7 @@ impl ProcessorBuilder for TimestampProcessorBuilder {
             real_fields.push(input);
         }
         let processor = TimestampProcessor {
-            real_fields: real_fields,
+            real_fields,
             formats: self.formats,
             resolution: self.resolution,
             ignore_missing: self.ignore_missing,
@@ -177,7 +177,7 @@ impl TimestampProcessorBuilder {
             real_fields.push(input);
         }
         TimestampProcessor {
-            real_fields: real_fields,
+            real_fields,
             formats: self.formats,
             resolution: self.resolution,
             ignore_missing: self.ignore_missing,
@@ -265,12 +265,6 @@ impl TimestampProcessor {
             Resolution::Micro => Ok(Timestamp::Microsecond(t)),
             Resolution::Nano => Ok(Timestamp::Nanosecond(t)),
         }
-    }
-
-    fn process_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        let key = field.get_target_field();
-
-        Ok(Map::one(key, Value::Timestamp(self.parse(val)?)))
     }
 }
 

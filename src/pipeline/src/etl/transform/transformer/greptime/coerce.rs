@@ -407,7 +407,6 @@ fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<Value
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::etl::field::Fields;
 
     #[test]
     fn test_coerce_string_without_on_failure() {

@@ -15,17 +15,17 @@
 use ahash::HashSet;
 
 // use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{Field, Fields, InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
 use crate::etl::processor::{
-    update_one_one_output_keys, yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, Processor,
-    ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, Processor, ProcessorBuilder,
+    ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::time::{
     MICROSECOND_RESOLUTION, MICRO_RESOLUTION, MILLISECOND_RESOLUTION, MILLI_RESOLUTION,
     MS_RESOLUTION, NANOSECOND_RESOLUTION, NANO_RESOLUTION, NS_RESOLUTION, SECOND_RESOLUTION,
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
-use crate::etl::value::{Map, Timestamp, Value};
+use crate::etl::value::{Timestamp, Value};
 
 pub(crate) const PROCESSOR_EPOCH: &str = "epoch";
 const RESOLUTION_NAME: &str = "resolution";
@@ -122,20 +122,6 @@ pub struct EpochProcessor {
 }
 
 impl EpochProcessor {
-    fn with_fields(&mut self, mut fields: Fields) {
-        todo!()
-        // update_one_one_output_keys(&mut fields);
-        // self.fields = fields
-    }
-
-    fn with_resolution(&mut self, resolution: Resolution) {
-        self.resolution = resolution;
-    }
-
-    fn with_ignore_missing(&mut self, ignore_missing: bool) {
-        self.ignore_missing = ignore_missing;
-    }
-
     fn parse(&self, val: &Value) -> Result<Timestamp, String> {
         let t: i64 = match val {
             Value::String(s) => s
@@ -171,12 +157,6 @@ impl EpochProcessor {
             Resolution::Micro => Ok(Timestamp::Microsecond(t)),
             Resolution::Nano => Ok(Timestamp::Nanosecond(t)),
         }
-    }
-
-    fn process_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        let key = field.get_target_field();
-
-        Ok(Map::one(key, Value::Timestamp(self.parse(val)?)))
     }
 }
 
@@ -262,8 +242,10 @@ mod tests {
 
     #[test]
     fn test_parse_epoch() {
-        let mut processor = EpochProcessor::default();
-        processor.with_resolution(super::Resolution::Second);
+        let processor = EpochProcessor {
+            resolution: super::Resolution::Second,
+            ..Default::default()
+        };
 
         let values = [
             Value::String("1573840000".into()),

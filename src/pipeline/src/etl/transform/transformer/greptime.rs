@@ -15,16 +15,15 @@
 pub mod coerce;
 
 use std::collections::HashSet;
-use std::usize;
 
 use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 
-use crate::etl::field::{Field, Fields, InputFieldInfo, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, OneInputOneOutPutField};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transformer, Transforms};
-use crate::etl::value::{Array, Map, Timestamp, Value};
+use crate::etl::value::{Timestamp, Value};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 
@@ -76,55 +75,6 @@ impl GreptimeTransformer {
             schema.extend(coerce_columns(transform)?);
         }
         Ok(schema)
-    }
-
-    fn transform_map(&self, map: &Map) -> Result<Row, String> {
-        todo!()
-        // let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
-        // for transform in self.transforms.iter() {
-        //     for field in transform.fields.iter() {
-        //         let value_data = match map.get(field.get_field_name()) {
-        //             Some(val) => coerce_value(val, transform)?,
-        //             None => {
-        //                 let default = transform.get_default();
-        //                 match default {
-        //                     Some(default) => coerce_value(default, transform)?,
-        //                     None => None,
-        //                 }
-        //             }
-        //         };
-        //         if let Some(i) = field
-        //             .output_fields_index_mapping
-        //             .iter()
-        //             .next()
-        //             .map(|kv| kv.1)
-        //         {
-        //             values[*i] = GreptimeValue { value_data }
-        //         } else {
-        //             return Err(format!(
-        //                 "field: {} output_fields is empty.",
-        //                 field.get_field_name()
-        //             ));
-        //         }
-        //     }
-        // }
-
-        // Ok(Row { values })
-    }
-
-    fn transform_array(&self, arr: &Array) -> Result<Vec<Row>, String> {
-        todo!()
-        // let mut rows = Vec::with_capacity(arr.len());
-        // for v in arr.iter() {
-        //     match v {
-        //         Value::Map(map) => {
-        //             let row = self.transform_map(map)?;
-        //             rows.push(row);
-        //         }
-        //         _ => return Err(format!("Expected map, found: {v:?}")),
-        //     }
-        // }
-        // Ok(rows)
     }
 }
 
@@ -198,27 +148,6 @@ impl Transformer for GreptimeTransformer {
                 )
             }
         }
-    }
-
-    fn transform(&self, value: Value) -> Result<Self::Output, String> {
-        todo!()
-        // match value {
-        //     Value::Map(map) => {
-        //         let rows = vec![self.transform_map(&map)?];
-        //         Ok(Rows {
-        //             schema: self.schema.clone(),
-        //             rows,
-        //         })
-        //     }
-        //     Value::Array(arr) => {
-        //         let rows = self.transform_array(&arr)?;
-        //         Ok(Rows {
-        //             schema: self.schema.clone(),
-        //             rows,
-        //         })
-        //     }
-        //     _ => Err(format!("Expected map or array, found: {}", value)),
-        // }
     }
 
     fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput, String> {

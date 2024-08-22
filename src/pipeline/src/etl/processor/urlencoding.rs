@@ -19,9 +19,9 @@ use super::{
     yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, ProcessorBuilder, ProcessorKind,
     FIELDS_NAME,
 };
-use crate::etl::field::{Field, Fields, InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
 use crate::etl::processor::{FIELD_NAME, IGNORE_MISSING_NAME, METHOD_NAME};
-use crate::etl::value::{Map, Value};
+use crate::etl::value::Value;
 
 pub(crate) const PROCESSOR_URL_ENCODING: &str = "urlencoding";
 
@@ -121,19 +121,7 @@ impl UrlEncodingProcessor {
             Method::Decode => decode(val).map_err(|e| e.to_string())?.into_owned(),
         };
         Ok(Value::String(processed))
-
-        // let key = field.get_target_field();
-
-        // Ok(Map::one(key, val))
     }
-
-    // fn update_output_keys(fields: &mut Fields) {
-    //     for field in fields.iter_mut() {
-    //         field
-    //             .output_fields_index_mapping
-    //             .insert(field.get_target_field().to_string(), 0_usize);
-    //     }
-    // }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for UrlEncodingProcessorBuilder {

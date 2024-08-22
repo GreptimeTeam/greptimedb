@@ -41,7 +41,6 @@ pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema>;
     fn transforms(&self) -> &Transforms;
     fn transforms_mut(&mut self) -> &mut Transforms;
-    fn transform(&self, val: Value) -> Result<Self::Output, String>;
     fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput, String>;
 }
 

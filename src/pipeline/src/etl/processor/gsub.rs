@@ -16,12 +16,12 @@ use ahash::HashSet;
 use regex::Regex;
 
 // use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{Fields, InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, Processor, ProcessorBuilder,
     ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
-use crate::etl::value::{Array, Value};
+use crate::etl::value::Value;
 
 pub(crate) const PROCESSOR_GSUB: &str = "gsub";
 
@@ -129,33 +129,9 @@ impl GsubProcessor {
         Ok(val)
     }
 
-    fn process_array(&self, arr: &Array) -> Result<Value, String> {
-        let re = self.pattern.as_ref().unwrap();
-        let replacement = self.replacement.as_ref().unwrap();
-
-        let mut result = Array::default();
-        for val in arr.iter() {
-            match val {
-                Value::String(haystack) => {
-                    let new_val = re.replace_all(haystack, replacement).to_string();
-                    result.push(Value::String(new_val));
-                }
-                _ => {
-                    return Err(format!(
-                        "{} processor: expect string or array string, but got {val:?}",
-                        self.kind()
-                    ))
-                }
-            }
-        }
-
-        Ok(Value::Array(result))
-    }
-
     fn process(&self, val: &Value) -> Result<Value, String> {
         match val {
             Value::String(val) => self.process_string(val),
-            Value::Array(arr) => self.process_array(arr),
             _ => Err(format!(
                 "{} processor: expect string or array string, but got {val:?}",
                 self.kind()
@@ -235,19 +211,9 @@ impl crate::etl::processor::Processor for GsubProcessor {
                     }
                 }
                 Some(v) => {
-                    // TODO(qtang): Let this method use the intermediate state collection directly.
                     let result = self.process(v)?;
                     let output_index = field.output_index();
                     val[output_index] = result;
-                    // let mut map = self.exec_field(v, field)?;
-                    // field
-                    //     .output_fields_index_mapping
-                    //     .iter()
-                    //     .for_each(|(k, output_index)| {
-                    //         if let Some(v) = map.remove(k) {
-                    //             val[*output_index] = v;
-                    //         }
-                    //     });
                 }
             }
         }
@@ -257,56 +223,20 @@ impl crate::etl::processor::Processor for GsubProcessor {
 
 #[cfg(test)]
 mod tests {
-    use crate::etl::field::Field;
     use crate::etl::processor::gsub::GsubProcessor;
-    use crate::etl::processor::Processor;
-    use crate::etl::value::{Map, Value};
+    use crate::etl::value::Value;
 
     #[test]
     fn test_string_value() {
-        // let mut processor = GsubProcessor::default();
-        // processor.try_pattern(r"\d+").unwrap();
-        // processor.with_replacement("xxx");
+        let processor = GsubProcessor {
+            pattern: Some(regex::Regex::new(r"\d+").unwrap()),
+            replacement: Some("xxx".to_string()),
+            ..Default::default()
+        };
 
-        // let field = Field::new("message");
-        // let val = Value::String("123".to_string());
-        // let result = processor.exec_field(&val, &field).unwrap();
+        let val = Value::String("123".to_string());
+        let result = processor.process(&val).unwrap();
 
-        // assert_eq!(
-        //     result,
-        //     Map::one("message", Value::String("xxx".to_string()))
-        // );
+        assert_eq!(result, Value::String("xxx".to_string()));
     }
-
-    // no longer support
-    // #[test]
-    // fn test_array_string_value() {
-    //     let mut processor = GsubProcessor::default();
-    //     processor.try_pattern(r"\d+").unwrap();
-    //     processor.with_replacement("xxx");
-
-    //     let field = Field::new("message");
-    //     let val = Value::Array(
-    //         vec![
-    //             Value::String("123".to_string()),
-    //             Value::String("456".to_string()),
-    //         ]
-    //         .into(),
-    //     );
-    //     let result = processor.exec_field(&val, &field).unwrap();
-
-    //     assert_eq!(
-    //         result,
-    //         Map::one(
-    //             "message",
-    //             Value::Array(
-    //                 vec![
-    //                     Value::String("xxx".to_string()),
-    //                     Value::String("xxx".to_string())
-    //                 ]
-    //                 .into()
-    //             )
-    //         )
-    //     );
-    // }
 }

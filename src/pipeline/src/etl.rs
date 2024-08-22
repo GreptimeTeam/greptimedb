@@ -19,12 +19,12 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
-use ahash::{HashMap, HashSet};
-use common_telemetry::{debug, warn};
+use ahash::HashSet;
+use common_telemetry::debug;
 use itertools::{merge, Itertools};
 use processor::{Processor, ProcessorBuilder, Processors};
 use transform::{TransformBuilders, Transformer, Transforms};
-use value::{Map, Value};
+use value::Value;
 use yaml_rust::YamlLoader;
 
 const DESCRIPTION: &str = "description";
@@ -36,75 +36,6 @@ pub enum Content {
     Json(String),
     Yaml(String),
 }
-
-// /// set the index for the processor keys
-// /// the index is the position of the key in the final intermediate keys
-// fn set_processor_keys_index(
-//     processors: &mut processor::Processors,
-//     final_intermediate_keys: &Vec<String>,
-// ) -> Result<(), String> {
-//     let final_intermediate_key_index = final_intermediate_keys
-//         .iter()
-//         .enumerate()
-//         .map(|(i, k)| (k.as_str(), i))
-//         .collect::<HashMap<_, _>>();
-//     for processor in processors.iter_mut() {
-//         for field in processor.fields_mut().iter_mut() {
-//             let index = final_intermediate_key_index.get(field.input_field.name.as_str()).ok_or(format!(
-//                     "input field {} is not found in intermediate keys: {final_intermediate_keys:?} when set processor keys index",
-//                     field.input_field.name
-//                 ))?;
-//             field.set_input_index(*index);
-//             for (k, v) in field.output_fields_index_mapping.iter_mut() {
-//                 let index = final_intermediate_key_index.get(k.as_str());
-//                 match index {
-//                     Some(index) => {
-//                         *v = *index;
-//                     }
-//                     None => {
-//                         warn!(
-//                             "output field {k} is not found in intermediate keys: {final_intermediate_keys:?} when set processor keys index"
-//                         );
-//                     }
-//                 }
-//             }
-//         }
-//     }
-//     Ok(())
-// }
-
-// fn set_transform_keys_index(
-//     transforms: &mut Transforms,
-//     final_intermediate_keys: &[String],
-//     output_keys: &[String],
-// ) -> Result<(), String> {
-//     let final_intermediate_key_index = final_intermediate_keys
-//         .iter()
-//         .enumerate()
-//         .map(|(i, k)| (k.as_str(), i))
-//         .collect::<HashMap<_, _>>();
-//     let output_key_index = output_keys
-//         .iter()
-//         .enumerate()
-//         .map(|(i, k)| (k.as_str(), i))
-//         .collect::<HashMap<_, _>>();
-//     for transform in transforms.iter_mut() {
-//         for field in transform.fields.iter_mut() {
-//             let index = final_intermediate_key_index.get(field.input_field.name.as_str()).ok_or(format!(
-//                     "input field {} is not found in intermediate keys: {final_intermediate_keys:?} when set transform keys index",
-//                     field.input_field.name
-//                 ))?;
-//             field.set_input_index(*index);
-//             for (k, v) in field.output_fields_index_mapping.iter_mut() {
-//                 let index = output_key_index.get(k.as_str()).ok_or(format!(
-//                     "output field {k} is not found in output keys: {final_intermediate_keys:?} when set transform keys index"
-//                 ))?;
-//                 *v = *index;
-//             }
-//         }
-//     }
-//     Ok(())
-// }
 
 pub fn parse<T>(input: &Content) -> Result<Pipeline<T>, String>
 where
@@ -185,7 +116,7 @@ where
 
             final_intermediate_keys.extend(intermediate_keys_exclude_original);
 
-            let output_keys = (&transform_builders.output_keys).clone();
+            let output_keys = transform_builders.output_keys.clone();
 
             let processors_kind_list = processor_builder_list
                 .processor_builders
@@ -198,9 +129,6 @@ where
                 output_keys: processors_output_keys.clone(),
                 required_original_keys: processors_required_original_keys.clone(),
             };
-
-            // set_processor_keys_index(&mut processors, &final_intermediate_keys)?;
-            // set_transform_keys_index(transforms, &final_intermediate_keys, &output_keys)?;
 
             let transfor_list = transform_builders
                 .builders
@@ -267,39 +195,6 @@ impl<T> Pipeline<T>
 where
     T: Transformer,
 {
-    fn exec_map(&self, map: &mut Map) -> Result<(), String> {
-        todo!()
-        // let v = map;
-        // for processor in self.processors.iter() {
-        //     processor.exec_map(v)?;
-        // }
-        // Ok(())
-    }
-
-    pub fn exec(&self, mut val: Value) -> Result<T::Output, String> {
-        let result = match val {
-            Value::Map(ref mut map) => {
-                self.exec_map(map)?;
-                val
-            }
-            Value::Array(arr) => arr
-                .values
-                .into_iter()
-                .map(|mut v| match v {
-                    Value::Map(ref mut map) => {
-                        self.exec_map(map)?;
-                        Ok(v)
-                    }
-                    _ => Err(format!("expected a map, but got {}", v)),
-                })
-                .collect::<Result<Vec<Value>, String>>()
-                .map(|values| Value::Array(value::Array { values }))?,
-            _ => return Err(format!("expected a map or array, but got {}", val)),
-        };
-
-        self.transformer.transform(result)
-    }
-
     pub fn exec_mut(&self, val: &mut Vec<Value>) -> Result<T::VecOutput, String> {
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
@@ -388,58 +283,47 @@ mod tests {
     use crate::etl::{parse, Content, Pipeline};
     use crate::Value;
 
-    //     #[test]
-    //     fn test_pipeline_prepare() {
-    //         let input_value_str = r#"
-    //             {
-    //                 "my_field": "1,2",
-    //                 "foo": "bar"
-    //             }
-    //         "#;
-    //         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
+    #[test]
+    fn test_pipeline_prepare() {
+        let input_value_str = r#"
+                {
+                    "my_field": "1,2",
+                    "foo": "bar"
+                }
+            "#;
+        let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
 
-    //         let pipeline_yaml = r#"
-    // ---
-    // description: Pipeline for Apache Tomcat
+        let pipeline_yaml = r#"description: 'Pipeline for Apache Tomcat'
+processors:
+  - csv:
+      field: my_field
+      target_fields: field1, field2
+transform:
+  - field: field1
+    type: uint32
+  - field: field2
+    type: uint32
+"#;
+        let pipeline: Pipeline<GreptimeTransformer> =
+            parse(&Content::Yaml(pipeline_yaml.into())).unwrap();
+        let mut payload = pipeline.init_intermediate_state();
+        pipeline.prepare(input_value, &mut payload).unwrap();
+        assert_eq!(&["my_field"].to_vec(), pipeline.required_keys());
+        assert_eq!(
+            payload,
+            vec![Value::String("1,2".to_string()), Value::Null, Value::Null]
+        );
+        let result = pipeline.exec_mut(&mut payload).unwrap();
 
-    // processors:
-    //   - csv:
-    //       field: my_field, my_field,field1, field2
-
-    // transform:
-    //   - field: field1
-    //     type: uint32
-    //   - field: field2
-    //     type: uint32
-    // "#;
-    //         let pipeline: Pipeline<GreptimeTransformer> =
-    //             parse(&Content::Yaml(pipeline_yaml.into())).unwrap();
-    //         let mut payload = pipeline.init_intermediate_state();
-    //         pipeline.prepare(input_value, &mut payload).unwrap();
-    //         assert_eq!(
-    //             &["greptime_timestamp", "my_field"].to_vec(),
-    //             pipeline.required_keys()
-    //         );
-    //         assert_eq!(
-    //             payload,
-    //             vec![
-    //                 Value::Null,
-    //                 Value::String("1,2".to_string()),
-    //                 Value::Null,
-    //                 Value::Null
-    //             ]
-    //         );
-    //         let result = pipeline.exec_mut(&mut payload).unwrap();
-
-    //         assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
-    //         assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
-    //         match &result.values[2].value_data {
-    //             Some(ValueData::TimestampNanosecondValue(v)) => {
-    //                 assert_ne!(*v, 0);
-    //             }
-    //             _ => panic!("expect null value"),
-    //         }
-    //     }
+        assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
+        assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
+        match &result.values[2].value_data {
+            Some(ValueData::TimestampNanosecondValue(v)) => {
+                assert_ne!(*v, 0);
+            }
+            _ => panic!("expect null value"),
+        }
+    }
 
     #[test]
     fn test_dissect_pipeline() {
@@ -530,21 +414,19 @@ transform:
     #[test]
     fn test_csv_pipeline() {
         let input_value_str = r#"
-            {
-                "my_field": "1,2",
-                "foo": "bar"
-            }
-        "#;
+                {
+                    "my_field": "1,2",
+                    "foo": "bar"
+                }
+            "#;
         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
 
         let pipeline_yaml = r#"
----
 description: Pipeline for Apache Tomcat
-
 processors:
   - csv:
-      field: my_field,my_field, field1, field2
-
+      field: my_field
+      target_fields: field1, field2
 transform:
   - field: field1
     type: uint32
@@ -554,8 +436,22 @@ transform:
 
         let pipeline: Pipeline<GreptimeTransformer> =
             parse(&Content::Yaml(pipeline_yaml.into())).unwrap();
-        let output = pipeline.exec(input_value.try_into().unwrap());
-        assert!(output.is_ok());
+        let mut payload = pipeline.init_intermediate_state();
+        pipeline.prepare(input_value, &mut payload).unwrap();
+        assert_eq!(&["my_field"].to_vec(), pipeline.required_keys());
+        assert_eq!(
+            payload,
+            vec![Value::String("1,2".to_string()), Value::Null, Value::Null]
+        );
+        let result = pipeline.exec_mut(&mut payload).unwrap();
+        assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
+        assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
+        match &result.values[2].value_data {
+            Some(ValueData::TimestampNanosecondValue(v)) => {
+                assert_ne!(*v, 0);
+            }
+            _ => panic!("expect null value"),
+        }
     }
 
     #[test]

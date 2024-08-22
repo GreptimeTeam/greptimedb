@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
 use std::ops::Deref;
-use std::usize;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use common_telemetry::warn;
@@ -27,7 +25,7 @@ use crate::etl::processor::{
     Processor, ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
     PATTERNS_NAME, PATTERN_NAME,
 };
-use crate::etl::value::{Map, Value};
+use crate::etl::value::Value;
 
 pub(crate) const PROCESSOR_DISSECT: &str = "dissect";
 
@@ -495,44 +493,39 @@ pub struct DissectProcessorBuilder {
     output_keys: HashSet<String>,
 }
 
-impl ProcessorBuilder for DissectProcessorBuilder {
-    fn output_keys(&self) -> HashSet<&str> {
-        self.output_keys.iter().map(|s| s.as_str()).collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.fields.iter().map(|f| f.input_field()).collect()
-    }
-
-    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
-        let mut real_fields = vec![];
-        let output_keys_index: BTreeMap<_, _> = self
-            .output_keys
+impl DissectProcessorBuilder {
+    fn build_output_keys(patterns: &Vec<PatternInfo>) -> HashSet<String> {
+        patterns
             .iter()
-            .map(|k| {
-                let index = intermediate_keys.iter().position(|x| x == k).unwrap();
-                (k.to_string(), index)
+            .flat_map(|pattern| pattern.iter())
+            .filter_map(|p| match p {
+                PartInfo::Name(name) => {
+                    if !name.is_empty()
+                        && (name.start_modifier.is_none()
+                            || name
+                                .start_modifier
+                                .as_ref()
+                                .is_some_and(|x| matches!(x, StartModifier::Append(_))))
+                    {
+                        Some(name.to_string())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
             })
-            .collect();
-        for field in self.fields.into_iter() {
-            let input_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.input_field())
-                // TODO (qtang): handler error
-                .unwrap();
+            .collect()
+    }
 
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
-
-            let real_field =
-                OneInputMultiOutputField::new(input_field_info, output_keys_index.clone());
-            real_fields.push(real_field);
-        }
-        let patterns = self
-            .patterns
+    fn build_patterns_from_pattern_infos(
+        patterns: Vec<PatternInfo>,
+        intermediate_keys: &[String],
+    ) -> Vec<Pattern> {
+        patterns
             .into_iter()
-            .map(|x| {
-                let original = x.origin;
-                let pattern1 = x
+            .map(|pattern_info| {
+                let original = pattern_info.origin;
+                let pattern = pattern_info
                     .parts
                     .into_iter()
                     .map(|xx| match xx {
@@ -559,10 +552,37 @@ impl ProcessorBuilder for DissectProcessorBuilder {
                     .collect();
                 Pattern {
                     origin: original,
-                    parts: pattern1,
+                    parts: pattern,
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    }
+}
+
+impl ProcessorBuilder for DissectProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        self.output_keys.iter().map(|s| s.as_str()).collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.fields.iter().map(|f| f.input_field()).collect()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input_index = intermediate_keys
+                .iter()
+                .position(|k| *k == field.input_field())
+                // TODO (qtang): handler error
+                .unwrap();
+
+            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+
+            let real_field = OneInputMultiOutputField::new(input_field_info, field.target_field);
+            real_fields.push(real_field);
+        }
+        let patterns = Self::build_patterns_from_pattern_infos(self.patterns, intermediate_keys);
         let processor = DissectProcessor {
             real_fields,
             patterns,
@@ -584,129 +604,6 @@ pub struct DissectProcessor {
 }
 
 impl DissectProcessor {
-    fn process_pattern_map(&self, chs: &[char], pattern: &Pattern) -> Result<Map, String> {
-        let mut map = Map::default();
-        let mut pos = 0;
-
-        let mut appends: HashMap<String, Vec<(String, u32)>> = HashMap::new();
-        // let mut maps: HashMap<usize, (String,String)> = HashMap::new();
-
-        let mut process_name_value = |name: &Name, value: String| {
-            let name_str = name.to_string();
-            match name.start_modifier {
-                Some(StartModifier::NamedSkip) => {
-                    // do nothing, ignore this match
-                }
-                Some(StartModifier::Append(order)) => {
-                    appends
-                        .entry(name_str)
-                        .or_default()
-                        .push((value, order.unwrap_or_default()));
-                }
-                // Some(StartModifier::MapKey) => match maps.get(&name_index) {
-                //     Some(map_val) => {
-                //         map.insert(value, Value::String(map_val.to_string()));
-                //     }
-                //     None => {
-                //         maps.insert(name_index, value);
-                //     }
-                // },
-                // Some(StartModifier::MapVal) => match maps.get(&name_index) {
-                //     Some(map_key) => {
-                //         map.insert(map_key, Value::String(value));
-                //     }
-                //     None => {
-                //         maps.insert(name_index, value);
-                //     }
-                // },
-                Some(_) => {
-                    // do nothing, ignore MapKey and MapVal
-                    // because transform can know the key name
-                }
-                None => {
-                    map.insert(name_str, Value::String(value));
-                }
-            }
-        };
-
-        for i in 0..pattern.len() {
-            let this_part = &pattern[i];
-            let next_part = pattern.get(i + 1);
-            match (this_part, next_part) {
-                // if Split part, and exactly matches, then move pos split.len() forward
-                (Part::Split(split), _) => {
-                    let split_chs = split.chars().collect::<Vec<char>>();
-                    let split_len = split_chs.len();
-                    if pos + split_len > chs.len() {
-                        return Err(format!("'{split}' exceeds the input",));
-                    }
-
-                    if &chs[pos..pos + split_len] != split_chs.as_slice() {
-                        return Err(format!(
-                            "'{split}' does not match the input '{}'",
-                            chs[pos..pos + split_len].iter().collect::<String>()
-                        ));
-                    }
-
-                    pos += split_len;
-                }
-
-                (Part::Name(name1), Some(Part::Name(name2))) => {
-                    return Err(format!(
-                        "consecutive names are not allowed: '{name1}' '{name2}'"
-                    ));
-                }
-
-                // if Name part is the last part, then the rest of the input is the value
-                (Part::Name(name), None) => {
-                    let value = chs[pos..].iter().collect::<String>();
-                    process_name_value(name, value);
-                }
-
-                // if Name part, and next part is Split, then find the matched value of the name
-                (Part::Name(name), Some(Part::Split(split))) => {
-                    let stop = split
-                        .chars()
-                        .next()
-                        .ok_or("Empty split is not allowed".to_string())?; // this won't happen
-                    let mut end = pos;
-                    while end < chs.len() && chs[end] != stop {
-                        end += 1;
-                    }
-
-                    if !name.is_name_empty() {
-                        let value = chs[pos..end].iter().collect::<String>();
-                        process_name_value(name, value);
-                    }
-
-                    if name.is_end_modifier_set() {
-                        while end < chs.len() && chs[end] == stop {
-                            end += 1;
-                        }
-                        end -= 1; // leave the last stop character to match the next split
-                    }
-
-                    pos = end;
-                }
-            }
-        }
-
-        if !appends.is_empty() {
-            let sep = match self.append_separator {
-                Some(ref sep) => sep,
-                None => " ",
-            };
-
-            for (name, mut values) in appends {
-                values.sort_by(|a, b| a.1.cmp(&b.1));
-                let value = values.into_iter().map(|(a, _)| a).join(sep);
-                map.insert(name, Value::String(value));
-            }
-        }
-
-        Ok(map)
-    }
-
     fn process_pattern(
         &self,
         chs: &[char],
@@ -887,26 +784,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessorBuilder {
                 _ => {}
             }
         }
-        let output_keys = patterns
-            .iter()
-            .flat_map(|pattern| pattern.iter())
-            .filter_map(|p| match p {
-                PartInfo::Name(name) => {
-                    if !name.is_empty()
-                        && (name.start_modifier.is_none()
-                            || name
-                                .start_modifier
-                                .as_ref()
-                                .is_some_and(|x| matches!(x, StartModifier::Append(_))))
-                    {
-                        Some(name.to_string())
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .collect();
+        let output_keys = Self::build_output_keys(&patterns);
         let builder = DissectProcessorBuilder {
             fields,
             patterns,
@@ -972,17 +850,27 @@ mod tests {
     use ahash::HashMap;
 
     use super::{DissectProcessor, EndModifier, NameInfo, PartInfo, PatternInfo, StartModifier};
-    use crate::etl::value::{Map, Value};
+    use crate::etl::processor::dissect::DissectProcessorBuilder;
+    use crate::etl::value::Value;
 
     fn assert(pattern_str: &str, input: &str, expected: HashMap<String, Value>) {
         let chs = input.chars().collect::<Vec<char>>();
-        let pattern_info: PatternInfo = pattern_str.parse().unwrap();
-        let pattern = pattern_info.into();
+        let pattern_infos: Vec<PatternInfo> = vec![pattern_str.parse().unwrap()];
+        let output_keys: Vec<String> = DissectProcessorBuilder::build_output_keys(&pattern_infos)
+            .into_iter()
+            .collect();
+        let pattern =
+            DissectProcessorBuilder::build_patterns_from_pattern_infos(pattern_infos, &output_keys);
 
         let processor = DissectProcessor::default();
-        let map = processor.process_pattern_map(&chs, &pattern).unwrap();
+        let result: HashMap<String, Value> = processor
+            .process_pattern(&chs, &pattern[0])
+            .unwrap()
+            .into_iter()
+            .map(|(k, v)| (output_keys[k].to_string(), v))
+            .collect();
 
-        assert_eq!(map, Map::from(expected), "pattern: {}", pattern_str);
+        assert_eq!(result, expected, "pattern: {}", pattern_str);
     }
 
     #[test]
@@ -1016,210 +904,210 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn test_dissect_modifier_pattern() {
-    //     let cases = [
-    //         (
-    //             "%{} %{}",
-    //             vec![
-    //                 Part::Name(Name {
-    //                     name: "".into(),
-    //                     start_modifier: None,
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(" ".into()),
-    //                 Part::Name(Name {
-    //                     name: "".into(),
-    //                     start_modifier: None,
-    //                     end_modifier: None,
-    //                 }),
-    //             ],
-    //         ),
-    //         (
-    //             "%{ts->} %{level}",
-    //             vec![
-    //                 Part::Name(Name {
-    //                     name: "ts".into(),
-    //                     start_modifier: None,
-    //                     end_modifier: Some(EndModifier),
-    //                 }),
-    //                 Part::Split(" ".into()),
-    //                 Part::Name("level".into()),
-    //             ],
-    //         ),
-    //         (
-    //             "[%{ts}]%{->}[%{level}]",
-    //             vec![
-    //                 Part::Split("[".into()),
-    //                 Part::Name(Name {
-    //                     name: "ts".into(),
-    //                     start_modifier: None,
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split("]".into()),
-    //                 Part::Name(Name {
-    //                     name: "".into(),
-    //                     start_modifier: None,
-    //                     end_modifier: Some(EndModifier),
-    //                 }),
-    //                 Part::Split("[".into()),
-    //                 Part::Name(Name {
-    //                     name: "level".into(),
-    //                     start_modifier: None,
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split("]".into()),
-    //             ],
-    //         ),
-    //         (
-    //             "%{+name} %{+name} %{+name} %{+name}",
-    //             vec![
-    //                 Part::Name(Name {
-    //                     name: "name".into(),
-    //                     start_modifier: Some(StartModifier::Append(None)),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(" ".into()),
-    //                 Part::Name(Name {
-    //                     name: "name".into(),
-    //                     start_modifier: Some(StartModifier::Append(None)),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(" ".into()),
-    //                 Part::Name(Name {
-    //                     name: "name".into(),
-    //                     start_modifier: Some(StartModifier::Append(None)),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(" ".into()),
-    //                 Part::Name(Name {
-    //                     name: "name".into(),
-    //                     start_modifier: Some(StartModifier::Append(None)),
-    //                     end_modifier: None,
-    //                 }),
-    //             ],
-    //         ),
-    //         (
-    //             "%{+name/2} %{+name/4} %{+name/3} %{+name/1}",
-    //             vec![
-    //                 Part::Name(Name {
-    //                     name: "name".into(),
-    //                     start_modifier: Some(StartModifier::Append(Some(2))),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(" ".into()),
-    //                 Part::Name(Name {
-    //                     name: "name".into(),
-    //                     start_modifier: Some(StartModifier::Append(Some(4))),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(" ".into()),
-    //                 Part::Name(Name {
-    //                     name: "name".into(),
-    //                     start_modifier: Some(StartModifier::Append(Some(3))),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(" ".into()),
-    //                 Part::Name(Name {
-    //                     name: "name".into(),
-    //                     start_modifier: Some(StartModifier::Append(Some(1))),
-    //                     end_modifier: None,
-    //                 }),
-    //             ],
-    //         ),
-    //         (
-    //             "%{clientip} %{?ident} %{?auth} [%{timestamp}]",
-    //             vec![
-    //                 Part::Name(Name {
-    //                     name: "clientip".into(),
-    //                     start_modifier: None,
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(" ".into()),
-    //                 Part::Name(Name {
-    //                     name: "ident".into(),
-    //                     start_modifier: Some(StartModifier::NamedSkip),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(" ".into()),
-    //                 Part::Name(Name {
-    //                     name: "auth".into(),
-    //                     start_modifier: Some(StartModifier::NamedSkip),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(" [".into()),
-    //                 Part::Name(Name {
-    //                     name: "timestamp".into(),
-    //                     start_modifier: None,
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split("]".into()),
-    //             ],
-    //         ),
-    //         (
-    //             "[%{ts}] [%{level}] %{*p1}:%{&p1} %{*p2}:%{&p2}",
-    //             vec![
-    //                 Part::Split("[".into()),
-    //                 Part::Name(Name {
-    //                     name: "ts".into(),
-    //                     start_modifier: None,
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split("] [".into()),
-    //                 Part::Name(Name {
-    //                     name: "level".into(),
-    //                     start_modifier: None,
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split("] ".into()),
-    //                 Part::Name(Name {
-    //                     name: "p1".into(),
-    //                     start_modifier: Some(StartModifier::MapKey),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(":".into()),
-    //                 Part::Name(Name {
-    //                     name: "p1".into(),
-    //                     start_modifier: Some(StartModifier::MapVal),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(" ".into()),
-    //                 Part::Name(Name {
-    //                     name: "p2".into(),
-    //                     start_modifier: Some(StartModifier::MapKey),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(":".into()),
-    //                 Part::Name(Name {
-    //                     name: "p2".into(),
-    //                     start_modifier: Some(StartModifier::MapVal),
-    //                     end_modifier: None,
-    //                 }),
-    //             ],
-    //         ),
-    //         (
-    //             "%{&p1}:%{*p1}",
-    //             vec![
-    //                 Part::Name(Name {
-    //                     name: "p1".into(),
-    //                     start_modifier: Some(StartModifier::MapVal),
-    //                     end_modifier: None,
-    //                 }),
-    //                 Part::Split(":".into()),
-    //                 Part::Name(Name {
-    //                     name: "p1".into(),
-    //                     start_modifier: Some(StartModifier::MapKey),
-    //                     end_modifier: None,
-    //                 }),
-    //             ],
-    //         ),
-    //     ];
+    #[test]
+    fn test_dissect_modifier_pattern() {
+        let cases = [
+            (
+                "%{} %{}",
+                vec![
+                    PartInfo::Name(NameInfo {
+                        name: "".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(" ".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                ],
+            ),
+            (
+                "%{ts->} %{level}",
+                vec![
+                    PartInfo::Name(NameInfo {
+                        name: "ts".into(),
+                        start_modifier: None,
+                        end_modifier: Some(EndModifier),
+                    }),
+                    PartInfo::Split(" ".into()),
+                    PartInfo::Name("level".into()),
+                ],
+            ),
+            (
+                "[%{ts}]%{->}[%{level}]",
+                vec![
+                    PartInfo::Split("[".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "ts".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split("]".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "".into(),
+                        start_modifier: None,
+                        end_modifier: Some(EndModifier),
+                    }),
+                    PartInfo::Split("[".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "level".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split("]".into()),
+                ],
+            ),
+            (
+                "%{+name} %{+name} %{+name} %{+name}",
+                vec![
+                    PartInfo::Name(NameInfo {
+                        name: "name".into(),
+                        start_modifier: Some(StartModifier::Append(None)),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(" ".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "name".into(),
+                        start_modifier: Some(StartModifier::Append(None)),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(" ".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "name".into(),
+                        start_modifier: Some(StartModifier::Append(None)),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(" ".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "name".into(),
+                        start_modifier: Some(StartModifier::Append(None)),
+                        end_modifier: None,
+                    }),
+                ],
+            ),
+            (
+                "%{+name/2} %{+name/4} %{+name/3} %{+name/1}",
+                vec![
+                    PartInfo::Name(NameInfo {
+                        name: "name".into(),
+                        start_modifier: Some(StartModifier::Append(Some(2))),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(" ".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "name".into(),
+                        start_modifier: Some(StartModifier::Append(Some(4))),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(" ".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "name".into(),
+                        start_modifier: Some(StartModifier::Append(Some(3))),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(" ".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "name".into(),
+                        start_modifier: Some(StartModifier::Append(Some(1))),
+                        end_modifier: None,
+                    }),
+                ],
+            ),
+            (
+                "%{clientip} %{?ident} %{?auth} [%{timestamp}]",
+                vec![
+                    PartInfo::Name(NameInfo {
+                        name: "clientip".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(" ".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "ident".into(),
+                        start_modifier: Some(StartModifier::NamedSkip),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(" ".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "auth".into(),
+                        start_modifier: Some(StartModifier::NamedSkip),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(" [".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "timestamp".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split("]".into()),
+                ],
+            ),
+            (
+                "[%{ts}] [%{level}] %{*p1}:%{&p1} %{*p2}:%{&p2}",
+                vec![
+                    PartInfo::Split("[".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "ts".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split("] [".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "level".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split("] ".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "p1".into(),
+                        start_modifier: Some(StartModifier::MapKey),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(":".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "p1".into(),
+                        start_modifier: Some(StartModifier::MapVal),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(" ".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "p2".into(),
+                        start_modifier: Some(StartModifier::MapKey),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(":".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "p2".into(),
+                        start_modifier: Some(StartModifier::MapVal),
+                        end_modifier: None,
+                    }),
+                ],
+            ),
+            (
+                "%{&p1}:%{*p1}",
+                vec![
+                    PartInfo::Name(NameInfo {
+                        name: "p1".into(),
+                        start_modifier: Some(StartModifier::MapVal),
+                        end_modifier: None,
+                    }),
+                    PartInfo::Split(":".into()),
+                    PartInfo::Name(NameInfo {
+                        name: "p1".into(),
+                        start_modifier: Some(StartModifier::MapKey),
+                        end_modifier: None,
+                    }),
+                ],
+            ),
+        ];
 
-    //     for (pattern, expected) in cases.into_iter() {
-    //         let p: Pattern = pattern.parse().unwrap();
-    //         assert_eq!(p.parts, expected);
-    //     }
-    // }
+        for (pattern, expected) in cases.into_iter() {
+            let p: PatternInfo = pattern.parse().unwrap();
+            assert_eq!(p.parts, expected);
+        }
+    }
 
     #[test]
     fn test_dissect_invalid_pattern() {
@@ -1431,46 +1319,4 @@ mod tests {
             );
         }
     }
-
-    // no longer support
-    // #[test]
-    // fn test_dissect_reference_keys() {
-    //     let cases = [
-    //         (
-    //             "[%{ts}] [%{level}] %{*p1}:%{&p1} %{*p2}:%{&p2}",
-    //             "[2018-08-10T17:15:42,466] [ERR] ip:1.2.3.4 error:REFUSED",
-    //             [
-    //                 ("ts", "2018-08-10T17:15:42,466"),
-    //                 ("level", "ERR"),
-    //                 ("ip", "1.2.3.4"),
-    //                 ("error", "REFUSED"),
-    //             ],
-    //         ),
-    //         (
-    //             "[%{ts}] [%{level}] %{&p1}:%{*p1} %{*p2}:%{&p2}",
-    //             "[2018-08-10T17:15:42,466] [ERR] ip:1.2.3.4 error:REFUSED",
-    //             [
-    //                 ("ts", "2018-08-10T17:15:42,466"),
-    //                 ("level", "ERR"),
-    //                 ("1.2.3.4", "ip"),
-    //                 ("error", "REFUSED"),
-    //             ],
-    //         ),
-    //     ]
-    //     .into_iter()
-    //     .map(|(pattern, input, expected)| {
-    //         let map = expected
-    //             .into_iter()
-    //             .map(|(k, v)| (k.to_string(), Value::String(v.to_string())));
-    //         (pattern, input, map)
-    //     });
-
-    //     for (pattern_str, input, expected) in cases {
-    //         assert(
-    //             pattern_str,
-    //             input,
-    //             expected.collect::<HashMap<String, Value>>(),
-    //         );
-    //     }
-    // }
 }

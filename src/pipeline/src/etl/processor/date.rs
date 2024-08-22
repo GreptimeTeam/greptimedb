@@ -58,8 +58,14 @@ lazy_static! {
                 .collect();
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Formats(Vec<Arc<String>>);
+
+impl Default for Formats {
+    fn default() -> Self {
+        Formats(DEFAULT_FORMATS.clone())
+    }
+}
 
 impl Formats {
     fn new(mut formats: Vec<Arc<String>>) -> Self {
@@ -209,38 +215,6 @@ pub struct DateProcessor {
 }
 
 impl DateProcessor {
-    // fn with_fields(&mut self, mut fields: Fields) {
-    //     todo!()
-    //     // update_one_one_output_keys(&mut fields);
-    //     // self.fields = fields
-    // }
-
-    // fn with_formats(&mut self, v: Option<Vec<Arc<String>>>) {
-    //     let v = match v {
-    //         Some(v) if !v.is_empty() => v,
-    //         _ => DEFAULT_FORMATS.clone(),
-    //     };
-
-    //     let formats = Formats::new(v);
-    //     self.formats = formats;
-    // }
-
-    // fn with_timezone(&mut self, timezone: String) {
-    //     if !timezone.is_empty() {
-    //         self.timezone = Some(Arc::new(timezone));
-    //     }
-    // }
-
-    // fn with_locale(&mut self, locale: String) {
-    //     if !locale.is_empty() {
-    //         self.locale = Some(Arc::new(locale));
-    //     }
-    // }
-
-    // fn with_ignore_missing(&mut self, ignore_missing: bool) {
-    //     self.ignore_missing = ignore_missing;
-    // }
-
     fn parse(&self, val: &str) -> Result<Timestamp, String> {
         let mut tz = Tz::UTC;
         if let Some(timezone) = &self.timezone {

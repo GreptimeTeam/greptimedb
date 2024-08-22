@@ -153,15 +153,12 @@ impl OneInputOneOutPutField {
 #[derive(Debug, Default, Clone)]
 pub struct OneInputMultiOutputField {
     input: InputFieldInfo,
-    outputs: Option<BTreeMap<String, usize>>,
+    prefix: Option<String>,
 }
 
 impl OneInputMultiOutputField {
-    pub(crate) fn new(input: InputFieldInfo, outputs: BTreeMap<String, usize>) -> Self {
-        OneInputMultiOutputField {
-            input,
-            outputs: Some(outputs),
-        }
+    pub(crate) fn new(input: InputFieldInfo, prefix: Option<String>) -> Self {
+        OneInputMultiOutputField { input, prefix }
     }
 
     pub(crate) fn input(&self) -> &InputFieldInfo {
@@ -176,21 +173,15 @@ impl OneInputMultiOutputField {
         &self.input.name
     }
 
-    pub(crate) fn outputs(&self) -> BTreeMap<&String, &usize> {
-        if let Some(outputs) = &self.outputs {
-            outputs.iter().collect()
-        } else {
-            let mut map = BTreeMap::new();
-            map.insert(&self.input.name, &self.input.index);
-            map
-        }
+    pub(crate) fn target_prefix(&self) -> &str {
+        self.prefix.as_deref().unwrap_or(&self.input.name)
     }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct NewField {
-    input_field: String,
-    target_field: Option<String>,
+    pub(crate) input_field: String,
+    pub(crate) target_field: Option<String>,
 }
 
 impl FromStr for NewField {

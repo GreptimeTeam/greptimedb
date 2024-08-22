@@ -15,12 +15,12 @@
 use ahash::HashSet;
 
 // use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{Field, Fields, InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
 use crate::etl::processor::{
-    update_one_one_output_keys, yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, Processor,
-    ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, SEPARATOR_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, Processor, ProcessorBuilder,
+    ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, SEPARATOR_NAME,
 };
-use crate::etl::value::{Array, Map, Value};
+use crate::etl::value::{Array, Value};
 
 pub(crate) const PROCESSOR_JOIN: &str = "join";
 
@@ -167,18 +167,9 @@ impl Processor for JoinProcessor {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::Array(arr)) => {
-                    // TODO(qtang): Let this method use the intermediate state collection directly.
                     let result = self.process(arr)?;
                     let output_index = field.output_index();
                     val[output_index] = result;
-                    // field
-                    //     .output_fields_index_mapping
-                    //     .iter()
-                    //     .for_each(|(k, output_index)| {
-                    //         if let Some(v) = map.remove(k) {
-                    //             val[*output_index] = v;
-                    //         }
-                    //     });
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {

@@ -23,12 +23,12 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 // use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{Fields, InputFieldInfo, NewFields, OneInputMultiOutputField};
+use crate::etl::field::{InputFieldInfo, NewFields, OneInputMultiOutputField};
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, yaml_strings, Field, Processor,
+    yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, yaml_strings, Processor,
     ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
-use crate::etl::value::{Map, Value};
+use crate::etl::value::Value;
 
 lazy_static! {
     static ref GROUPS_NAME_REGEX: Regex = Regex::new(r"\(\?P?<([[:word:]]+)>.+?\)").unwrap();
@@ -121,12 +121,6 @@ impl RegexProcessorBuilder {
 
     fn build(self, intermediate_keys: &[String]) -> RegexProcessor {
         let mut real_fields = vec![];
-
-        let output_keys = self
-            .patterns
-            .iter()
-            .map(|pattern| pattern.groups.iter().collect::<Vec<_>>())
-            .collect::<Vec<_>>();
         for field in self.fields.into_iter() {
             let input_index = intermediate_keys
                 .iter()
@@ -135,18 +129,7 @@ impl RegexProcessorBuilder {
                 .unwrap();
             let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
 
-            let result = output_keys
-                .iter()
-                .flatten()
-                .map(|x| generate_key(field.target_or_input_field(), x))
-                // TODO (qtang): handler error
-                .map(|o| {
-                    let index = intermediate_keys.iter().position(|ik| *ik == o).unwrap();
-                    (o, index)
-                })
-                .collect();
-
-            let input = OneInputMultiOutputField::new(input_field_info, result);
+            let input = OneInputMultiOutputField::new(input_field_info, field.target_field);
             real_fields.push(input);
         }
         let output_info = real_fields
@@ -158,9 +141,9 @@ impl RegexProcessorBuilder {
                         p.groups
                             .iter()
                             .map(|g| {
-                                let key = generate_key(f.input_name(), g);
-                                let index =
-                                    intermediate_keys.iter().position(|ik| *ik == key).unwrap();
+                                let key = generate_key(f.target_prefix(), g);
+                                let index = intermediate_keys.iter().position(|ik| *ik == key);
+                                let index = index.unwrap();
                                 (f.input_name().to_string(), g.to_string(), index)
                             })
                             .collect::<Vec<_>>()
@@ -175,75 +158,6 @@ impl RegexProcessorBuilder {
             output_info,
             ignore_missing: self.ignore_missing,
         }
-    }
-}
-
-/// only support string value
-/// if no value found from a pattern, the target_field will be ignored
-#[derive(Debug, Default)]
-pub struct RegexProcessor {
-    real_fields: Vec<OneInputMultiOutputField>,
-    output_info: Vec<Vec<Vec<(String, String, usize)>>>,
-    patterns: Vec<GroupRegex>,
-    ignore_missing: bool,
-}
-
-impl RegexProcessor {
-    fn with_fields(&mut self, fields: Fields) {
-        todo!();
-        // self.fields = fields;
-    }
-
-    fn try_with_patterns(&mut self, patterns: Vec<String>) -> Result<(), String> {
-        let mut rs = vec![];
-        for pattern in patterns {
-            let gr = pattern.parse()?;
-            rs.push(gr);
-        }
-        self.patterns = rs;
-        Ok(())
-    }
-
-    fn with_ignore_missing(&mut self, ignore_missing: bool) {
-        self.ignore_missing = ignore_missing;
-    }
-
-    fn process(
-        &self,
-        val: &str,
-        gr: &GroupRegex,
-        index: (usize, usize),
-    ) -> Result<Vec<(usize, Value)>, String> {
-        let mut result = Vec::new();
-        if let Some(captures) = gr.regex.captures(val) {
-            for (group_index, group) in gr.groups.iter().enumerate() {
-                if let Some(capture) = captures.name(group) {
-                    let value = capture.as_str().to_string();
-                    let index = self.output_info[index.0][index.1][group_index].2;
-                    result.push((index, Value::String(value)));
-                }
-            }
-        }
-        Ok(result)
-    }
-
-    fn process_field(&self, val: &str, field: &Field, gr: &GroupRegex) -> Result<Map, String> {
-        let mut map = Map::default();
-
-        if let Some(captures) = gr.regex.captures(val) {
-            for group in &gr.groups {
-                if let Some(capture) = captures.name(group) {
-                    let value = capture.as_str().to_string();
-                    let prefix = field.get_target_field();
-
-                    let key = generate_key(prefix, group);
-
-                    map.insert(key, Value::String(value));
-                }
-            }
-        }
-
-        Ok(map)
     }
 }
 
@@ -267,10 +181,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessorBuilder {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
                 }
                 PATTERN_NAME => {
-                    for pattern in vec![yaml_string(v, PATTERN_NAME)?] {
-                        let gr = pattern.parse()?;
-                        patterns.push(gr);
-                    }
+                    let pattern = yaml_string(v, PATTERN_NAME)?;
+                    let gr = pattern.parse()?;
+                    patterns.push(gr);
                 }
                 PATTERNS_NAME => {
                     for pattern in yaml_strings(v, PATTERNS_NAME)? {
@@ -306,6 +219,46 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessorBuilder {
         processor_builder.check()
     }
 }
+/// only support string value
+/// if no value found from a pattern, the target_field will be ignored
+#[derive(Debug, Default)]
+pub struct RegexProcessor {
+    real_fields: Vec<OneInputMultiOutputField>,
+    output_info: Vec<Vec<Vec<(String, String, usize)>>>,
+    patterns: Vec<GroupRegex>,
+    ignore_missing: bool,
+}
+
+impl RegexProcessor {
+    fn try_with_patterns(&mut self, patterns: Vec<String>) -> Result<(), String> {
+        let mut rs = vec![];
+        for pattern in patterns {
+            let gr = pattern.parse()?;
+            rs.push(gr);
+        }
+        self.patterns = rs;
+        Ok(())
+    }
+
+    fn process(
+        &self,
+        val: &str,
+        gr: &GroupRegex,
+        index: (usize, usize),
+    ) -> Result<Vec<(usize, Value)>, String> {
+        let mut result = Vec::new();
+        if let Some(captures) = gr.regex.captures(val) {
+            for (group_index, group) in gr.groups.iter().enumerate() {
+                if let Some(capture) = captures.name(group) {
+                    let value = capture.as_str().to_string();
+                    let index = self.output_info[index.0][index.1][group_index].2;
+                    result.push((index, Value::String(value)));
+                }
+            }
+        }
+        Ok(result)
+    }
+}
 
 impl Processor for RegexProcessor {
     fn kind(&self) -> &str {
@@ -331,8 +284,17 @@ impl Processor for RegexProcessor {
                     //     }
                     // }
                     for (gr_index, gr) in self.patterns.iter().enumerate() {
-                        result_list =
-                            Some(self.process(s.as_str(), gr, (field_index, gr_index))?);
+                        let result = self.process(s.as_str(), gr, (field_index, gr_index))?;
+                        if !result.is_empty() {
+                            match result_list.as_mut() {
+                                None => {
+                                    result_list = Some(result);
+                                }
+                                Some(result_list) => {
+                                    result_list.extend(result);
+                                }
+                            }
+                        }
                     }
                 }
                 Some(Value::Null) | None => {
@@ -367,55 +329,57 @@ impl Processor for RegexProcessor {
 }
 #[cfg(test)]
 mod tests {
+    use ahash::{HashMap, HashMapExt};
     use itertools::Itertools;
 
-    use super::RegexProcessor;
-    use crate::etl::field::Fields;
-    use crate::etl::processor::Processor;
+    use crate::etl::processor::regex::RegexProcessorBuilder;
     use crate::etl::value::{Map, Value};
 
     #[test]
     fn test_simple_parse() {
-        // let mut processor = RegexProcessor::default();
+        let pipeline_str = r#"fields: ["a"]
+patterns: ['(?<ar>\d)']
+ignore_missing: false"#;
 
-        // // single field (with prefix), multiple patterns
-        // let f = ["a"].iter().map(|f| f.parse().unwrap()).collect();
-        // processor.with_fields(Fields::new(f).unwrap());
+        let processor_yaml = yaml_rust::YamlLoader::load_from_str(pipeline_str)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let processor_yaml_hash = processor_yaml.as_hash().unwrap();
+        let builder = RegexProcessorBuilder::try_from(processor_yaml_hash).unwrap();
+        let intermediate_keys = ["a".to_string(), "a_ar".to_string()];
+        let processor = builder.build(&intermediate_keys);
 
-        // let ar = "(?<ar>\\d)";
+        // single field (with prefix), multiple patterns
 
-        // let patterns = [ar].iter().map(|p| p.to_string()).collect();
-        // processor.try_with_patterns(patterns).unwrap();
+        let result = processor
+            .process("123", &processor.patterns[0], (0, 0))
+            .unwrap()
+            .into_iter()
+            .map(|(k, v)| (intermediate_keys[k].clone(), v))
+            .collect();
 
-        // let mut map = Map::default();
-        // map.insert("a", Value::String("123".to_string()));
-        // processor.exec_map(&mut map).unwrap();
+        let map = Map { values: result };
 
-        // let v = Map {
-        //     values: vec![
-        //         ("a_ar".to_string(), Value::String("1".to_string())),
-        //         ("a".to_string(), Value::String("123".to_string())),
-        //     ]
-        //     .into_iter()
-        //     .collect(),
-        // };
+        let v = Map {
+            values: vec![("a_ar".to_string(), Value::String("1".to_string()))]
+                .into_iter()
+                .collect(),
+        };
 
-        // assert_eq!(v, map);
+        assert_eq!(v, map);
     }
 
     #[test]
     fn test_process() {
-        let mut processor = RegexProcessor::default();
-
         let cc = "[c=c,n=US_CA_SANJOSE,o=55155]";
         let cg = "[a=12.34.567.89,b=12345678,c=g,n=US_CA_SANJOSE,o=20940]";
         let co = "[a=987.654.321.09,c=o]";
         let cp = "[c=p,n=US_CA_SANJOSE,o=55155]";
         let cw = "[c=w,n=US_CA_SANJOSE,o=55155]";
-        let breadcrumbs = Value::String([cc, cg, co, cp, cw].iter().join(","));
+        let breadcrumbs_str = [cc, cg, co, cp, cw].iter().join(",");
 
         let values = [
-            ("breadcrumbs", breadcrumbs.clone()),
             ("breadcrumbs_parent", Value::String(cc.to_string())),
             ("breadcrumbs_edge", Value::String(cg.to_string())),
             ("breadcrumbs_origin", Value::String(co.to_string())),
@@ -425,84 +389,160 @@ mod tests {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
-        let mut temporary_map = Map { values };
+        let temporary_map = Map { values };
 
         {
             // single field (with prefix), multiple patterns
-            // let ff = ["breadcrumbs, breadcrumbs"]
-            //     .iter()
-            //     .map(|f| f.parse().unwrap())
-            //     .collect();
-            // processor.with_fields(Fields::new(ff).unwrap());
 
-            // let ccr = "(?<parent>\\[[^\\[]*c=c[^\\]]*\\])";
-            // let cgr = "(?<edge>\\[[^\\[]*c=g[^\\]]*\\])";
-            // let cor = "(?<origin>\\[[^\\[]*c=o[^\\]]*\\])";
-            // let cpr = "(?<peer>\\[[^\\[]*c=p[^\\]]*\\])";
-            // let cwr = "(?<wrapper>\\[[^\\[]*c=w[^\\]]*\\])";
-            // let patterns = [ccr, cgr, cor, cpr, cwr]
-            //     .iter()
-            //     .map(|p| p.to_string())
-            //     .collect();
-            // processor.try_with_patterns(patterns).unwrap();
+            let pipeline_str = r#"fields: ["breadcrumbs"]
+patterns:
+  - '(?<parent>\[[^\[]*c=c[^\]]*\])'
+  - '(?<edge>\[[^\[]*c=g[^\]]*\])'
+  - '(?<origin>\[[^\[]*c=o[^\]]*\])'
+  - '(?<peer>\[[^\[]*c=p[^\]]*\])'
+  - '(?<wrapper>\[[^\[]*c=w[^\]]*\])'
+ignore_missing: false"#;
 
-            // let mut map = Map::default();
-            // map.insert("breadcrumbs", breadcrumbs.clone());
-            // processor.exec_map(&mut map).unwrap();
-
-            // assert_eq!(map, temporary_map);
+            let processor_yaml = yaml_rust::YamlLoader::load_from_str(pipeline_str)
+                .unwrap()
+                .pop()
+                .unwrap();
+            let processor_yaml_hash = processor_yaml.as_hash().unwrap();
+            let builder = RegexProcessorBuilder::try_from(processor_yaml_hash).unwrap();
+            let intermediate_keys = [
+                "breadcrumbs",
+                "breadcrumbs_parent",
+                "breadcrumbs_edge",
+                "breadcrumbs_origin",
+                "breadcrumbs_peer",
+                "breadcrumbs_wrapper",
+            ]
+            .iter()
+            .map(|k| k.to_string())
+            .collect_vec();
+            let processor = builder.build(&intermediate_keys);
+            let mut result = HashMap::new();
+            for (index, pattern) in processor.patterns.iter().enumerate() {
+                let r = processor
+                    .process(&breadcrumbs_str, pattern, (0, index))
+                    .unwrap()
+                    .into_iter()
+                    .map(|(k, v)| (intermediate_keys[k].clone(), v))
+                    .collect::<HashMap<_, _>>();
+                result.extend(r);
+            }
+            let map = Map { values: result };
+            assert_eq!(temporary_map, map);
         }
 
         {
             // multiple fields (with prefix), multiple patterns
-            // let ff = [
-            //     "breadcrumbs_parent, parent",
-            //     "breadcrumbs_edge, edge",
-            //     "breadcrumbs_origin, origin",
-            //     "breadcrumbs_peer, peer",
-            //     "breadcrumbs_wrapper, wrapper",
-            // ]
-            // .iter()
-            // .map(|f| f.parse().unwrap())
-            // .collect();
-            // processor.with_fields(Fields::new(ff).unwrap());
 
-            // let patterns = [
-            //     "a=(?<ip>[^,\\]]+)",
-            //     "b=(?<request_id>[^,\\]]+)",
-            //     "k=(?<request_end_time>[^,\\]]+)",
-            //     "l=(?<turn_around_time>[^,\\]]+)",
-            //     "m=(?<dns_lookup_time>[^,\\]]+)",
-            //     "n=(?<geo>[^,\\]]+)",
-            //     "o=(?<asn>[^,\\]]+)",
-            // ]
-            // .iter()
-            // .map(|p| p.to_string())
-            // .collect();
-            // processor.try_with_patterns(patterns).unwrap();
+            let pipeline_str = r#"fields:
+  - breadcrumbs_parent, parent
+  - breadcrumbs_edge, edge
+  - breadcrumbs_origin, origin
+  - breadcrumbs_peer, peer
+  - breadcrumbs_wrapper, wrapper
+patterns:
+  - 'a=(?<ip>[^,\]]+)'
+  - 'b=(?<request_id>[^,\]]+)'
+  - 'k=(?<request_end_time>[^,\]]+)'
+  - 'l=(?<turn_around_time>[^,\]]+)'
+  - 'm=(?<dns_lookup_time>[^,\]]+)'
+  - 'n=(?<geo>[^,\]]+)'
+  - 'o=(?<asn>[^,\]]+)'
+ignore_missing: false"#;
 
-            // let new_values = vec![
-            //     ("edge_ip", Value::String("12.34.567.89".to_string())),
-            //     ("edge_request_id", Value::String("12345678".to_string())),
-            //     ("edge_geo", Value::String("US_CA_SANJOSE".to_string())),
-            //     ("edge_asn", Value::String("20940".to_string())),
-            //     ("origin_ip", Value::String("987.654.321.09".to_string())),
-            //     ("peer_asn", Value::String("55155".to_string())),
-            //     ("peer_geo", Value::String("US_CA_SANJOSE".to_string())),
-            //     ("parent_asn", Value::String("55155".to_string())),
-            //     ("parent_geo", Value::String("US_CA_SANJOSE".to_string())),
-            //     ("wrapper_asn", Value::String("55155".to_string())),
-            //     ("wrapper_geo", Value::String("US_CA_SANJOSE".to_string())),
-            // ]
-            // .into_iter()
-            // .map(|(k, v)| (k.to_string(), v))
-            // .collect();
+            let processor_yaml = yaml_rust::YamlLoader::load_from_str(pipeline_str)
+                .unwrap()
+                .pop()
+                .unwrap();
+            let processor_yaml_hash = processor_yaml.as_hash().unwrap();
+            let builder = RegexProcessorBuilder::try_from(processor_yaml_hash).unwrap();
 
-            // let mut expected_map = temporary_map.clone();
-            // processor.exec_map(&mut temporary_map).unwrap();
-            // expected_map.extend(Map { values: new_values });
+            let intermediate_keys = [
+                "breadcrumbs_parent",
+                "breadcrumbs_edge",
+                "breadcrumbs_origin",
+                "breadcrumbs_peer",
+                "breadcrumbs_wrapper",
+                "edge_ip",
+                "edge_request_id",
+                "edge_request_end_time",
+                "edge_turn_around_time",
+                "edge_dns_lookup_time",
+                "edge_geo",
+                "edge_asn",
+                "origin_ip",
+                "origin_request_id",
+                "origin_request_end_time",
+                "origin_turn_around_time",
+                "origin_dns_lookup_time",
+                "origin_geo",
+                "origin_asn",
+                "peer_ip",
+                "peer_request_id",
+                "peer_request_end_time",
+                "peer_turn_around_time",
+                "peer_dns_lookup_time",
+                "peer_geo",
+                "peer_asn",
+                "parent_ip",
+                "parent_request_id",
+                "parent_request_end_time",
+                "parent_turn_around_time",
+                "parent_dns_lookup_time",
+                "parent_geo",
+                "parent_asn",
+                "wrapper_ip",
+                "wrapper_request_id",
+                "wrapper_request_end_time",
+                "wrapper_turn_around_time",
+                "wrapper_dns_lookup_time",
+                "wrapper_geo",
+                "wrapper_asn",
+            ]
+            .iter()
+            .map(|k| k.to_string())
+            .collect_vec();
+            let processor = builder.build(&intermediate_keys);
 
-            // assert_eq!(expected_map, temporary_map);
+            let mut result = HashMap::new();
+            for (field_index, field) in processor.real_fields.iter().enumerate() {
+                for (pattern_index, pattern) in processor.patterns.iter().enumerate() {
+                    let s = temporary_map
+                        .get(field.input_name())
+                        .unwrap()
+                        .to_str_value();
+                    let r = processor
+                        .process(&s, pattern, (field_index, pattern_index))
+                        .unwrap()
+                        .into_iter()
+                        .map(|(k, v)| (intermediate_keys[k].clone(), v))
+                        .collect::<HashMap<_, _>>();
+                    result.extend(r);
+                }
+            }
+
+            let new_values = vec![
+                ("edge_ip", Value::String("12.34.567.89".to_string())),
+                ("edge_request_id", Value::String("12345678".to_string())),
+                ("edge_geo", Value::String("US_CA_SANJOSE".to_string())),
+                ("edge_asn", Value::String("20940".to_string())),
+                ("origin_ip", Value::String("987.654.321.09".to_string())),
+                ("peer_asn", Value::String("55155".to_string())),
+                ("peer_geo", Value::String("US_CA_SANJOSE".to_string())),
+                ("parent_asn", Value::String("55155".to_string())),
+                ("parent_geo", Value::String("US_CA_SANJOSE".to_string())),
+                ("wrapper_asn", Value::String("55155".to_string())),
+                ("wrapper_geo", Value::String("US_CA_SANJOSE".to_string())),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+
+            assert_eq!(result, new_values);
         }
     }
 }

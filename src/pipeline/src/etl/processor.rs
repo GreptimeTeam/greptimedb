@@ -41,7 +41,7 @@ use urlencoding::{UrlEncodingProcessor, UrlEncodingProcessorBuilder};
 
 use super::field::{NewField, NewFields};
 use crate::etl::field::{Field, Fields};
-use crate::etl::value::{Map, Value};
+use crate::etl::value::Value;
 
 const FIELD_NAME: &str = "field";
 const FIELDS_NAME: &str = "fields";
@@ -50,6 +50,7 @@ const METHOD_NAME: &str = "method";
 const PATTERN_NAME: &str = "pattern";
 const PATTERNS_NAME: &str = "patterns";
 const SEPARATOR_NAME: &str = "separator";
+const TARGET_FIELDS_NAME: &str = "target_fields";
 
 // const IF_NAME: &str = "if";
 // const IGNORE_FAILURE_NAME: &str = "ignore_failure";
@@ -165,7 +166,7 @@ impl Processors {
     }
 }
 
-impl<'a> TryFrom<&Vec<yaml_rust::Yaml>> for ProcessorBuilderList {
+impl TryFrom<&Vec<yaml_rust::Yaml>> for ProcessorBuilderList {
     type Error = String;
 
     fn try_from(vec: &Vec<yaml_rust::Yaml>) -> Result<Self, Self::Error> {
@@ -313,7 +314,7 @@ pub(crate) fn yaml_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields, St
 }
 
 pub(crate) fn yaml_new_fileds(v: &yaml_rust::Yaml, field: &str) -> Result<NewFields, String> {
-    yaml_parse_strings(v, field).map(|v| NewFields::new(v))
+    yaml_parse_strings(v, field).map(NewFields::new)
 }
 
 pub(crate) fn yaml_new_field(v: &yaml_rust::Yaml, field: &str) -> Result<NewField, String> {
