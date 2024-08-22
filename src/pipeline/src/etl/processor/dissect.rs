@@ -18,10 +18,9 @@ use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use common_telemetry::warn;
 use itertools::Itertools;
 
-// use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, Fields, OneInputMultiOutputField};
+use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fileds, yaml_parse_string, yaml_parse_strings, yaml_string,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_parse_string, yaml_parse_strings, yaml_string,
     Processor, ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
     PATTERNS_NAME, PATTERN_NAME,
 };
@@ -766,7 +765,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessorBuilder {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
+                    fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
                 PATTERN_NAME => {
                     let pattern: PatternInfo = yaml_parse_string(v, PATTERN_NAME)?;

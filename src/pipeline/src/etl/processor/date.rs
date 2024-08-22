@@ -19,10 +19,9 @@ use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
-// use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, Fields, OneInputOneOutPutField};
+use crate::etl::field::{Fields, InputFieldInfo, OneInputOneOutPutField};
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, yaml_strings, Processor,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
     ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::{Timestamp, Value};
@@ -160,7 +159,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
+                    fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
 
                 FORMATS_NAME => {

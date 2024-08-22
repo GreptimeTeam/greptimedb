@@ -16,7 +16,7 @@ use ahash::HashSet;
 use urlencoding::{decode, encode};
 
 use super::{
-    yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, ProcessorBuilder, ProcessorKind,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, ProcessorBuilder, ProcessorKind,
     FIELDS_NAME,
 };
 use crate::etl::field::{Fields, InputFieldInfo, OneInputOneOutPutField};
@@ -141,7 +141,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for UrlEncodingProcessorBuilder {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
+                    fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
 
                 IGNORE_MISSING_NAME => {

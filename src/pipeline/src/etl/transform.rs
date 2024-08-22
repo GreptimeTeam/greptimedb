@@ -31,7 +31,7 @@ const TRANSFORM_ON_FAILURE: &str = "on_failure";
 pub use transformer::greptime::GreptimeTransformer;
 
 use super::field::{InputFieldInfo, Fields, OneInputOneOutPutField};
-use super::processor::{yaml_new_field, yaml_new_fileds};
+use super::processor::{yaml_new_field, yaml_new_fields};
 
 pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     type Output;
@@ -329,7 +329,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
                 }
 
                 TRANSFORM_FIELDS => {
-                    fields = yaml_new_fileds(v, TRANSFORM_FIELDS)?;
+                    fields = yaml_new_fields(v, TRANSFORM_FIELDS)?;
                 }
 
                 TRANSFORM_TYPE => {

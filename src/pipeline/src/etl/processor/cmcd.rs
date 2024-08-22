@@ -17,10 +17,9 @@ use std::collections::BTreeMap;
 use ahash::HashSet;
 use urlencoding::decode;
 
-// use super::{yaml_new_field, yaml_new_fileds, Processor, ProcessorBuilder, ProcessorKind};
 use crate::etl::field::{Field, Fields, InputFieldInfo, OneInputMultiOutputField};
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fileds, Processor, ProcessorBuilder, ProcessorKind,
+    yaml_bool, yaml_new_field, yaml_new_fields, Processor, ProcessorBuilder, ProcessorKind,
     FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
@@ -320,7 +319,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessorBuilder {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
+                    fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
 
                 IGNORE_MISSING_NAME => {

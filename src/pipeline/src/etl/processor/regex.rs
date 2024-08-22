@@ -22,10 +22,9 @@ use ahash::{HashSet, HashSetExt};
 use lazy_static::lazy_static;
 use regex::Regex;
 
-// use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, Fields, OneInputMultiOutputField};
+use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, yaml_strings, Processor,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
     ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
@@ -178,7 +177,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessorBuilder {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
+                    fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
                 PATTERN_NAME => {
                     let pattern = yaml_string(v, PATTERN_NAME)?;

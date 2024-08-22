@@ -307,7 +307,7 @@ where
     })
 }
 
-pub(crate) fn yaml_new_fileds(v: &yaml_rust::Yaml, field: &str) -> Result<Fields, String> {
+pub(crate) fn yaml_new_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields, String> {
     yaml_parse_strings(v, field).map(Fields::new)
 }
 

@@ -15,10 +15,9 @@
 use ahash::HashSet;
 use regex::Regex;
 
-// use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, Fields, OneInputOneOutPutField};
+use crate::etl::field::{Fields, InputFieldInfo, OneInputOneOutPutField};
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, Processor, ProcessorBuilder,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
     ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
@@ -158,7 +157,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    fields = yaml_new_fileds(v, FIELDS_NAME)?;
+                    fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
                 PATTERN_NAME => {
                     let pattern_str = yaml_string(v, PATTERN_NAME)?;
