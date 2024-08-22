@@ -890,7 +890,12 @@ impl ScanPartList {
     /// Returns the number of file ranges.
     pub(crate) fn num_file_ranges(&self) -> usize {
         self.0.as_ref().map_or(0, |parts| {
-            parts.iter().map(|part| part.file_ranges.len()).sum()
+            parts
+                .iter()
+                .map(|part| part.file_ranges.iter())
+                .flatten()
+                .map(|ranges| ranges.len())
+                .sum()
         })
     }
 }
