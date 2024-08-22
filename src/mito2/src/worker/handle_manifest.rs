@@ -19,10 +19,9 @@
 use std::collections::{HashMap, VecDeque};
 
 use common_telemetry::{info, warn};
-use snafu::ensure;
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidRequestSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
+use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
@@ -289,20 +288,6 @@ impl<S> RegionWorkerLoop<S> {
 /// Checks the edit, writes and applies it.
 async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
     let region_id = region.region_id;
-    for file_meta in &edit.files_to_add {
-        let is_exist = region.access_layer.is_exist(file_meta).await?;
-        ensure!(
-            is_exist,
-            InvalidRequestSnafu {
-                region_id,
-                reason: format!(
-                    "trying to add a not exist file '{}' when editing region",
-                    file_meta.file_id
-                )
-            }
-        );
-    }
-
     info!("Applying {edit:?} to region {}", region_id);
 
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
