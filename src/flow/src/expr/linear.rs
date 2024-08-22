@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use arrow::array::BooleanArray;
+use arrow::buffer::BooleanBuffer;
 use arrow::compute::FilterBuilder;
 use common_telemetry::debug;
 use datatypes::prelude::ConcreteDataType;
@@ -523,7 +524,9 @@ impl SafeMfpPlan {
         // mark the columns that have been evaluated and appended to the `batch`
         let mut expression = 0;
         // preds default to true and will be updated as we evaluate each predicate
-        let mut all_preds = BooleanVector::from(vec![Some(true); batch.row_count()]);
+        let buf = BooleanBuffer::new_set(batch.row_count());
+        let arr = BooleanArray::new(buf, None);
+        let mut all_preds = BooleanVector::from(arr);
 
         // to compute predicate, need to first compute all expressions used in predicates
         for (support, predicate) in self.mfp.predicates.iter() {

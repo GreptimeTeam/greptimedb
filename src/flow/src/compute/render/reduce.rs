@@ -378,7 +378,7 @@ fn reduce_batch_subgraph(
 
             // optimize use bool mask to avoid unnecessary slice
             for row_idx in 0..key_batch.row_count() {
-                let key_row = key_batch.get_row(row_idx).unwrap();
+                let key_row = key_batch.get_row(row_idx)?;
                 let key_row = Row::new(key_row);
 
                 // if the same key exist then it's already filtered all values in this batch
