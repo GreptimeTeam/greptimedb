@@ -887,6 +887,7 @@ impl ScanPartList {
         })
     }
 
+    // TODO(yingwen): Also add a method to return num files.
     /// Returns the number of file ranges.
     pub(crate) fn num_file_ranges(&self) -> usize {
         self.0.as_ref().map_or(0, |parts| {
@@ -936,6 +937,7 @@ impl StreamContext {
     ) -> fmt::Result {
         match self.parts.try_lock() {
             Ok(inner) => match t {
+                // TODO(yingwen): Print num files and ranges.
                 DisplayFormatType::Default => write!(
                     f,
                     "partition_count={} ({} memtable ranges, {} file ranges)",
