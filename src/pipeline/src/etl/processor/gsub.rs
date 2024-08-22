@@ -16,7 +16,7 @@ use ahash::HashSet;
 use regex::Regex;
 
 // use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, Fields, OneInputOneOutPutField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, Processor, ProcessorBuilder,
     ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
@@ -29,7 +29,7 @@ const REPLACEMENT_NAME: &str = "replacement";
 
 #[derive(Debug, Default)]
 pub struct GsubProcessorBuilder {
-    fields: NewFields,
+    fields: Fields,
     pattern: Option<Regex>,
     replacement: Option<String>,
     ignore_missing: bool,
@@ -86,7 +86,7 @@ impl GsubProcessorBuilder {
             real_fields.push(input);
         }
         GsubProcessor {
-            real_fields,
+            fields: real_fields,
             pattern: self.pattern,
             replacement: self.replacement,
             ignore_missing: self.ignore_missing,
@@ -97,7 +97,7 @@ impl GsubProcessorBuilder {
 /// A processor to replace all matches of a pattern in string by a replacement, only support string value, and array string value
 #[derive(Debug, Default)]
 pub struct GsubProcessor {
-    real_fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutPutField>,
     pattern: Option<Regex>,
     replacement: Option<String>,
     ignore_missing: bool,
@@ -144,7 +144,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut ignore_missing = false;
         let mut pattern = None;
         let mut replacement = None;
@@ -155,7 +155,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
@@ -198,7 +198,7 @@ impl crate::etl::processor::Processor for GsubProcessor {
     }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.real_fields.iter() {
+        for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::Null) | None => {

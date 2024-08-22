@@ -19,7 +19,7 @@ use common_telemetry::warn;
 use itertools::Itertools;
 
 // use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, NewFields, OneInputMultiOutputField};
+use crate::etl::field::{InputFieldInfo, Fields, OneInputMultiOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fileds, yaml_parse_string, yaml_parse_strings, yaml_string,
     Processor, ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
@@ -486,7 +486,7 @@ impl std::fmt::Display for PatternInfo {
 
 #[derive(Debug, Default)]
 pub struct DissectProcessorBuilder {
-    fields: NewFields,
+    fields: Fields,
     patterns: Vec<PatternInfo>,
     ignore_missing: bool,
     append_separator: Option<String>,
@@ -494,7 +494,7 @@ pub struct DissectProcessorBuilder {
 }
 
 impl DissectProcessorBuilder {
-    fn build_output_keys(patterns: &Vec<PatternInfo>) -> HashSet<String> {
+    fn build_output_keys(patterns: &[PatternInfo]) -> HashSet<String> {
         patterns
             .iter()
             .flat_map(|pattern| pattern.iter())
@@ -584,7 +584,7 @@ impl ProcessorBuilder for DissectProcessorBuilder {
         }
         let patterns = Self::build_patterns_from_pattern_infos(self.patterns, intermediate_keys);
         let processor = DissectProcessor {
-            real_fields,
+            fields: real_fields,
             patterns,
             ignore_missing: self.ignore_missing,
             append_separator: self.append_separator,
@@ -595,7 +595,7 @@ impl ProcessorBuilder for DissectProcessorBuilder {
 
 #[derive(Debug, Default)]
 pub struct DissectProcessor {
-    real_fields: Vec<OneInputMultiOutputField>,
+    fields: Vec<OneInputMultiOutputField>,
     patterns: Vec<Pattern>,
     ignore_missing: bool,
 
@@ -751,7 +751,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut patterns = vec![];
         let mut ignore_missing = false;
         let mut append_separator = None;
@@ -763,7 +763,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessorBuilder {
 
             match key {
                 FIELD_NAME => {
-                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
@@ -807,7 +807,7 @@ impl Processor for DissectProcessor {
     }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.real_fields.iter() {
+        for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::String(val_str)) => match self.process(val_str) {

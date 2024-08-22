@@ -20,12 +20,12 @@ use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
 // use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{Field, InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, Fields, OneInputOneOutPutField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, yaml_strings, Processor,
     ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
-use crate::etl::value::{Map, Timestamp, Value};
+use crate::etl::value::{Timestamp, Value};
 
 pub(crate) const PROCESSOR_DATE: &str = "date";
 
@@ -85,7 +85,7 @@ impl std::ops::Deref for Formats {
 
 #[derive(Debug, Default)]
 pub struct DateProcessorBuilder {
-    fields: NewFields,
+    fields: Fields,
     formats: Formats,
     timezone: Option<Arc<String>>,
     locale: Option<Arc<String>>,
@@ -131,7 +131,7 @@ impl DateProcessorBuilder {
             real_fields.push(input);
         }
         DateProcessor {
-            real_fields,
+            fields: real_fields,
             formats: self.formats,
             timezone: self.timezone,
             locale: self.locale,
@@ -144,7 +144,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
     type Error = String;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut formats = Formats::default();
         let mut timezone = None;
         let mut locale = None;
@@ -157,7 +157,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
 
             match key {
                 FIELD_NAME => {
-                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
@@ -201,7 +201,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
 /// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct DateProcessor {
-    real_fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutPutField>,
     formats: Formats,
     timezone: Option<Arc<String>>,
     locale: Option<Arc<String>>, // to support locale
@@ -229,12 +229,6 @@ impl DateProcessor {
 
         Err(format!("{} processor: failed to parse {val}", self.kind(),))
     }
-
-    fn process_field(&self, val: &str, field: &Field) -> Result<Map, String> {
-        let key = field.get_target_field();
-
-        Ok(Map::one(key, Value::Timestamp(self.parse(val)?)))
-    }
 }
 
 impl Processor for DateProcessor {
@@ -247,7 +241,7 @@ impl Processor for DateProcessor {
     }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.real_fields.iter() {
+        for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::String(s)) => {

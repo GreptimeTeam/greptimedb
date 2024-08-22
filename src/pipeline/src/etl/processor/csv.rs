@@ -19,7 +19,7 @@ use csv::{ReaderBuilder, Trim};
 use itertools::EitherOrBoth::{Both, Left, Right};
 use itertools::Itertools;
 
-use crate::etl::field::{InputFieldInfo, NewFields, OneInputMultiOutputField};
+use crate::etl::field::{InputFieldInfo, Fields, OneInputMultiOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, Processor, ProcessorBuilder,
     ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
@@ -38,7 +38,7 @@ const TARGET_FIELDS: &str = "target_fields";
 pub struct CsvProcessorBuilder {
     reader: ReaderBuilder,
 
-    fields: NewFields,
+    fields: Fields,
     ignore_missing: bool,
 
     // Value used to fill empty fields, empty fields will be skipped if this is not provided.
@@ -72,7 +72,7 @@ impl CsvProcessorBuilder {
             .collect_vec();
         CsvProcessor {
             reader: self.reader,
-            real_fields,
+            fields: real_fields,
             ignore_missing: self.ignore_missing,
             empty_value: self.empty_value,
             output_index_info,
@@ -99,7 +99,7 @@ impl ProcessorBuilder for CsvProcessorBuilder {
 pub struct CsvProcessor {
     reader: ReaderBuilder,
 
-    real_fields: Vec<OneInputMultiOutputField>,
+    fields: Vec<OneInputMultiOutputField>,
 
     ignore_missing: bool,
 
@@ -155,7 +155,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessorBuilder {
         let mut reader = ReaderBuilder::new();
         reader.has_headers(false);
 
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut ignore_missing = false;
         let mut empty_value = None;
         let mut target_fields = vec![];
@@ -166,7 +166,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessorBuilder {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
@@ -242,7 +242,7 @@ impl Processor for CsvProcessor {
     }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.real_fields.iter() {
+        for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::String(v)) => {

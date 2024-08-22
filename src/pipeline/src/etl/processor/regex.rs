@@ -23,7 +23,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 // use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, NewFields, OneInputMultiOutputField};
+use crate::etl::field::{InputFieldInfo, Fields, OneInputMultiOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, yaml_strings, Processor,
     ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
@@ -79,7 +79,7 @@ impl std::str::FromStr for GroupRegex {
 
 #[derive(Debug, Default)]
 pub struct RegexProcessorBuilder {
-    fields: NewFields,
+    fields: Fields,
     patterns: Vec<GroupRegex>,
     ignore_missing: bool,
     output_keys: HashSet<String>,
@@ -153,7 +153,7 @@ impl RegexProcessorBuilder {
             .collect::<Vec<_>>();
         RegexProcessor {
             // fields: Fields::one(Field::new("test".to_string())),
-            real_fields,
+            fields: real_fields,
             patterns: self.patterns,
             output_info,
             ignore_missing: self.ignore_missing,
@@ -165,7 +165,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut patterns: Vec<GroupRegex> = vec![];
         let mut ignore_missing = false;
 
@@ -175,7 +175,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessorBuilder {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
@@ -223,7 +223,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessorBuilder {
 /// if no value found from a pattern, the target_field will be ignored
 #[derive(Debug, Default)]
 pub struct RegexProcessor {
-    real_fields: Vec<OneInputMultiOutputField>,
+    fields: Vec<OneInputMultiOutputField>,
     output_info: Vec<Vec<Vec<(String, String, usize)>>>,
     patterns: Vec<GroupRegex>,
     ignore_missing: bool,
@@ -270,7 +270,7 @@ impl Processor for RegexProcessor {
     }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for (field_index, field) in self.real_fields.iter().enumerate() {
+        for (field_index, field) in self.fields.iter().enumerate() {
             let index = field.input_index();
             let mut result_list = None;
             match val.get(index) {
@@ -509,7 +509,7 @@ ignore_missing: false"#;
             let processor = builder.build(&intermediate_keys);
 
             let mut result = HashMap::new();
-            for (field_index, field) in processor.real_fields.iter().enumerate() {
+            for (field_index, field) in processor.fields.iter().enumerate() {
                 for (pattern_index, pattern) in processor.patterns.iter().enumerate() {
                     let s = temporary_map
                         .get(field.input_name())

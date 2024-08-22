@@ -30,7 +30,7 @@ const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
 pub use transformer::greptime::GreptimeTransformer;
 
-use super::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
+use super::field::{InputFieldInfo, Fields, OneInputOneOutPutField};
 use super::processor::{yaml_new_field, yaml_new_fileds};
 
 pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
@@ -178,7 +178,7 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for TransformBuilders {
 
 #[derive(Debug, Clone)]
 pub struct TransformBuilder {
-    fields: NewFields,
+    fields: Fields,
     type_: Value,
     default: Option<Value>,
     index: Option<Index>,
@@ -315,7 +315,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
     type Error = String;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut type_ = Value::Null;
         let mut default = None;
         let mut index = None;
@@ -325,7 +325,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
             let key = k.as_str().ok_or("key must be a string")?;
             match key {
                 TRANSFORM_FIELD => {
-                    fields = NewFields::one(yaml_new_field(v, TRANSFORM_FIELD)?);
+                    fields = Fields::one(yaml_new_field(v, TRANSFORM_FIELD)?);
                 }
 
                 TRANSFORM_FIELDS => {

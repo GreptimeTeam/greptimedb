@@ -20,7 +20,7 @@ use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
 use super::{yaml_new_field, yaml_new_fileds, yaml_strings, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, Fields, OneInputOneOutPutField};
 use crate::etl::processor::{
     yaml_bool, yaml_string, Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
@@ -109,7 +109,7 @@ impl std::ops::Deref for Formats {
 
 #[derive(Debug)]
 pub struct TimestampProcessorBuilder {
-    fields: NewFields,
+    fields: Fields,
     formats: Formats,
     resolution: Resolution,
     ignore_missing: bool,
@@ -147,7 +147,7 @@ impl ProcessorBuilder for TimestampProcessorBuilder {
             real_fields.push(input);
         }
         let processor = TimestampProcessor {
-            real_fields,
+            fields: real_fields,
             formats: self.formats,
             resolution: self.resolution,
             ignore_missing: self.ignore_missing,
@@ -177,7 +177,7 @@ impl TimestampProcessorBuilder {
             real_fields.push(input);
         }
         TimestampProcessor {
-            real_fields,
+            fields: real_fields,
             formats: self.formats,
             resolution: self.resolution,
             ignore_missing: self.ignore_missing,
@@ -188,7 +188,7 @@ impl TimestampProcessorBuilder {
 /// support string, integer, float, time, epoch
 #[derive(Debug, Default)]
 pub struct TimestampProcessor {
-    real_fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutPutField>,
     formats: Formats,
     resolution: Resolution,
     ignore_missing: bool,
@@ -302,7 +302,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessorBuilder {
     type Error = String;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut formats = Formats::default();
         let mut resolution = Resolution::default();
         let mut ignore_missing = false;
@@ -314,7 +314,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessorBuilder {
 
             match key {
                 FIELD_NAME => {
-                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
@@ -354,7 +354,7 @@ impl Processor for TimestampProcessor {
     }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.real_fields.iter() {
+        for field in self.fields.iter() {
             let index = field.input().index;
             match val.get(index) {
                 Some(Value::Null) | None => {
@@ -386,7 +386,7 @@ mod tests {
 
     fn builder_to_native_processor(builder: TimestampProcessorBuilder) -> TimestampProcessor {
         TimestampProcessor {
-            real_fields: vec![],
+            fields: vec![],
             formats: builder.formats,
             resolution: builder.resolution,
             ignore_missing: builder.ignore_missing,

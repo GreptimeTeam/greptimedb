@@ -19,7 +19,7 @@ use super::{
     yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, ProcessorBuilder, ProcessorKind,
     FIELDS_NAME,
 };
-use crate::etl::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{Fields, InputFieldInfo, OneInputOneOutPutField};
 use crate::etl::processor::{FIELD_NAME, IGNORE_MISSING_NAME, METHOD_NAME};
 use crate::etl::value::Value;
 
@@ -55,7 +55,7 @@ impl std::str::FromStr for Method {
 
 #[derive(Debug, Default)]
 pub struct UrlEncodingProcessorBuilder {
-    fields: NewFields,
+    fields: Fields,
     method: Method,
     ignore_missing: bool,
 }
@@ -99,7 +99,7 @@ impl UrlEncodingProcessorBuilder {
             real_fields.push(input);
         }
         UrlEncodingProcessor {
-            real_fields,
+            fields: real_fields,
             method: self.method,
             ignore_missing: self.ignore_missing,
         }
@@ -109,7 +109,7 @@ impl UrlEncodingProcessorBuilder {
 /// only support string value
 #[derive(Debug, Default)]
 pub struct UrlEncodingProcessor {
-    real_fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutPutField>,
     method: Method,
     ignore_missing: bool,
 }
@@ -128,7 +128,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for UrlEncodingProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut method = Method::Decode;
         let mut ignore_missing = false;
 
@@ -138,7 +138,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for UrlEncodingProcessorBuilder {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
@@ -176,7 +176,7 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
     }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.real_fields.iter() {
+        for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::String(s)) => {
@@ -223,7 +223,7 @@ mod tests {
         }
         {
             let processor = UrlEncodingProcessor {
-                real_fields: vec![],
+                fields: vec![],
                 method: super::Method::Encode,
                 ignore_missing: false,
             };

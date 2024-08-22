@@ -15,7 +15,7 @@
 use ahash::HashSet;
 
 // use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, Fields, OneInputOneOutPutField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, Processor, ProcessorBuilder,
     ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, SEPARATOR_NAME,
@@ -26,7 +26,7 @@ pub(crate) const PROCESSOR_JOIN: &str = "join";
 
 #[derive(Debug, Default)]
 pub struct JoinProcessorBuilder {
-    fields: NewFields,
+    fields: Fields,
     separator: Option<String>,
     ignore_missing: bool,
 }
@@ -79,7 +79,7 @@ impl JoinProcessorBuilder {
         }
 
         JoinProcessor {
-            real_fields,
+            fields: real_fields,
             separator: self.separator,
             ignore_missing: self.ignore_missing,
         }
@@ -89,7 +89,7 @@ impl JoinProcessorBuilder {
 /// A processor to join each element of an array into a single string using a separator string between each element
 #[derive(Debug, Default)]
 pub struct JoinProcessor {
-    real_fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutPutField>,
     separator: Option<String>,
     ignore_missing: bool,
 }
@@ -119,7 +119,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for JoinProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut separator = None;
         let mut ignore_missing = false;
 
@@ -129,7 +129,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for JoinProcessorBuilder {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
@@ -163,7 +163,7 @@ impl Processor for JoinProcessor {
     }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.real_fields.iter() {
+        for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::Array(arr)) => {

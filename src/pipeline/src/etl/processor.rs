@@ -39,8 +39,7 @@ use regex::{RegexProcessor, RegexProcessorBuilder};
 use timestamp::{TimestampProcessor, TimestampProcessorBuilder};
 use urlencoding::{UrlEncodingProcessor, UrlEncodingProcessorBuilder};
 
-use super::field::{NewField, NewFields};
-use crate::etl::field::{Field, Fields};
+use super::field::{Field, Fields};
 use crate::etl::value::Value;
 
 const FIELD_NAME: &str = "field";
@@ -308,27 +307,10 @@ where
     })
 }
 
-pub(crate) fn yaml_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields, String> {
-    let v = yaml_parse_strings(v, field)?;
-    Fields::new(v)
+pub(crate) fn yaml_new_fileds(v: &yaml_rust::Yaml, field: &str) -> Result<Fields, String> {
+    yaml_parse_strings(v, field).map(Fields::new)
 }
 
-pub(crate) fn yaml_new_fileds(v: &yaml_rust::Yaml, field: &str) -> Result<NewFields, String> {
-    yaml_parse_strings(v, field).map(NewFields::new)
-}
-
-pub(crate) fn yaml_new_field(v: &yaml_rust::Yaml, field: &str) -> Result<NewField, String> {
+pub(crate) fn yaml_new_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field, String> {
     yaml_parse_string(v, field)
-}
-
-pub(crate) fn yaml_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field, String> {
-    yaml_parse_string(v, field)
-}
-
-pub(crate) fn update_one_one_output_keys(fields: &mut Fields) {
-    for field in fields.iter_mut() {
-        field
-            .output_fields_index_mapping
-            .insert(field.get_target_field().to_string(), 0_usize);
-    }
 }

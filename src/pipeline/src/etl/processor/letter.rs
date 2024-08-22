@@ -15,7 +15,7 @@
 use ahash::HashSet;
 
 // use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, Fields, OneInputOneOutPutField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, Processor, ProcessorBuilder,
     ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, METHOD_NAME,
@@ -57,7 +57,7 @@ impl std::str::FromStr for Method {
 
 #[derive(Debug, Default)]
 pub struct LetterProcessorBuilder {
-    fields: NewFields,
+    fields: Fields,
     method: Method,
     ignore_missing: bool,
 }
@@ -95,7 +95,7 @@ impl ProcessorBuilder for LetterProcessorBuilder {
         }
 
         let processor = LetterProcessor {
-            real_fields,
+            fields: real_fields,
             method: self.method,
             ignore_missing: self.ignore_missing,
         };
@@ -125,7 +125,7 @@ impl LetterProcessorBuilder {
         }
 
         LetterProcessor {
-            real_fields,
+            fields: real_fields,
             method: self.method,
             ignore_missing: self.ignore_missing,
         }
@@ -135,7 +135,7 @@ impl LetterProcessorBuilder {
 /// only support string value
 #[derive(Debug, Default)]
 pub struct LetterProcessor {
-    real_fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutPutField>,
     method: Method,
     ignore_missing: bool,
 }
@@ -157,7 +157,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for LetterProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut method = Method::Lower;
         let mut ignore_missing = false;
 
@@ -167,7 +167,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for LetterProcessorBuilder {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
@@ -200,7 +200,7 @@ impl Processor for LetterProcessor {
     }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.real_fields.iter() {
+        for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::String(s)) => {

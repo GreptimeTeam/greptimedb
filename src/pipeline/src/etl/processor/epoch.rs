@@ -15,7 +15,7 @@
 use ahash::HashSet;
 
 // use super::{yaml_new_field, yaml_new_fileds, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, NewFields, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, Fields, OneInputOneOutPutField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fileds, yaml_string, Processor, ProcessorBuilder,
     ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
@@ -55,7 +55,7 @@ impl TryFrom<&str> for Resolution {
 
 #[derive(Debug, Default)]
 pub struct EpochProcessorBuilder {
-    fields: NewFields,
+    fields: Fields,
     resolution: Resolution,
     ignore_missing: bool,
 }
@@ -99,7 +99,7 @@ impl EpochProcessorBuilder {
             real_fields.push(input);
         }
         EpochProcessor {
-            real_fields,
+            fields: real_fields,
             resolution: self.resolution,
             ignore_missing: self.ignore_missing,
         }
@@ -111,7 +111,7 @@ impl EpochProcessorBuilder {
 /// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct EpochProcessor {
-    real_fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutPutField>,
     resolution: Resolution,
     ignore_missing: bool,
     // description
@@ -164,7 +164,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessorBuilder {
     type Error = String;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut resolution = Resolution::default();
         let mut ignore_missing = false;
 
@@ -175,7 +175,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessorBuilder {
 
             match key {
                 FIELD_NAME => {
-                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
@@ -211,7 +211,7 @@ impl Processor for EpochProcessor {
     }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.real_fields.iter() {
+        for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::Null) | None => {

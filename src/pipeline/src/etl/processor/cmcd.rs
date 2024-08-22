@@ -18,7 +18,7 @@ use ahash::HashSet;
 use urlencoding::decode;
 
 // use super::{yaml_new_field, yaml_new_fileds, Processor, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{InputFieldInfo, NewField, NewFields, OneInputMultiOutputField};
+use crate::etl::field::{Field, Fields, InputFieldInfo, OneInputMultiOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fileds, Processor, ProcessorBuilder, ProcessorKind,
     FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
@@ -69,14 +69,14 @@ const CMCD_KEYS: [&str; 18] = [
 
 #[derive(Debug, Default)]
 pub struct CmcdProcessorBuilder {
-    fields: NewFields,
+    fields: Fields,
     output_keys: HashSet<String>,
     ignore_missing: bool,
 }
 
 impl CmcdProcessorBuilder {
     pub(super) fn build_cmcd_outputs(
-        field: &NewField,
+        field: &Field,
         intermediate_keys: &[String],
     ) -> (BTreeMap<String, usize>, Vec<CmcdOutputInfo>) {
         let mut output_index = BTreeMap::new();
@@ -137,7 +137,7 @@ impl CmcdProcessorBuilder {
             real_fields.push(real_field);
         }
         CmcdProcessor {
-            real_fields,
+            fields: real_fields,
             cmcd_outputs,
             ignore_missing: self.ignore_missing,
         }
@@ -273,7 +273,7 @@ fn pr(s: &str, k: &str, v: Option<&str>) -> Result<Value, String> {
 /// 12. Transport Layer Security SHOULD be used to protect all transmission of CMCD data.
 #[derive(Debug, Default)]
 pub struct CmcdProcessor {
-    real_fields: Vec<OneInputMultiOutputField>,
+    fields: Vec<OneInputMultiOutputField>,
     cmcd_outputs: Vec<Vec<CmcdOutputInfo>>,
 
     ignore_missing: bool,
@@ -308,7 +308,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut fields = NewFields::default();
+        let mut fields = Fields::default();
         let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
@@ -317,7 +317,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessorBuilder {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    fields = NewFields::one(yaml_new_field(v, FIELD_NAME)?);
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
                     fields = yaml_new_fileds(v, FIELDS_NAME)?;
@@ -360,7 +360,7 @@ impl Processor for CmcdProcessor {
     }
 
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for (field_index, field) in self.real_fields.iter().enumerate() {
+        for (field_index, field) in self.fields.iter().enumerate() {
             let field_value_index = field.input_index();
             match val.get(field_value_index) {
                 Some(Value::String(v)) => {
@@ -396,7 +396,7 @@ mod tests {
     use urlencoding::decode;
 
     use super::{CmcdProcessorBuilder, CMCD_KEYS};
-    use crate::etl::field::{NewField, NewFields};
+    use crate::etl::field::{Field, Fields};
     use crate::etl::value::{Map, Value};
 
     #[test]
@@ -529,7 +529,7 @@ mod tests {
             ),
         ];
 
-        let field = NewField::new("prefix", None);
+        let field = Field::new("prefix", None);
 
         let output_keys = CMCD_KEYS
             .iter()
@@ -540,7 +540,7 @@ mod tests {
         intermediate_keys.append(&mut (output_keys.clone()));
 
         let builder = CmcdProcessorBuilder {
-            fields: NewFields::new(vec![field]),
+            fields: Fields::new(vec![field]),
             output_keys: output_keys.iter().map(|s| s.to_string()).collect(),
             ignore_missing: false,
         };
