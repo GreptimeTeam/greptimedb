@@ -89,10 +89,15 @@ pub enum ProcessorKind {
     Date(DateProcessor),
 }
 
+/// ProcessorBuilder trait defines the interface for all processor builders
+/// A processor builder is used to create a processor
 #[enum_dispatch(ProcessorBuilders)]
 pub trait ProcessorBuilder: std::fmt::Debug + Send + Sync + 'static {
+    /// Get the processor's output keys
     fn output_keys(&self) -> HashSet<&str>;
+    /// Get the processor's input keys
     fn input_keys(&self) -> HashSet<&str>;
+    /// Build the processor
     fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String>;
 }
 

@@ -66,6 +66,8 @@ const CMCD_KEYS: [&str; 18] = [
     CMCD_KEY_V,
 ];
 
+/// CmcdProcessorBuilder is a builder for CmcdProcessor
+/// parse from raw yaml
 #[derive(Debug, Default)]
 pub struct CmcdProcessorBuilder {
     fields: Fields,
@@ -74,6 +76,8 @@ pub struct CmcdProcessorBuilder {
 }
 
 impl CmcdProcessorBuilder {
+    /// build_cmcd_outputs build cmcd output info
+    /// generate index and function for each output
     pub(super) fn build_cmcd_outputs(
         field: &Field,
         intermediate_keys: &[String],
@@ -113,6 +117,7 @@ impl CmcdProcessorBuilder {
         Ok((output_index, cmcd_field_outputs))
     }
 
+    /// build CmcdProcessor from CmcdProcessorBuilder
     pub fn build(self, intermediate_keys: &[String]) -> Result<CmcdProcessor, String> {
         let mut real_fields = vec![];
         let mut cmcd_outputs = Vec::with_capacity(CMCD_KEYS.len());
@@ -154,11 +159,16 @@ fn generate_key(prefix: &str, key: &str) -> String {
     format!("{}_{}", prefix, key)
 }
 
+/// CmcdOutputInfo is a struct to store output info
 #[derive(Debug)]
 pub(super) struct CmcdOutputInfo {
+    /// {input_field}_{cmcd_key}
     final_key: String,
+    /// cmcd key
     key: &'static str,
+    /// index in intermediate_keys
     index: usize,
+    /// function to resolve value
     f: fn(&str, &str, Option<&str>) -> Result<Value, String>,
 }
 

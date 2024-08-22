@@ -36,6 +36,7 @@ pub struct GreptimeTransformer {
 }
 
 impl GreptimeTransformer {
+    /// Add a default timestamp column to the transforms
     fn add_greptime_timestamp_column(transforms: &mut Transforms) {
         let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let type_ = Value::Timestamp(Timestamp::Nanosecond(ns));
@@ -69,6 +70,7 @@ impl GreptimeTransformer {
         transforms.push(transform);
     }
 
+    /// Generate the schema for the GreptimeTransformer
     fn schemas(transforms: &Transforms) -> Result<Vec<ColumnSchema>, String> {
         let mut schema = vec![];
         for transform in transforms.iter() {
