@@ -156,7 +156,6 @@ impl CacheManager {
         }
     }
 
-    // TODO(yingwen): Rename pages to page.
     /// Gets pages for the row group.
     pub fn get_pages(&self, page_key: &PageKey) -> Option<Arc<PageValue>> {
         self.page_cache.as_ref().and_then(|page_cache| {

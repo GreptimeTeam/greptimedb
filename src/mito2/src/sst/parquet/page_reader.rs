@@ -14,6 +14,7 @@
 
 //! Parquet page reader.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use parquet::column::page::{Page, PageMetadata, PageReader};
@@ -25,8 +26,51 @@ use crate::cache::{CacheManagerRef, PageKey, PageValue};
 use crate::sst::file::FileId;
 use crate::sst::parquet::row_group::ColumnChunkData;
 
-/// A reader that reads pages from the cache.
-pub(crate) struct CachedPageReader {
+/// A reader that reads all pages from a cache.
+pub(crate) struct RowGroupCachedReader {
+    /// Cached pages.
+    pages: VecDeque<Page>,
+}
+
+impl RowGroupCachedReader {
+    /// Returns a new reader from a cache.
+    pub(crate) fn new(pages: &[Page]) -> Self {
+        Self {
+            pages: pages.iter().cloned().collect(),
+        }
+    }
+}
+
+impl PageReader for RowGroupCachedReader {
+    fn get_next_page(&mut self) -> Result<Option<Page>> {
+        Ok(self.pages.pop_front())
+    }
+
+    fn peek_next_page(&mut self) -> Result<Option<PageMetadata>> {
+        Ok(self.pages.front().map(page_to_page_meta))
+    }
+
+    fn skip_next_page(&mut self) -> Result<()> {
+        // When the `SerializedPageReader` is in `SerializedPageReaderState::Pages` state, it never pops
+        // the dictionary page. So it always return the dictionary page as the first page. See:
+        // https://github.com/apache/arrow-rs/blob/1d6feeacebb8d0d659d493b783ba381940973745/parquet/src/file/serialized_reader.rs#L766-L770
+        // But the `GenericColumnReader` will read the dictionary page before skipping records so it won't skip dictionary page.
+        // So we don't need to handle the dictionary page specifically in this method.
+        // https://github.com/apache/arrow-rs/blob/65f7be856099d389b0d0eafa9be47fad25215ee6/parquet/src/column/reader.rs#L322-L331
+        self.pages.pop_front();
+        Ok(())
+    }
+}
+
+impl Iterator for RowGroupCachedReader {
+    type Item = Result<Page>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.get_next_page().transpose()
+    }
+}
+
+/// A reader that can cache pages on demand.
+pub(crate) struct OnDemandCachedReader {
     /// Page cache.
     cache: CacheManagerRef,
     /// Reader to fall back. `None` indicates the reader is exhausted.
@@ -39,7 +83,7 @@ pub(crate) struct CachedPageReader {
     current_page_idx: usize,
 }
 
-impl CachedPageReader {
+impl OnDemandCachedReader {
     /// Returns a new reader from a cache and a reader.
     pub(crate) fn new(
         cache: CacheManagerRef,
@@ -61,7 +105,7 @@ impl CachedPageReader {
     }
 }
 
-impl PageReader for CachedPageReader {
+impl PageReader for OnDemandCachedReader {
     fn get_next_page(&mut self) -> Result<Option<Page>> {
         let Some(reader) = self.reader.as_mut() else {
             // The reader is exhausted.
@@ -115,21 +159,43 @@ impl PageReader for CachedPageReader {
         let Some(reader) = self.reader.as_mut() else {
             return Ok(());
         };
-        // When the `SerializedPageReader` is in `SerializedPageReaderState::Pages` state, it never pops
-        // the dictionary page. So it always return the dictionary page as the first page. See:
-        // https://github.com/apache/arrow-rs/blob/1d6feeacebb8d0d659d493b783ba381940973745/parquet/src/file/serialized_reader.rs#L766-L770
-        // But the `GenericColumnReader` will read the dictionary page before skipping records so it won't skip dictionary page.
-        // So we don't need to handle the dictionary page specifically in this method.
-        // https://github.com/apache/arrow-rs/blob/65f7be856099d389b0d0eafa9be47fad25215ee6/parquet/src/column/reader.rs#L322-L331
         self.current_page_idx += 1;
         reader.skip_next_page()
     }
 }
 
-impl Iterator for CachedPageReader {
+impl Iterator for OnDemandCachedReader {
     type Item = Result<Page>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.get_next_page().transpose()
+    }
+}
+
+/// Get [PageMetadata] from `page`.
+///
+/// The conversion is based on [decode_page()](https://github.com/apache/arrow-rs/blob/1d6feeacebb8d0d659d493b783ba381940973745/parquet/src/file/serialized_reader.rs#L438-L481)
+/// and [PageMetadata](https://github.com/apache/arrow-rs/blob/65f7be856099d389b0d0eafa9be47fad25215ee6/parquet/src/column/page.rs#L279-L301).
+fn page_to_page_meta(page: &Page) -> PageMetadata {
+    match page {
+        Page::DataPage { num_values, .. } => PageMetadata {
+            num_rows: None,
+            num_levels: Some(*num_values as usize),
+            is_dict: false,
+        },
+        Page::DataPageV2 {
+            num_values,
+            num_rows,
+            ..
+        } => PageMetadata {
+            num_rows: Some(*num_rows as usize),
+            num_levels: Some(*num_values as usize),
+            is_dict: false,
+        },
+        Page::DictionaryPage { .. } => PageMetadata {
+            num_rows: None,
+            num_levels: None,
+            is_dict: true,
+        },
     }
 }
