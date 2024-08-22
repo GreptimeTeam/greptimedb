@@ -28,7 +28,7 @@ pub enum Admin {
 impl Display for Admin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Admin::Func(func) => write!(f, ",ADMIN {func}"),
+            Admin::Func(func) => write!(f, "ADMIN {func}"),
         }
     }
 }

@@ -85,6 +85,8 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        assert_eq!(sql, stmt.to_string());
     }
 
     #[test]
@@ -103,5 +105,7 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        assert_eq!("ADMIN test()", stmt.to_string());
     }
 }

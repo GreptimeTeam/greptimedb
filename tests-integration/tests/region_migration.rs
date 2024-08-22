@@ -1120,7 +1120,7 @@ async fn trigger_migration_by_sql(
 ) -> String {
     let OutputData::Stream(stream) = run_sql(
         &cluster.frontend,
-        &format!("select migrate_region({region_id}, {from_peer_id}, {to_peer_id})"),
+        &format!("admin migrate_region({region_id}, {from_peer_id}, {to_peer_id})"),
         QueryContext::arc(),
     )
     .await
@@ -1145,7 +1145,7 @@ async fn trigger_migration_by_sql(
 async fn query_procedure_by_sql(instance: &Arc<Instance>, pid: &str) -> String {
     let OutputData::Stream(stream) = run_sql(
         instance,
-        &format!("select procedure_state('{pid}')"),
+        &format!("admin procedure_state('{pid}')"),
         QueryContext::arc(),
     )
     .await

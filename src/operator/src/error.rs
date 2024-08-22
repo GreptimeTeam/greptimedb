@@ -42,6 +42,19 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to execute admin function"))]
+    ExecuteAdminFunction {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_query::error::Error,
+    },
+
+    #[snafu(display("Failed to build admin function args: {msg}"))]
+    BuildAdminFunctionArgs { msg: String },
+
+    #[snafu(display("Expected {expected} args, but actual {actual}"))]
+    FunctionArityMismatch { expected: usize, actual: usize },
+
     #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
         #[snafu(implicit)]
@@ -208,6 +221,9 @@ pub enum Error {
 
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound { table_name: String },
+
+    #[snafu(display("Admin function not found: {}", name))]
+    AdminFunctionNotFound { name: String },
 
     #[snafu(display("Flow not found: {}", flow_name))]
     FlowNotFound { flow_name: String },
@@ -546,6 +562,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to build record batch"))]
+    BuildRecordBatch {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_recordbatch::error::Error,
+    },
+
     #[snafu(display("Failed to read orc schema"))]
     ReadOrc {
         source: common_datasource::error::Error,
@@ -792,9 +815,12 @@ impl ErrorExt for Error {
             | Error::InvalidViewName { .. }
             | Error::InvalidView { .. }
             | Error::InvalidExpr { .. }
+            | Error::AdminFunctionNotFound { .. }
             | Error::ViewColumnsMismatch { .. }
             | Error::InvalidViewStmt { .. }
             | Error::ConvertIdentifier { .. }
+            | Error::BuildAdminFunctionArgs { .. }
+            | Error::FunctionArityMismatch { .. }
             | Error::InvalidPartition { .. }
             | Error::PhysicalExpr { .. } => StatusCode::InvalidArguments,
 
@@ -902,6 +928,9 @@ impl ErrorExt for Error {
             | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,
 
             Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
+
+            Error::ExecuteAdminFunction { source, .. } => source.status_code(),
+            Error::BuildRecordBatch { source, .. } => source.status_code(),
         }
     }
 
