@@ -3152,6 +3152,7 @@ dependencies = [
  "common-time",
  "datafusion-common",
  "enum_dispatch",
+ "jsonb",
  "num",
  "num-traits",
  "ordered-float 3.9.2",
@@ -3683,6 +3684,12 @@ name = "fallible-streaming-iterator"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
+name = "fast-float"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95765f67b4b18863968b4a1bd5bb576f732b29a4a28c7cd84c09fa3e2875f33c"
 
 [[package]]
 name = "fastdivide"
@@ -5350,6 +5357,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonb"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f98d1dd2023aa6a1b74f23432e2db5a9122bf53ae98053efc650951d31f59ffb"
+dependencies = [
+ "byteorder",
+ "fast-float",
+ "itoa",
+ "nom",
+ "ordered-float 4.2.0",
+ "rand",
+ "ryu",
+ "serde_json",
+]
+
+[[package]]
 name = "jsonpath-rust"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7010,9 +7033,9 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opendal"
-version = "0.49.0"
+version = "0.49.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39d516adf7db912c38af382c3e92c27cd62fbbc240e630920555d784c2ab1494"
+checksum = "ba615070686c8781ce97376fdafca29d7c42f47b31d2230d7c8c1642ec823950"
 dependencies = [
  "anyhow",
  "async-trait",

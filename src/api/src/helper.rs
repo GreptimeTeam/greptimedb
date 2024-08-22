@@ -261,7 +261,8 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
             | ConcreteDataType::Dictionary(_)
-            | ConcreteDataType::Duration(_) => {
+            | ConcreteDataType::Duration(_)
+            | ConcreteDataType::Json(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
             }
         };
@@ -443,7 +444,7 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
                 .push(convert_i128_to_interval(val.to_i128())),
         },
         Value::Decimal128(val) => values.decimal128_values.push(convert_to_pb_decimal128(val)),
-        Value::List(_) | Value::Duration(_) => unreachable!(),
+        Value::List(_) | Value::Duration(_) | Value::Json(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();
 }
@@ -649,7 +650,8 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
         ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
         | ConcreteDataType::Dictionary(_)
-        | ConcreteDataType::Duration(_) => {
+        | ConcreteDataType::Duration(_)
+        | ConcreteDataType::Json(_) => {
             unreachable!()
         }
     }
@@ -813,7 +815,8 @@ pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<
         ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
         | ConcreteDataType::Dictionary(_)
-        | ConcreteDataType::Duration(_) => {
+        | ConcreteDataType::Duration(_)
+        | ConcreteDataType::Json(_) => {
             unreachable!()
         }
     }
@@ -928,7 +931,7 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
         Value::Decimal128(v) => v1::Value {
             value_data: Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
         },
-        Value::List(_) | Value::Duration(_) => return None,
+        Value::List(_) | Value::Duration(_) | Value::Json(_) => return None,
     };
 
     Some(proto_value)
@@ -1023,7 +1026,7 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 }
             }),
             Value::Decimal128(v) => Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
-            Value::List(_) | Value::Duration(_) => unreachable!(),
+            Value::List(_) | Value::Duration(_) | Value::Json(_) => unreachable!(),
         },
     }
 }

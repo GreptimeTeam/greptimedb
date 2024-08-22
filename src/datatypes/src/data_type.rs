@@ -33,8 +33,8 @@ use crate::types::{
     BinaryType, BooleanType, DateTimeType, DateType, Decimal128Type, DictionaryType,
     DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType, DurationSecondType,
     DurationType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
-    IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, ListType,
-    NullType, StringType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
+    IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonType,
+    ListType, NullType, StringType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
     UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
@@ -81,6 +81,9 @@ pub enum ConcreteDataType {
     // Compound types:
     List(ListType),
     Dictionary(DictionaryType),
+
+    // JSON type:
+    Json(JsonType),
 }
 
 impl fmt::Display for ConcreteDataType {
@@ -128,6 +131,7 @@ impl fmt::Display for ConcreteDataType {
             ConcreteDataType::Decimal128(v) => write!(f, "{}", v.name()),
             ConcreteDataType::List(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Dictionary(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Json(v) => write!(f, "{}", v.name()),
         }
     }
 }
@@ -162,6 +166,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Duration(_)
                 | ConcreteDataType::Decimal128(_)
                 | ConcreteDataType::Binary(_)
+                | ConcreteDataType::Json(_)
         )
     }
 
@@ -404,7 +409,7 @@ macro_rules! impl_new_concrete_type_functions {
 
 impl_new_concrete_type_functions!(
     Null, Boolean, UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64,
-    Binary, Date, DateTime, String
+    Binary, Date, DateTime, String, Json
 );
 
 impl ConcreteDataType {
