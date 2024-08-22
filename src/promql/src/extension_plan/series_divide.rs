@@ -253,12 +253,8 @@ impl Stream for SeriesDivideStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let timer = std::time::Instant::now();
         loop {
-            // if let Some(batch) = self.buffer.as_ref() {
             if !self.buffer.is_empty() {
-                // let same_length = self.find_first_diff_row(batch) + 1;
                 let cut_at = self.find_first_diff_row();
-                // println!("cut at: {:?}", cut_at);
-                // if same_length >= batch.num_rows() {
                 if let Some((batch_index, row_index)) = cut_at {
                     // slice out the first time series and return it.
                     let half_batch_of_first_series =
@@ -272,13 +268,9 @@ impl Stream for SeriesDivideStream {
                         .drain(0..batch_index)
                         .chain([half_batch_of_first_series])
                         .collect::<Vec<_>>();
-                    // self.buffer.insert(0, half_batch_of_second_series);
                     self.buffer[0] = half_batch_of_second_series;
                     let result_batch = compute::concat_batches(&self.schema, &result_batches)?;
 
-                    // let result_batch = batch.slice(0, same_length);
-                    // let remaining_batch = batch.slice(same_length, batch.num_rows() - same_length);
-                    // self.buffer = Some(remaining_batch);
                     self.inspect_start = 0;
                     self.num_series += 1;
                     self.metric.elapsed_compute().add_elapsed(timer);
@@ -286,16 +278,8 @@ impl Stream for SeriesDivideStream {
                 } else {
                     // continue to fetch next batch as the current buffer only contains one time series.
                     let next_batch = ready!(self.as_mut().fetch_next_batch(cx)).transpose()?;
-                    // SAFETY: if-let guards the buffer is not None;
-                    //   and we cannot change the buffer at this point.
-                    // let batch = self.buffer.take().expect("this batch must exist");
                     if let Some(next_batch) = next_batch {
-                        // self.buffer = Some(compute::concat_batches(
-                        //     &batch.schema(),
-                        //     &[batch, next_batch],
-                        // )?);
                         self.buffer.push(next_batch);
-                        // println!("buffer: {:?}", self.buffer.len());
                         continue;
                     } else {
                         // input stream is ended
@@ -328,20 +312,15 @@ impl SeriesDivideStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<DataFusionResult<RecordBatch>>> {
-        let poll = match self.input.poll_next_unpin(cx) {
-            Poll::Ready(batch) => Poll::Ready(batch),
-            Poll::Pending => Poll::Pending,
-        };
+        let poll = self.input.poll_next_unpin(cx);
         self.metric.record_poll(poll)
     }
 
     /// Return the position to cut buffer.
-    /// None for don't cut, which implies the current buffer only contains one
-    /// time series.
+    /// None implies the current buffer only contains one time series.
     fn find_first_diff_row(&mut self) -> Option<(usize, usize)> {
         // fast path: no tag columns means all data belongs to the same series.
         if self.tag_indices.is_empty() {
-            // return batch.num_rows();
             return None;
         }
 
@@ -388,11 +367,6 @@ impl SeriesDivideStream {
                 }
                 result_index = result_index.min(same_until);
             }
-
-            // println!(
-            //     "same until: {:?}, number of rows: {:?}",
-            //     result_index, num_rows
-            // );
 
             if result_index + 1 >= num_rows {
                 // all rows are the same, inspect next batch
