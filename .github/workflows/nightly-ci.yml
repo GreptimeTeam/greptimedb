@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: nightly-2024-08-07
+  RUST_TOOLCHAIN: nightly-2024-08-21
 
 permissions:
   issues: write
