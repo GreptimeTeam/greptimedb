@@ -260,12 +260,13 @@
 | `data_home` | String | `/tmp/metasrv/` | The working home directory. |
 | `bind_addr` | String | `127.0.0.1:3002` | The bind address of metasrv. |
 | `server_addr` | String | `127.0.0.1:3002` | The communication server address for frontend and datanode to connect to metasrv,  "127.0.0.1:3002" by default for localhost. |
-| `store_addr` | String | `127.0.0.1:2379` | Etcd server address. |
+| `store_addr` | String | `127.0.0.1:2379` | Store server address default to etcd store. |
 | `selector` | String | `round_robin` | Datanode selector type.<br/>- `round_robin` (default value)<br/>- `lease_based`<br/>- `load_based`<br/>For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector". |
 | `use_memory_store` | Bool | `false` | Store data in memory. |
 | `enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. |
 | `store_key_prefix` | String | `""` | If it's not empty, the metasrv will store all data with this key prefix. |
 | `enable_region_failover` | Bool | `false` | Whether to enable region failover.<br/>This feature is only available on GreptimeDB running on cluster mode and<br/>- Using Remote WAL<br/>- Using shared storage (e.g., s3). |
+| `backend` | String | `EtcdStore` | The datastore for meta server. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
