@@ -332,7 +332,7 @@ pub fn sql_value_to_value(
                 _ => return InvalidUnaryOpSnafu { unary_op, value }.fail(),
             },
 
-            Value::String(_) | Value::Binary(_) | Value::List(_) => {
+            Value::String(_) | Value::Binary(_) | Value::List(_) | Value::Json(_) => {
                 return InvalidUnaryOpSnafu { unary_op, value }.fail()
             }
         }
@@ -634,7 +634,8 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
-        | ConcreteDataType::Dictionary(_) => {
+        | ConcreteDataType::Dictionary(_)
+        | ConcreteDataType::Json(_) => {
             unreachable!()
         }
     }

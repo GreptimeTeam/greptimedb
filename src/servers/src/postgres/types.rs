@@ -131,7 +131,7 @@ pub(super) fn encode_value(
         }
         Value::Interval(v) => builder.encode_field(&PgInterval::from(*v)),
         Value::Decimal128(v) => builder.encode_field(&v.to_string()),
-        Value::List(_) | Value::Duration(_) => {
+        Value::List(_) | Value::Duration(_) | Value::Json(_) => {
             Err(PgWireError::ApiError(Box::new(Error::Internal {
                 err_msg: format!(
                     "cannot write value {:?} in postgres protocol: unimplemented",
@@ -163,7 +163,8 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Json(_) => Ok(Type::JSON),
         &ConcreteDataType::Duration(_)
         | &ConcreteDataType::List(_)
-        | &ConcreteDataType::Dictionary(_) => server_error::UnsupportedDataTypeSnafu {
+        | &ConcreteDataType::Dictionary(_)
+        | &ConcreteDataType::Json(_) => server_error::UnsupportedDataTypeSnafu {
             data_type: origin,
             reason: "not implemented",
         }

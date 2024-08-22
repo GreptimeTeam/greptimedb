@@ -119,7 +119,8 @@ impl SortField {
                     }
                     ConcreteDataType::List(_) |
                     ConcreteDataType::Dictionary(_) |
-                    ConcreteDataType::Null(_) => {
+                    ConcreteDataType::Null(_) |
+                    ConcreteDataType::Json(_) => {
                         return error::NotSupportedFieldSnafu {
                             data_type: $self.data_type.clone()
                         }.fail()
@@ -191,6 +192,10 @@ impl SortField {
                     .fail(),
                     ConcreteDataType::Null(n) => NotSupportedFieldSnafu {
                         data_type: ConcreteDataType::Null(n.clone()),
+                    }
+                    .fail(),
+                    ConcreteDataType::Json(j) => NotSupportedFieldSnafu {
+                        data_type: ConcreteDataType::Json(j.clone()),
                     }
                     .fail(),
                 }
@@ -267,7 +272,8 @@ impl SortField {
             ConcreteDataType::Decimal128(_) => 19,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
-            | ConcreteDataType::Dictionary(_) => 0,
+            | ConcreteDataType::Dictionary(_)
+            | ConcreteDataType::Json(_) => 0,
         };
         deserializer.advance(to_skip);
         Ok(to_skip)
