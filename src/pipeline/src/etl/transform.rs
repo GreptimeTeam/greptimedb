@@ -266,40 +266,6 @@ impl Default for Transform {
 }
 
 impl Transform {
-    // fn with_fields(&mut self, mut fields: Fields) {
-    //     update_one_one_output_keys(&mut fields);
-    //     self.fields = fields;
-    // }
-
-    fn with_type(&mut self, type_: Value) {
-        self.type_ = type_;
-    }
-
-    // fn try_default(&mut self, default: Value) -> Result<(), String> {
-    //     match (&self.type_, &default) {
-    //         (Value::Null, _) => Err(format!(
-    //             "transform {} type MUST BE set before default {}",
-    //             self.fields, &default,
-    //         )),
-    //         (_, Value::Null) => Ok(()), // if default is not set, then it will be regarded as default null
-    //         (_, _) => {
-    //             let target = self
-    //                 .type_
-    //                 .parse_str_value(default.to_str_value().as_str())?;
-    //             self.default = Some(target);
-    //             Ok(())
-    //         }
-    //     }
-    // }
-
-    fn with_index(&mut self, index: Index) {
-        self.index = Some(index);
-    }
-
-    fn with_on_failure(&mut self, on_failure: OnFailure) {
-        self.on_failure = Some(on_failure);
-    }
-
     pub(crate) fn get_default(&self) -> Option<&Value> {
         self.default.as_ref()
     }

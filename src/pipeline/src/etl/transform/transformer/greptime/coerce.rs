@@ -134,7 +134,7 @@ fn coerce_type(transform: &Transform) -> Result<ColumnDataType, String> {
 
         Value::Null => Err(format!(
             "Null type not supported when to coerce '{}' type",
-            "123" // transform.fields
+            transform.type_.to_str_type()
         )),
     }
 }
