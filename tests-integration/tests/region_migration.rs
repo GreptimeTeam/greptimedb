@@ -1118,7 +1118,7 @@ async fn trigger_migration_by_sql(
     from_peer_id: u64,
     to_peer_id: u64,
 ) -> String {
-    let OutputData::Stream(stream) = run_sql(
+    let OutputData::RecordBatches(recordbatches) = run_sql(
         &cluster.frontend,
         &format!("admin migrate_region({region_id}, {from_peer_id}, {to_peer_id})"),
         QueryContext::arc(),
@@ -1129,8 +1129,6 @@ async fn trigger_migration_by_sql(
     else {
         unreachable!();
     };
-
-    let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
 
     info!("SQL result:\n {}", recordbatches.pretty_print().unwrap());
 
@@ -1143,7 +1141,7 @@ async fn trigger_migration_by_sql(
 
 /// Query procedure state by SQL.
 async fn query_procedure_by_sql(instance: &Arc<Instance>, pid: &str) -> String {
-    let OutputData::Stream(stream) = run_sql(
+    let OutputData::RecordBatches(recordbatches) = run_sql(
         instance,
         &format!("admin procedure_state('{pid}')"),
         QueryContext::arc(),
@@ -1154,8 +1152,6 @@ async fn query_procedure_by_sql(instance: &Arc<Instance>, pid: &str) -> String {
     else {
         unreachable!();
     };
-
-    let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
 
     info!("SQL result:\n {}", recordbatches.pretty_print().unwrap());
 
