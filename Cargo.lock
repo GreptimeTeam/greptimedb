@@ -9170,8 +9170,9 @@ dependencies = [
 
 [[package]]
 name = "rsasl"
-version = "2.0.2"
-source = "git+https://github.com/wenyxu/rsasl.git?rev=06ebb683d5539c3410de4ce9fa37ff9b97e790a4#06ebb683d5539c3410de4ce9fa37ff9b97e790a4"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45035615cdd68c71daac89aef75b130d4b2cad29599966e1b4671f8fbb463559"
 dependencies = [
  "base64 0.22.1",
  "core2",
@@ -9188,9 +9189,8 @@ dependencies = [
 [[package]]
 name = "rskafka"
 version = "0.5.0"
-source = "git+https://github.com/WenyXu/rskafka.git?rev=940c6030012c5b746fad819fb72e3325b26e39de#940c6030012c5b746fad819fb72e3325b26e39de"
+source = "git+https://github.com/influxdata/rskafka.git?rev=75535b5ad9bae4a5dbb582c82e44dfd81ec10105#75535b5ad9bae4a5dbb582c82e44dfd81ec10105"
 dependencies = [
- "async-trait",
  "bytes",
  "chrono",
  "crc32c",
@@ -9199,7 +9199,6 @@ dependencies = [
  "integer-encoding 4.0.0",
  "lz4",
  "parking_lot 0.12.3",
- "pin-project-lite",
  "rand",
  "rsasl",
  "rustls 0.23.10",
