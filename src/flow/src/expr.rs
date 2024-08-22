@@ -193,6 +193,8 @@ impl Batch {
     }
 
     /// append another batch to self
+    ///
+    /// NOTE: This is expensive since it will create new vectors for each column
     pub fn append_batch(&mut self, other: Batch) -> Result<(), EvalError> {
         ensure!(
             self.batch.len() == other.batch.len()
@@ -227,11 +229,11 @@ impl Batch {
             .collect_vec();
 
         let mut result = vec![];
-        let zelf_row_count = self.row_count();
+        let self_row_count = self.row_count();
         let other_row_count = other.row_count();
         for (idx, mut builder) in batch_builders.into_iter().enumerate() {
             builder
-                .extend_slice_of(self.batch()[idx].as_ref(), 0, zelf_row_count)
+                .extend_slice_of(self.batch()[idx].as_ref(), 0, self_row_count)
                 .context(DataTypeSnafu {
                     msg: "Failed to extend vector",
                 })?;
@@ -243,7 +245,7 @@ impl Batch {
             result.push(builder.to_vector());
         }
         self.batch = result;
-        self.row_count = zelf_row_count + other_row_count;
+        self.row_count = self_row_count + other_row_count;
         Ok(())
     }
 }
