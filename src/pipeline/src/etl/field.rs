@@ -14,6 +14,8 @@
 
 use std::ops::Deref;
 use std::str::FromStr;
+
+use super::processor::find_key_index;
 enum IndexInfo {
     Index(usize),
     NotSet,
@@ -56,6 +58,22 @@ impl OneInputOneOutPutField {
             input,
             output: Some(output),
         }
+    }
+
+    pub(crate) fn build(
+        processor_kind: &str,
+        intermediate_keys: &[String],
+        input_field: &str,
+        target_field: &str,
+    ) -> Result<Self, String> {
+        let input_index = find_key_index(intermediate_keys, input_field, processor_kind)?;
+
+        let input_field_info = InputFieldInfo::new(input_field, input_index);
+        let output_index = find_key_index(intermediate_keys, target_field, processor_kind)?;
+        Ok(OneInputOneOutPutField::new(
+            input_field_info,
+            (target_field.to_string(), output_index),
+        ))
     }
 
     pub(crate) fn input(&self) -> &InputFieldInfo {

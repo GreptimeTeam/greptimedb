@@ -19,7 +19,7 @@ use serde_json::{Deserializer, Value};
 fn processor_mut(
     pipeline: &Pipeline<GreptimeTransformer>,
     input_values: Vec<Value>,
-) -> impl IntoIterator<Item = Vec<greptime_proto::v1::Row>> {
+) -> Result<Vec<greptime_proto::v1::Row>, String> {
     let mut payload = pipeline.init_intermediate_state();
     let mut result = Vec::with_capacity(input_values.len());
 
@@ -236,7 +236,12 @@ fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("pipeline");
     group.sample_size(50);
     group.bench_function("processor mut", |b| {
-        b.iter(|| processor_mut(black_box(&pipeline), black_box(input_value.clone())))
+        b.iter(|| {
+            let result = processor_mut(black_box(&pipeline), black_box(input_value.clone()));
+            if result.is_err() {
+                panic!("Error: {:?}", result);
+            }
+        })
     });
     group.finish();
 }

@@ -19,8 +19,8 @@ use urlencoding::decode;
 
 use crate::etl::field::{Field, Fields, InputFieldInfo, OneInputMultiOutputField};
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, Processor, ProcessorBuilder, ProcessorKind,
-    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    find_key_index, yaml_bool, yaml_new_field, yaml_new_fields, Processor, ProcessorBuilder,
+    ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
 
@@ -77,15 +77,12 @@ impl CmcdProcessorBuilder {
     pub(super) fn build_cmcd_outputs(
         field: &Field,
         intermediate_keys: &[String],
-    ) -> (BTreeMap<String, usize>, Vec<CmcdOutputInfo>) {
+    ) -> Result<(BTreeMap<String, usize>, Vec<CmcdOutputInfo>), String> {
         let mut output_index = BTreeMap::new();
         let mut cmcd_field_outputs = Vec::with_capacity(CMCD_KEYS.len());
         for cmcd in CMCD_KEYS {
             let final_key = generate_key(field.target_or_input_field(), cmcd);
-            let index = intermediate_keys
-                .iter()
-                .position(|k| k == &final_key)
-                .unwrap();
+            let index = find_key_index(intermediate_keys, &final_key, "cmcd")?;
             output_index.insert(final_key.clone(), index);
             match cmcd {
                 CMCD_KEY_BS | CMCD_KEY_SU => {
@@ -113,33 +110,29 @@ impl CmcdProcessorBuilder {
                 _ => {}
             }
         }
-        (output_index, cmcd_field_outputs)
+        Ok((output_index, cmcd_field_outputs))
     }
 
-    pub fn build(self, intermediate_keys: &[String]) -> CmcdProcessor {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<CmcdProcessor, String> {
         let mut real_fields = vec![];
         let mut cmcd_outputs = Vec::with_capacity(CMCD_KEYS.len());
         for field in self.fields.into_iter() {
-            let input_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.input_field())
-                // TODO (qtang): handler error
-                .unwrap();
+            let input_index = find_key_index(intermediate_keys, field.input_field(), "cmcd")?;
 
             let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
 
-            let (_, cmcd_field_outputs) = Self::build_cmcd_outputs(&field, intermediate_keys);
+            let (_, cmcd_field_outputs) = Self::build_cmcd_outputs(&field, intermediate_keys)?;
 
             cmcd_outputs.push(cmcd_field_outputs);
 
             let real_field = OneInputMultiOutputField::new(input_field_info, field.target_field);
             real_fields.push(real_field);
         }
-        CmcdProcessor {
+        Ok(CmcdProcessor {
             fields: real_fields,
             cmcd_outputs,
             ignore_missing: self.ignore_missing,
-        }
+        })
     }
 }
 
@@ -152,8 +145,8 @@ impl ProcessorBuilder for CmcdProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
-        ProcessorKind::Cmcd(self.build(intermediate_keys))
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+        self.build(intermediate_keys).map(ProcessorKind::Cmcd)
     }
 }
 
@@ -544,7 +537,7 @@ mod tests {
             ignore_missing: false,
         };
 
-        let processor = builder.build(&intermediate_keys);
+        let processor = builder.build(&intermediate_keys).unwrap();
 
         for (s, vec) in ss.into_iter() {
             let decoded = decode(s).unwrap().to_string();

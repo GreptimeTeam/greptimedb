@@ -19,10 +19,10 @@ use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
-use super::{yaml_new_field, yaml_new_fields, yaml_strings, ProcessorBuilder, ProcessorKind};
-use crate::etl::field::{Fields, InputFieldInfo, OneInputOneOutPutField};
+use crate::etl::field::{Fields, OneInputOneOutPutField};
 use crate::etl::processor::{
-    yaml_bool, yaml_string, Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
+    ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::time::{
     MICROSECOND_RESOLUTION, MICRO_RESOLUTION, MILLISECOND_RESOLUTION, MILLI_RESOLUTION,
@@ -127,61 +127,29 @@ impl ProcessorBuilder for TimestampProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
-        let mut real_fields = vec![];
-        for field in self.fields.into_iter() {
-            let input_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.input_field())
-                // TODO (qtang): handler error
-                .unwrap();
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
-            let output_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.target_or_input_field())
-                .unwrap();
-            let input = OneInputOneOutPutField::new(
-                input_field_info,
-                (field.target_or_input_field().to_string(), output_index),
-            );
-            real_fields.push(input);
-        }
-        let processor = TimestampProcessor {
-            fields: real_fields,
-            formats: self.formats,
-            resolution: self.resolution,
-            ignore_missing: self.ignore_missing,
-        };
-        ProcessorKind::Timestamp(processor)
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+        self.build(intermediate_keys).map(ProcessorKind::Timestamp)
     }
 }
 
 impl TimestampProcessorBuilder {
-    pub fn build(self, intermediate_keys: &[String]) -> TimestampProcessor {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<TimestampProcessor, String> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
-            let input_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.input_field())
-                // TODO (qtang): handler error
-                .unwrap();
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
-            let output_index = intermediate_keys
-                .iter()
-                .position(|k| k == field.target_or_input_field())
-                .unwrap();
-            let input = OneInputOneOutPutField::new(
-                input_field_info,
-                (field.target_or_input_field().to_string(), output_index),
-            );
+            let input = OneInputOneOutPutField::build(
+                "timestamp",
+                intermediate_keys,
+                field.input_field(),
+                field.target_or_input_field(),
+            )?;
             real_fields.push(input);
         }
-        TimestampProcessor {
+        Ok(TimestampProcessor {
             fields: real_fields,
             formats: self.formats,
             resolution: self.resolution,
             ignore_missing: self.ignore_missing,
-        }
+        })
     }
 }
 

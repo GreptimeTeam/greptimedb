@@ -122,7 +122,7 @@ where
                 .processor_builders
                 .into_iter()
                 .map(|builder| builder.build(&final_intermediate_keys))
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, _>>()?;
             let processors = Processors {
                 processors: processors_kind_list,
                 required_keys: processors_required_keys.clone(),
@@ -134,7 +134,7 @@ where
                 .builders
                 .into_iter()
                 .map(|builder| builder.build(&final_intermediate_keys, &output_keys))
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, String>>()?;
 
             let transformers = Transforms {
                 transforms: transfor_list,

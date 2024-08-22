@@ -20,9 +20,9 @@ use itertools::Itertools;
 
 use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_parse_string, yaml_parse_strings, yaml_string,
-    Processor, ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
-    PATTERNS_NAME, PATTERN_NAME,
+    find_key_index, yaml_bool, yaml_new_field, yaml_new_fields, yaml_parse_string,
+    yaml_parse_strings, yaml_string, Processor, ProcessorBuilder, ProcessorKind, FIELDS_NAME,
+    FIELD_NAME, IGNORE_MISSING_NAME, PATTERNS_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
 
@@ -516,45 +516,56 @@ impl DissectProcessorBuilder {
             .collect()
     }
 
+    fn part_info_to_part(
+        part_info: PartInfo,
+        intermediate_keys: &[String],
+    ) -> Result<Part, String> {
+        match part_info {
+            PartInfo::Split(s) => Ok(Part::Split(s)),
+            PartInfo::Name(n) => match n.start_modifier {
+                None | Some(StartModifier::Append(_)) => {
+                    let index = find_key_index(intermediate_keys, &n.name, "dissect")?;
+                    Ok(Part::Name(Name {
+                        name: n.name,
+                        index,
+                        start_modifier: n.start_modifier,
+                        end_modifier: n.end_modifier,
+                    }))
+                }
+                _ => Ok(Part::Name(Name {
+                    name: n.name,
+                    index: usize::MAX,
+                    start_modifier: n.start_modifier,
+                    end_modifier: n.end_modifier,
+                })),
+            },
+        }
+    }
+
+    fn pattern_info_to_pattern(
+        pattern_info: PatternInfo,
+        intermediate_keys: &[String],
+    ) -> Result<Pattern, String> {
+        let original = pattern_info.origin;
+        let pattern = pattern_info
+            .parts
+            .into_iter()
+            .map(|part_info| Self::part_info_to_part(part_info, intermediate_keys))
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Pattern {
+            origin: original,
+            parts: pattern,
+        })
+    }
+
     fn build_patterns_from_pattern_infos(
         patterns: Vec<PatternInfo>,
         intermediate_keys: &[String],
-    ) -> Vec<Pattern> {
+    ) -> Result<Vec<Pattern>, String> {
         patterns
             .into_iter()
-            .map(|pattern_info| {
-                let original = pattern_info.origin;
-                let pattern = pattern_info
-                    .parts
-                    .into_iter()
-                    .map(|xx| match xx {
-                        PartInfo::Split(s) => Part::Split(s),
-                        PartInfo::Name(n) => match n.start_modifier {
-                            None | Some(StartModifier::Append(_)) => {
-                                let index =
-                                    intermediate_keys.iter().position(|x| x == &n.name).unwrap();
-                                Part::Name(Name {
-                                    name: n.name,
-                                    index,
-                                    start_modifier: n.start_modifier,
-                                    end_modifier: n.end_modifier,
-                                })
-                            }
-                            _ => Part::Name(Name {
-                                name: n.name,
-                                index: usize::MAX,
-                                start_modifier: n.start_modifier,
-                                end_modifier: n.end_modifier,
-                            }),
-                        },
-                    })
-                    .collect();
-                Pattern {
-                    origin: original,
-                    parts: pattern,
-                }
-            })
-            .collect::<Vec<_>>()
+            .map(|pattern_info| Self::pattern_info_to_pattern(pattern_info, intermediate_keys))
+            .collect()
     }
 }
 
@@ -567,28 +578,24 @@ impl ProcessorBuilder for DissectProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
-            let input_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.input_field())
-                // TODO (qtang): handler error
-                .unwrap();
+            let input_index = find_key_index(intermediate_keys, field.input_field(), "dissect")?;
 
             let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
 
             let real_field = OneInputMultiOutputField::new(input_field_info, field.target_field);
             real_fields.push(real_field);
         }
-        let patterns = Self::build_patterns_from_pattern_infos(self.patterns, intermediate_keys);
+        let patterns = Self::build_patterns_from_pattern_infos(self.patterns, intermediate_keys)?;
         let processor = DissectProcessor {
             fields: real_fields,
             patterns,
             ignore_missing: self.ignore_missing,
             append_separator: self.append_separator,
         };
-        ProcessorKind::Dissect(processor)
+        Ok(ProcessorKind::Dissect(processor))
     }
 }
 
@@ -859,7 +866,8 @@ mod tests {
             .into_iter()
             .collect();
         let pattern =
-            DissectProcessorBuilder::build_patterns_from_pattern_infos(pattern_infos, &output_keys);
+            DissectProcessorBuilder::build_patterns_from_pattern_infos(pattern_infos, &output_keys)
+                .unwrap();
 
         let processor = DissectProcessor::default();
         let result: HashMap<String, Value> = processor

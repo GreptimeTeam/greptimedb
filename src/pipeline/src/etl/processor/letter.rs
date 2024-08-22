@@ -14,7 +14,7 @@
 
 use ahash::HashSet;
 
-use crate::etl::field::{Fields, InputFieldInfo, OneInputOneOutPutField};
+use crate::etl::field::{Fields, OneInputOneOutPutField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
     ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, METHOD_NAME,
@@ -73,61 +73,29 @@ impl ProcessorBuilder for LetterProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
-        let mut real_fields = vec![];
-        for field in self.fields.into_iter() {
-            let input_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.input_field())
-                // TODO (qtang): handler error
-                .unwrap();
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
-            let output_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.target_or_input_field())
-                .unwrap();
-            let input = OneInputOneOutPutField::new(
-                input_field_info,
-                (field.target_or_input_field().to_string(), output_index),
-            );
-            real_fields.push(input);
-        }
-
-        let processor = LetterProcessor {
-            fields: real_fields,
-            method: self.method,
-            ignore_missing: self.ignore_missing,
-        };
-        ProcessorKind::Letter(processor)
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+        self.build(intermediate_keys).map(ProcessorKind::Letter)
     }
 }
 
 impl LetterProcessorBuilder {
-    pub fn build(self, intermediate_keys: &[String]) -> LetterProcessor {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<LetterProcessor, String> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
-            let input_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.input_field())
-                // TODO (qtang): handler error
-                .unwrap();
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
-            let output_index = intermediate_keys
-                .iter()
-                .position(|k| k == field.target_or_input_field())
-                .unwrap();
-            let input = OneInputOneOutPutField::new(
-                input_field_info,
-                (field.target_or_input_field().to_string(), output_index),
-            );
+            let input = OneInputOneOutPutField::build(
+                "letter",
+                intermediate_keys,
+                field.input_field(),
+                field.target_or_input_field(),
+            )?;
             real_fields.push(input);
         }
 
-        LetterProcessor {
+        Ok(LetterProcessor {
             fields: real_fields,
             method: self.method,
             ignore_missing: self.ignore_missing,
-        }
+        })
     }
 }
 
@@ -203,18 +171,9 @@ impl Processor for LetterProcessor {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::String(s)) => {
-                    // TODO(qtang): Let this method use the intermediate state collection directly.
                     let result = self.process_field(s)?;
                     let (_, output_index) = field.output();
                     val[*output_index] = result;
-                    // field
-                    //     .output_fields_index_mapping
-                    //     .iter()
-                    //     .for_each(|(k, output_index)| {
-                    //         if let Some(v) = processed.remove(k) {
-                    //             val[*output_index] = v;
-                    //         }
-                    //     });
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {

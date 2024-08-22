@@ -31,7 +31,7 @@ const TRANSFORM_ON_FAILURE: &str = "on_failure";
 pub use transformer::greptime::GreptimeTransformer;
 
 use super::field::{Fields, InputFieldInfo, OneInputOneOutPutField};
-use super::processor::{yaml_new_field, yaml_new_fields};
+use super::processor::{find_key_index, yaml_new_field, yaml_new_fields};
 
 pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     type Output;
@@ -186,32 +186,30 @@ pub struct TransformBuilder {
 }
 
 impl TransformBuilder {
-    pub fn build(self, intermediate_keys: &[String], output_keys: &[String]) -> Transform {
+    pub fn build(
+        self,
+        intermediate_keys: &[String],
+        output_keys: &[String],
+    ) -> Result<Transform, String> {
         let mut real_fields = vec![];
         for field in self.fields {
-            let input_index = intermediate_keys
-                .iter()
-                .position(|k| *k == field.input_field())
-                // TODO (qtang): handler error
-                .unwrap();
+            let input_index = find_key_index(intermediate_keys, field.input_field(), "transform")?;
             let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
-            let output_index = output_keys
-                .iter()
-                .position(|k| k == field.target_or_input_field())
-                .unwrap();
+            let output_index =
+                find_key_index(output_keys, field.target_or_input_field(), "transform")?;
             let input = OneInputOneOutPutField::new(
                 input_field_info,
                 (field.target_or_input_field().to_string(), output_index),
             );
             real_fields.push(input);
         }
-        Transform {
+        Ok(Transform {
             real_fields,
             type_: self.type_,
             default: self.default,
             index: self.index,
             on_failure: self.on_failure,
-        }
+        })
     }
 }
 

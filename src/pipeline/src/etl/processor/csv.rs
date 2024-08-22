@@ -21,8 +21,8 @@ use itertools::Itertools;
 
 use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
-    ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    find_key_index, yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor,
+    ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
 
@@ -52,14 +52,12 @@ pub struct CsvProcessorBuilder {
 }
 
 impl CsvProcessorBuilder {
-    fn build(self, intermediate_keys: &[String]) -> CsvProcessor {
+    fn build(self, intermediate_keys: &[String]) -> Result<CsvProcessor, String> {
         let mut real_fields = vec![];
 
         for field in self.fields {
-            let input_index = intermediate_keys
-                .iter()
-                .position(|k| k == field.input_field())
-                .unwrap();
+            let input_index = find_key_index(intermediate_keys, field.input_field(), "csv")?;
+
             let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
             let real_field = OneInputMultiOutputField::new(input_field_info, None);
             real_fields.push(real_field);
@@ -68,15 +66,15 @@ impl CsvProcessorBuilder {
         let output_index_info = self
             .target_fields
             .iter()
-            .map(|f| intermediate_keys.iter().position(|k| k == f).unwrap())
-            .collect_vec();
-        CsvProcessor {
+            .map(|f| find_key_index(intermediate_keys, f, "csv"))
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(CsvProcessor {
             reader: self.reader,
             fields: real_fields,
             ignore_missing: self.ignore_missing,
             empty_value: self.empty_value,
             output_index_info,
-        }
+        })
     }
 }
 
@@ -89,8 +87,8 @@ impl ProcessorBuilder for CsvProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> ProcessorKind {
-        ProcessorKind::Csv(self.build(intermediate_keys))
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+        self.build(intermediate_keys).map(ProcessorKind::Csv)
     }
 }
 
@@ -292,7 +290,7 @@ mod tests {
 
         let intermediate_keys = vec!["data".into(), "a".into(), "b".into()];
 
-        let processor = builder.build(&intermediate_keys);
+        let processor = builder.build(&intermediate_keys).unwrap();
         let result = processor
             .process("1,2")
             .unwrap()
@@ -325,7 +323,7 @@ mod tests {
 
             let intermediate_keys = vec!["data".into(), "a".into(), "b".into(), "c".into()];
 
-            let processor = builder.build(&intermediate_keys);
+            let processor = builder.build(&intermediate_keys).unwrap();
             let result = processor
                 .process("1,2")
                 .unwrap()
@@ -357,7 +355,7 @@ mod tests {
 
             let intermediate_keys = vec!["data".into(), "a".into(), "b".into(), "c".into()];
 
-            let processor = builder.build(&intermediate_keys);
+            let processor = builder.build(&intermediate_keys).unwrap();
             let result = processor
                 .process("1,2")
                 .unwrap()
@@ -391,7 +389,7 @@ mod tests {
 
         let intermediate_keys = vec!["data".into(), "a".into(), "b".into()];
 
-        let processor = builder.build(&intermediate_keys);
+        let processor = builder.build(&intermediate_keys).unwrap();
         let result = processor
             .process("1,2")
             .unwrap()
