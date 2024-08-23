@@ -87,7 +87,6 @@ where
 
             required_keys.append(&mut tr_keys);
             required_keys.sort();
-            let required_keys = required_keys;
 
             debug!("required_keys: {:?}", required_keys);
 

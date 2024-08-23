@@ -237,10 +237,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     group.sample_size(50);
     group.bench_function("processor mut", |b| {
         b.iter(|| {
-            let result = processor_mut(black_box(&pipeline), black_box(input_value.clone()));
-            if result.is_err() {
-                panic!("Error: {:?}", result);
-            }
+            processor_mut(black_box(&pipeline), black_box(input_value.clone())).unwrap();
         })
     });
     group.finish();
