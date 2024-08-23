@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use common_telemetry::debug;
+use common_telemetry::trace;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
@@ -76,7 +76,7 @@ impl Default for SourceSender {
         let (send_buf_tx, send_buf_rx) = mpsc::channel(SEND_BUF_CAP);
         Self {
             // TODO(discord9): found a better way then increase this to prevent lagging and hence missing input data
-            sender: broadcast::Sender::new(BROADCAST_CAP),
+            sender: broadcast::Sender::new(SEND_BUF_CAP),
             send_buf_tx,
             send_buf_rx: RwLock::new(send_buf_rx),
             send_buf_row_cnt: AtomicUsize::new(0),
@@ -120,11 +120,11 @@ impl SourceSender {
             }
         }
         if row_cnt > 0 {
-            debug!("Send {} rows", row_cnt);
+            trace!("Flushed {} rows", row_cnt);
             METRIC_FLOW_INPUT_BUF_SIZE.sub(row_cnt as _);
-            debug!(
+            trace!(
                 "Remaining Send buf.len() = {}",
-                self.send_buf_rx.read().await.len()
+                METRIC_FLOW_INPUT_BUF_SIZE.get()
             );
         }
 
@@ -136,6 +136,7 @@ impl SourceSender {
         METRIC_FLOW_INPUT_BUF_SIZE.add(rows.len() as _);
         let batch = Batch::try_from_rows(rows.into_iter().map(|(row, _, _)| row).collect())
             .context(EvalSnafu)?;
+        common_telemetry::trace!("Send one batch to worker with {} rows", batch.row_count());
         self.send_buf_tx.send(batch).await.map_err(|e| {
             crate::error::InternalSnafu {
                 reason: format!("Failed to send row, error = {:?}", e),
@@ -157,8 +158,6 @@ impl FlownodeContext {
             .with_context(|| TableNotFoundSnafu {
                 name: table_id.to_string(),
             })?;
-
-        debug!("FlownodeContext::send: trying to send {} rows", rows.len());
         sender.send_rows(rows).await
     }
 
@@ -171,16 +170,6 @@ impl FlownodeContext {
             sender.try_flush().await.inspect(|x| sum += x)?;
         }
         Ok(sum)
-    }
-
-    /// Return the sum number of rows in all send buf
-    /// TODO(discord9): remove this since we can't get correct row cnt anyway
-    pub async fn get_send_buf_size(&self) -> usize {
-        let mut sum = 0;
-        for sender in self.source_sender.values() {
-            sum += sender.send_buf_rx.read().await.len();
-        }
-        sum
     }
 }
 

@@ -257,7 +257,7 @@ impl FlowWorkerManager {
                 self.try_fetch_or_create_table(&table_name).await?;
             let schema_len = proto_schema.len();
 
-            debug!(
+            trace!(
                 "Sending {} writeback requests to table {}, reqs={:?}",
                 reqs.len(),
                 table_name.join("."),
@@ -521,10 +521,6 @@ impl FlowWorkerManager {
         }
     }
 
-    async fn get_buf_size(&self) -> usize {
-        self.node_context.read().await.get_send_buf_size().await
-    }
-
     /// Trigger dataflow running, and then send writeback request to the source sender
     ///
     /// note that this method didn't handle input mirror request, as this should be handled by grpc server
@@ -611,18 +607,18 @@ impl FlowWorkerManager {
                 }
             }
             // check row send and rows remain in send buf
-            let (flush_res, _buf_len) = if blocking {
+            let flush_res = if blocking {
                 let ctx = self.node_context.read().await;
-                (ctx.flush_all_sender().await, ctx.get_send_buf_size().await)
+                ctx.flush_all_sender().await
             } else {
                 match self.node_context.try_read() {
-                    Ok(ctx) => (ctx.flush_all_sender().await, ctx.get_send_buf_size().await),
+                    Ok(ctx) => ctx.flush_all_sender().await,
                     Err(_) => return Ok(row_cnt),
                 }
             };
             match flush_res {
                 Ok(r) => {
-                    common_telemetry::trace!("Flushed {} rows", r);
+                    common_telemetry::trace!("Total flushed {} rows", r);
                     row_cnt += r;
                     // send buf is likely to be somewhere empty now, wait
                     if r < BATCH_SIZE / 2 {
@@ -651,9 +647,10 @@ impl FlowWorkerManager {
             .with_label_values(&[table_id.to_string().as_str()])
             .start_timer();
         self.node_context.read().await.send(table_id, rows).await?;
-        debug!(
+        trace!(
             "Handling write request for table_id={} with {} rows",
-            table_id, rows_len
+            table_id,
+            rows_len
         );
         Ok(())
     }

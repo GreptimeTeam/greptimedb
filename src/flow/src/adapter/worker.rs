@@ -158,13 +158,13 @@ impl WorkerHandle {
     ///
     /// the returned error is unrecoverable, and the worker should be shutdown/rebooted
     pub async fn run_available(&self, now: repr::Timestamp, blocking: bool) -> Result<(), Error> {
-        common_telemetry::debug!("Running available with blocking={}", blocking);
+        common_telemetry::trace!("Running available with blocking={}", blocking);
         if blocking {
             let resp = self
                 .itc_client
                 .call_with_resp(Request::RunAvail { now, blocking })
                 .await?;
-            common_telemetry::debug!("Running available with response={:?}", resp);
+            common_telemetry::trace!("Running available with response={:?}", resp);
             Ok(())
         } else {
             self.itc_client

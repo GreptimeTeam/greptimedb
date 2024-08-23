@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use arrow::array::BooleanArray;
 use arrow::buffer::BooleanBuffer;
 use arrow::compute::FilterBuilder;
-use common_telemetry::debug;
+use common_telemetry::trace;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper};
@@ -796,7 +796,7 @@ impl MfpPlan {
 
         if Some(lower_bound) != upper_bound && !null_eval {
             if self.mfp.mfp.projection.iter().any(|c| values.len() <= *c) {
-                debug!("values={:?}, mfp={:?}", &values, &self.mfp.mfp);
+                trace!("values={:?}, mfp={:?}", &values, &self.mfp.mfp);
                 let err = InternalSnafu {
                     reason: format!(
                         "Index out of bound for mfp={:?} and values={:?}",
