@@ -26,7 +26,8 @@ use crate::error::{
     DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
 use crate::expr::error::{
-    DataTypeSnafu, EvalError, InternalSnafu, InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
+    ArrowSnafu, DataTypeSnafu, EvalError, InternalSnafu, InvalidArgumentSnafu, OptimizeSnafu,
+    TypeMismatchSnafu,
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::expr::{Batch, DfScalarFunction};
@@ -222,6 +223,7 @@ impl ScalarExpr {
         }
     }
 
+    // TODO(discord9): optimize using `arrow::compute::concat` instead
     fn eval_if_then(
         batch: &Batch,
         cond: &ScalarExpr,
@@ -240,130 +242,54 @@ impl ScalarExpr {
             })?
             .as_boolean_array();
 
-        let mut then_input_batch = None;
-        let mut else_input_batch = None;
-        let mut null_input_batch = None;
+        let mut input_batch: Vec<(Option<bool>, Batch)> = Vec::with_capacity(bool_conds.len());
 
-        // instructions for how to reassembly result vector,
-        // iterate over (type of vec, offset, length) and append to resulting vec
-        let mut assembly_idx = vec![];
-
-        // append batch, returning appended batch's slice in (offset, length)
-        fn append_batch(
-            batch: &mut Option<Batch>,
-            to_be_append: Batch,
-        ) -> Result<(usize, usize), EvalError> {
-            let len = to_be_append.row_count();
-            if let Some(batch) = batch {
-                let offset = batch.row_count();
-                batch.append_batch(to_be_append)?;
-                Ok((offset, len))
-            } else {
-                *batch = Some(to_be_append);
-                Ok((0, len))
-            }
-        }
-
-        let mut prev_cond: Option<Option<bool>> = None;
-        let mut prev_start_idx: Option<usize> = None;
+        let mut prev_cond_and_idx: Option<(Option<bool>, usize)> = None;
         // first put different conds' vector into different batches
         for (idx, cond) in bool_conds.iter().enumerate() {
             // if belong to same slice and not last one continue
-            if prev_cond == Some(cond) {
-                continue;
-            } else if let Some(prev_cond_idx) = prev_start_idx {
-                let prev_cond = prev_cond.unwrap();
-
-                // put a slice to corresponding batch
-                let slice_offset = prev_cond_idx;
-                let slice_length = idx - prev_cond_idx;
-                let to_be_append = batch.slice(slice_offset, slice_length)?;
-
-                let to_put_back = match prev_cond {
-                    Some(true) => (
-                        Some(true),
-                        append_batch(&mut then_input_batch, to_be_append)?,
-                    ),
-                    Some(false) => (
-                        Some(false),
-                        append_batch(&mut else_input_batch, to_be_append)?,
-                    ),
-                    None => (None, append_batch(&mut null_input_batch, to_be_append)?),
-                };
-                assembly_idx.push(to_put_back);
+            if let Some((prev_cond, prev_start_idx)) = prev_cond_and_idx {
+                if prev_cond == cond {
+                    continue;
+                } else {
+                    // put a slice to corresponding batch
+                    let slice_offset = prev_start_idx;
+                    let slice_length = idx - prev_start_idx;
+                    let to_be_append = batch.slice(slice_offset, slice_length)?;
+                    input_batch.push((prev_cond, to_be_append));
+                    prev_cond_and_idx = Some((cond, idx));
+                }
+            } else {
+                prev_cond_and_idx = Some((cond, idx));
             }
-            prev_cond = Some(cond);
-            prev_start_idx = Some(idx);
         }
 
         // deal with empty and last slice case
-        if let Some(slice_offset) = prev_start_idx {
-            let prev_cond = prev_cond.unwrap();
-            let slice_length = bool_conds.len() - slice_offset;
-            let to_be_append = batch.slice(slice_offset, slice_length)?;
-            let to_put_back = match prev_cond {
-                Some(true) => (
-                    Some(true),
-                    append_batch(&mut then_input_batch, to_be_append)?,
-                ),
-                Some(false) => (
-                    Some(false),
-                    append_batch(&mut else_input_batch, to_be_append)?,
-                ),
-                None => (None, append_batch(&mut null_input_batch, to_be_append)?),
+        if let Some((prev_cond, prev_start_idx)) = prev_cond_and_idx {
+            let slice_length = bool_conds.len() - prev_start_idx;
+            let to_be_append = batch.slice(prev_start_idx, slice_length)?;
+            input_batch.push((prev_cond, to_be_append));
+        }
+
+        let mut output_arrays = Vec::with_capacity(input_batch.len());
+        for (cond, input_batch) in input_batch {
+            let out = match cond {
+                Some(true) => then.eval_batch(&input_batch)?,
+                Some(false) => els.eval_batch(&input_batch)?,
+                None => NullVector::new(input_batch.row_count()).slice(0, input_batch.row_count()),
             };
-            assembly_idx.push(to_put_back);
+            output_arrays.push(out.to_arrow_array());
         }
+        let out_ref = output_arrays.iter().map(|v| v.as_ref()).collect::<Vec<_>>();
+        let concated = arrow::compute::concat(&out_ref).context(ArrowSnafu {
+            context: "Failed to concat output arrays",
+        })?;
 
-        let then_output_vec = then_input_batch
-            .map(|batch| then.eval_batch(&batch))
-            .transpose()?;
-        let else_output_vec = else_input_batch
-            .map(|batch| els.eval_batch(&batch))
-            .transpose()?;
-        let null_output_vec = null_input_batch
-            .map(|null| NullVector::new(null.row_count()).slice(0, null.row_count()));
+        let out_vec = Helper::try_into_vector(concated).context(DataTypeSnafu {
+            msg: "Failed to convert arrow array to vector",
+        })?;
 
-        let dt = then_output_vec
-            .as_ref()
-            .map(|v| v.data_type())
-            .or(else_output_vec.as_ref().map(|v| v.data_type()))
-            .unwrap_or(ConcreteDataType::null_datatype());
-        let mut builder = dt.create_mutable_vector(conds.len());
-        for (cond, (offset, length)) in assembly_idx {
-            let slice = match cond {
-                Some(true) => then_output_vec.as_ref(),
-                Some(false) => else_output_vec.as_ref(),
-                None => null_output_vec.as_ref(),
-            }
-            .context(InternalSnafu {
-                reason: "Expect corresponding output vector to exist",
-            })?;
-            // TODO(discord9): seems `extend_slice_of` doesn't support NullVector or ConstantVector
-            // consider adding it maybe?
-            if slice.data_type().is_null() {
-                builder.push_nulls(length);
-            } else if slice.is_const() {
-                let arr = slice.slice(offset, length).to_arrow_array();
-                let vector = Helper::try_into_vector(arr).context(DataTypeSnafu {
-                    msg: "Failed to convert arrow array to vector",
-                })?;
-                builder
-                    .extend_slice_of(vector.as_ref(), 0, vector.len())
-                    .context(DataTypeSnafu {
-                        msg: "Failed to build result vector for if-then expression",
-                    })?;
-            } else {
-                builder
-                    .extend_slice_of(slice.as_ref(), offset, length)
-                    .context(DataTypeSnafu {
-                        msg: "Failed to build result vector for if-then expression",
-                    })?;
-            }
-        }
-        let result_vec = builder.to_vector();
-
-        Ok(result_vec)
+        Ok(out_vec)
     }
 
     /// Eval this expression with the given values.
@@ -781,7 +707,7 @@ mod test {
     }
 
     #[test]
-    fn test_eval_batch() {
+    fn test_eval_batch_if_then() {
         // TODO(discord9): add more tests
         {
             let expr = ScalarExpr::If {
