@@ -16,10 +16,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use arrow::array::{make_array, ArrayData, ArrayRef};
 use common_error::ext::BoxedError;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
-use datatypes::vectors::{BooleanVector, Helper, NullVector, Vector, VectorRef};
+use datatypes::vectors::{BooleanVector, Helper, VectorRef};
+use hydroflow::lattices::cc_traits::Iter;
+use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
@@ -271,21 +274,72 @@ impl ScalarExpr {
         }
 
         let mut output_arrays = Vec::with_capacity(input_batch.len());
+        let mut first_type = None;
         for (cond, input_batch) in input_batch {
+            let len = input_batch.row_count();
             let out = match cond {
-                Some(true) => then.eval_batch(&input_batch)?,
-                Some(false) => els.eval_batch(&input_batch)?,
-                None => {
-                    // TODO: make a same type null vector
-                    NullVector::new(input_batch.row_count()).slice(0, input_batch.row_count())
+                Some(true) => {
+                    let ret = then.eval_batch(&input_batch)?;
+                    if first_type.is_none() {
+                        first_type = Some(ret.data_type());
+                    }
+                    (Some(ret.to_arrow_array()), len)
                 }
+                Some(false) => {
+                    let ret = els.eval_batch(&input_batch)?;
+                    if first_type.is_none() {
+                        first_type = Some(ret.data_type());
+                    }
+                    (Some(ret.to_arrow_array()), len)
+                }
+                None => (None, len),
             };
-            output_arrays.push(out.to_arrow_array());
+            output_arrays.push(out);
         }
-        let out_ref = output_arrays.iter().map(|v| v.as_ref()).collect::<Vec<_>>();
-        let concated = arrow::compute::concat(&out_ref).context(ArrowSnafu {
-            context: "Failed to concat output arrays",
-        })?;
+        fn new_nulls(dt: &arrow_schema::DataType, len: usize) -> ArrayRef {
+            let data = ArrayData::new_null(dt, len);
+            make_array(data)
+        }
+
+        // get persumed type from first output array
+        let persumed_type = first_type
+            .unwrap_or(ConcreteDataType::null_datatype())
+            .as_arrow_type();
+
+        // and create null array of same type for concat
+        let cast_output_array = output_arrays
+            .into_iter()
+            .map(|(x, len)| x.unwrap_or_else(|| new_nulls(&persumed_type, len)))
+            .collect_vec();
+
+        let out_type = cast_output_array
+            .iter()
+            .map(|x| x.data_type())
+            .collect::<Vec<_>>();
+
+        let is_same = out_type.windows(2).all(|w| w[0] == w[1]);
+
+        if !is_same {
+            InvalidArgumentSnafu {
+                reason: format!(
+                    "if then else return different type, found {:?}",
+                    BTreeSet::from_iter(out_type.iter())
+                ),
+            }
+            .fail()?;
+        }
+
+        let out_ref = cast_output_array
+            .iter()
+            .map(|v| v.as_ref())
+            .collect::<Vec<_>>();
+        let concated = if out_ref.is_empty() {
+            new_nulls(&persumed_type, 0)
+        } else {
+            arrow::compute::concat(&out_ref).context(ArrowSnafu {
+                context: "Failed to concat output arrays",
+            })?
+        };
 
         let out_vec = Helper::try_into_vector(concated).context(DataTypeSnafu {
             msg: "Failed to convert arrow array to vector",
@@ -613,7 +667,7 @@ impl ScalarExpr {
 
 #[cfg(test)]
 mod test {
-    use datatypes::vectors::Int32Vector;
+    use datatypes::vectors::{Int32Vector, NullVector, Vector};
     use pretty_assertions::assert_eq;
 
     use super::*;
