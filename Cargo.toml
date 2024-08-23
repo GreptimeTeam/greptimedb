@@ -152,8 +152,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-# SCRAM-SHA-512 requires https://github.com/dequbed/rsasl/pull/48, https://github.com/influxdata/rskafka/pull/247
-rskafka = { git = "https://github.com/WenyXu/rskafka.git", rev = "940c6030012c5b746fad819fb72e3325b26e39de", features = [
+rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "75535b5ad9bae4a5dbb582c82e44dfd81ec10105", features = [
     "transport-tls",
 ] }
 rstest = "0.21"
