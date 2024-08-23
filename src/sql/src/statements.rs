@@ -42,7 +42,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN};
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use datatypes::types::{cast, TimestampType};
-use datatypes::value::{OrderedF32, OrderedF64, Value};
+use datatypes::value::{JsonbValue, OrderedF32, OrderedF64, Value};
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::{ExactNumberInfo, UnaryOperator};
 
@@ -123,6 +123,16 @@ fn parse_string_to_value(
             }
         }
         ConcreteDataType::Binary(_) => Ok(Value::Binary(s.as_bytes().into())),
+        ConcreteDataType::Json(_) => {
+            if let Ok(json) = jsonb::parse_value(s.as_bytes()) {
+                Ok(Value::Json(JsonbValue::new(json.to_vec())))
+            } else {
+                ParseSqlValueSnafu {
+                    msg: format!("Failed to parse {s} to Json value"),
+                }
+                .fail()
+            }
+        }
         _ => {
             unreachable!()
         }
@@ -570,6 +580,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
                 Ok(ConcreteDataType::decimal128_datatype(*p as u8, *s as i8))
             }
         },
+        SqlDataType::JSON => Ok(ConcreteDataType::json_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -606,11 +617,11 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::Decimal128(d) => Ok(SqlDataType::Decimal(
             ExactNumberInfo::PrecisionAndScale(d.precision() as u64, d.scale() as u64),
         )),
+        ConcreteDataType::Json(_) => Ok(SqlDataType::JSON),
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
-        | ConcreteDataType::Dictionary(_)
-        | ConcreteDataType::Json(_) => {
+        | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }
     }
