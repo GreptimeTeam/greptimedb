@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 
+use common_telemetry::trace;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::{ListValue, Value};
@@ -28,7 +29,7 @@ use crate::compute::render::{Context, SubgraphArg};
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
 use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
 use crate::expr::error::{ArrowSnafu, DataAlreadyExpiredSnafu, DataTypeSnafu, InternalSnafu};
-use crate::expr::{Batch, EvalError, ScalarExpr};
+use crate::expr::{Accum, Accumulator, Batch, EvalError, ScalarExpr, VectorDiff};
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, KeyExpiryManager};
@@ -361,7 +362,12 @@ fn reduce_batch_subgraph(
     }: SubgraphArg<Toff<Batch>>,
 ) {
     let mut key_to_many_vals = BTreeMap::<Row, Vec<Batch>>::new();
+    let mut input_row_count = 0;
+    let mut input_batch_count = 0;
+
     for batch in src_data {
+        input_batch_count += 1;
+        input_row_count += batch.row_count();
         err_collector.run(|| {
             let (key_batch, val_batch) =
                 batch_split_by_key_val(&batch, key_val_plan, err_collector);
@@ -376,15 +382,20 @@ fn reduce_batch_subgraph(
                 }
             );
 
+            // record all visited keys in **this** batch
+            let mut visited_keys = BTreeSet::new();
+
             // optimize use bool mask to avoid unnecessary slice
             for row_idx in 0..key_batch.row_count() {
                 let key_row = key_batch.get_row(row_idx)?;
                 let key_row = Row::new(key_row);
 
-                // if the same key exist then it's already filtered all values in this batch
-                if key_to_many_vals.contains_key(&key_row) {
+                if visited_keys.contains(&key_row) {
                     continue;
+                } else {
+                    visited_keys.insert(key_row.clone());
                 }
+
                 let key_eq_mask = {
                     let mut key_scalar_value = Vec::with_capacity(key_row.len());
                     for key in key_row.iter() {
@@ -464,6 +475,12 @@ fn reduce_batch_subgraph(
         });
     }
 
+    trace!(
+        "Reduce take {} batches, {} rows",
+        input_batch_count,
+        input_row_count
+    );
+
     // write lock the arrange for the rest of the function body
     // to prevent wired race condition
     let mut arrange = arrange.write();
@@ -483,8 +500,12 @@ fn reduce_batch_subgraph(
                 output_idx,
             } in accum_plan.simple_aggrs.iter()
             {
-                let mut cur_accum = accum_list.get(*output_idx).cloned().unwrap_or_default();
-                let mut cur_output = None;
+                let cur_accum_value = accum_list.get(*output_idx).cloned().unwrap_or_default();
+                let mut cur_accum = if cur_accum_value.is_empty() {
+                    Accum::new_accum(&expr.func.clone())?
+                } else {
+                    Accum::try_into_accum(&expr.func, cur_accum_value)?
+                };
 
                 for val_batch in val_batches.iter() {
                     // if batch is empty, input null instead
@@ -493,16 +514,17 @@ fn reduce_batch_subgraph(
                         .get(*input_idx)
                         .cloned()
                         .unwrap_or_else(|| Arc::new(NullVector::new(val_batch.row_count())));
+                    let len = cur_input.len();
+                    cur_accum.update_batch(&expr.func, VectorDiff::from(cur_input))?;
 
-                    let (output, new_accum) = expr.func.eval_batch(cur_accum, cur_input, None)?;
-                    cur_accum = new_accum;
-                    cur_output = Some(output);
+                    trace!("Reduce accum after take {} rows: {:?}", len, cur_accum);
                 }
+                let final_output = cur_accum.eval(&expr.func)?;
+                trace!("Reduce accum final output: {:?}", final_output);
+                accum_output.insert_output(*output_idx, final_output);
 
-                accum_output.insert_accum(*output_idx, cur_accum);
-                if let Some(final_output) = cur_output {
-                    accum_output.insert_output(*output_idx, final_output);
-                }
+                let cur_accum_value = cur_accum.into_state();
+                accum_output.insert_accum(*output_idx, cur_accum_value);
             }
 
             let (new_accums, res_val_row) = accum_output.into_accum_output()?;

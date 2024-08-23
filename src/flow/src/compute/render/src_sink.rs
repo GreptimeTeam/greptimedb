@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use common_telemetry::debug;
+use common_telemetry::{debug, trace};
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::OptionExt;
@@ -48,10 +48,13 @@ impl<'referred, 'df> Context<'referred, 'df> {
         let sub = self
             .df
             .add_subgraph_source("source_batch", send_port, move |_ctx, send| {
+                let mut total_batches = vec![];
+                let mut total_row_count = 0;
                 loop {
                     match src_recv.try_recv() {
                         Ok(batch) => {
-                            send.give(vec![batch]);
+                            total_row_count += batch.row_count();
+                            total_batches.push(batch);
                         }
                         Err(TryRecvError::Empty) => {
                             break;
@@ -77,6 +80,13 @@ impl<'referred, 'df> Context<'referred, 'df> {
                         }
                     }
                 }
+
+                trace!(
+                    "Send {} rows in {} batches",
+                    total_row_count,
+                    total_batches.len()
+                );
+                send.give(total_batches);
 
                 let now = *now.borrow();
                 // always schedule source to run at now so we can

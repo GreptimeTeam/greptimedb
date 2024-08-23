@@ -16,10 +16,10 @@
 
 mod df_func;
 pub(crate) mod error;
-mod func;
+pub(crate) mod func;
 mod id;
 mod linear;
-mod relation;
+pub(crate) mod relation;
 mod scalar;
 mod signature;
 
@@ -32,11 +32,12 @@ pub(crate) use func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc}
 pub(crate) use id::{GlobalId, Id, LocalId};
 use itertools::Itertools;
 pub(crate) use linear::{MapFilterProject, MfpPlan, SafeMfpPlan};
-pub(crate) use relation::{AggregateExpr, AggregateFunc};
+pub(crate) use relation::{Accum, Accumulator, AggregateExpr, AggregateFunc};
 pub(crate) use scalar::{ScalarExpr, TypedExpr};
 use snafu::{ensure, ResultExt};
 
 use crate::expr::error::DataTypeSnafu;
+use crate::repr::Diff;
 
 pub const TUMBLE_START: &str = "tumble_start";
 pub const TUMBLE_END: &str = "tumble_end";
@@ -249,5 +250,79 @@ impl Batch {
         self.batch = result;
         self.row_count = self_row_count + other_row_count;
         Ok(())
+    }
+}
+
+/// Vector with diff to note the insert and delete
+pub(crate) struct VectorDiff {
+    vector: VectorRef,
+    diff: Option<VectorRef>,
+}
+
+impl From<VectorRef> for VectorDiff {
+    fn from(vector: VectorRef) -> Self {
+        Self { vector, diff: None }
+    }
+}
+
+impl VectorDiff {
+    fn len(&self) -> usize {
+        self.vector.len()
+    }
+
+    fn try_new(vector: VectorRef, diff: Option<VectorRef>) -> Result<Self, EvalError> {
+        ensure!(
+            diff.as_ref()
+                .map_or(true, |diff| diff.len() == vector.len()),
+            InvalidArgumentSnafu {
+                reason: "Length of vector and diff should be the same"
+            }
+        );
+        Ok(Self { vector, diff })
+    }
+}
+
+impl IntoIterator for VectorDiff {
+    type Item = (Value, Diff);
+    type IntoIter = VectorDiffIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        VectorDiffIter {
+            vector: self.vector,
+            diff: self.diff,
+            idx: 0,
+        }
+    }
+}
+
+/// iterator for VectorDiff
+pub(crate) struct VectorDiffIter {
+    vector: VectorRef,
+    diff: Option<VectorRef>,
+    idx: usize,
+}
+
+impl std::iter::Iterator for VectorDiffIter {
+    type Item = (Value, Diff);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.idx >= self.vector.len() {
+            return None;
+        }
+        let value = self.vector.get(self.idx);
+        // +1 means insert, -1 means delete, and default to +1 insert when diff is not provided
+        let diff = if let Some(diff) = self.diff.as_ref() {
+            if let Ok(diff_at) = diff.get(self.idx).try_into() {
+                diff_at
+            } else {
+                common_telemetry::warn!("Invalid diff value at index {}", self.idx);
+                return None;
+            }
+        } else {
+            1
+        };
+
+        self.idx += 1;
+        Some((value, diff))
     }
 }
