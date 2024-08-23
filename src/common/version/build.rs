@@ -19,7 +19,11 @@ use build_data::{format_timestamp, get_source_time};
 use shadow_rs::{CARGO_METADATA, CARGO_TREE};
 
 fn main() -> shadow_rs::SdResult<()> {
-    println!("cargo:rerun-if-changed=../../../.git/refs/heads");
+    println!(
+        "cargo:rerun-if-changed={}/.git/refs/heads",
+        env!("CARGO_RUSTC_CURRENT_DIR")
+    );
+
     println!(
         "cargo:rustc-env=SOURCE_TIMESTAMP={}",
         if let Ok(t) = get_source_time() {
