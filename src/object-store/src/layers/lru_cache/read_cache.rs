@@ -26,7 +26,9 @@ use crate::metrics::{
     OBJECT_STORE_LRU_CACHE_BYTES, OBJECT_STORE_LRU_CACHE_ENTRIES, OBJECT_STORE_LRU_CACHE_HIT,
     OBJECT_STORE_LRU_CACHE_MISS, OBJECT_STORE_READ_ERROR,
 };
+
 const RECOVER_CACHE_CONCURRENT: usize = 8;
+
 /// Cache value for read file
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 enum ReadResult {
