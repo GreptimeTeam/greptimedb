@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use common_error::ext::BoxedError;
-use datatypes::prelude::{ConcreteDataType, DataType};
+use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper, NullVector, Vector, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -26,8 +26,7 @@ use crate::error::{
     DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
 use crate::expr::error::{
-    ArrowSnafu, DataTypeSnafu, EvalError, InternalSnafu, InvalidArgumentSnafu, OptimizeSnafu,
-    TypeMismatchSnafu,
+    ArrowSnafu, DataTypeSnafu, EvalError, InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::expr::{Batch, DfScalarFunction};
@@ -276,7 +275,10 @@ impl ScalarExpr {
             let out = match cond {
                 Some(true) => then.eval_batch(&input_batch)?,
                 Some(false) => els.eval_batch(&input_batch)?,
-                None => NullVector::new(input_batch.row_count()).slice(0, input_batch.row_count()),
+                None => {
+                    // TODO: make a same type null vector
+                    NullVector::new(input_batch.row_count()).slice(0, input_batch.row_count())
+                }
             };
             output_arrays.push(out.to_arrow_array());
         }
