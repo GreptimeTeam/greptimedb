@@ -1018,9 +1018,9 @@ pub fn file_column_schemas_to_table(
 ///
 /// More specifically, for each column seen in the table schema,
 /// - If the same column does exist in the file schema, it checks if the data
-/// type of the file column can be casted into the form of the table column.
+///   type of the file column can be casted into the form of the table column.
 /// - If the same column does not exist in the file schema, it checks if the
-/// table column is nullable or has a default constraint.
+///   table column is nullable or has a default constraint.
 pub fn check_file_to_table_schema_compatibility(
     file_column_schemas: &[ColumnSchema],
     table_column_schemas: &[ColumnSchema],

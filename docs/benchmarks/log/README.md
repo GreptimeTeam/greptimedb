@@ -29,7 +29,7 @@ INSERT INTO test_table (message, timestamp) VALUES ()
 The goal is to test fuzzy search performance for each database. In real scenarios it means the log is produced by some kind of middleware and inserted directly into the database.
 
 ## Creating tables
-See [here](./create_table.sql) for GreptimeDB and Clickhouse's create table clause. 
+See [here](./create_table.sql) for GreptimeDB and Clickhouse's create table clause.
 The mapping of Elastic search is created automatically.
 
 ## Vector Configuration
@@ -41,7 +41,7 @@ Please refer to [SQL query](./query.sql) for GreptimeDB and Clickhouse, and [que
 
 ## Steps to reproduce
 0. Decide whether to run structured model test or unstructured mode test.
-1. Build vector binary(see vector's config file for specific branch) and databases binaries accordingly. 
+1. Build vector binary(see vector's config file for specific branch) and databases binaries accordingly.
 2. Create table in GreptimeDB and Clickhouse in advance.
 3. Run vector to insert data.
 4. When data insertion is finished, run queries against each database. Note: you'll need to update timerange value after data insertion.

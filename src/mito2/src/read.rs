@@ -56,6 +56,7 @@ use crate::error::{
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::prune::PruneReader;
+use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -752,11 +753,13 @@ pub(crate) struct ScannerMetrics {
     num_batches: usize,
     /// Number of rows returned.
     num_rows: usize,
+    /// Filter related metrics for readers.
+    filter_metrics: ReaderFilterMetrics,
 }
 
 impl ScannerMetrics {
     /// Sets and observes metrics on initializing parts.
-    fn observe_init_part(&mut self, build_parts_cost: Duration) {
+    fn observe_init_part(&mut self, build_parts_cost: Duration, reader_metrics: &ReaderMetrics) {
         self.build_parts_cost = build_parts_cost;
 
         // Observes metrics.
@@ -766,6 +769,11 @@ impl ScannerMetrics {
         READ_STAGE_ELAPSED
             .with_label_values(&["build_parts"])
             .observe(self.build_parts_cost.as_secs_f64());
+
+        // We only call this once so we overwrite it directly.
+        self.filter_metrics = reader_metrics.filter_metrics;
+        // Observes filter metrics.
+        self.filter_metrics.observe();
     }
 
     /// Observes metrics on scanner finish.

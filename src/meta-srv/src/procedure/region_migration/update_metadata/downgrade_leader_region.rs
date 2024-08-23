@@ -33,8 +33,8 @@ impl UpdateMetadata {
     /// About the failure of updating the [TableRouteValue](common_meta::key::table_region::TableRegionValue):
     ///
     /// - There may be another [RegionMigrationProcedure](crate::procedure::region_migration::RegionMigrationProcedure)
-    /// that is executed concurrently for **other region**.
-    /// It will only update **other region** info. Therefore, It's safe to retry after failure.
+    ///   that is executed concurrently for **other region**.
+    ///   It will only update **other region** info. Therefore, It's safe to retry after failure.
     ///
     /// - There is no other DDL procedure executed concurrently for the current table.
     pub async fn downgrade_leader_region(&self, ctx: &mut Context) -> Result<()> {

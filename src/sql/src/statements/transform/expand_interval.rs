@@ -57,8 +57,9 @@ lazy_static! {
 /// - `ms` for `milliseconds`
 /// - `us` for `microseconds`
 /// - `ns` for `nanoseconds`
+///
 /// Required for scenarios that use the shortened version of `INTERVAL`,
-/// f.e `SELECT INTERVAL '1h'` or `SELECT INTERVAL '3w2d'`
+///   f.e `SELECT INTERVAL '1h'` or `SELECT INTERVAL '3w2d'`
 pub(crate) struct ExpandIntervalTransformRule;
 
 impl TransformRule for ExpandIntervalTransformRule {
@@ -145,10 +146,11 @@ fn update_existing_interval_with_value(interval: &Interval, value: Box<Expr>) ->
 /// Normalizes an interval expression string into the sql-compatible format.
 /// This function handles 2 types of input:
 /// 1. Abbreviated interval strings (e.g., "1y2mo3d")
-/// Returns an interval's full name (e.g., "years", "hours", "minutes") according to the `INTERVAL_ABBREVIATION_MAPPING`
-/// If the `interval_str` contains whitespaces, the interval name is considered to be in a full form.
+///    Returns an interval's full name (e.g., "years", "hours", "minutes") according to the `INTERVAL_ABBREVIATION_MAPPING`
+///    If the `interval_str` contains whitespaces, the interval name is considered to be in a full form.
 /// 2. ISO 8601 format strings (e.g., "P1Y2M3D"), case/sign independent
-/// Returns a number of milliseconds corresponding to ISO 8601 (e.g., "36525000 milliseconds")
+///    Returns a number of milliseconds corresponding to ISO 8601 (e.g., "36525000 milliseconds")
+///
 /// Note: Hybrid format "1y 2 days 3h" is not supported.
 fn normalize_interval_name(interval_str: &str) -> Option<String> {
     if interval_str.contains(char::is_whitespace) {

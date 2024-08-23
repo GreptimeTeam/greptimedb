@@ -40,8 +40,9 @@ pub(crate) const ESTIMATED_META_SIZE: usize = 256;
 /// - If the entry is able to fit into a Kafka record, it's converted into a Full record.
 ///
 /// - If the entry is too large to fit into a Kafka record, it's converted into a collection of records.
+///
 /// Those records must contain exactly one First record and one Last record, and potentially several
-/// Middle records. There may be no Middle record.
+///   Middle records. There may be no Middle record.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum RecordType {
     /// The record is self-contained, i.e. an entry's data is fully stored into this record.

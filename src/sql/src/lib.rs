@@ -15,7 +15,6 @@
 #![feature(box_patterns)]
 #![feature(assert_matches)]
 #![feature(let_chains)]
-#![feature(lazy_cell)]
 
 pub mod ast;
 pub mod dialect;

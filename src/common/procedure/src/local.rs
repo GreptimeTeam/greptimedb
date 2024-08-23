@@ -51,7 +51,7 @@ const META_TTL: Duration = Duration::from_secs(60 * 10);
 /// [Notify] is not a condition variable, we can't guarantee the waiters are notified
 /// if they didn't call `notified()` before we signal the notify. So we
 /// 1. use dedicated notify for each condition, such as waiting for a lock, waiting
-/// for children;
+///    for children;
 /// 2. always use `notify_one` and ensure there are only one waiter.
 #[derive(Debug)]
 pub(crate) struct ProcedureMeta {

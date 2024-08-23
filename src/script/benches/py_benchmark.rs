@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -31,8 +32,9 @@ use tokio::runtime::Runtime;
 static SCRIPT_ENGINE: Lazy<PyEngine> = Lazy::new(sample_script_engine);
 static LOCAL_RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 fn get_local_runtime() -> std::thread::Result<&'static Runtime> {
-    let rt = LOCAL_RUNTIME
-        .get_or_try_init(|| tokio::runtime::Runtime::new().map_err(|e| Box::new(e) as _))?;
+    let rt = LOCAL_RUNTIME.get_or_try_init(|| {
+        tokio::runtime::Runtime::new().map_err(|e| Box::new(e) as Box<dyn Any + Send + 'static>)
+    })?;
     Ok(rt)
 }
 /// a terrible hack to call async from sync by:

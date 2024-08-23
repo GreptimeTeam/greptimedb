@@ -51,7 +51,7 @@ file-engine.workspace = true
 flow.workspace = true
 frontend = { workspace = true, default-features = false }
 futures.workspace = true
-human-panic = "1.2.2"
+human-panic = "2.0"
 lazy_static.workspace = true
 meta-client.workspace = true
 meta-srv.workspace = true

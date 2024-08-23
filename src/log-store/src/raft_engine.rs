@@ -23,6 +23,7 @@ use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::Provider;
 use store_api::storage::RegionId;
 
+#[allow(renamed_and_removed_lints)]
 pub mod protos {
     include!(concat!(env!("OUT_DIR"), concat!("/", "protos/", "mod.rs")));
 }

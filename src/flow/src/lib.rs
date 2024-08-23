@@ -17,7 +17,6 @@
 //! It also contains definition of expression, adapter and plan, and internal state management.
 
 #![feature(let_chains)]
-#![feature(duration_abs_diff)]
 #![allow(dead_code)]
 #![warn(clippy::missing_docs_in_private_items)]
 #![warn(clippy::too_many_lines)]

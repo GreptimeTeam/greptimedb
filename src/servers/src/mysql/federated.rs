@@ -196,7 +196,7 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
                 // @@aa
                 // field is '@@aa'
                 fields.push(ColumnSchema::new(
-                    &format!("@@{}", var_as[0]),
+                    format!("@@{}", var_as[0]),
                     ConcreteDataType::string_datatype(),
                     true,
                 ));
