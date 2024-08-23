@@ -109,7 +109,7 @@ uuid.workspace = true
 zstd.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
-tikv-jemalloc-ctl = { version = "0.6", features = ["use_std"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
 
 [dev-dependencies]
 auth = { workspace = true, features = ["testing"] }
