@@ -43,7 +43,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN};
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use datatypes::types::{cast, TimestampType};
-use datatypes::value::{OrderedF32, OrderedF64, Value};
+use datatypes::value::{JsonbValue, OrderedF32, OrderedF64, Value};
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::{ExactNumberInfo, UnaryOperator};
 
@@ -634,8 +634,7 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
-        | ConcreteDataType::Dictionary(_)
-        | ConcreteDataType::Json(_) => {
+        | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }
     }

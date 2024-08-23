@@ -34,6 +34,7 @@ snafu.workspace = true
 sqlparser.workspace = true
 sqlparser_derive = "0.1"
 table.workspace = true
+jsonb.workspace = true
 
 [dev-dependencies]
 common-datasource.workspace = true
