@@ -757,14 +757,14 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to remotely compact region {} by job {} due to {}",
+        "Failed to remotely compact region {} by job {:?} due to {}",
         region_id,
         job_id,
         reason
     ))]
     RemoteCompaction {
         region_id: RegionId,
-        job_id: JobId,
+        job_id: Option<JobId>,
         reason: String,
         #[snafu(implicit)]
         location: Location,

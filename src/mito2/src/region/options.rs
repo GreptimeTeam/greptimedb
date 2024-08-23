@@ -170,6 +170,12 @@ impl CompactionOptions {
             CompactionOptions::Twcs(opts) => opts.remote_compaction,
         }
     }
+
+    pub(crate) fn fallback_to_local(&self) -> bool {
+        match self {
+            CompactionOptions::Twcs(opts) => opts.fallback_to_local,
+        }
+    }
 }
 
 impl Default for CompactionOptions {
@@ -201,6 +207,9 @@ pub struct TwcsOptions {
     /// Whether to use remote compaction.
     #[serde_as(as = "DisplayFromStr")]
     pub remote_compaction: bool,
+    /// Whether to fall back to local compaction if remote compaction fails.
+    #[serde_as(as = "DisplayFromStr")]
+    pub fallback_to_local: bool,
 }
 
 with_prefix!(prefix_twcs "compaction.twcs.");
@@ -228,6 +237,7 @@ impl Default for TwcsOptions {
             max_inactive_window_files: 1,
             time_window: None,
             remote_compaction: false,
+            fallback_to_local: true,
         }
     }
 }
@@ -590,6 +600,7 @@ mod tests {
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
             ("compaction.twcs.remote_compaction", "false"),
+            ("compaction.twcs.fallback_to_local", "true"),
             ("storage", "S3"),
             ("append_mode", "false"),
             ("index.inverted_index.ignore_column_ids", "1,2,3"),
@@ -614,6 +625,7 @@ mod tests {
                 max_inactive_window_files: 3,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 remote_compaction: false,
+                fallback_to_local: true,
             }),
             storage: Some("S3".to_string()),
             append_mode: false,
@@ -645,6 +657,7 @@ mod tests {
                 max_inactive_window_files: usize::MAX,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 remote_compaction: false,
+                fallback_to_local: true,
             }),
             storage: Some("S3".to_string()),
             append_mode: false,
@@ -710,6 +723,7 @@ mod tests {
                 max_inactive_window_files: 7,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 remote_compaction: false,
+                fallback_to_local: true,
             }),
             storage: Some("S3".to_string()),
             append_mode: false,
