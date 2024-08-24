@@ -17,7 +17,6 @@ use std::sync::Arc;
 use api::v1::greptime_request::Request;
 use async_trait::async_trait;
 use axum::Router;
-use catalog::catalog_protocol::CatalogProtocol;
 use common_query::Output;
 use common_test_util::ports;
 use query::parser::PromQuery;
@@ -30,7 +29,7 @@ use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::OpentsdbProtocolHandler;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 use tokio::sync::mpsc;
 
 struct DummyInstance {
@@ -101,7 +100,7 @@ impl SqlQueryHandler for DummyInstance {
         &self,
         _catalog: &str,
         _schema: &str,
-        _catalog_protocol: CatalogProtocol,
+        _channel: Channel,
     ) -> Result<bool> {
         Ok(true)
     }

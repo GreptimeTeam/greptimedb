@@ -30,12 +30,12 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{Int64VectorBuilder, StringVectorBuilder, UInt64VectorBuilder};
 use futures::{StreamExt, TryStreamExt};
+use session::context::Channel::Mysql;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, ScanRequest, TableId};
 use table::metadata::TableType;
 
 use super::REGION_PEERS;
-use crate::catalog_protocol::CatalogProtocol::MySQL;
 use crate::error::{
     CreateRecordBatchSnafu, FindRegionRoutesSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu,
@@ -177,7 +177,7 @@ impl InformationSchemaRegionPeersBuilder {
 
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager.schema_names(&catalog_name, MySQL).await? {
+        for schema_name in catalog_manager.schema_names(&catalog_name, Mysql).await? {
             let table_id_stream = catalog_manager
                 .tables(&catalog_name, &schema_name)
                 .try_filter_map(|t| async move {

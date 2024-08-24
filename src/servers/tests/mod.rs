@@ -18,7 +18,6 @@ use std::sync::{Arc, RwLock};
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
-use catalog::catalog_protocol::CatalogProtocol;
 use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
@@ -32,7 +31,7 @@ use servers::error::{Error, NotSupportedSnafu, Result};
 use servers::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerRef};
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 use snafu::ensure;
 use sql::statements::statement::Statement;
 use table::TableRef;
@@ -113,7 +112,7 @@ impl SqlQueryHandler for DummyInstance {
         &self,
         catalog: &str,
         schema: &str,
-        _catalog_protocol: CatalogProtocol,
+        _channel: Channel,
     ) -> Result<bool> {
         Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
     }

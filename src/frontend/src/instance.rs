@@ -27,7 +27,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
@@ -68,7 +67,7 @@ use servers::query_handler::{
     PromStoreProtocolHandler, ScriptHandler,
 };
 use servers::server::ServerHandlers;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
@@ -355,14 +354,9 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn is_valid_schema(
-        &self,
-        catalog: &str,
-        schema: &str,
-        catalog_protocol: CatalogProtocol,
-    ) -> Result<bool> {
+    async fn is_valid_schema(&self, catalog: &str, schema: &str, channel: Channel) -> Result<bool> {
         self.catalog_manager
-            .schema_exists(catalog, schema, catalog_protocol)
+            .schema_exists(catalog, schema, channel)
             .await
             .context(error::CatalogSnafu)
     }

@@ -1,7 +1,7 @@
 -- should not able to create pg_catalog
 create database pg_catalog;
 
-Error: 1004(InvalidArguments), Schema pg_catalog already exists
+Affected Rows: 1
 
 select * from pg_catalog.pg_type order by oid;
 

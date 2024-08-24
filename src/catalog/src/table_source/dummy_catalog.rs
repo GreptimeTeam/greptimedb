@@ -22,10 +22,10 @@ use common_catalog::format_full_table_name;
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList};
 use datafusion::datasource::TableProvider;
+use session::context::Channel;
 use snafu::OptionExt;
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::catalog_protocol::CatalogProtocol;
 use crate::error::TableNotExistSnafu;
 use crate::CatalogManagerRef;
 
@@ -117,7 +117,7 @@ impl SchemaProvider for DummySchemaProvider {
                 &self.catalog_name,
                 &self.schema_name,
                 name,
-                CatalogProtocol::Other,
+                Channel::Unknown,
             )
             .await?
             .with_context(|| TableNotExistSnafu {

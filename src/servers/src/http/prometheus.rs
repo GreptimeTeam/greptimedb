@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Form};
-use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -43,7 +42,7 @@ use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use session::context::QueryContext;
+use session::context::{Channel, QueryContext};
 use snafu::{Location, OptionExt, ResultExt};
 
 pub use super::prometheus_resp::PrometheusJsonResponse;
@@ -411,7 +410,7 @@ async fn get_all_column_names(
     let mut labels = HashSet::new();
     for table_name in table_names {
         let Some(table) = manager
-            .table(catalog, schema, &table_name, CatalogProtocol::Other)
+            .table(catalog, schema, &table_name, Channel::Unknown)
             .await?
         else {
             continue;
@@ -433,7 +432,7 @@ async fn retrieve_series_from_query_result(
     metrics: &mut HashMap<String, u64>,
 ) -> Result<()> {
     let result = result?;
-    let catalog_protocol = CatalogProtocol::from_query_dialect(query_ctx.sql_dialect());
+    let channel = query_ctx.channel();
 
     // fetch tag list
     let table = manager
@@ -441,7 +440,7 @@ async fn retrieve_series_from_query_result(
             query_ctx.current_catalog(),
             &query_ctx.current_schema(),
             table_name,
-            catalog_protocol,
+            channel,
         )
         .await
         .context(CatalogSnafu)?
@@ -779,7 +778,7 @@ async fn retrieve_field_names(
 ) -> Result<HashSet<String>> {
     let mut field_columns = HashSet::new();
     let catalog = query_ctx.current_catalog();
-    let catalog_protocol = CatalogProtocol::from_query_dialect(query_ctx.sql_dialect());
+    let channel = query_ctx.channel();
     let schema = query_ctx.current_schema();
 
     if matches.is_empty() {
@@ -795,7 +794,7 @@ async fn retrieve_field_names(
 
     for table_name in matches {
         let table = manager
-            .table(catalog, &schema, &table_name, catalog_protocol)
+            .table(catalog, &schema, &table_name, channel)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

@@ -20,7 +20,6 @@ use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
-use catalog::catalog_protocol::CatalogProtocol;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_plugins::GREPTIME_EXEC_WRITE_COST;
@@ -32,7 +31,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::{Channel, QueryContext, QueryContextRef};
-use sql::dialect::Dialect;
 
 use super::header::collect_plan_metrics;
 use crate::http::arrow_result::ArrowResponse;
@@ -340,13 +338,12 @@ async fn validate_schema(
     sql_handler: ServerSqlQueryHandlerRef,
     query_ctx: QueryContextRef,
 ) -> Option<(StatusCode, String)> {
-    let query_dialect: &dyn Dialect = query_ctx.sql_dialect();
-    let catalog_protocol = CatalogProtocol::from_query_dialect(query_dialect);
+    let channel = query_ctx.channel();
     match sql_handler
         .is_valid_schema(
             query_ctx.current_catalog(),
             &query_ctx.current_schema(),
-            catalog_protocol,
+            channel,
         )
         .await
     {

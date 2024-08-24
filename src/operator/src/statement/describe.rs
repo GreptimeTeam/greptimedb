@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use catalog::catalog_protocol::CatalogProtocol;
 use common_error::ext::BoxedError;
 use common_query::Output;
 use common_telemetry::tracing;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
@@ -40,7 +39,7 @@ impl StatementExecutor {
 
         let table = self
             .catalog_manager
-            .table(&catalog, &schema, &table, CatalogProtocol::MySQL)
+            .table(&catalog, &schema, &table, Channel::Mysql)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

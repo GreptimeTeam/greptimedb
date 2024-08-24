@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use api::v1::region::region_request::Body as RegionRequestBody;
 use api::v1::region::{CompactRequest, FlushRequest, RegionRequestHeader};
-use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
@@ -25,7 +24,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info};
 use futures_util::future;
 use partition::manager::{PartitionInfo, PartitionRuleManagerRef};
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 use snafu::prelude::*;
 use store_api::storage::RegionId;
 use table::requests::{CompactTableRequest, FlushTableRequest};
@@ -220,7 +219,7 @@ impl Requester {
     ) -> Result<Vec<PartitionInfo>> {
         let table = self
             .catalog_manager
-            .table(catalog, schema, table_name, CatalogProtocol::Other)
+            .table(catalog, schema, table_name, Channel::Unknown)
             .await
             .context(CatalogSnafu)?;
 

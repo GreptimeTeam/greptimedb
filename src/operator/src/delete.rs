@@ -18,7 +18,6 @@ use std::{iter, mem};
 
 use api::v1::region::{DeleteRequests as RegionDeleteRequests, RegionRequestHeader};
 use api::v1::{DeleteRequests, RowDeleteRequests};
-use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
@@ -26,7 +25,7 @@ use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
 use futures_util::future;
 use partition::manager::PartitionRuleManagerRef;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::DeleteRequest as TableDeleteRequest;
 use table::TableRef;
@@ -233,7 +232,7 @@ impl Deleter {
 
     async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {
         self.catalog_manager
-            .table(catalog, schema, table, CatalogProtocol::Other)
+            .table(catalog, schema, table, Channel::Unknown)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

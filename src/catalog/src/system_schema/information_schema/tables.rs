@@ -30,12 +30,12 @@ use datatypes::vectors::{
     DateTimeVectorBuilder, StringVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder,
 };
 use futures::TryStreamExt;
+use session::context::Channel::Mysql;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::{TableInfo, TableType};
 
 use super::TABLES;
-use crate::catalog_protocol::CatalogProtocol::MySQL;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
@@ -235,7 +235,7 @@ impl InformationSchemaTablesBuilder {
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager.schema_names(&catalog_name, MySQL).await? {
+        for schema_name in catalog_manager.schema_names(&catalog_name, Mysql).await? {
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
 
             while let Some(table) = stream.try_next().await? {

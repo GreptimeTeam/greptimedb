@@ -29,9 +29,9 @@ use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 mod dummy_catalog;
 use dummy_catalog::DummyCatalogList;
+use session::context::Channel;
 use table::TableRef;
 
-use crate::catalog_protocol::CatalogProtocol;
 use crate::error::{
     CastManagerSnafu, DatafusionSnafu, DecodePlanSnafu, GetViewCacheSnafu, ProjectViewColumnsSnafu,
     QueryAccessDeniedSnafu, Result, TableNotExistSnafu, ViewInfoNotFoundSnafu,
@@ -46,7 +46,7 @@ pub struct DfTableSourceProvider {
     disallow_cross_catalog_query: bool,
     default_catalog: String,
     default_schema: String,
-    catalog_protocol: CatalogProtocol,
+    channel: Channel,
     plan_decoder: SubstraitPlanDecoderRef,
     enable_ident_normalization: bool,
 }
@@ -62,7 +62,7 @@ impl DfTableSourceProvider {
         Self {
             catalog_manager,
             disallow_cross_catalog_query,
-            catalog_protocol: CatalogProtocol::from_query_dialect(query_ctx.sql_dialect()),
+            channel: query_ctx.channel(),
             resolved_tables: HashMap::new(),
             default_catalog: query_ctx.current_catalog().to_owned(),
             default_schema: query_ctx.current_schema(),
@@ -109,7 +109,7 @@ impl DfTableSourceProvider {
 
         let table = self
             .catalog_manager
-            .table(catalog_name, schema_name, table_name, self.catalog_protocol)
+            .table(catalog_name, schema_name, table_name, self.channel)
             .await?
             .with_context(|| TableNotExistSnafu {
                 table: format_full_table_name(catalog_name, schema_name, table_name),

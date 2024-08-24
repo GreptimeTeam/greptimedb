@@ -21,7 +21,6 @@ use api::v1::{
     AlterExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests, RowInsertRequest,
     RowInsertRequests, SemanticType,
 };
-use catalog::catalog_protocol::CatalogProtocol;
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
@@ -37,7 +36,7 @@ use datatypes::schema::Schema;
 use futures_util::future;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 use snafu::prelude::*;
 use snafu::ResultExt;
 use sql::statements::insert::Insert;
@@ -609,7 +608,7 @@ impl Inserter {
         table: &str,
     ) -> Result<Option<TableRef>> {
         self.catalog_manager
-            .table(catalog, schema, table, CatalogProtocol::Other)
+            .table(catalog, schema, table, Channel::Unknown)
             .await
             .context(CatalogSnafu)
     }

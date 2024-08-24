@@ -68,13 +68,12 @@ mod python {
     use api::v1::greptime_request::Request;
     use api::v1::DdlRequest;
     use arc_swap::ArcSwap;
-    use catalog::catalog_protocol::CatalogProtocol;
     use catalog::RegisterSystemTableRequest;
     use common_error::ext::{BoxedError, ErrorExt};
     use common_telemetry::{error, info};
     use script::manager::ScriptManager;
     use servers::query_handler::grpc::GrpcQueryHandler;
-    use session::context::QueryContext;
+    use session::context::{Channel, QueryContext};
     use snafu::{OptionExt, ResultExt};
     use table::table_name::TableName;
 
@@ -157,7 +156,7 @@ mod python {
                     &expr.catalog_name,
                     &expr.schema_name,
                     &expr.table_name,
-                    CatalogProtocol::Other,
+                    Channel::Unknown,
                 )
                 .await
                 .context(CatalogSnafu)?
@@ -191,7 +190,7 @@ mod python {
                     &table_name.catalog_name,
                     &table_name.schema_name,
                     &table_name.table_name,
-                    CatalogProtocol::Other,
+                    Channel::Unknown,
                 )
                 .await
                 .context(CatalogSnafu)?

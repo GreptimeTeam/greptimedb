@@ -35,12 +35,12 @@ use datatypes::vectors::{
 use futures::{StreamExt, TryStreamExt};
 use partition::manager::PartitionInfo;
 use partition::partition::PartitionDef;
+use session::context::Channel::Mysql;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, ScanRequest, TableId};
 use table::metadata::{TableInfo, TableType};
 
 use super::PARTITIONS;
-use crate::catalog_protocol::CatalogProtocol::MySQL;
 use crate::error::{
     CreateRecordBatchSnafu, FindPartitionsSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu,
@@ -241,7 +241,7 @@ impl InformationSchemaPartitionsBuilder {
 
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager.schema_names(&catalog_name, MySQL).await? {
+        for schema_name in catalog_manager.schema_names(&catalog_name, Mysql).await? {
             let table_info_stream = catalog_manager
                 .tables(&catalog_name, &schema_name)
                 .try_filter_map(|t| async move {

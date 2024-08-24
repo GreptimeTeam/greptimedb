@@ -28,12 +28,12 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::StringVectorBuilder;
 use futures::TryStreamExt;
+use session::context::Channel::Mysql;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
 
 use super::VIEWS;
-use crate::catalog_protocol::CatalogProtocol::MySQL;
 use crate::error::{
     CastManagerSnafu, CreateRecordBatchSnafu, GetViewCacheSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu, ViewInfoNotFoundSnafu,
@@ -193,7 +193,7 @@ impl InformationSchemaViewsBuilder {
             .context(CastManagerSnafu)?
             .view_info_cache()?;
 
-        for schema_name in catalog_manager.schema_names(&catalog_name, MySQL).await? {
+        for schema_name in catalog_manager.schema_names(&catalog_name, Mysql).await? {
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
 
             while let Some(table) = stream.try_next().await? {

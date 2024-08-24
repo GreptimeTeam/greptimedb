@@ -22,7 +22,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use catalog::catalog_protocol::CatalogProtocol;
 use common_base::Plugins;
 use common_catalog::consts::is_readonly_schema;
 use common_error::ext::BoxedError;
@@ -250,11 +249,11 @@ impl DatafusionQueryEngine {
         let catalog_name = table_name.catalog.as_ref();
         let schema_name = table_name.schema.as_ref();
         let table_name = table_name.table.as_ref();
-        let catalog_protocol = CatalogProtocol::from_query_dialect(query_context.sql_dialect());
+        let channel = query_context.channel();
 
         self.state
             .catalog_manager()
-            .table(catalog_name, schema_name, table_name, catalog_protocol)
+            .table(catalog_name, schema_name, table_name, channel)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu { table: table_name })

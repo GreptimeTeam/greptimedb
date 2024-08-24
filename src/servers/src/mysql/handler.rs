@@ -20,7 +20,6 @@ use std::time::Duration;
 
 use ::auth::{Identity, Password, UserProviderRef};
 use async_trait::async_trait;
-use catalog::catalog_protocol::CatalogProtocol;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -522,7 +521,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         if !self
             .query_handler
-            .is_valid_schema(&catalog, &schema, CatalogProtocol::MySQL)
+            .is_valid_schema(&catalog, &schema, Channel::Mysql)
             .await?
         {
             return w

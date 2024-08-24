@@ -20,7 +20,6 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::region::QueryRequest;
-    use catalog::catalog_protocol::CatalogProtocol;
     use client::OutputData;
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -36,7 +35,7 @@ mod tests {
     use query::query_engine::DefaultSerializer;
     use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
     use servers::query_handler::sql::SqlQueryHandler;
-    use session::context::{QueryContext, QueryContextRef};
+    use session::context::{Channel, QueryContext, QueryContextRef};
     use sql::statements::statement::Statement;
     use store_api::storage::RegionId;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -279,7 +278,7 @@ mod tests {
         assert!(instance
             .frontend()
             .catalog_manager()
-            .table("greptime", "public", "demo", CatalogProtocol::Other)
+            .table("greptime", "public", "demo", Channel::Unknown)
             .await
             .unwrap()
             .is_none())

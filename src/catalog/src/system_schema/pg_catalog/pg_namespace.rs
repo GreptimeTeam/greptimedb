@@ -28,11 +28,11 @@ use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder, VectorRef};
+use session::context::Channel::Postgres;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 
 use super::{PGNamespaceOidMapRef, OID_COLUMN_NAME, PG_NAMESPACE};
-use crate::catalog_protocol::CatalogProtocol::PostgreSQL;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
@@ -182,7 +182,7 @@ impl PGNamespaceBuilder {
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
         let predicates = Predicates::from_scan_request(&request);
         for schema_name in catalog_manager
-            .schema_names(&catalog_name, PostgreSQL)
+            .schema_names(&catalog_name, Postgres)
             .await?
         {
             self.add_namespace(&predicates, &schema_name);

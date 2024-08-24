@@ -15,7 +15,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use catalog::catalog_protocol::CatalogProtocol;
 use client::{OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::key::{RegionDistribution, TableMetadataManagerRef};
 use common_meta::peer::Peer;
@@ -38,7 +37,7 @@ use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_migration::RegionMigrationProcedureTask;
 use meta_srv::selector::{Namespace, Selector, SelectorOptions};
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::{QueryContext, QueryContextRef};
+use session::context::{Channel, QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
@@ -1018,7 +1017,7 @@ async fn prepare_testing_metric_table(cluster: &GreptimeDbCluster) -> TableId {
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
             "phy",
-            CatalogProtocol::Other,
+            Channel::Unknown,
         )
         .await
         .unwrap()
@@ -1049,7 +1048,7 @@ async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
             TEST_TABLE_NAME,
-            CatalogProtocol::Other,
+            Channel::Unknown,
         )
         .await
         .unwrap()

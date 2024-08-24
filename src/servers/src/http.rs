@@ -951,7 +951,6 @@ mod test {
     use axum::handler::Handler;
     use axum::http::StatusCode;
     use axum::routing::get;
-    use catalog::catalog_protocol::CatalogProtocol;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
@@ -960,7 +959,7 @@ mod test {
     use query::parser::PromQuery;
     use query::plan::LogicalPlan;
     use query::query_engine::DescribeResult;
-    use session::context::QueryContextRef;
+    use session::context::{Channel, QueryContextRef};
     use tokio::sync::mpsc;
 
     use super::*;
@@ -1022,7 +1021,7 @@ mod test {
             &self,
             _catalog: &str,
             _schema: &str,
-            _catalog_protocol: CatalogProtocol,
+            _channel: Channel,
         ) -> Result<bool> {
             Ok(true)
         }

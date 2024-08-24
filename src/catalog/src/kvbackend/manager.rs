@@ -36,13 +36,13 @@ use futures_util::{StreamExt, TryStreamExt};
 use meta_client::client::MetaClient;
 use moka::sync::Cache;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
+use session::context::Channel;
 use snafu::prelude::*;
 use table::dist_table::DistTable;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::table_name::TableName;
 use table::TableRef;
 
-use crate::catalog_protocol::CatalogProtocol;
 use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
@@ -153,11 +153,7 @@ impl CatalogManager for KvBackendCatalogManager {
         Ok(keys)
     }
 
-    async fn schema_names(
-        &self,
-        catalog: &str,
-        catalog_protocol: CatalogProtocol,
-    ) -> Result<Vec<String>> {
+    async fn schema_names(&self, catalog: &str, channel: Channel) -> Result<Vec<String>> {
         let stream = self
             .table_metadata_manager
             .schema_manager()
@@ -168,7 +164,7 @@ impl CatalogManager for KvBackendCatalogManager {
             .map_err(BoxedError::new)
             .context(ListSchemasSnafu { catalog })?;
 
-        keys.extend(self.system_catalog.schema_names(catalog_protocol));
+        keys.extend(self.system_catalog.schema_names(channel));
 
         Ok(keys.into_iter().collect())
     }
@@ -199,13 +195,8 @@ impl CatalogManager for KvBackendCatalogManager {
             .context(TableMetadataManagerSnafu)
     }
 
-    async fn schema_exists(
-        &self,
-        catalog: &str,
-        schema: &str,
-        catalog_protocol: CatalogProtocol,
-    ) -> Result<bool> {
-        if self.system_catalog.schema_exists(schema, catalog_protocol) {
+    async fn schema_exists(&self, catalog: &str, schema: &str, channel: Channel) -> Result<bool> {
+        if self.system_catalog.schema_exists(schema, channel) {
             return Ok(true);
         }
 
@@ -235,7 +226,7 @@ impl CatalogManager for KvBackendCatalogManager {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        catalog_protocol: CatalogProtocol,
+        channel: Channel,
     ) -> Result<Option<TableRef>> {
         if let Some(table) = self
             .system_catalog
@@ -259,7 +250,7 @@ impl CatalogManager for KvBackendCatalogManager {
             return Ok(Some(table));
         }
 
-        if catalog_protocol == CatalogProtocol::PostgreSQL {
+        if channel == Channel::Postgres {
             // falldown to pg_catalog
             if let Some(table) =
                 self.system_catalog
@@ -345,19 +336,15 @@ struct SystemCatalog {
 }
 
 impl SystemCatalog {
-    fn schema_names(&self, catalog_protocol: CatalogProtocol) -> Vec<String> {
-        match catalog_protocol {
+    fn schema_names(&self, channel: Channel) -> Vec<String> {
+        match channel {
             // pg_catalog only visible under postgres protocol
-            CatalogProtocol::PostgreSQL => vec![PG_CATALOG_NAME.to_string()],
-            // information_schema visible for mysql protocol and other
-            CatalogProtocol::MySQL => {
+            Channel::Postgres => vec![
+                INFORMATION_SCHEMA_NAME.to_string(),
+                PG_CATALOG_NAME.to_string(),
+            ],
+            _ => {
                 vec![INFORMATION_SCHEMA_NAME.to_string()]
-            }
-            CatalogProtocol::Other => {
-                vec![
-                    PG_CATALOG_NAME.to_string(),
-                    INFORMATION_SCHEMA_NAME.to_string(),
-                ]
             }
         }
     }
@@ -373,13 +360,10 @@ impl SystemCatalog {
         }
     }
 
-    fn schema_exists(&self, schema: &str, catalog_protocol: CatalogProtocol) -> bool {
-        match catalog_protocol {
-            CatalogProtocol::PostgreSQL => schema == PG_CATALOG_NAME,
-            CatalogProtocol::MySQL => schema == INFORMATION_SCHEMA_NAME,
-            CatalogProtocol::Other => {
-                schema == PG_CATALOG_NAME || schema == INFORMATION_SCHEMA_NAME
-            }
+    fn schema_exists(&self, schema: &str, channel: Channel) -> bool {
+        match channel {
+            Channel::Postgres => schema == PG_CATALOG_NAME || schema == INFORMATION_SCHEMA_NAME,
+            _ => schema == INFORMATION_SCHEMA_NAME,
         }
     }
 
