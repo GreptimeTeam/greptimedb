@@ -1,34 +1,11 @@
 -- should not able to create pg_catalog
 create database pg_catalog;
 
-Affected Rows: 1
+Error: 1004(InvalidArguments), Schema pg_catalog already exists
 
 select * from pg_catalog.pg_type order by oid;
 
-+-----+-----------+--------+
-| oid | typname   | typlen |
-+-----+-----------+--------+
-| 1   | String    | -1     |
-| 2   | Binary    | -1     |
-| 3   | Int8      | 1      |
-| 4   | Int16     | 2      |
-| 5   | Int32     | 4      |
-| 6   | Int64     | 8      |
-| 7   | UInt8     | 1      |
-| 8   | UInt16    | 2      |
-| 9   | UInt32    | 4      |
-| 10  | UInt64    | 8      |
-| 11  | Float32   | 4      |
-| 12  | Float64   | 8      |
-| 13  | Decimal   | 16     |
-| 14  | Date      | 4      |
-| 15  | DateTime  | 8      |
-| 16  | Timestamp | 8      |
-| 17  | Time      | 8      |
-| 18  | Duration  | 8      |
-| 19  | Interval  | 16     |
-| 20  | List      | -1     |
-+-----+-----------+--------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_type
 
 -- \d
 SELECT n.nspname as "Schema",
@@ -44,11 +21,7 @@ WHERE c.relkind IN ('r','p','v','m','S','f','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-+--------+---------+-------+-------+
-| Schema | Name    | Type  | Owner |
-+--------+---------+-------+-------+
-| public | numbers | table |       |
-+--------+---------+-------+-------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
 
 -- \dt
 SELECT n.nspname as "Schema",
@@ -64,11 +37,7 @@ WHERE c.relkind IN ('r','p','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-+--------+---------+-------+-------+
-| Schema | Name    | Type  | Owner |
-+--------+---------+-------+-------+
-| public | numbers | table |       |
-+--------+---------+-------+-------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
 
 -- make sure oid of namespace keep stable
 SELECT * FROM pg_namespace ORDER BY oid;
@@ -100,11 +69,7 @@ where relnamespace = (
     where nspname = 'my_db'
 );
 
-+---------+
-| relname |
-+---------+
-| foo     |
-+---------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
 
 -- \dt
 SELECT n.nspname as "Schema",
@@ -120,12 +85,7 @@ WHERE c.relkind IN ('r','p','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-+--------+---------+-------+-------+
-| Schema | Name    | Type  | Owner |
-+--------+---------+-------+-------+
-| my_db  | foo     | table |       |
-| public | numbers | table |       |
-+--------+---------+-------+-------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
 
 -- show tables in `my_db`, `public`
 select relname
@@ -137,12 +97,7 @@ where relnamespace in (
 )
 order by relname;
 
-+---------+
-| relname |
-+---------+
-| foo     |
-| numbers |
-+---------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
 
 select relname
 from pg_catalog.pg_class
@@ -152,11 +107,7 @@ where relnamespace in (
     where nspname like 'my%'
 );
 
-+---------+
-| relname |
-+---------+
-| foo     |
-+---------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
 
 select relnamespace, relname, relkind
 from pg_catalog.pg_class
@@ -169,11 +120,7 @@ where relnamespace in (
 )
 order by relnamespace, relname;
 
-+--------------+---------+---------+
-| relnamespace | relname | relkind |
-+--------------+---------+---------+
-| 434869349    | foo     | r       |
-+--------------+---------+---------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
 
 use public;
 
@@ -190,24 +137,11 @@ Affected Rows: 0
 -- pg_class
 desc table pg_class;
 
-+--------------+--------+-----+------+---------+---------------+
-| Column       | Type   | Key | Null | Default | Semantic Type |
-+--------------+--------+-----+------+---------+---------------+
-| oid          | UInt32 |     | NO   |         | FIELD         |
-| relname      | String |     | NO   |         | FIELD         |
-| relnamespace | UInt32 |     | NO   |         | FIELD         |
-| relkind      | String |     | NO   |         | FIELD         |
-| relowner     | UInt32 |     | NO   |         | FIELD         |
-+--------------+--------+-----+------+---------+---------------+
+Error: 4001(TableNotFound), Table not found: pg_class
 
 desc table pg_namespace;
 
-+---------+--------+-----+------+---------+---------------+
-| Column  | Type   | Key | Null | Default | Semantic Type |
-+---------+--------+-----+------+---------+---------------+
-| oid     | UInt32 |     | NO   |         | FIELD         |
-| nspname | String |     | NO   |         | FIELD         |
-+---------+--------+-----+------+---------+---------------+
+Error: 4001(TableNotFound), Table not found: pg_namespace
 
 drop table my_db.foo;
 

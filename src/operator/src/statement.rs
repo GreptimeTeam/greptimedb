@@ -285,7 +285,7 @@ impl StatementExecutor {
         let catalog = query_ctx.current_catalog();
         ensure!(
             self.catalog_manager
-                .schema_exists(catalog, db.as_ref(), Channel::Mysql)
+                .schema_exists(catalog, db.as_ref(), query_ctx.channel())
                 .await
                 .context(CatalogSnafu)?,
             SchemaNotFoundSnafu { schema_info: &db }

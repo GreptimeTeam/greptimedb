@@ -68,7 +68,12 @@ impl CatalogManager for MemoryCatalogManager {
             .collect())
     }
 
-    async fn table_names(&self, catalog: &str, schema: &str) -> Result<Vec<String>> {
+    async fn table_names(
+        &self,
+        catalog: &str,
+        schema: &str,
+        _channel: Channel,
+    ) -> Result<Vec<String>> {
         Ok(self
             .catalogs
             .read()
@@ -92,7 +97,13 @@ impl CatalogManager for MemoryCatalogManager {
         self.schema_exist_sync(catalog, schema)
     }
 
-    async fn table_exists(&self, catalog: &str, schema: &str, table: &str) -> Result<bool> {
+    async fn table_exists(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        _channel: Channel,
+    ) -> Result<bool> {
         let catalogs = self.catalogs.read().unwrap();
         Ok(catalogs
             .get(catalog)
@@ -123,7 +134,12 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(result)
     }
 
-    fn tables<'a>(&'a self, catalog: &'a str, schema: &'a str) -> BoxStream<'a, Result<TableRef>> {
+    fn tables<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+        _channel: Channel,
+    ) -> BoxStream<'a, Result<TableRef>> {
         let catalogs = self.catalogs.read().unwrap();
 
         let Some(schemas) = catalogs.get(catalog) else {
@@ -378,7 +394,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let stream = catalog_list.tables(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let stream =
+            catalog_list.tables(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Channel::Unknown);
         let tables = stream.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(tables.len(), 1);
         assert_eq!(

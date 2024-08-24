@@ -35,7 +35,7 @@ use datatypes::vectors::{
 use futures::{StreamExt, TryStreamExt};
 use partition::manager::PartitionInfo;
 use partition::partition::PartitionDef;
-use session::context::Channel::Mysql;
+use session::context::Channel::{self, Mysql};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, ScanRequest, TableId};
 use table::metadata::{TableInfo, TableType};
@@ -243,7 +243,7 @@ impl InformationSchemaPartitionsBuilder {
 
         for schema_name in catalog_manager.schema_names(&catalog_name, Mysql).await? {
             let table_info_stream = catalog_manager
-                .tables(&catalog_name, &schema_name)
+                .tables(&catalog_name, &schema_name, Channel::Mysql)
                 .try_filter_map(|t| async move {
                     let table_info = t.table_info();
                     if table_info.table_type == TableType::Temporary {

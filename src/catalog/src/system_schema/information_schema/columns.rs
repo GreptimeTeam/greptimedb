@@ -34,7 +34,7 @@ use datatypes::vectors::{
     ConstantVector, Int64Vector, Int64VectorBuilder, StringVector, StringVectorBuilder, VectorRef,
 };
 use futures::TryStreamExt;
-use session::context::Channel::Mysql;
+use session::context::Channel::{self, Mysql};
 use snafu::{OptionExt, ResultExt};
 use sql::statements;
 use store_api::storage::{ScanRequest, TableId};
@@ -259,7 +259,7 @@ impl InformationSchemaColumnsBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name, Mysql).await? {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, Channel::Mysql);
 
             while let Some(table) = stream.try_next().await? {
                 let keys = &table.table_info().meta.primary_key_indices;

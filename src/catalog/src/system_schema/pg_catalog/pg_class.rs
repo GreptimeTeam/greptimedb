@@ -207,7 +207,7 @@ impl PGClassBuilder {
             .schema_names(&catalog_name, Postgres)
             .await?
         {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, Postgres);
             while let Some(table) = stream.try_next().await? {
                 let table_info = table.table_info();
                 self.add_class(

@@ -405,7 +405,9 @@ async fn get_all_column_names(
     schema: &str,
     manager: &CatalogManagerRef,
 ) -> std::result::Result<HashSet<String>, catalog::error::Error> {
-    let table_names = manager.table_names(catalog, schema).await?;
+    let table_names = manager
+        .table_names(catalog, schema, Channel::Prometheus)
+        .await?;
 
     let mut labels = HashSet::new();
     for table_name in table_names {
@@ -696,7 +698,7 @@ pub async fn label_values_query(
     if label_name == METRIC_NAME_LABEL {
         let mut table_names = match handler
             .catalog_manager()
-            .table_names(&catalog, &schema)
+            .table_names(&catalog, &schema, query_ctx.channel())
             .await
         {
             Ok(table_names) => table_names,
@@ -783,7 +785,7 @@ async fn retrieve_field_names(
 
     if matches.is_empty() {
         // query all tables if no matcher is provided
-        while let Some(table) = manager.tables(catalog, &schema).next().await {
+        while let Some(table) = manager.tables(catalog, &schema, channel).next().await {
             let table = table.context(CatalogSnafu)?;
             for column in table.field_columns() {
                 field_columns.insert(column.name);

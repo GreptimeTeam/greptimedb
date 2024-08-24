@@ -1185,6 +1185,7 @@ impl StatementExecutor {
             .schema_exists(catalog, database, Channel::Unknown)
             .await
             .context(CatalogSnafu)?
+            && !self.catalog_manager.is_reserved_schema_name(database)
         {
             self.create_database_procedure(
                 catalog.to_string(),

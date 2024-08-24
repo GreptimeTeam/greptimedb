@@ -194,7 +194,7 @@ impl InformationSchemaViewsBuilder {
             .view_info_cache()?;
 
         for schema_name in catalog_manager.schema_names(&catalog_name, Mysql).await? {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, Mysql);
 
             while let Some(table) = stream.try_next().await? {
                 let table_info = table.table_info();

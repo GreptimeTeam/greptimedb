@@ -214,7 +214,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name, Mysql).await? {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, Mysql);
 
             while let Some(table) = stream.try_next().await? {
                 let mut primary_constraints = vec![];
