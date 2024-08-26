@@ -16,13 +16,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 
-use arrow::array::BooleanArray;
-use arrow::buffer::BooleanBuffer;
 use common_telemetry::trace;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::{ListValue, Value};
-use datatypes::vectors::{BooleanVector, Helper, NullVector};
+use datatypes::vectors::{BooleanVector, NullVector};
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
