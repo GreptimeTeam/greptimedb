@@ -123,7 +123,7 @@ mod tests {
     use datatypes::vectors::{StringVector, UInt64Vector, VectorRef};
 
     use super::*;
-    use crate::function::{Function, FunctionContext};
+    use crate::function::{AsyncFunction, FunctionContext};
 
     #[test]
     fn test_migrate_region_misc() {
@@ -140,8 +140,8 @@ mod tests {
                          } if sigs.len() == 2));
     }
 
-    #[test]
-    fn test_missing_procedure_service() {
+    #[tokio::test]
+    async fn test_missing_procedure_service() {
         let f = MigrateRegionFunction;
 
         let args = vec![1, 1, 1];
@@ -151,15 +151,15 @@ mod tests {
             .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
             .collect::<Vec<_>>();
 
-        let result = f.eval(FunctionContext::default(), &args).unwrap_err();
+        let result = f.eval(FunctionContext::default(), &args).await.unwrap_err();
         assert_eq!(
             "Missing ProcedureServiceHandler, not expected",
             result.to_string()
         );
     }
 
-    #[test]
-    fn test_migrate_region() {
+    #[tokio::test]
+    async fn test_migrate_region() {
         let f = MigrateRegionFunction;
 
         let args = vec![1, 1, 1];
@@ -169,7 +169,7 @@ mod tests {
             .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
             .collect::<Vec<_>>();
 
-        let result = f.eval(FunctionContext::mock(), &args).unwrap();
+        let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
 
         let expect: VectorRef = Arc::new(StringVector::from(vec!["test_pid"]));
         assert_eq!(expect, result);

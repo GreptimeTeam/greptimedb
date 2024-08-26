@@ -1954,6 +1954,7 @@ dependencies = [
  "statrs",
  "store-api",
  "table",
+ "tokio",
 ]
 
 [[package]]

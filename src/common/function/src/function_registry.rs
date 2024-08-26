@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use once_cell::sync::Lazy;
 
-use crate::function::FunctionRef;
+use crate::function::{AsyncFunctionRef, FunctionRef};
 use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
@@ -32,6 +32,7 @@ use crate::table::TableFunction;
 #[derive(Default)]
 pub struct FunctionRegistry {
     functions: RwLock<HashMap<String, FunctionRef>>,
+    async_functions: RwLock<HashMap<String, AsyncFunctionRef>>,
     aggregate_functions: RwLock<HashMap<String, AggregateFunctionMetaRef>>,
 }
 
@@ -42,6 +43,27 @@ impl FunctionRegistry {
             .write()
             .unwrap()
             .insert(func.name().to_string(), func);
+    }
+
+    pub fn register_async(&self, func: AsyncFunctionRef) {
+        let _ = self
+            .async_functions
+            .write()
+            .unwrap()
+            .insert(func.name().to_string(), func);
+    }
+
+    pub fn get_async_function(&self, name: &str) -> Option<AsyncFunctionRef> {
+        self.async_functions.read().unwrap().get(name).cloned()
+    }
+
+    pub fn async_functions(&self) -> Vec<AsyncFunctionRef> {
+        self.async_functions
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn register_aggregate_function(&self, func: AggregateFunctionMetaRef) {

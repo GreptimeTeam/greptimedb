@@ -447,6 +447,10 @@ impl QueryEngine for DatafusionQueryEngine {
         state.config_mut().set_extension(query_ctx.clone());
         QueryEngineContext::new(state, query_ctx)
     }
+
+    fn engine_state(&self) -> &QueryEngineState {
+        &self.state
+    }
 }
 
 impl QueryExecutor for DatafusionQueryEngine {
