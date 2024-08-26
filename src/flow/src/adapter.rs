@@ -258,10 +258,10 @@ impl FlowWorkerManager {
             let schema_len = proto_schema.len();
 
             trace!(
-                "Sending {} writeback requests to table {}, reqs={:?}",
+                "Sending {} writeback requests to table {}, reqs total rows={}",
                 reqs.len(),
                 table_name.join("."),
-                reqs
+                reqs.iter().map(|r| r.len()).sum::<usize>()
             );
             let now = self.tick_manager.tick();
             for req in reqs {
@@ -357,7 +357,9 @@ impl FlowWorkerManager {
     pub async fn generate_writeback_request(
         &self,
     ) -> Result<BTreeMap<TableName, Vec<DiffRequest>>, Error> {
+        trace!("Start to generate writeback request");
         let mut output = BTreeMap::new();
+        let mut total_row_count = 0;
         for (name, sink_recv) in self
             .node_context
             .write()
@@ -367,12 +369,14 @@ impl FlowWorkerManager {
             .map(|(n, (_s, r))| (n, r))
         {
             let mut batches = Vec::new();
-            while let Ok(row) = sink_recv.try_recv() {
-                batches.push(row);
+            while let Ok(batch) = sink_recv.try_recv() {
+                total_row_count += batch.row_count();
+                batches.push(batch);
             }
             let reqs = batches_to_rows_req(batches)?;
             output.insert(name.clone(), reqs);
         }
+        trace!("Prepare writeback req: total row count={}", total_row_count);
         Ok(output)
     }
 
@@ -594,43 +598,37 @@ impl FlowWorkerManager {
     /// TODO(discord9): add flag for subgraph that have input since last run
     pub async fn run_available(&self, blocking: bool) -> Result<usize, Error> {
         let mut row_cnt = 0;
-        loop {
-            let now = self.tick_manager.tick();
-            for worker in self.worker_handles.iter() {
-                // TODO(discord9): consider how to handle error in individual worker
-                if blocking {
-                    worker.lock().await.run_available(now, blocking).await?;
-                } else if let Ok(worker) = worker.try_lock() {
-                    worker.run_available(now, blocking).await?;
-                } else {
-                    return Ok(row_cnt);
-                }
-            }
-            // check row send and rows remain in send buf
-            let flush_res = if blocking {
-                let ctx = self.node_context.read().await;
-                ctx.flush_all_sender().await
+
+        let now = self.tick_manager.tick();
+        for worker in self.worker_handles.iter() {
+            // TODO(discord9): consider how to handle error in individual worker
+            if blocking {
+                worker.lock().await.run_available(now, blocking).await?;
+            } else if let Ok(worker) = worker.try_lock() {
+                worker.run_available(now, blocking).await?;
             } else {
-                match self.node_context.try_read() {
-                    Ok(ctx) => ctx.flush_all_sender().await,
-                    Err(_) => return Ok(row_cnt),
-                }
-            };
-            match flush_res {
-                Ok(r) => {
-                    common_telemetry::trace!("Total flushed {} rows", r);
-                    row_cnt += r;
-                    // send buf is likely to be somewhere empty now, wait
-                    if r < BATCH_SIZE / 2 {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    common_telemetry::error!("Flush send buf errors: {:?}", err);
-                    break;
-                }
-            };
+                return Ok(row_cnt);
+            }
         }
+        // check row send and rows remain in send buf
+        let flush_res = if blocking {
+            let ctx = self.node_context.read().await;
+            ctx.flush_all_sender().await
+        } else {
+            match self.node_context.try_read() {
+                Ok(ctx) => ctx.flush_all_sender().await,
+                Err(_) => return Ok(row_cnt),
+            }
+        };
+        match flush_res {
+            Ok(r) => {
+                common_telemetry::trace!("Total flushed {} rows", r);
+                row_cnt += r;
+            }
+            Err(err) => {
+                common_telemetry::error!("Flush send buf errors: {:?}", err);
+            }
+        };
 
         Ok(row_cnt)
     }
