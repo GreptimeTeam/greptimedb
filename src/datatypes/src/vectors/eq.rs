@@ -23,10 +23,9 @@ use crate::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, Decimal128Vector,
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
     DurationSecondVector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
-    IntervalYearMonthVector, JsonVector, ListVector, PrimitiveVector, StringVector,
-    TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
-    TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, Vector,
+    IntervalYearMonthVector, ListVector, PrimitiveVector, StringVector, TimeMicrosecondVector,
+    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
+    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, Vector,
 };
 use crate::with_match_primitive_type_id;
 
@@ -81,7 +80,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
     match lhs.data_type() {
         Null(_) => true,
         Boolean(_) => is_vector_eq!(BooleanVector, lhs, rhs),
-        Binary(_) => is_vector_eq!(BinaryVector, lhs, rhs),
+        Binary(_) | Json(_) => is_vector_eq!(BinaryVector, lhs, rhs),
         String(_) => is_vector_eq!(StringVector, lhs, rhs),
         Date(_) => is_vector_eq!(DateVector, lhs, rhs),
         DateTime(_) => is_vector_eq!(DateTimeVector, lhs, rhs),
@@ -154,9 +153,6 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
         },
         Decimal128(_) => {
             is_vector_eq!(Decimal128Vector, lhs, rhs)
-        }
-        Json(_) => {
-            is_vector_eq!(JsonVector, lhs, rhs)
         }
     }
 }

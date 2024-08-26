@@ -208,7 +208,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Float32(v) => row_writer.write_col(v.0)?,
                     Value::Float64(v) => row_writer.write_col(v.0)?,
                     Value::String(v) => row_writer.write_col(v.as_utf8())?,
-                    Value::Binary(v) => row_writer.write_col(v.deref())?,
+                    Value::Binary(v) | Value::Json(v) => row_writer.write_col(v.deref())?,
                     Value::Date(v) => row_writer.write_col(v.to_chrono_date())?,
                     // convert datetime and timestamp to timezone of current connection
                     Value::DateTime(v) => row_writer.write_col(
@@ -230,7 +230,6 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Time(v) => row_writer
                         .write_col(v.to_timezone_aware_string(Some(&query_context.timezone())))?,
                     Value::Decimal128(v) => row_writer.write_col(v.to_string())?,
-                    Value::Json(v) => row_writer.write_col(v.to_json_string())?,
                 }
             }
             row_writer.end_row().await?;

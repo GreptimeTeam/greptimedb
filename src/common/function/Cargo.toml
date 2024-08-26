@@ -23,6 +23,7 @@ common-time.workspace = true
 common-version.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true
+jsonb.workspace = true
 num = "0.4"
 num-traits = "0.2"
 once_cell.workspace = true
@@ -35,7 +36,6 @@ sql.workspace = true
 statrs = "0.16"
 store-api.workspace = true
 table.workspace = true
-jsonb.workspace = true
 
 [dev-dependencies]
 ron = "0.7"

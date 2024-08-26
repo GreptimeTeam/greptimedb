@@ -15,13 +15,14 @@
 use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
+use common_base::bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::data_type::{DataType, DataTypeRef};
 use crate::scalars::ScalarVectorBuilder;
 use crate::type_id::LogicalTypeId;
-use crate::value::{JsonbValue, Value};
-use crate::vectors::{JsonVectorBuilder, MutableVector};
+use crate::value::Value;
+use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct JsonType;
@@ -42,7 +43,7 @@ impl DataType for JsonType {
     }
 
     fn default_value(&self) -> Value {
-        Value::Json(JsonbValue::default())
+        Bytes::default().into()
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
@@ -50,7 +51,7 @@ impl DataType for JsonType {
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        Box::new(JsonVectorBuilder::with_capacity(capacity))
+        Box::new(BinaryVectorBuilder::with_capacity(capacity))
     }
 
     fn try_cast(&self, from: Value) -> Option<Value> {

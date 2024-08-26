@@ -21,10 +21,10 @@ use crate::types::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type, UInt32Type,
     UInt64Type, UInt8Type,
 };
-use crate::value::{JsonbValue, JsonbValueRef, ListValue, ListValueRef, Value};
+use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, Decimal128Vector, JsonVector,
-    ListVector, MutableVector, PrimitiveVector, StringVector, Vector,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, Decimal128Vector, ListVector,
+    MutableVector, PrimitiveVector, StringVector, Vector,
 };
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
@@ -354,27 +354,6 @@ impl<'a> ScalarRef<'a> for ListValueRef<'a> {
             },
             ListValueRef::Ref { val } => (*val).clone(),
         }
-    }
-}
-
-impl Scalar for JsonbValue {
-    type VectorType = JsonVector;
-    type RefType<'a> = JsonbValueRef<'a>;
-
-    fn as_scalar_ref(&self) -> Self::RefType<'_> {
-        self.as_jsonb_ref()
-    }
-
-    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
-        long
-    }
-}
-
-impl<'a> ScalarRef<'a> for JsonbValueRef<'a> {
-    type ScalarType = JsonbValue;
-
-    fn to_owned_scalar(&self) -> Self::ScalarType {
-        Self::ScalarType::new(self.value().to_vec())
     }
 }
 

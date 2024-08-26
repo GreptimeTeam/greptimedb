@@ -57,35 +57,7 @@ impl Function for GetByPathFunction {
         let mut results = StringVectorBuilder::with_capacity(size);
 
         match datatype {
-            ConcreteDataType::Json(_) => {
-                for i in 0..size {
-                    let json = jsons.get_ref(i);
-                    let json = json.as_json().unwrap();
-                    let path = paths.get_ref(i);
-                    let path = path.as_string().unwrap();
-                    let result = match (json, path) {
-                        (Some(json), Some(path)) => {
-                            let json_path =
-                                jsonb::jsonpath::parse_json_path(path.as_bytes()).unwrap();
-                            let mut sub_jsonb = Vec::new();
-                            let mut sub_offsets = Vec::new();
-                            match jsonb::get_by_path(
-                                json.value(),
-                                json_path,
-                                &mut sub_jsonb,
-                                &mut sub_offsets,
-                            ) {
-                                Ok(_) => Some(jsonb::to_string(&sub_jsonb)),
-                                Err(_) => None,
-                            }
-                        }
-                        _ => None,
-                    };
-
-                    results.push(result.as_deref());
-                }
-            }
-            ConcreteDataType::Binary(_) => {
+            ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => {
                 for i in 0..size {
                     let json = jsons.get_ref(i);
                     let json = json.as_binary().unwrap();
@@ -138,8 +110,7 @@ mod tests {
 
     use common_query::prelude::TypeSignature;
     use datatypes::scalars::ScalarVector;
-    use datatypes::value::JsonbValue;
-    use datatypes::vectors::{JsonVector, StringVector};
+    use datatypes::vectors::{BinaryVector, StringVector};
 
     use super::*;
 
@@ -181,11 +152,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let json_values = jsonbs
-            .iter()
-            .map(|j| JsonbValue::new(j.clone()))
-            .collect::<Vec<_>>();
-        let json_vector = JsonVector::from_vec(json_values);
+        let json_vector = BinaryVector::from_vec(jsonbs);
         let path_vector = StringVector::from_vec(paths);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
         let vector = get_by_path.eval(FunctionContext::default(), &args).unwrap();
