@@ -186,12 +186,12 @@ impl GlobalIndexCollector {
     /// that are greater than or equal to a given `entry_id`.
     pub(crate) async fn read_remote_region_index(
         &self,
-        datanode_id: u64,
+        location_id: u64,
         provider: &KafkaProvider,
         region_id: RegionId,
         entry_id: EntryId,
     ) -> Result<Option<(BTreeSet<EntryId>, EntryId)>> {
-        let path = default_index_file(datanode_id);
+        let path = default_index_file(location_id);
 
         let bytes = match self.operator.read(&path).await {
             Ok(bytes) => bytes.to_vec(),

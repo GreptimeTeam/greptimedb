@@ -25,6 +25,6 @@ pub(crate) use iterator::{
 #[cfg(test)]
 pub(crate) use iterator::{MultipleRegionWalIndexIterator, RegionWalRange, RegionWalVecIndex};
 
-pub fn default_index_file(datanode_id: u64) -> String {
-    format!("__datanode/{datanode_id}/index.json")
+pub fn default_index_file(location_id: u64) -> String {
+    format!("__datanode/{location_id}/index.json")
 }

@@ -102,14 +102,14 @@ impl<S: LogStore> Wal<S> {
         &self,
         provider: &Provider,
         region_id: RegionId,
-        from_peer_id: Option<u64>,
+        location_id: Option<u64>,
     ) -> Box<dyn WalEntryReader> {
         match provider {
             Provider::RaftEngine(_) => Box::new(LogStoreEntryReader::new(
                 LogStoreRawEntryReader::new(self.store.clone()),
             )),
             Provider::Kafka(_) => {
-                let reader = if let Some(from_peer_id) = from_peer_id {
+                let reader = if let Some(from_peer_id) = location_id {
                     LogStoreRawEntryReader::new(self.store.clone())
                         .with_wal_index(WalIndex::new(region_id, from_peer_id))
                 } else {
