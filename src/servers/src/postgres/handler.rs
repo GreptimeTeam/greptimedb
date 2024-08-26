@@ -37,7 +37,7 @@ use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
 use super::types::*;
-use super::PostgresServerHandler;
+use super::{fixtures, PostgresServerHandler};
 use crate::error::Result;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::SqlPlan;
@@ -58,20 +58,26 @@ impl SimpleQueryHandler for PostgresServerHandler {
         let _timer = crate::metrics::METRIC_POSTGRES_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY, db.as_str()])
             .start_timer();
-        let outputs = self.query_handler.do_query(query, query_ctx.clone()).await;
 
-        let mut results = Vec::with_capacity(outputs.len());
+        if let Some(resps) = fixtures::process(query, query_ctx.clone()) {
+            resps
+        } else {
+            let outputs = self.query_handler.do_query(query, query_ctx.clone()).await;
 
-        for output in outputs {
-            let resp = output_to_query_response(query_ctx.clone(), output, &Format::UnifiedText)?;
-            results.push(resp);
+            let mut results = Vec::with_capacity(outputs.len());
+
+            for output in outputs {
+                let resp =
+                    output_to_query_response(query_ctx.clone(), output, &Format::UnifiedText)?;
+                results.push(resp);
+            }
+
+            Ok(results)
         }
-
-        Ok(results)
     }
 }
 
-fn output_to_query_response<'a>(
+pub(crate) fn output_to_query_response<'a>(
     query_ctx: QueryContextRef,
     output: Result<Output>,
     field_format: &Format,
