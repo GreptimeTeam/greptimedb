@@ -77,7 +77,7 @@ impl TopicManager {
     /// If not enough topics retrieved, the initializer will try to contact the Kafka cluster and request creating more topics.
     pub async fn start(&self) -> Result<()> {
         // Skip creating topics.
-        if !self.config.create_topic {
+        if !self.config.auto_create_topics {
             return Ok(());
         }
         let num_topics = self.config.kafka_topic.num_topics;

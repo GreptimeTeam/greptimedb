@@ -99,10 +99,10 @@ provider = "raft_engine"
 ## The broker endpoints of the Kafka cluster.
 broker_endpoints = ["127.0.0.1:9092"]
 
-## Create topics for WAL.
+## Automatically create topics for WAL.
 ## Set to `true` to automatically create topics for WAL.
 ## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
-create_topic = true
+auto_create_topics = true
 
 ## Number of topics.
 num_topics = 64

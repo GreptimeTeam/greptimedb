@@ -30,8 +30,8 @@ pub struct MetasrvKafkaConfig {
     /// The kafka config.
     #[serde(flatten)]
     pub kafka_topic: KafkaTopicConfig,
-    // Create topics for WAL.
-    pub create_topic: bool,
+    // Automatically create topics for WAL.
+    pub auto_create_topics: bool,
 }
 
 impl Default for MetasrvKafkaConfig {
@@ -40,7 +40,7 @@ impl Default for MetasrvKafkaConfig {
             connection: Default::default(),
             backoff: Default::default(),
             kafka_topic: Default::default(),
-            create_topic: true,
+            auto_create_topics: true,
         }
     }
 }
