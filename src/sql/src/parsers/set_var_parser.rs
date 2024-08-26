@@ -43,7 +43,6 @@ impl<'a> ParserContext<'a> {
             })),
 
             unexp => error::UnsupportedSnafu {
-                sql: self.sql.to_string(),
                 keyword: unexp.to_string(),
             }
             .fail(),

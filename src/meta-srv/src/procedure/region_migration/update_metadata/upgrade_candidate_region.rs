@@ -122,7 +122,7 @@ impl UpdateMetadata {
     ///
     /// Abort(non-retry):
     /// - TableRoute or RegionRoute is not found.
-    /// Typically, it's impossible, there is no other DDL procedure executed concurrently for the current table.
+    ///   Typically, it's impossible, there is no other DDL procedure executed concurrently for the current table.
     ///
     /// Retry:
     /// - Failed to update [TableRouteValue](common_meta::key::table_region::TableRegionValue).

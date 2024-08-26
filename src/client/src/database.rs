@@ -91,7 +91,7 @@ impl Database {
     ///
     /// - the name of database when using GreptimeDB standalone or cluster
     /// - the name provided by GreptimeCloud or other multi-tenant GreptimeDB
-    /// environment
+    ///   environment
     pub fn new_with_dbname(dbname: impl Into<String>, client: Client) -> Self {
         Self {
             catalog: String::default(),

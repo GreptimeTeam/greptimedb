@@ -34,7 +34,7 @@
 //!     - bit 0 (lowest bit): whether `FooterPayload` is compressed
 //!     - all other bits are reserved for future use and should be set to 0 on write
 //!   * all other bytes are reserved for future use and should be set to 0 on write
-//! A 4 byte integer is always signed, in a two’s complement representation, stored little-endian.
+//!     A 4 byte integer is always signed, in a two’s complement representation, stored little-endian.
 //!
 //! ## Footer Payload
 //!

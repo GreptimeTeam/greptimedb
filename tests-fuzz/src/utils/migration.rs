@@ -35,9 +35,8 @@ pub async fn migrate_region(
     to_peer_id: u64,
     timeout_secs: u64,
 ) -> String {
-    let sql = format!(
-        "select migrate_region({region_id}, {from_peer_id}, {to_peer_id}, {timeout_secs}) as output;"
-    );
+    let sql =
+        format!("admin migrate_region({region_id}, {from_peer_id}, {to_peer_id}, {timeout_secs});");
     let result = sqlx::query(&sql)
         .fetch_one(e)
         .await

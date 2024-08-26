@@ -96,7 +96,7 @@ mod tests {
     use datatypes::vectors::StringVector;
 
     use super::*;
-    use crate::function::{Function, FunctionContext};
+    use crate::function::{AsyncFunction, FunctionContext};
 
     #[test]
     fn test_procedure_state_misc() {
@@ -114,8 +114,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_missing_procedure_service() {
+    #[tokio::test]
+    async fn test_missing_procedure_service() {
         let f = ProcedureStateFunction;
 
         let args = vec!["pid"];
@@ -125,15 +125,15 @@ mod tests {
             .map(|arg| Arc::new(StringVector::from_slice(&[arg])) as _)
             .collect::<Vec<_>>();
 
-        let result = f.eval(FunctionContext::default(), &args).unwrap_err();
+        let result = f.eval(FunctionContext::default(), &args).await.unwrap_err();
         assert_eq!(
             "Missing ProcedureServiceHandler, not expected",
             result.to_string()
         );
     }
 
-    #[test]
-    fn test_procedure_state() {
+    #[tokio::test]
+    async fn test_procedure_state() {
         let f = ProcedureStateFunction;
 
         let args = vec!["pid"];
@@ -143,7 +143,7 @@ mod tests {
             .map(|arg| Arc::new(StringVector::from_slice(&[arg])) as _)
             .collect::<Vec<_>>();
 
-        let result = f.eval(FunctionContext::mock(), &args).unwrap();
+        let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
 
         let expect: VectorRef = Arc::new(StringVector::from(vec![
             "{\"status\":\"Done\",\"error\":\"OK\"}",

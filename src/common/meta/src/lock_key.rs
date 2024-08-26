@@ -172,8 +172,8 @@ impl From<TableLock> for StringKey {
 ///
 /// Note:
 /// - Allows modification the corresponding region's [TableRouteValue](crate::key::table_route::TableRouteValue),
-/// [TableDatanodeValue](crate::key::datanode_table::DatanodeTableValue) even if
-/// it acquires the [RegionLock::Write] only without acquiring the [TableLock::Write].
+///   [TableDatanodeValue](crate::key::datanode_table::DatanodeTableValue) even if
+///   it acquires the [RegionLock::Write] only without acquiring the [TableLock::Write].
 ///
 /// - Should acquire [TableLock] of the table at same procedure.
 ///

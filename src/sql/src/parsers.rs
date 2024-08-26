@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod admin_parser;
 mod alter_parser;
 pub(crate) mod copy_parser;
 pub(crate) mod create_parser;

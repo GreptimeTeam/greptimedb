@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod admin;
 pub mod alter;
 pub mod copy;
 pub mod create;
@@ -817,7 +818,7 @@ mod tests {
         assert!(v.is_err());
         assert!(
             format!("{v:?}").contains(
-                "Column a expect type: Float64(Float64Type), actual: Boolean(BooleanType))"
+                "Column a expect type: Float64(Float64Type), actual: Boolean(BooleanType)"
             ),
             "v is {v:?}",
         );

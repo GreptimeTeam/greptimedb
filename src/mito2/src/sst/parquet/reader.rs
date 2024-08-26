@@ -174,14 +174,19 @@ impl ParquetReaderBuilder {
     ///
     /// This needs to perform IO operation.
     pub async fn build(&self) -> Result<ParquetReader> {
-        let (context, row_groups) = self.build_reader_input().await?;
+        let mut metrics = ReaderMetrics::default();
+
+        let (context, row_groups) = self.build_reader_input(&mut metrics).await?;
         ParquetReader::new(Arc::new(context), row_groups).await
     }
 
     /// Builds a [FileRangeContext] and collects row groups to read.
     ///
     /// This needs to perform IO operation.
-    pub(crate) async fn build_reader_input(&self) -> Result<(FileRangeContext, RowGroupMap)> {
+    pub(crate) async fn build_reader_input(
+        &self,
+        metrics: &mut ReaderMetrics,
+    ) -> Result<(FileRangeContext, RowGroupMap)> {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.file_dir);
@@ -219,10 +224,8 @@ impl ParquetReaderBuilder {
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
                 .context(ReadParquetSnafu { path: &file_path })?;
 
-        let mut metrics = ReaderMetrics::default();
-
         let row_groups = self
-            .row_groups_to_read(&read_format, &parquet_meta, &mut metrics)
+            .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
 
         let reader_builder = RowGroupReaderBuilder {
@@ -336,7 +339,7 @@ impl ParquetReaderBuilder {
         &self,
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
-        metrics: &mut ReaderMetrics,
+        metrics: &mut ReaderFilterMetrics,
     ) -> BTreeMap<usize, Option<RowSelection>> {
         let num_row_groups = parquet_meta.num_row_groups();
         let num_rows = parquet_meta.file_metadata().num_rows();
@@ -382,7 +385,7 @@ impl ParquetReaderBuilder {
         row_group_size: usize,
         parquet_meta: &ParquetMetaData,
         output: &mut BTreeMap<usize, Option<RowSelection>>,
-        metrics: &mut ReaderMetrics,
+        metrics: &mut ReaderFilterMetrics,
     ) -> bool {
         let Some(index_applier) = &self.fulltext_index_applier else {
             return false;
@@ -462,7 +465,7 @@ impl ParquetReaderBuilder {
         row_group_size: usize,
         parquet_meta: &ParquetMetaData,
         output: &mut BTreeMap<usize, Option<RowSelection>>,
-        metrics: &mut ReaderMetrics,
+        metrics: &mut ReaderFilterMetrics,
     ) -> bool {
         let Some(index_applier) = &self.inverted_index_applier else {
             return false;
@@ -529,7 +532,7 @@ impl ParquetReaderBuilder {
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
         output: &mut BTreeMap<usize, Option<RowSelection>>,
-        metrics: &mut ReaderMetrics,
+        metrics: &mut ReaderFilterMetrics,
     ) -> bool {
         let Some(predicate) = &self.predicate else {
             return false;
@@ -724,9 +727,9 @@ fn time_range_to_predicate(
     Ok(predicates)
 }
 
-/// Parquet reader metrics.
-#[derive(Debug, Default, Clone)]
-pub(crate) struct ReaderMetrics {
+/// Metrics of filtering rows groups and rows.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ReaderFilterMetrics {
     /// Number of row groups before filtering.
     pub(crate) num_row_groups_before_filtering: usize,
     /// Number of row groups filtered by fulltext index.
@@ -743,6 +746,57 @@ pub(crate) struct ReaderMetrics {
     pub(crate) num_rows_in_row_group_fulltext_index_filtered: usize,
     /// Number of rows in row group filtered by inverted index.
     pub(crate) num_rows_in_row_group_inverted_index_filtered: usize,
+}
+
+impl ReaderFilterMetrics {
+    /// Adds `other` metrics to this metrics.
+    pub(crate) fn merge_from(&mut self, other: &ReaderFilterMetrics) {
+        self.num_row_groups_before_filtering += other.num_row_groups_before_filtering;
+        self.num_row_groups_fulltext_index_filtered += other.num_row_groups_fulltext_index_filtered;
+        self.num_row_groups_inverted_index_filtered += other.num_row_groups_inverted_index_filtered;
+        self.num_row_groups_min_max_filtered += other.num_row_groups_min_max_filtered;
+        self.num_rows_precise_filtered += other.num_rows_precise_filtered;
+        self.num_rows_in_row_group_before_filtering += other.num_rows_in_row_group_before_filtering;
+        self.num_rows_in_row_group_fulltext_index_filtered +=
+            other.num_rows_in_row_group_fulltext_index_filtered;
+        self.num_rows_in_row_group_inverted_index_filtered +=
+            other.num_rows_in_row_group_inverted_index_filtered;
+    }
+
+    /// Reports metrics.
+    pub(crate) fn observe(&self) {
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["before_filtering"])
+            .inc_by(self.num_row_groups_before_filtering as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["fulltext_index_filtered"])
+            .inc_by(self.num_row_groups_fulltext_index_filtered as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["inverted_index_filtered"])
+            .inc_by(self.num_row_groups_inverted_index_filtered as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["minmax_index_filtered"])
+            .inc_by(self.num_row_groups_min_max_filtered as u64);
+        PRECISE_FILTER_ROWS_TOTAL
+            .with_label_values(&["parquet"])
+            .inc_by(self.num_rows_precise_filtered as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["before_filtering"])
+            .inc_by(self.num_rows_in_row_group_before_filtering as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["fulltext_index_filtered"])
+            .inc_by(self.num_rows_in_row_group_fulltext_index_filtered as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["inverted_index_filtered"])
+            .inc_by(self.num_rows_in_row_group_inverted_index_filtered as u64);
+    }
+}
+
+/// Parquet reader metrics.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ReaderMetrics {
+    /// Filtered row groups and rows metrics.
+    pub(crate) filter_metrics: ReaderFilterMetrics,
     /// Duration to build the parquet reader.
     pub(crate) build_cost: Duration,
     /// Duration to scan the reader.
@@ -758,21 +812,19 @@ pub(crate) struct ReaderMetrics {
 impl ReaderMetrics {
     /// Adds `other` metrics to this metrics.
     pub(crate) fn merge_from(&mut self, other: &ReaderMetrics) {
-        self.num_row_groups_before_filtering += other.num_row_groups_before_filtering;
-        self.num_row_groups_fulltext_index_filtered += other.num_row_groups_fulltext_index_filtered;
-        self.num_row_groups_inverted_index_filtered += other.num_row_groups_inverted_index_filtered;
-        self.num_row_groups_min_max_filtered += other.num_row_groups_min_max_filtered;
-        self.num_rows_precise_filtered += other.num_rows_precise_filtered;
-        self.num_rows_in_row_group_before_filtering += other.num_rows_in_row_group_before_filtering;
-        self.num_rows_in_row_group_fulltext_index_filtered +=
-            other.num_rows_in_row_group_fulltext_index_filtered;
-        self.num_rows_in_row_group_inverted_index_filtered +=
-            other.num_rows_in_row_group_inverted_index_filtered;
+        self.filter_metrics.merge_from(&other.filter_metrics);
         self.build_cost += other.build_cost;
         self.scan_cost += other.scan_cost;
         self.num_record_batches += other.num_record_batches;
         self.num_batches += other.num_batches;
         self.num_rows += other.num_rows;
+    }
+
+    /// Reports total rows.
+    pub(crate) fn observe_rows(&self, read_type: &str) {
+        READ_ROWS_TOTAL
+            .with_label_values(&[read_type])
+            .inc_by(self.num_rows as u64);
     }
 }
 
@@ -1006,10 +1058,12 @@ impl Drop for ParquetReader {
             self.context.reader_builder().file_handle.region_id(),
             self.context.reader_builder().file_handle.file_id(),
             self.context.reader_builder().file_handle.time_range(),
-            metrics.num_row_groups_before_filtering
-                - metrics.num_row_groups_inverted_index_filtered
-                - metrics.num_row_groups_min_max_filtered,
-            metrics.num_row_groups_before_filtering,
+            metrics.filter_metrics.num_row_groups_before_filtering
+                - metrics
+                    .filter_metrics
+                    .num_row_groups_inverted_index_filtered
+                - metrics.filter_metrics.num_row_groups_min_max_filtered,
+            metrics.filter_metrics.num_row_groups_before_filtering,
             metrics
         );
 
@@ -1020,33 +1074,8 @@ impl Drop for ParquetReader {
         READ_STAGE_ELAPSED
             .with_label_values(&["scan_row_groups"])
             .observe(metrics.scan_cost.as_secs_f64());
-        READ_ROWS_TOTAL
-            .with_label_values(&["parquet"])
-            .inc_by(metrics.num_rows as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["before_filtering"])
-            .inc_by(metrics.num_row_groups_before_filtering as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["fulltext_index_filtered"])
-            .inc_by(metrics.num_row_groups_fulltext_index_filtered as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["inverted_index_filtered"])
-            .inc_by(metrics.num_row_groups_inverted_index_filtered as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["minmax_index_filtered"])
-            .inc_by(metrics.num_row_groups_min_max_filtered as u64);
-        PRECISE_FILTER_ROWS_TOTAL
-            .with_label_values(&["parquet"])
-            .inc_by(metrics.num_rows_precise_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["before_filtering"])
-            .inc_by(metrics.num_rows_in_row_group_before_filtering as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["fulltext_index_filtered"])
-            .inc_by(metrics.num_rows_in_row_group_fulltext_index_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["inverted_index_filtered"])
-            .inc_by(metrics.num_rows_in_row_group_inverted_index_filtered as u64);
+        metrics.observe_rows("parquet_reader");
+        metrics.filter_metrics.observe();
     }
 }
 

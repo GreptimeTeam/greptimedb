@@ -38,21 +38,25 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("SQL statement is not supported: {}, keyword: {}", sql, keyword))]
-    Unsupported { sql: String, keyword: String },
+    #[snafu(display("SQL statement is not supported, keyword: {}", keyword))]
+    Unsupported {
+        keyword: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
-        "Unexpected token while parsing SQL statement: {}, expected: '{}', found: {}",
-        sql,
+        "Unexpected token while parsing SQL statement, expected: '{}', found: {}",
         expected,
         actual,
     ))]
     Unexpected {
-        sql: String,
         expected: String,
         actual: String,
         #[snafu(source)]
         error: ParserError,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display(
@@ -60,7 +64,12 @@ pub enum Error {
         expr,
         column_name
     ))]
-    UnsupportedDefaultValue { column_name: String, expr: Expr },
+    UnsupportedDefaultValue {
+        column_name: String,
+        expr: Expr,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     // Syntax error from sql parser.
     #[snafu(display(""))]
@@ -84,31 +93,52 @@ pub enum Error {
     MissingTimeIndex {},
 
     #[snafu(display("Invalid time index: {}", msg))]
-    InvalidTimeIndex { msg: String },
+    InvalidTimeIndex {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
-    InvalidSql { msg: String },
+    InvalidSql {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
-        "Unexpected token while parsing SQL statement: {}, expected: '{}', found: {}",
-        sql,
+        "Unexpected token while parsing SQL statement, expected: '{}', found: {}",
         expected,
         actual,
     ))]
     UnexpectedToken {
-        sql: String,
         expected: String,
         actual: String,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Invalid column option, column name: {}, error: {}", name, msg))]
-    InvalidColumnOption { name: String, msg: String },
+    InvalidColumnOption {
+        name: String,
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("SQL data type not supported yet: {:?}", t))]
-    SqlTypeNotSupported { t: crate::ast::DataType },
+    SqlTypeNotSupported {
+        t: crate::ast::DataType,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to parse value: {}", msg))]
-    ParseSqlValue { msg: String },
+    ParseSqlValue {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
         "Column {} expect type: {:?}, actual: {:?}",
@@ -120,10 +150,16 @@ pub enum Error {
         column_name: String,
         expect: ConcreteDataType,
         actual: ConcreteDataType,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Invalid database name: {}", name))]
-    InvalidDatabaseName { name: String },
+    InvalidDatabaseName {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid interval provided: {}", reason))]
     InvalidInterval {
@@ -140,10 +176,18 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid table name: {}", name))]
-    InvalidTableName { name: String },
+    InvalidTableName {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid flow name: {}", name))]
-    InvalidFlowName { name: String },
+    InvalidFlowName {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid default constraint, column: {}", column))]
     InvalidDefault {
@@ -207,7 +251,11 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid sql value: {}", value))]
-    InvalidSqlValue { value: String },
+    InvalidSqlValue {
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
         "Converting timestamp {:?} to unit {:?} overflow",
@@ -217,6 +265,8 @@ pub enum Error {
     TimestampOverflow {
         timestamp: Timestamp,
         target_unit: TimeUnit,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Unable to convert statement {} to DataFusion statement", statement))]

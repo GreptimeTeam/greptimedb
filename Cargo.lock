@@ -1954,6 +1954,7 @@ dependencies = [
  "statrs",
  "store-api",
  "table",
+ "tokio",
 ]
 
 [[package]]
@@ -4568,9 +4569,9 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "human-panic"
-version = "1.2.3"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4f016c89920bbb30951a8405ecacbb4540db5524313b9445736e7e1855cf370"
+checksum = "1c5a08ed290eac04006e21e63d32e90086b6182c7cd0452d10f4264def1fec9a"
 dependencies = [
  "anstream",
  "anstyle",
@@ -7011,9 +7012,9 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opendal"
-version = "0.48.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "615d41187deea0ea7fab5b48e9afef6ae8fc742fdcfa248846ee3d92ff71e986"
+checksum = "39d516adf7db912c38af382c3e92c27cd62fbbc240e630920555d784c2ab1494"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9171,8 +9172,9 @@ dependencies = [
 
 [[package]]
 name = "rsasl"
-version = "2.0.2"
-source = "git+https://github.com/wenyxu/rsasl.git?rev=06ebb683d5539c3410de4ce9fa37ff9b97e790a4#06ebb683d5539c3410de4ce9fa37ff9b97e790a4"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45035615cdd68c71daac89aef75b130d4b2cad29599966e1b4671f8fbb463559"
 dependencies = [
  "base64 0.22.1",
  "core2",
@@ -9189,9 +9191,8 @@ dependencies = [
 [[package]]
 name = "rskafka"
 version = "0.5.0"
-source = "git+https://github.com/WenyXu/rskafka.git?rev=940c6030012c5b746fad819fb72e3325b26e39de#940c6030012c5b746fad819fb72e3325b26e39de"
+source = "git+https://github.com/influxdata/rskafka.git?rev=75535b5ad9bae4a5dbb582c82e44dfd81ec10105#75535b5ad9bae4a5dbb582c82e44dfd81ec10105"
 dependencies = [
- "async-trait",
  "bytes",
  "chrono",
  "crc32c",
@@ -9200,7 +9201,6 @@ dependencies = [
  "integer-encoding 4.0.0",
  "lz4",
  "parking_lot 0.12.3",
- "pin-project-lite",
  "rand",
  "rsasl",
  "rustls 0.23.10",
@@ -11801,9 +11801,9 @@ dependencies = [
 
 [[package]]
 name = "tikv-jemalloc-ctl"
-version = "0.5.4"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "619bfed27d807b54f7f776b9430d4f8060e66ee138a28632ca898584d462c31c"
+checksum = "f21f216790c8df74ce3ab25b534e0718da5a1916719771d3fec23315c99e468b"
 dependencies = [
  "libc",
  "paste",
@@ -11812,9 +11812,9 @@ dependencies = [
 
 [[package]]
 name = "tikv-jemalloc-sys"
-version = "0.5.4+5.3.0-patched"
+version = "0.6.0+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9402443cb8fd499b6f327e40565234ff34dbda27460c5b47db0db77443dd85d1"
+checksum = "cd3c60906412afa9c2b5b5a48ca6a5abe5736aec9eb48ad05037a677e52e4e2d"
 dependencies = [
  "cc",
  "libc",
@@ -11822,9 +11822,9 @@ dependencies = [
 
 [[package]]
 name = "tikv-jemallocator"
-version = "0.5.4"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "965fe0c26be5c56c94e38ba547249074803efd52adfb66de62107d95aab3eaca"
+checksum = "4cec5ff18518d81584f477e9bfdf957f5bb0979b0bac3af4ca30b5b3ae2d2865"
 dependencies = [
  "libc",
  "tikv-jemalloc-sys",

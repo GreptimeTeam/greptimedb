@@ -168,7 +168,7 @@ SELECT * FROM t;
 
 ALTER TABLE t ADD COLUMN x int xxx;
 
-Error: 1001(Unsupported), SQL statement is not supported: ALTER TABLE t ADD COLUMN x int xxx;, keyword: xxx
+Error: 1001(Unsupported), SQL statement is not supported, keyword: xxx
 
 DROP TABLE t;
 

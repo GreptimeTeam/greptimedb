@@ -98,7 +98,6 @@ impl<'a> ParserContext<'a> {
             let variable = self
                 .parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
                     expected: "a variable name",
                     actual: self.peek_token_as_string(),
                 })?;
@@ -115,7 +114,6 @@ impl<'a> ParserContext<'a> {
         let raw_table_name = self
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "a table name",
                 actual: self.peek_token_as_string(),
             })?;
@@ -133,7 +131,6 @@ impl<'a> ParserContext<'a> {
         let raw_flow_name = self
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "a flow name",
                 actual: self.peek_token_as_string(),
             })?;
@@ -151,7 +148,6 @@ impl<'a> ParserContext<'a> {
         let raw_view_name = self
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "a view name",
                 actual: self.peek_token_as_string(),
             })?;
@@ -170,7 +166,6 @@ impl<'a> ParserContext<'a> {
         let table_name = self
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "a table name",
                 actual: self.peek_token_as_string(),
             })?;
@@ -193,7 +188,6 @@ impl<'a> ParserContext<'a> {
         let db_name = self
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "a database name",
                 actual: self.peek_token_as_string(),
             })?;
@@ -219,7 +213,6 @@ impl<'a> ParserContext<'a> {
             }
             _ => {
                 return error::UnexpectedTokenSnafu {
-                    sql: self.sql,
                     expected: "{FROM | IN} table",
                     actual: self.peek_token_as_string(),
                 }
@@ -264,7 +257,6 @@ impl<'a> ParserContext<'a> {
                     self.parser.next_token();
                     Ok(ShowKind::Like(self.parse_identifier().with_context(
                         |_| error::UnexpectedSnafu {
-                            sql: self.sql,
                             expected: "LIKE",
                             actual: self.peek_token_as_string(),
                         },
@@ -274,7 +266,6 @@ impl<'a> ParserContext<'a> {
                     self.parser.next_token();
                     Ok(ShowKind::Where(self.parser.parse_expr().with_context(
                         |_| error::UnexpectedSnafu {
-                            sql: self.sql,
                             expected: "some valid expression",
                             actual: self.peek_token_as_string(),
                         },
@@ -294,7 +285,6 @@ impl<'a> ParserContext<'a> {
             }
             _ => {
                 return error::UnexpectedTokenSnafu {
-                    sql: self.sql,
                     expected: "{FROM | IN} table",
                     actual: self.peek_token_as_string(),
                 }
@@ -328,7 +318,6 @@ impl<'a> ParserContext<'a> {
                     self.parser.next_token();
                     ShowKind::Where(self.parser.parse_expr().with_context(|_| {
                         error::UnexpectedSnafu {
-                            sql: self.sql,
                             expected: "some valid expression",
                             actual: self.peek_token_as_string(),
                         }
@@ -412,7 +401,6 @@ impl<'a> ParserContext<'a> {
                 Keyword::LIKE => Ok(Statement::ShowDatabases(ShowDatabases::new(
                     ShowKind::Like(self.parse_identifier().with_context(|_| {
                         error::UnexpectedSnafu {
-                            sql: self.sql,
                             expected: "LIKE",
                             actual: tok.to_string(),
                         }
@@ -422,7 +410,6 @@ impl<'a> ParserContext<'a> {
                 Keyword::WHERE => Ok(Statement::ShowDatabases(ShowDatabases::new(
                     ShowKind::Where(self.parser.parse_expr().with_context(|_| {
                         error::UnexpectedSnafu {
-                            sql: self.sql,
                             expected: "some valid expression",
                             actual: self.peek_token_as_string(),
                         }
@@ -766,7 +753,7 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let error = result.unwrap_err();
-        assert_eq!("Unexpected token while parsing SQL statement: SHOW COLUMNS, expected: '{FROM | IN} table', found: EOF", error.to_string());
+        assert_eq!("Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF", error.to_string());
 
         let sql = "SHOW COLUMNS from test";
         let result =
@@ -826,7 +813,7 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let error = result.unwrap_err();
-        assert_eq!("Unexpected token while parsing SQL statement: SHOW INDEX, expected: '{FROM | IN} table', found: EOF", error.to_string());
+        assert_eq!("Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF", error.to_string());
 
         let sql = "SHOW INDEX from test";
         let result =
@@ -859,7 +846,7 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let error = result.unwrap_err();
         assert_eq!(
-            "SQL statement is not supported: SHOW INDEX from test like 'disk%', keyword: like",
+            "SQL statement is not supported, keyword: like",
             error.to_string()
         );
 

@@ -100,7 +100,6 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .parse_object_name(false)
                 .context(error::UnexpectedSnafu {
-                    sql: self.sql,
                     expected: "a table name",
                     actual: self.parser.peek_token().to_string(),
                 })?;
@@ -160,8 +159,10 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::SET => self.parse_set_variables(),
 
+                    Keyword::ADMIN => self.parse_admin_command(),
+
                     Keyword::NoKeyword
-                        if w.value.to_uppercase() == tql_parser::TQL && w.quote_style.is_none() =>
+                        if w.quote_style.is_none() && w.value.to_uppercase() == tql_parser::TQL =>
                     {
                         self.parse_tql()
                     }
@@ -171,7 +172,6 @@ impl<'a> ParserContext<'a> {
 
                         let database_name = self.parser.parse_identifier(false).context(
                             error::UnexpectedSnafu {
-                                sql: self.sql,
                                 expected: "a database name",
                                 actual: self.peek_token_as_string(),
                             },
@@ -213,11 +213,7 @@ impl<'a> ParserContext<'a> {
 
     /// Raises an "unsupported statement" error.
     pub fn unsupported<T>(&self, keyword: String) -> Result<T> {
-        error::UnsupportedSnafu {
-            sql: self.sql,
-            keyword,
-        }
-        .fail()
+        error::UnsupportedSnafu { keyword }.fail()
     }
 
     // Report unexpected token

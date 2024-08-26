@@ -48,19 +48,19 @@ pub fn build_db_string(catalog: &str, schema: &str) -> String {
 /// The database name may come from different sources:
 ///
 /// - MySQL `schema` name in MySQL protocol login request: it's optional and user
-/// and switch database using `USE` command
+///   and switch database using `USE` command
 /// - Postgres `database` parameter in Postgres wire protocol, required
 /// - HTTP RESTful API: the database parameter, optional
 /// - gRPC: the dbname field in header, optional but has a higher priority than
-/// original catalog/schema
+///   original catalog/schema
 ///
 /// When database name is provided, we attempt to parse catalog and schema from
 /// it. We assume the format `[<catalog>-]<schema>`:
 ///
 /// - If `[<catalog>-]` part is not provided, we use whole database name as
-/// schema name
+///   schema name
 /// - if `[<catalog>-]` is provided, we split database name with `-` and use
-/// `<catalog>` and `<schema>`.
+///   `<catalog>` and `<schema>`.
 pub fn parse_catalog_and_schema_from_db_string(db: &str) -> (String, String) {
     match parse_optional_catalog_and_schema_from_db_string(db) {
         (Some(catalog), schema) => (catalog, schema),

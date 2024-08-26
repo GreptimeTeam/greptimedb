@@ -24,7 +24,7 @@ Affected Rows: 0
 
 SHOW INDEX;
 
-Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement: SHOW INDEX;, expected: '{FROM | IN} table', found: ;
+Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: ;
 
 SHOW INDEX FROM test;
 
@@ -58,7 +58,7 @@ SHOW INDEX FROM system_metrics in public;
 
 SHOW INDEX FROM system_metrics like '%util%';
 
-Error: 1001(Unsupported), SQL statement is not supported: SHOW INDEX FROM system_metrics like '%util%';, keyword: like
+Error: 1001(Unsupported), SQL statement is not supported, keyword: like
 
 SHOW INDEX FROM system_metrics WHERE Key_name = 'TIME INDEX';
 

@@ -50,7 +50,6 @@ impl<'a> ParserContext<'a> {
         let raw_view_ident = self
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "a view name",
                 actual: self.peek_token_as_string(),
             })?;
@@ -75,7 +74,6 @@ impl<'a> ParserContext<'a> {
         let raw_flow_ident = self
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "a flow name",
                 actual: self.peek_token_as_string(),
             })?;
@@ -99,7 +97,6 @@ impl<'a> ParserContext<'a> {
             let raw_table_ident =
                 self.parse_object_name()
                     .with_context(|_| error::UnexpectedSnafu {
-                        sql: self.sql,
                         expected: "a table name",
                         actual: self.peek_token_as_string(),
                     })?;
@@ -126,7 +123,6 @@ impl<'a> ParserContext<'a> {
         let database_name = self
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
                 expected: "a database name",
                 actual: self.peek_token_as_string(),
             })?;

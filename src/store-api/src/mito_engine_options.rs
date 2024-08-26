@@ -33,6 +33,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         "compaction.twcs.max_inactive_window_files",
         "compaction.twcs.time_window",
         "compaction.twcs.remote_compaction",
+        "compaction.twcs.fallback_to_local",
         "storage",
         "index.inverted_index.ignore_column_ids",
         "index.inverted_index.segment_row_count",

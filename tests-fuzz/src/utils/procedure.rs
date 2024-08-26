@@ -23,7 +23,7 @@ use crate::error;
 
 /// Fetches the state of a procedure.
 pub async fn procedure_state(e: &Pool<MySql>, procedure_id: &str) -> String {
-    let sql = format!("select procedure_state(\"{procedure_id}\");");
+    let sql = format!("admin procedure_state(\"{procedure_id}\");");
     let result = sqlx::query(&sql)
         .fetch_one(e)
         .await
