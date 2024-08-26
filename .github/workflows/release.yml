@@ -183,6 +183,8 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
+          image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
+          image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -202,6 +204,8 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
+          image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
+          image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
 
   build-macos-artifacts:
     name: Build macOS artifacts
