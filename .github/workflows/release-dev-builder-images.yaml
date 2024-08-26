@@ -36,9 +36,13 @@ jobs:
         id: set-version
         shell: bash
         run: |
+          commitShortSHA=`echo ${GITHUB_SHA} | cut -c1-8`
+          buildTime=`date +%Y%m%d%H%M%S`
+          BUILD_VERSION="$commitShortSHA-$buildTime"
           RUST_TOOLCHAIN_VERSION=$(cat rust_toolchain.toml | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}')
-          echo "VERSION=${RUST_TOOLCHAIN_VERSION}" >> $GITHUB_ENV
-          echo "version=$RUST_TOOLCHAIN_VERSION" >> $GITHUB_OUTPUT
+          VERSION="${BUILD_VERSION}-${RUST_TOOLCHAIN_VERSION}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "version=VERSION" >> $GITHUB_OUTPUT
 
       - name: Build and push dev builder images
         uses: ./.github/actions/build-dev-builder-images
