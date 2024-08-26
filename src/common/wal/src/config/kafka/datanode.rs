@@ -40,6 +40,10 @@ pub struct DatanodeKafkaConfig {
     /// The kafka topic config.
     #[serde(flatten)]
     pub kafka_topic: KafkaTopicConfig,
+    // Create topic for WAL.
+    // Set to false to use existing topics. It will then use topics named topic_name_prefix_[0..num_topics).
+    pub create_topic: bool,
+    // Create index for WAL.
     pub create_index: bool,
     #[serde(with = "humantime_serde")]
     pub dump_index_interval: Duration,
@@ -54,6 +58,7 @@ impl Default for DatanodeKafkaConfig {
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig::default(),
             kafka_topic: KafkaTopicConfig::default(),
+            create_topic: true,
             create_index: true,
             dump_index_interval: Duration::from_secs(60),
         }

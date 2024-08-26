@@ -76,6 +76,10 @@ impl TopicManager {
     /// The initializer first tries to restore persisted topics from the kv backend.
     /// If not enough topics retrieved, the initializer will try to contact the Kafka cluster and request creating more topics.
     pub async fn start(&self) -> Result<()> {
+        // Skip creating topics.
+        if !self.config.create_topic {
+            return Ok(());
+        }
         let num_topics = self.config.kafka_topic.num_topics;
         ensure!(num_topics > 0, InvalidNumTopicsSnafu { num_topics });
 
