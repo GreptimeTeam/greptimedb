@@ -99,7 +99,11 @@ provider = "raft_engine"
 ## The broker endpoints of the Kafka cluster.
 broker_endpoints = ["127.0.0.1:9092"]
 
-## Number of topics to be created upon start.
+## Create topics for WAL
+## Set to false to use existing topics. It will then use topics named topic_name_prefix_[0..num_topics)
+create_topic = true
+
+## Number of topics.
 num_topics = 64
 
 ## Topic selector type.
@@ -108,6 +112,7 @@ num_topics = 64
 selector_type = "round_robin"
 
 ## A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
+## i.g., greptimedb_wal_topic_0, greptimedb_wal_topic_1.
 topic_name_prefix = "greptimedb_wal_topic"
 
 ## Expected number of replicas of each partition.
