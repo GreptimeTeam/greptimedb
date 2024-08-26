@@ -22,6 +22,7 @@ use crate::function::FunctionRef;
 use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
+use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::math::MathFunction;
 use crate::scalars::numpy::NumpyFunction;
@@ -93,6 +94,9 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     // System and administration functions
     SystemFunction::register(&function_registry);
     TableFunction::register(&function_registry);
+
+    // JSON functions
+    JsonFunction::register(&function_registry);
 
     Arc::new(function_registry)
 });

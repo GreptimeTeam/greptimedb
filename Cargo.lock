@@ -1941,6 +1941,7 @@ dependencies = [
  "common-version",
  "datafusion",
  "datatypes",
+ "jsonb",
  "num",
  "num-traits",
  "once_cell",
