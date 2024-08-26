@@ -40,4 +40,3 @@ table.workspace = true
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 tokio.workspace = true
-tokio-test = "0.4"

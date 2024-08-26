@@ -1955,7 +1955,6 @@ dependencies = [
  "store-api",
  "table",
  "tokio",
- "tokio-test",
 ]
 
 [[package]]

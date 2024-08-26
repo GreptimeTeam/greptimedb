@@ -81,6 +81,7 @@ pub trait AsyncFunction: fmt::Display + Sync + Send {
     fn signature(&self) -> Signature;
 
     /// Evaluate the function, e.g. run/execute the function.
+    /// TODO(dennis): simplify the signature and refactor all the admin functions.
     async fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef>;
 }
 

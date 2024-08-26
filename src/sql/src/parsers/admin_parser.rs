@@ -13,9 +13,8 @@
 // limitations under the License.
 
 use snafu::ResultExt;
-use sqlparser::tokenizer::Token;
 
-use crate::ast::{Expr, Function};
+use crate::ast::Expr;
 use crate::error::{Result, SyntaxSnafu};
 use crate::parser::ParserContext;
 use crate::statements::admin::Admin;
@@ -30,27 +29,14 @@ impl<'a> ParserContext<'a> {
 
         let object_name = self.parser.parse_object_name(false).context(SyntaxSnafu)?;
 
-        let func = if self.parser.peek_token().token == Token::LParen {
-            match self
-                .parser
-                .parse_function(object_name)
-                .context(SyntaxSnafu)?
-            {
-                Expr::Function(f) => f,
-                _ => {
-                    return self.unsupported(self.peek_token_as_string());
-                }
-            }
-        } else {
-            Function {
-                name: object_name,
-                args: vec![],
-                over: None,
-                filter: None,
-                null_treatment: None,
-                distinct: false,
-                special: false,
-                order_by: vec![],
+        let func = match self
+            .parser
+            .parse_function(object_name)
+            .context(SyntaxSnafu)?
+        {
+            Expr::Function(f) => f,
+            _ => {
+                return self.unsupported(self.peek_token_as_string());
             }
         };
 
@@ -61,7 +47,7 @@ impl<'a> ParserContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Expr, FunctionArg, FunctionArgExpr, Value};
+    use crate::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Value};
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
 
@@ -91,7 +77,7 @@ mod tests {
 
     #[test]
     fn test_parse_admin_function_without_args() {
-        let sql = "ADMIN test";
+        let sql = "ADMIN test()";
 
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -107,5 +93,32 @@ mod tests {
         }
 
         assert_eq!("ADMIN test()", stmt.to_string());
+    }
+
+    #[test]
+    fn test_invalid_admin_statement() {
+        let sql = "ADMIN";
+        assert!(ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default()
+        )
+        .is_err());
+
+        let sql = "ADMIN test";
+        assert!(ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default()
+        )
+        .is_err());
+
+        let sql = "ADMIN test test";
+        assert!(ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default()
+        )
+        .is_err());
     }
 }
