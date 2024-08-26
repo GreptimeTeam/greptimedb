@@ -30,17 +30,18 @@ pub use crate::logstore::entry::Id as EntryId;
 use crate::logstore::provider::Provider;
 use crate::storage::RegionId;
 
+// The information used to locate WAL index for the specified region.
 #[derive(Debug, Clone, Copy)]
 pub struct WalIndex {
     pub region_id: RegionId,
-    pub from_peer_id: u64,
+    pub datanode_id: u64,
 }
 
 impl WalIndex {
-    pub fn new(region_id: RegionId, from_peer_id: u64) -> Self {
+    pub fn new(region_id: RegionId, datanode_id: u64) -> Self {
         Self {
             region_id,
-            from_peer_id,
+            datanode_id,
         }
     }
 }

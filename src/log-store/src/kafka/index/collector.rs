@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use common_telemetry::{error, info};
 use futures::future::try_join_all;
+use object_store::ErrorKind;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
@@ -191,21 +192,17 @@ impl GlobalIndexCollector {
         entry_id: EntryId,
     ) -> Result<Option<(BTreeSet<EntryId>, EntryId)>> {
         let path = default_index_file(datanode_id);
-        let exists = self
-            .operator
-            .is_exist(&path)
-            .await
-            .context(error::ReadIndexSnafu { path: &path })?;
-        if !exists {
-            return Ok(None);
-        }
 
-        let bytes = self
-            .operator
-            .read(&path)
-            .await
-            .context(error::ReadIndexSnafu { path })?
-            .to_bytes();
+        let bytes = match self.operator.read(&path).await {
+            Ok(bytes) => bytes.to_vec(),
+            Err(err) => {
+                if err.kind() == ErrorKind::NotFound {
+                    return Ok(None);
+                } else {
+                    return Err(err).context(error::ReadIndexSnafu { path });
+                }
+            }
+        };
 
         match DatanodeWalIndexes::decode(&bytes)?.provider(provider) {
             Some(indexes) => {
