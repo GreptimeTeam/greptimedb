@@ -40,9 +40,9 @@ jobs:
           buildTime=`date +%Y%m%d%H%M%S`
           BUILD_VERSION="$commitShortSHA-$buildTime"
           RUST_TOOLCHAIN_VERSION=$(cat rust-toolchain.toml | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}')
-          VERSION="${RUST_TOOLCHAIN_VERSION}-${BUILD_VERSION}"
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-          echo "version=VERSION" >> $GITHUB_OUTPUT
+          IMAGE_VERSION="${RUST_TOOLCHAIN_VERSION}-${BUILD_VERSION}"
+          echo "VERSION=${IMAGE_VERSION}" >> $GITHUB_ENV
+          echo "version=$IMAGE_VERSION" >> $GITHUB_OUTPUT
 
       - name: Build and push dev builder images
         uses: ./.github/actions/build-dev-builder-images
@@ -122,18 +122,18 @@ jobs:
         if: ${{ inputs.release_dev_builder_ubuntu_image }}
         run: |
           docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ needs.release-dev-builder-images.outputs.version }} \
-            docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ inputs.version }}
+            docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ needs.release-dev-builder-images.outputs.version }}
 
       - name: Push dev-builder-centos image
         shell: bash
         if: ${{ inputs.release_dev_builder_centos_image }}
         run: |
           docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ needs.release-dev-builder-images.outputs.version }} \
-            docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ inputs.version }}
+            docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ needs.release-dev-builder-images.outputs.version }}
 
       - name: Push dev-builder-android image
         shell: bash
         if: ${{ inputs.release_dev_builder_android_image }}
         run: |
           docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ needs.release-dev-builder-images.outputs.version }} \
-            docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ inputs.version }}
+            docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ needs.release-dev-builder-images.outputs.version }}
