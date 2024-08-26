@@ -396,6 +396,7 @@ fn reduce_batch_subgraph(
                     visited_keys.insert(key_row.clone());
                 }
 
+                // TODO(discord9): use interleave to get keys?
                 let key_eq_mask = {
                     let mut key_scalar_value = Vec::with_capacity(key_row.len());
                     for key in key_row.iter() {
