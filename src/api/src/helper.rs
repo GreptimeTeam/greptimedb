@@ -26,7 +26,7 @@ use datatypes::scalars::ScalarVector;
 use datatypes::types::{
     Int16Type, Int8Type, IntervalType, TimeType, TimestampType, UInt16Type, UInt8Type,
 };
-use datatypes::value::{JsonbValueRef, OrderedF32, OrderedF64, Value};
+use datatypes::value::{OrderedF32, OrderedF64, Value};
 use datatypes::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, Decimal128Vector, Float32Vector,
     Float64Vector, Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
@@ -596,7 +596,7 @@ pub fn pb_value_to_value_ref<'a>(
                 ))
             }
         }
-        ValueData::JsonValue(v) => ValueRef::Json(JsonbValueRef::new(v)),
+        ValueData::JsonValue(v) => ValueRef::Json(v),
     }
 }
 
@@ -965,7 +965,7 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
             value_data: Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
         },
         Value::Json(v) => v1::Value {
-            value_data: Some(ValueData::JsonValue(v.value().to_vec())),
+            value_data: Some(ValueData::JsonValue(v.to_vec())),
         },
         Value::List(_) | Value::Duration(_) => return None,
     };
@@ -1063,7 +1063,7 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 }
             }),
             Value::Decimal128(v) => Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
-            Value::Json(v) => Some(ValueData::JsonValue(v.value().to_vec())),
+            Value::Json(v) => Some(ValueData::JsonValue(v.to_vec())),
             Value::List(_) | Value::Duration(_) => unreachable!(),
         },
     }
