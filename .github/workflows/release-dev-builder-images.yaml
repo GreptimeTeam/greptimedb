@@ -39,7 +39,7 @@ jobs:
           commitShortSHA=`echo ${{ github.sha }} | cut -c1-8`
           buildTime=`date +%Y%m%d%H%M%S`
           BUILD_VERSION="$commitShortSHA-$buildTime"
-          RUST_TOOLCHAIN_VERSION=$(cat rust_toolchain.toml | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}')
+          RUST_TOOLCHAIN_VERSION=$(cat rust-toolchain.toml | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}')
           VERSION="${RUST_TOOLCHAIN_VERSION}-${BUILD_VERSION}"
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
           echo "version=VERSION" >> $GITHUB_OUTPUT
