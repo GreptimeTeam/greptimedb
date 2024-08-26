@@ -34,14 +34,14 @@ use crate::storage::RegionId;
 #[derive(Debug, Clone, Copy)]
 pub struct WalIndex {
     pub region_id: RegionId,
-    pub datanode_id: u64,
+    pub location_id: u64,
 }
 
 impl WalIndex {
-    pub fn new(region_id: RegionId, datanode_id: u64) -> Self {
+    pub fn new(region_id: RegionId, location_id: u64) -> Self {
         Self {
             region_id,
-            datanode_id,
+            location_id,
         }
     }
 }

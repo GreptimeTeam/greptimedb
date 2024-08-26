@@ -240,7 +240,7 @@ impl LogStore for KafkaLogStore {
             (index, self.client_manager.global_index_collector())
         {
             collector
-                .read_remote_region_index(index.datanode_id, provider, index.region_id, entry_id)
+                .read_remote_region_index(index.location_id, provider, index.region_id, entry_id)
                 .await?
         } else {
             None
