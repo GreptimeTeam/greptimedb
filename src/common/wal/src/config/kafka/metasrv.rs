@@ -31,7 +31,6 @@ pub struct MetasrvKafkaConfig {
     #[serde(flatten)]
     pub kafka_topic: KafkaTopicConfig,
     // Create topics for WAL.
-    // Set to false to use existing topics. It will then use topics named topic_name_prefix_[0..num_topics).
     pub create_topic: bool,
 }
 

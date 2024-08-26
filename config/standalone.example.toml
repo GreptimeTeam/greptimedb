@@ -171,8 +171,9 @@ sync_period = "10s"
 ## **It's only used when the provider is `kafka`**.
 broker_endpoints = ["127.0.0.1:9092"]
 
-## Create topics for WAL
-## Set to false to use existing topics. It will then use topics named topic_name_prefix_[0..num_topics)
+## Create topics for WAL.
+## Set to `true` to automatically create topics for WAL.
+## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
 create_topic = true
 
 ## Number of topics.

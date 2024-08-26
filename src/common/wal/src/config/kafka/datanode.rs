@@ -41,7 +41,6 @@ pub struct DatanodeKafkaConfig {
     #[serde(flatten)]
     pub kafka_topic: KafkaTopicConfig,
     // Create topic for WAL.
-    // Set to false to use existing topics. It will then use topics named topic_name_prefix_[0..num_topics).
     pub create_topic: bool,
     // Create index for WAL.
     pub create_index: bool,
