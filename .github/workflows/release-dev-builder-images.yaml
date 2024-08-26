@@ -80,40 +80,46 @@ jobs:
         shell: bash
         if: ${{ inputs.release_dev_builder_ubuntu_image }}
         run: |
-          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ needs.release-dev-builder-images.outputs.version }} \
+          docker run quay.io/skopeo/stable:latest \
             -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
             -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ needs.release-dev-builder-images.outputs.version }} \
             docker://${{ vars.ECR_IMAGE_REGISTRY }}/${{ vars.ECR_IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ needs.release-dev-builder-images.outputs.version }}
 
-          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:latest \
+          docker run quay.io/skopeo/stable:latest \
             -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
             -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:latest \
             docker://${{ vars.ECR_IMAGE_REGISTRY }}/${{ vars.ECR_IMAGE_NAMESPACE }}/dev-builder-ubuntu:latest
       - name: Push dev-builder-centos image
         shell: bash
         if: ${{ inputs.release_dev_builder_centos_image }}
         run: |
-          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ needs.release-dev-builder-images.outputs.version }} \
+          docker run quay.io/skopeo/stable:latest \
             -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
             -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ needs.release-dev-builder-images.outputs.version }} \
             docker://${{ vars.ECR_IMAGE_REGISTRY }}/${{ vars.ECR_IMAGE_NAMESPACE }}/dev-builder-centos:${{ needs.release-dev-builder-images.outputs.version }}
 
-          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:latest \
+          docker run quay.io/skopeo/stable:latest
             -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
             -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:latest \
             docker://${{ vars.ECR_IMAGE_REGISTRY }}/${{ vars.ECR_IMAGE_NAMESPACE }}/dev-builder-centos:latest
       - name: Push dev-builder-android image
         shell: bash
         if: ${{ inputs.release_dev_builder_android_image }}
         run: |
-          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ needs.release-dev-builder-images.outputs.version }} \
+          docker run quay.io/skopeo/stable:latest \
             -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
             -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ needs.release-dev-builder-images.outputs.version }} \
             docker://${{ vars.ECR_IMAGE_REGISTRY }}/${{ vars.ECR_IMAGE_NAMESPACE }}/dev-builder-android:${{ needs.release-dev-builder-images.outputs.version }}
 
-          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:latest \
+          docker run quay.io/skopeo/stable:latest \
             -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
             -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:latest \
             docker://${{ vars.ECR_IMAGE_REGISTRY }}/${{ vars.ECR_IMAGE_NAMESPACE }}/dev-builder-android:latest
   release-dev-builder-images-cn: # Note: Be careful issue: https://github.com/containers/skopeo/issues/1874 and we decide to use the latest stable skopeo container.
     name: Release dev builder images to CN region
@@ -133,25 +139,28 @@ jobs:
         shell: bash
         if: ${{ inputs.release_dev_builder_ubuntu_image }}
         run: |
-          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ needs.release-dev-builder-images.outputs.version }} \
+          docker run quay.io/skopeo/stable:latest \
             -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
             -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ needs.release-dev-builder-images.outputs.version }} \
             docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ needs.release-dev-builder-images.outputs.version }}
 
       - name: Push dev-builder-centos image
         shell: bash
         if: ${{ inputs.release_dev_builder_centos_image }}
         run: |
-          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ needs.release-dev-builder-images.outputs.version }} \
+          docker run quay.io/skopeo/stable:latest \
             -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
             -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ needs.release-dev-builder-images.outputs.version }} \
             docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ needs.release-dev-builder-images.outputs.version }}
 
       - name: Push dev-builder-android image
         shell: bash
         if: ${{ inputs.release_dev_builder_android_image }}
         run: |
-          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ needs.release-dev-builder-images.outputs.version }} \
+          docker run quay.io/skopeo/stable:latest \
             -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
             -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ needs.release-dev-builder-images.outputs.version }} \
             docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ needs.release-dev-builder-images.outputs.version }}
