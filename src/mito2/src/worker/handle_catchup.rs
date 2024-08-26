@@ -76,7 +76,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let timer = Instant::now();
         let wal_entry_reader =
             self.wal
-                .wal_entry_reader(&region.provider, region_id, request.from_peer_id);
+                .wal_entry_reader(&region.provider, region_id, request.location_id);
         let on_region_opened = self.wal.on_region_opened();
         let last_entry_id = replay_memtable(
             &region.provider,

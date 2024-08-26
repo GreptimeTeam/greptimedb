@@ -674,7 +674,7 @@ pub struct RegionCatchupRequest {
     /// `None` stands replaying to latest.
     pub entry_id: Option<entry::Id>,
     /// The hint for replaying memtable.
-    pub from_peer_id: Option<u64>,
+    pub location_id: Option<u64>,
 }
 
 impl fmt::Display for RegionRequest {

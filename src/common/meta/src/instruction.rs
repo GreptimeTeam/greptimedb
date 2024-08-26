@@ -155,7 +155,7 @@ pub struct UpgradeRegion {
     pub wait_for_replay_timeout: Option<Duration>,
     /// The hint for replaying memtable.
     #[serde(default)]
-    pub from_peer_id: Option<u64>,
+    pub location_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

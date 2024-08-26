@@ -206,7 +206,7 @@ mod tests {
             region_id,
             last_entry_id: None,
             wait_for_replay_timeout: None,
-            from_peer_id: None,
+            location_id: None,
         });
         assert!(
             heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))

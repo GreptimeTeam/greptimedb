@@ -90,7 +90,7 @@ impl UpgradeCandidateRegion {
             region_id,
             last_entry_id,
             wait_for_replay_timeout: Some(self.replay_timeout),
-            from_peer_id: Some(ctx.persistent_ctx.from_peer.id),
+            location_id: Some(ctx.persistent_ctx.from_peer.id),
         })
     }
 

@@ -41,7 +41,7 @@ impl MetricEngineInner {
                 RegionRequest::Catchup(RegionCatchupRequest {
                     set_writable: req.set_writable,
                     entry_id: None,
-                    from_peer_id: req.from_peer_id,
+                    location_id: req.location_id,
                 }),
             )
             .await
@@ -53,7 +53,7 @@ impl MetricEngineInner {
                 RegionRequest::Catchup(RegionCatchupRequest {
                     set_writable: req.set_writable,
                     entry_id: req.entry_id,
-                    from_peer_id: req.from_peer_id,
+                    location_id: req.location_id,
                 }),
             )
             .await
