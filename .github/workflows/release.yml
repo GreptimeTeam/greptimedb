@@ -82,7 +82,6 @@ on:
 # Use env variables to control all the release process.
 env:
   # The arguments of building greptime.
-  RUST_TOOLCHAIN: nightly-2024-06-06
   CARGO_PROFILE: nightly
 
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
@@ -240,7 +239,6 @@ jobs:
       - uses: ./.github/actions/build-macos-artifacts
         with:
           arch: ${{ matrix.arch }}
-          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           cargo-profile: ${{ env.CARGO_PROFILE }}
           features: ${{ matrix.features }}
           version: ${{ needs.allocate-runners.outputs.version }}
@@ -283,7 +281,6 @@ jobs:
       - uses: ./.github/actions/build-windows-artifacts
         with:
           arch: ${{ matrix.arch }}
-          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           cargo-profile: ${{ env.CARGO_PROFILE }}
           features: ${{ matrix.features }}
           version: ${{ needs.allocate-runners.outputs.version }}
