@@ -352,6 +352,8 @@ impl UnaryFunc {
                             }.fail()?
                     }
                 };
+
+                // start time argument is optional
                 let start_time = match args.get(2) {
                     Some(start_time) => {
                         if let Some(value) = start_time.expr.as_literal() {
@@ -367,7 +369,10 @@ impl UnaryFunc {
                                 })?;
                             Some(ret)
                         } else {
-                            None
+                            UnexpectedSnafu {
+                                reason: "Expect start time arg to be literal",
+                            }
+                            .fail()?
                         }
                     }
                     None => None,
