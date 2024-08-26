@@ -42,6 +42,7 @@ sql.workspace = true
 statrs = "0.16"
 store-api.workspace = true
 table.workspace = true
+jsonb.workspace = true
 
 [dev-dependencies]
 ron = "0.7"
