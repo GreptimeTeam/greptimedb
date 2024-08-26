@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 
+use arrow::array::BooleanArray;
+use arrow::buffer::BooleanBuffer;
 use common_telemetry::trace;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
@@ -382,22 +384,24 @@ fn reduce_batch_subgraph(
                 }
             );
 
-            // record all visited keys in **this** batch
-            let mut visited_keys = BTreeSet::new();
+            let mut key_batch = key_batch.clone();
+            let mut val_batch = val_batch.clone();
 
-            // optimize use bool mask to avoid unnecessary slice
+            let mut distinct_keys = BTreeSet::new();
             for row_idx in 0..key_batch.row_count() {
                 let key_row = key_batch.get_row(row_idx)?;
                 let key_row = Row::new(key_row);
 
-                if visited_keys.contains(&key_row) {
+                if distinct_keys.contains(&key_row) {
                     continue;
                 } else {
-                    visited_keys.insert(key_row.clone());
+                    distinct_keys.insert(key_row.clone());
                 }
+            }
 
-                // TODO(discord9): use interleave to get keys?
-                let key_eq_mask = {
+            // TODO: here reduce numbers of eq to mininal by keeping slicing key/val batch
+            for key_row in distinct_keys {
+                let key_scalar_value = {
                     let mut key_scalar_value = Vec::with_capacity(key_row.len());
                     for key in key_row.iter() {
                         let v =
@@ -411,65 +415,61 @@ fn reduce_batch_subgraph(
                             })?;
                         key_scalar_value.push(arrow_value);
                     }
-                    let key_scalar_value = key_scalar_value;
-
-                    let eq_results = key_scalar_value
-                        .into_iter()
-                        .zip(key_batch.batch().iter())
-                        .map(|(key, col)| {
-                            arrow::compute::kernels::cmp::eq(
-                                &key,
-                                &col.to_arrow_array().as_ref() as _,
-                            )
-                        })
-                        .try_collect::<_, Vec<_>, _>()
-                        .context(ArrowSnafu {
-                            context: "Failed to compare key values",
-                        })?;
-
-                    let eq_mask = eq_results
-                        .into_iter()
-                        .fold(None, |acc, v| match acc {
-                            Some(Ok(acc)) => Some(arrow::compute::kernels::boolean::and(&acc, &v)),
-                            Some(Err(_)) => acc,
-                            None => Some(Ok(v)),
-                        })
-                        .transpose()
-                        .context(ArrowSnafu {
-                            context: "Failed to combine key comparison results",
-                        })?;
-
-                    if let Some(eq_mask) = eq_mask {
-                        eq_mask
-                    } else {
-                        // if None, meaning key_batch's column number is zero, which means
-                        // the key is empty, so we just return a mask of all true
-                        // meaning taking all values
-                        BooleanVector::from(vec![true; key_batch.row_count()])
-                            .as_boolean_array()
-                            .clone()
-                    }
+                    key_scalar_value
                 };
 
-                let val_slice = val_batch
-                    .batch()
-                    .iter()
-                    .map(|col| arrow::compute::filter(col.to_arrow_array().as_ref(), &key_eq_mask))
+                // first compute equal fro separate columns
+                let eq_results = key_scalar_value
+                    .into_iter()
+                    .zip(key_batch.batch().iter())
+                    .map(|(key, col)| {
+                        // TODO(discord9): this takes half of the cpu! And this is redundant amount of `eq`!
+                        arrow::compute::kernels::cmp::eq(&key, &col.to_arrow_array().as_ref() as _)
+                    })
                     .try_collect::<_, Vec<_>, _>()
                     .context(ArrowSnafu {
-                        context: "Failed to filter val batches",
+                        context: "Failed to compare key values",
                     })?;
 
-                let val_slice_vector =
-                    Helper::try_into_vectors(&val_slice).context(DataTypeSnafu {
-                        msg: "can't convert arrow array to vector",
+                // then combine all equal results to finally found equal key rows
+                let opt_eq_mask = eq_results
+                    .into_iter()
+                    .fold(None, |acc, v| match acc {
+                        Some(Ok(acc)) => Some(arrow::compute::kernels::boolean::and(&acc, &v)),
+                        Some(Err(_)) => acc,
+                        None => Some(Ok(v)),
+                    })
+                    .transpose()
+                    .context(ArrowSnafu {
+                        context: "Failed to combine key comparison results",
                     })?;
 
-                let cur_val_batch = Batch::try_new(val_slice_vector, key_eq_mask.true_count())?;
+                let key_eq_mask = if let Some(eq_mask) = opt_eq_mask {
+                    BooleanVector::from(eq_mask)
+                } else {
+                    // if None, meaning key_batch's column number is zero, which means
+                    // the key is empty, so we just return a mask of all true
+                    // meaning taking all values
+                    BooleanVector::from(vec![true; key_batch.row_count()])
+                };
+                // TODO: both slice and mutate remaining batch
 
-                let val_batch = key_to_many_vals.entry(key_row).or_default();
+                let cur_val_batch = val_batch.filter(&key_eq_mask)?;
 
-                val_batch.push(cur_val_batch);
+                key_to_many_vals
+                    .entry(key_row)
+                    .or_default()
+                    .push(cur_val_batch);
+
+                let not_key_eq_mask = arrow::compute::not(key_eq_mask.as_boolean_array())
+                    .map(BooleanVector::from)
+                    .context(ArrowSnafu {
+                        context: "Failed to get not key eq mask",
+                    })?;
+
+                // remove the key that has been taken
+                key_batch = key_batch.filter(&not_key_eq_mask)?;
+                val_batch = val_batch.filter(&not_key_eq_mask)?;
             }
 
             Ok(())

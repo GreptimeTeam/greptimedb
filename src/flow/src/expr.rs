@@ -23,9 +23,10 @@ pub(crate) mod relation;
 mod scalar;
 mod signature;
 
+use arrow::compute::FilterBuilder;
 use datatypes::prelude::DataType;
 use datatypes::value::Value;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{BooleanVector, Helper, Vector, VectorRef};
 pub(crate) use df_func::{DfScalarFunction, RawDfScalarFn};
 pub(crate) use error::{EvalError, InvalidArgumentSnafu};
 pub(crate) use func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
@@ -36,7 +37,7 @@ pub(crate) use relation::{Accum, Accumulator, AggregateExpr, AggregateFunc};
 pub(crate) use scalar::{ScalarExpr, TypedExpr};
 use snafu::{ensure, ResultExt};
 
-use crate::expr::error::DataTypeSnafu;
+use crate::expr::error::{ArrowSnafu, DataTypeSnafu};
 use crate::repr::Diff;
 
 pub const TUMBLE_START: &str = "tumble_start";
@@ -250,6 +251,25 @@ impl Batch {
         self.batch = result;
         self.row_count = self_row_count + other_row_count;
         Ok(())
+    }
+
+    /// filter the batch with given predicate
+    pub fn filter(&self, predicate: &BooleanVector) -> Result<Self, EvalError> {
+        let len = predicate.as_boolean_array().true_count();
+        let filter_builder = FilterBuilder::new(predicate.as_boolean_array()).optimize();
+        let filter_pred = filter_builder.build();
+        let filtered = self
+            .batch()
+            .iter()
+            .map(|col| filter_pred.filter(col.to_arrow_array().as_ref()))
+            .try_collect::<_, Vec<_>, _>()
+            .context(ArrowSnafu {
+                context: "Failed to filter val batches",
+            })?;
+        let res_vector = Helper::try_into_vectors(&filtered).context(DataTypeSnafu {
+            msg: "can't convert arrow array to vector",
+        })?;
+        Self::try_new(res_vector, len)
     }
 }
 
