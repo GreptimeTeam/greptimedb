@@ -188,7 +188,7 @@ impl MergeScanExec {
         let regions = self.regions.clone();
         let region_query_handler = self.region_query_handler.clone();
         let metric = MergeScanMetric::new(&self.metric);
-        let schema = Self::arrow_schema_to_schema(self.schema())?;
+        let schema = self.schema.clone();
 
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
