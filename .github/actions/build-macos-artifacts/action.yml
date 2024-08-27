@@ -4,9 +4,6 @@ inputs:
   arch:
     description: Architecture to build
     required: true
-  rust-toolchain:
-    description: Rust toolchain to use
-    required: true
   cargo-profile:
     description: Cargo profile to build
     required: true
@@ -43,9 +40,8 @@ runs:
         brew install protobuf
 
     - name: Install rust toolchain
-      uses: dtolnay/rust-toolchain@master
+      uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: ${{ inputs.rust-toolchain }}
         targets: ${{ inputs.arch }}
 
     - name: Start etcd # For integration tests.
