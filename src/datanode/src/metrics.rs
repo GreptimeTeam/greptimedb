@@ -54,4 +54,17 @@ lazy_static! {
         &[REGION_ROLE]
     )
     .unwrap();
+    /// The number of heartbeats send by datanode.
+    pub static ref HEARTBEAT_SENT_COUNT: IntCounter = register_int_counter!(
+        "greptime_datanode_heartbeat_send_count",
+        "datanode heartbeat sent",
+    )
+    .unwrap();
+    /// The number of heartbeats received by datanode, labeled with result type.
+    pub static ref HEARTBEAT_RECV_COUNT: IntCounterVec = register_int_counter_vec!(
+        "greptime_datanode_heartbeat_recv_count",
+        "datanode heartbeat received",
+        &["result"]
+    )
+    .unwrap();
 }
