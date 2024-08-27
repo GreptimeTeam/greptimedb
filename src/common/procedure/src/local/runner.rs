@@ -373,7 +373,7 @@ impl Runner {
             procedure,
             manager_ctx: self.manager_ctx.clone(),
             step,
-            exponential_builder: self.exponential_builder.clone(),
+            exponential_builder: self.exponential_builder,
             store: self.store.clone(),
             rolling_back: false,
         };
