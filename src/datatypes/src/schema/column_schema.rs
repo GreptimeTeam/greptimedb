@@ -268,7 +268,10 @@ impl TryFrom<&Field> for ColumnSchema {
     type Error = Error;
 
     fn try_from(field: &Field) -> Result<ColumnSchema> {
-        let data_type = ConcreteDataType::try_from(field.data_type())?;
+        let mut data_type = ConcreteDataType::try_from(field.data_type())?;
+        if field.metadata().contains_key("is_json") {
+            data_type = ConcreteDataType::json_datatype();
+        }
         let mut metadata = field.metadata().clone();
         let default_constraint = match metadata.remove(DEFAULT_CONSTRAINT_KEY) {
             Some(json) => {

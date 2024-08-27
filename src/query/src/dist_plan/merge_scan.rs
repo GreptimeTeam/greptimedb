@@ -157,20 +157,19 @@ impl MergeScanExec {
         query_ctx: QueryContextRef,
         target_partition: usize,
     ) -> Result<Self> {
-        let arrow_schema_without_metadata = Self::arrow_schema_without_metadata(arrow_schema);
+        let arrow_schema = Arc::new(arrow_schema.clone());
         let properties = PlanProperties::new(
-            EquivalenceProperties::new(arrow_schema_without_metadata.clone()),
+            EquivalenceProperties::new(arrow_schema.clone()),
             Partitioning::UnknownPartitioning(target_partition),
             ExecutionMode::Bounded,
         );
-        let schema_without_metadata =
-            Self::arrow_schema_to_schema(arrow_schema_without_metadata.clone())?;
+        let schema = Self::arrow_schema_to_schema(arrow_schema.clone())?;
         Ok(Self {
             table,
             regions,
             plan,
-            schema: schema_without_metadata,
-            arrow_schema: arrow_schema_without_metadata,
+            schema,
+            arrow_schema,
             region_query_handler,
             metric: ExecutionPlanMetricsSet::new(),
             sub_stage_metrics: Arc::default(),
@@ -292,20 +291,6 @@ impl MergeScanExec {
             output_ordering: None,
             metrics: Default::default(),
         }))
-    }
-
-    fn arrow_schema_without_metadata(arrow_schema: &ArrowSchema) -> ArrowSchemaRef {
-        Arc::new(ArrowSchema::new(
-            arrow_schema
-                .fields()
-                .iter()
-                .map(|field| {
-                    let field = field.as_ref().clone();
-                    let field_without_metadata = field.with_metadata(Default::default());
-                    Arc::new(field_without_metadata)
-                })
-                .collect::<Vec<_>>(),
-        ))
     }
 
     fn arrow_schema_to_schema(arrow_schema: ArrowSchemaRef) -> Result<SchemaRef> {

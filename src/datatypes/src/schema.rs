@@ -256,7 +256,15 @@ fn collect_fields(column_schemas: &[ColumnSchema]) -> Result<FieldsAndIndices> {
         if column_schema.is_time_index() && timestamp_index.is_none() {
             timestamp_index = Some(index);
         }
-        let field = Field::try_from(column_schema)?;
+        let mut field = Field::try_from(column_schema)?;
+
+        // Json column performs the same as binary column in Arrow, so we need to mark it
+        if column_schema.data_type.is_json() {
+            field.set_metadata(HashMap::from([(
+                String::from("is_json"),
+                String::from("true"),
+            )]));
+        }
         fields.push(field);
         ensure!(
             name_to_index

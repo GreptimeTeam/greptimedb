@@ -221,6 +221,10 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Decimal128(_))
     }
 
+    pub fn is_json(&self) -> bool {
+        matches!(self, ConcreteDataType::Json(_))
+    }
+
     pub fn numerics() -> Vec<ConcreteDataType> {
         vec![
             ConcreteDataType::int8_datatype(),

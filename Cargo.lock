@@ -10363,6 +10363,7 @@ dependencies = [
  "hyper 0.14.29",
  "influxdb_line_protocol",
  "itertools 0.10.5",
+ "jsonb",
  "lazy_static",
  "mime_guess",
  "mysql_async",
