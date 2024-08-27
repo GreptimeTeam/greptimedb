@@ -58,6 +58,7 @@ humantime-serde.workspace = true
 hyper = { version = "0.14", features = ["full"] }
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
 itertools.workspace = true
+jsonb.workspace = true
 lazy_static.workspace = true
 mime_guess = "2.0"
 notify.workspace = true
@@ -93,7 +94,6 @@ serde_json.workspace = true
 session.workspace = true
 snafu.workspace = true
 snap = "1"
-jsonb.workspace = true
 sql.workspace = true
 strum.workspace = true
 table.workspace = true
