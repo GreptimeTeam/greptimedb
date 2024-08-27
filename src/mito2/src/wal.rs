@@ -109,9 +109,9 @@ impl<S: LogStore> Wal<S> {
                 LogStoreRawEntryReader::new(self.store.clone()),
             )),
             Provider::Kafka(_) => {
-                let reader = if let Some(from_peer_id) = location_id {
+                let reader = if let Some(location_id) = location_id {
                     LogStoreRawEntryReader::new(self.store.clone())
-                        .with_wal_index(WalIndex::new(region_id, from_peer_id))
+                        .with_wal_index(WalIndex::new(region_id, location_id))
                 } else {
                     LogStoreRawEntryReader::new(self.store.clone())
                 };
