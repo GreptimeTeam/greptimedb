@@ -57,6 +57,8 @@ pub const SEND_BUF_CAP: usize = BROADCAST_CAP * 2;
 
 pub const BATCH_SIZE: usize = 32 * 1024;
 
+pub const SLEEP_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Convert a value that is or can be converted to Datetime to internal timestamp
 ///
 /// support types are: `Date`, `DateTime`, `TimeStamp`, `i64`

@@ -26,7 +26,7 @@ mod signature;
 use arrow::compute::FilterBuilder;
 use datatypes::prelude::DataType;
 use datatypes::value::Value;
-use datatypes::vectors::{BooleanVector, Helper, Vector, VectorRef};
+use datatypes::vectors::{BooleanVector, Helper, VectorRef};
 pub(crate) use df_func::{DfScalarFunction, RawDfScalarFn};
 pub(crate) use error::{EvalError, InvalidArgumentSnafu};
 pub(crate) use func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};

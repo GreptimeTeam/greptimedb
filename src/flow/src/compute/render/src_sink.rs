@@ -195,13 +195,18 @@ impl<'referred, 'df> Context<'referred, 'df> {
             collection.into_inner(),
             move |_ctx, recv| {
                 let data = recv.take_inner();
+                let mut row_count = 0;
+                let mut batch_count = 0;
                 for batch in data.into_iter().flat_map(|i| i.into_iter()) {
+                    row_count += batch.row_count();
+                    batch_count += 1;
                     // if the sender is closed unexpectedly, stop sending
                     if sender.is_closed() || sender.send(batch).is_err() {
                         common_telemetry::error!("UnboundedSinkBatch is closed");
                         break;
                     }
                 }
+                trace!("sink send {} rows in {} batches", row_count, batch_count);
             },
         );
     }

@@ -15,8 +15,9 @@
 //! Node context, prone to change with every incoming requests
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_telemetry::trace;
 use session::context::QueryContext;
@@ -29,7 +30,7 @@ use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::{Batch, GlobalId};
 use crate::metrics::METRIC_FLOW_INPUT_BUF_SIZE;
-use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP, SEND_BUF_CAP};
+use crate::repr::{DiffRow, RelationDesc, BATCH_SIZE, BROADCAST_CAP, SEND_BUF_CAP};
 
 /// A context that holds the information of the dataflow
 #[derive(Default, Debug)]
@@ -105,8 +106,7 @@ impl SourceSender {
             // TODO(discord9): send rows instead so it's just moving a point
             if let Some(batch) = send_buf.recv().await {
                 let len = batch.row_count();
-                self.send_buf_row_cnt
-                    .fetch_sub(len, std::sync::atomic::Ordering::SeqCst);
+                self.send_buf_row_cnt.fetch_sub(len, Ordering::SeqCst);
                 row_cnt += len;
                 self.sender
                     .send(batch)
@@ -120,10 +120,10 @@ impl SourceSender {
             }
         }
         if row_cnt > 0 {
-            trace!("Flushed {} rows", row_cnt);
+            trace!("Source Flushed {} rows", row_cnt);
             METRIC_FLOW_INPUT_BUF_SIZE.sub(row_cnt as _);
             trace!(
-                "Remaining Send buf.len() = {}",
+                "Remaining Source Send buf.len() = {}",
                 METRIC_FLOW_INPUT_BUF_SIZE.get()
             );
         }
@@ -134,6 +134,9 @@ impl SourceSender {
     /// return number of rows it actual send(including what's in the buffer)
     pub async fn send_rows(&self, rows: Vec<DiffRow>) -> Result<usize, Error> {
         METRIC_FLOW_INPUT_BUF_SIZE.add(rows.len() as _);
+        // row count metrics is approx so relaxed order is ok
+        self.send_buf_row_cnt
+            .fetch_add(rows.len(), Ordering::SeqCst);
         let batch = Batch::try_from_rows(rows.into_iter().map(|(row, _, _)| row).collect())
             .context(EvalSnafu)?;
         common_telemetry::trace!("Send one batch to worker with {} rows", batch.row_count());
@@ -143,6 +146,11 @@ impl SourceSender {
             }
             .build()
         })?;
+
+        // sleep when flow worker are overwhelmed and input buf is constantly full
+        while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         Ok(0)
     }
 }

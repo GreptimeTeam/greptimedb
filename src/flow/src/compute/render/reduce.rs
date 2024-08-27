@@ -382,9 +382,6 @@ fn reduce_batch_subgraph(
                 }
             );
 
-            let mut key_batch = key_batch.clone();
-            let mut val_batch = val_batch.clone();
-
             let mut distinct_keys = BTreeSet::new();
             for row_idx in 0..key_batch.row_count() {
                 let key_row = key_batch.get_row(row_idx)?;
@@ -397,7 +394,7 @@ fn reduce_batch_subgraph(
                 }
             }
 
-            // TODO: here reduce numbers of eq to mininal by keeping slicing key/val batch
+            // TODO: here reduce numbers of eq to minimal by keeping slicing key/val batch
             for key_row in distinct_keys {
                 let key_scalar_value = {
                     let mut key_scalar_value = Vec::with_capacity(key_row.len());
@@ -458,16 +455,6 @@ fn reduce_batch_subgraph(
                     .entry(key_row)
                     .or_default()
                     .push(cur_val_batch);
-
-                let not_key_eq_mask = arrow::compute::not(key_eq_mask.as_boolean_array())
-                    .map(BooleanVector::from)
-                    .context(ArrowSnafu {
-                        context: "Failed to get not key eq mask",
-                    })?;
-
-                // remove the key that has been taken
-                key_batch = key_batch.filter(&not_key_eq_mask)?;
-                val_batch = val_batch.filter(&not_key_eq_mask)?;
             }
 
             Ok(())
@@ -484,7 +471,8 @@ fn reduce_batch_subgraph(
     // to prevent wired race condition
     let mut arrange = arrange.write();
     let mut all_arrange_updates = Vec::with_capacity(key_to_many_vals.len());
-    let mut all_output_rows = Vec::with_capacity(key_to_many_vals.len());
+
+    let mut all_output_dict = BTreeMap::new();
 
     for (key, val_batches) in key_to_many_vals {
         err_collector.run(|| -> Result<(), _> {
@@ -531,9 +519,7 @@ fn reduce_batch_subgraph(
             let arrange_update = ((key.clone(), Row::new(new_accums)), now, 1);
             all_arrange_updates.push(arrange_update);
 
-            let mut key_val = key;
-            key_val.extend(res_val_row);
-            all_output_rows.push((key_val, now, 1));
+            all_output_dict.insert(key, Row::from(res_val_row));
 
             Ok(())
         });
@@ -543,12 +529,17 @@ fn reduce_batch_subgraph(
         arrange.apply_updates(now, all_arrange_updates)?;
         arrange.compact_to(now)
     });
+    // release the lock
+    drop(arrange);
 
     // this output part is not supposed to be resource intensive
     // (because for every batch there wouldn't usually be as many output row?),
     // so we can do some costly operation here
-    let output_types = all_output_rows.first().map(|(row, _, _)| {
-        row.iter()
+    let output_types = all_output_dict.first_entry().map(|entry| {
+        entry
+            .key()
+            .iter()
+            .chain(entry.get().iter())
             .map(|v| v.data_type())
             .collect::<Vec<ConcreteDataType>>()
     });
@@ -556,15 +547,15 @@ fn reduce_batch_subgraph(
     if let Some(output_types) = output_types {
         err_collector.run(|| {
             let column_cnt = output_types.len();
-            let row_cnt = all_output_rows.len();
+            let row_cnt = all_output_dict.len();
 
             let mut output_builder = output_types
                 .into_iter()
                 .map(|t| t.create_mutable_vector(row_cnt))
                 .collect_vec();
 
-            for (row, _, _) in all_output_rows {
-                for (i, v) in row.into_iter().enumerate() {
+            for (key, val) in all_output_dict {
+                for (i, v) in key.into_iter().chain(val.into_iter()).enumerate() {
                     output_builder
                     .get_mut(i)
                     .context(InternalSnafu{
@@ -587,6 +578,9 @@ fn reduce_batch_subgraph(
                 .collect_vec();
 
             let output_batch = Batch::try_new(output_columns, row_cnt)?;
+
+            trace!("Reduce output batch: {:?}", output_batch);
+
             send.give(vec![output_batch]);
 
             Ok(())
