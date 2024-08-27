@@ -55,7 +55,7 @@ pub const BROADCAST_CAP: usize = 1024;
 /// The maximum capacity of the send buffer, to prevent the buffer from growing too large
 pub const SEND_BUF_CAP: usize = BROADCAST_CAP * 2;
 
-pub const BATCH_SIZE: usize = 32 * 1024;
+pub const BATCH_SIZE: usize = 32 * 16384;
 
 pub const SLEEP_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
 

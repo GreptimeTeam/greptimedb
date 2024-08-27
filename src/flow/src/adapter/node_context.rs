@@ -134,6 +134,9 @@ impl SourceSender {
     /// return number of rows it actual send(including what's in the buffer)
     pub async fn send_rows(&self, rows: Vec<DiffRow>) -> Result<usize, Error> {
         METRIC_FLOW_INPUT_BUF_SIZE.add(rows.len() as _);
+        while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         // row count metrics is approx so relaxed order is ok
         self.send_buf_row_cnt
             .fetch_add(rows.len(), Ordering::SeqCst);
@@ -147,10 +150,6 @@ impl SourceSender {
             .build()
         })?;
 
-        // sleep when flow worker are overwhelmed and input buf is constantly full
-        while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
         Ok(0)
     }
 }
