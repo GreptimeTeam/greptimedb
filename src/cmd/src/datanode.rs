@@ -267,7 +267,7 @@ impl StartCommand {
             &opts.component.tracing,
             opts.component.node_id.map(|x| x.to_string()),
         );
-        log_versions(version(), short_version());
+        log_versions(version(), short_version(), APP_NAME);
 
         info!("Datanode start command: {:#?}", self);
         info!("Datanode options: {:#?}", opts);

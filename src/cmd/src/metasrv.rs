@@ -244,7 +244,7 @@ impl StartCommand {
             &opts.component.tracing,
             None,
         );
-        log_versions(version(), short_version());
+        log_versions(version(), short_version(), APP_NAME);
 
         info!("Metasrv start command: {:#?}", self);
         info!("Metasrv options: {:#?}", opts);
