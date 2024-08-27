@@ -228,7 +228,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     )?,
                     Value::Interval(v) => row_writer.write_col(v.to_iso8601_string())?,
                     Value::Duration(v) => row_writer.write_col(v.to_std_duration())?,
-                    Value::List(_) => {
+                    Value::List(_) | Value::Json(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(
                                 "cannot write value {:?} in mysql protocol: unimplemented",
