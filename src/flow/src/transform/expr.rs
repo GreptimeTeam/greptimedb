@@ -33,7 +33,7 @@ use crate::error::{
 };
 use crate::expr::{
     BinaryFunc, DfScalarFunction, RawDfScalarFn, ScalarExpr, TypedExpr, UnaryFunc,
-    UnmaterializableFunc, VariadicFunc,
+    UnmaterializableFunc, VariadicFunc, TUMBLE_END, TUMBLE_START,
 };
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::literal::{
@@ -361,7 +361,7 @@ impl TypedExpr {
                 Ok(TypedExpr::new(ret_expr, ret_type))
             }
             _var => {
-                if fn_name == "tumble_start" || fn_name == "tumble_end" {
+                if fn_name == TUMBLE_START || fn_name == TUMBLE_END {
                     let (func, arg) = UnaryFunc::from_tumble_func(fn_name, &arg_typed_exprs)?;
 
                     let ret_type = ColumnType::new_nullable(func.signature().output.clone());

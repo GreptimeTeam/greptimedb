@@ -41,7 +41,7 @@ use crate::expr::error::{
     TryFromValueSnafu, TypeMismatchSnafu,
 };
 use crate::expr::signature::{GenericFn, Signature};
-use crate::expr::{Batch, InvalidArgumentSnafu, ScalarExpr, TypedExpr};
+use crate::expr::{Batch, InvalidArgumentSnafu, ScalarExpr, TypedExpr, TUMBLE_END, TUMBLE_START};
 use crate::repr::{self, value_to_internal_ts};
 
 /// UnmaterializableFunc is a function that can't be eval independently,
@@ -316,8 +316,8 @@ impl UnaryFunc {
     }
 
     pub fn from_tumble_func(name: &str, args: &[TypedExpr]) -> Result<(Self, TypedExpr), Error> {
-        match name {
-            "tumble_start" | "tumble_end" => {
+        match name.to_lowercase().as_str() {
+            TUMBLE_START | TUMBLE_END => {
                 let ts = args.first().context(InvalidQuerySnafu {
                     reason: "Tumble window function requires a timestamp argument",
                 })?;
@@ -378,7 +378,7 @@ impl UnaryFunc {
                     None => None,
                 };
 
-                if name == "tumble_start" {
+                if name == TUMBLE_START {
                     Ok((
                         Self::TumbleWindowFloor {
                             window_size,
@@ -386,7 +386,7 @@ impl UnaryFunc {
                         },
                         ts.clone(),
                     ))
-                } else if name == "tumble_end" {
+                } else if name == TUMBLE_END {
                     Ok((
                         Self::TumbleWindowCeiling {
                             window_size,

@@ -51,6 +51,7 @@ use substrait::DFLogicalSubstraitConvertor;
 
 use crate::adapter::FlownodeContext;
 use crate::error::{DatafusionSnafu, Error, ExternalSnafu, UnexpectedSnafu};
+use crate::expr::{TUMBLE_END, TUMBLE_START};
 use crate::plan::TypedPlan;
 
 // TODO(discord9): use `Analyzer` to manage rules if more `AnalyzerRule` is needed
@@ -369,7 +370,7 @@ fn expand_tumble_analyzer(
                     datafusion_expr::Expr::ScalarFunction(func) if func.name() == "tumble" => {
                         encountered_tumble = true;
 
-                        let tumble_start = TumbleExpand::new("tumble_start");
+                        let tumble_start = TumbleExpand::new(TUMBLE_START);
                         let tumble_start = datafusion_expr::expr::ScalarFunction::new_udf(
                             Arc::new(tumble_start.into()),
                             func.args.clone(),
@@ -378,7 +379,7 @@ fn expand_tumble_analyzer(
                         let start_col_name = tumble_start.name_for_alias()?;
                         new_group_expr.push(tumble_start);
 
-                        let tumble_end = TumbleExpand::new("tumble_end");
+                        let tumble_end = TumbleExpand::new(TUMBLE_END);
                         let tumble_end = datafusion_expr::expr::ScalarFunction::new_udf(
                             Arc::new(tumble_end.into()),
                             func.args.clone(),
@@ -439,6 +440,8 @@ fn expand_tumble_analyzer(
     Ok(Transformed::no(plan))
 }
 
+/// This is a placeholder for tumble_start and tumble_end function, so that datafusion can
+/// recognize them as scalar function
 #[derive(Debug)]
 pub struct TumbleExpand {
     signature: Signature,
@@ -524,6 +527,7 @@ impl ScalarUDFImpl for TumbleExpand {
     }
 }
 
+/// This rule check all group by exprs, and make sure they are also in select clause in a aggr query
 struct CheckGroupByRule {}
 
 impl CheckGroupByRule {
@@ -574,6 +578,7 @@ fn check_group_by_analyzer(
     Ok(Transformed::no(plan))
 }
 
+/// Find all column names in a plan
 #[derive(Debug, Default)]
 struct FindColumn {
     names_for_alias: HashSet<String>,

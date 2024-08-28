@@ -37,6 +37,9 @@ use snafu::{ensure, ResultExt};
 
 use crate::expr::error::DataTypeSnafu;
 
+pub const TUMBLE_START: &str = "tumble_start";
+pub const TUMBLE_END: &str = "tumble_end";
+
 /// A batch of vectors with the same length but without schema, only useful in dataflow
 pub struct Batch {
     batch: Vec<VectorRef>,

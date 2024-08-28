@@ -29,6 +29,7 @@ use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 use crate::adapter::FlownodeContext;
 use crate::error::{Error, NotImplementedSnafu, UnexpectedSnafu};
+use crate::expr::{TUMBLE_END, TUMBLE_START};
 /// a simple macro to generate a not implemented error
 macro_rules! not_impl_err {
     ($($arg:tt)*)  => {
@@ -99,8 +100,8 @@ impl FunctionExtensions {
 /// register flow-specific functions to the query engine
 pub fn register_function_to_query_engine(engine: &Arc<dyn QueryEngine>) {
     engine.register_function(Arc::new(TumbleFunction::new("tumble")));
-    engine.register_function(Arc::new(TumbleFunction::new("tumble_start")));
-    engine.register_function(Arc::new(TumbleFunction::new("tumble_end")));
+    engine.register_function(Arc::new(TumbleFunction::new(TUMBLE_START)));
+    engine.register_function(Arc::new(TumbleFunction::new(TUMBLE_END)));
 }
 
 #[derive(Debug)]
