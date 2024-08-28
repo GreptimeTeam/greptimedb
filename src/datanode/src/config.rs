@@ -47,7 +47,8 @@ pub enum ObjectStoreConfig {
 }
 
 impl ObjectStoreConfig {
-    pub fn name(&self) -> &'static str {
+    /// Returns the object storage type name, such as `S3`, `Oss` etc.
+    pub fn provider_name(&self) -> &'static str {
         match self {
             Self::File(_) => "File",
             Self::S3(_) => "S3",
@@ -55,6 +56,24 @@ impl ObjectStoreConfig {
             Self::Azblob(_) => "Azblob",
             Self::Gcs(_) => "Gcs",
         }
+    }
+
+    /// Returns the object storage configuration name, return the provider name if it's empty.
+    pub fn config_name(&self) -> &str {
+        let name = match self {
+            // file storage doesn't support name
+            Self::File(_) => self.provider_name(),
+            Self::S3(s3) => &s3.name,
+            Self::Oss(oss) => &oss.name,
+            Self::Azblob(az) => &az.name,
+            Self::Gcs(gcs) => &gcs.name,
+        };
+
+        if name.trim().is_empty() {
+            return self.provider_name();
+        }
+
+        name
     }
 }
 
@@ -66,6 +85,7 @@ pub struct StorageConfig {
     pub data_home: String,
     #[serde(flatten)]
     pub store: ObjectStoreConfig,
+    /// Object storage providers
     pub providers: Vec<ObjectStoreConfig>,
 }
 
@@ -95,6 +115,7 @@ pub struct ObjectStorageCacheConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct S3Config {
+    pub name: String,
     pub bucket: String,
     pub root: String,
     #[serde(skip_serializing)]
@@ -109,7 +130,8 @@ pub struct S3Config {
 
 impl PartialEq for S3Config {
     fn eq(&self, other: &Self) -> bool {
-        self.bucket == other.bucket
+        self.name == other.name
+            && self.bucket == other.bucket
             && self.root == other.root
             && self.access_key_id.expose_secret() == other.access_key_id.expose_secret()
             && self.secret_access_key.expose_secret() == other.secret_access_key.expose_secret()
@@ -122,6 +144,7 @@ impl PartialEq for S3Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OssConfig {
+    pub name: String,
     pub bucket: String,
     pub root: String,
     #[serde(skip_serializing)]
@@ -135,7 +158,8 @@ pub struct OssConfig {
 
 impl PartialEq for OssConfig {
     fn eq(&self, other: &Self) -> bool {
-        self.bucket == other.bucket
+        self.name == other.name
+            && self.bucket == other.bucket
             && self.root == other.root
             && self.access_key_id.expose_secret() == other.access_key_id.expose_secret()
             && self.access_key_secret.expose_secret() == other.access_key_secret.expose_secret()
@@ -147,6 +171,7 @@ impl PartialEq for OssConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AzblobConfig {
+    pub name: String,
     pub container: String,
     pub root: String,
     #[serde(skip_serializing)]
@@ -161,7 +186,8 @@ pub struct AzblobConfig {
 
 impl PartialEq for AzblobConfig {
     fn eq(&self, other: &Self) -> bool {
-        self.container == other.container
+        self.name == other.name
+            && self.container == other.container
             && self.root == other.root
             && self.account_name.expose_secret() == other.account_name.expose_secret()
             && self.account_key.expose_secret() == other.account_key.expose_secret()
@@ -174,6 +200,7 @@ impl PartialEq for AzblobConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GcsConfig {
+    pub name: String,
     pub root: String,
     pub bucket: String,
     pub scope: String,
@@ -188,7 +215,8 @@ pub struct GcsConfig {
 
 impl PartialEq for GcsConfig {
     fn eq(&self, other: &Self) -> bool {
-        self.root == other.root
+        self.name == other.name
+            && self.root == other.root
             && self.bucket == other.bucket
             && self.scope == other.scope
             && self.credential_path.expose_secret() == other.credential_path.expose_secret()
@@ -201,6 +229,7 @@ impl PartialEq for GcsConfig {
 impl Default for S3Config {
     fn default() -> Self {
         Self {
+            name: String::default(),
             bucket: String::default(),
             root: String::default(),
             access_key_id: SecretString::from(String::default()),
@@ -215,6 +244,7 @@ impl Default for S3Config {
 impl Default for OssConfig {
     fn default() -> Self {
         Self {
+            name: String::default(),
             bucket: String::default(),
             root: String::default(),
             access_key_id: SecretString::from(String::default()),
@@ -228,6 +258,7 @@ impl Default for OssConfig {
 impl Default for AzblobConfig {
     fn default() -> Self {
         Self {
+            name: String::default(),
             container: String::default(),
             root: String::default(),
             account_name: SecretString::from(String::default()),
@@ -242,6 +273,7 @@ impl Default for AzblobConfig {
 impl Default for GcsConfig {
     fn default() -> Self {
         Self {
+            name: String::default(),
             root: String::default(),
             bucket: String::default(),
             scope: String::default(),
@@ -353,6 +385,23 @@ mod tests {
         let opts = DatanodeOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
         let _parsed: DatanodeOptions = toml::from_str(&toml_string).unwrap();
+    }
+
+    #[test]
+    fn test_config_name() {
+        let object_store_config = ObjectStoreConfig::default();
+        assert_eq!("File", object_store_config.config_name());
+
+        let s3_config = ObjectStoreConfig::S3(S3Config::default());
+        assert_eq!("S3", s3_config.config_name());
+        assert_eq!("S3", s3_config.provider_name());
+
+        let s3_config = ObjectStoreConfig::S3(S3Config {
+            name: "test".to_string(),
+            ..Default::default()
+        });
+        assert_eq!("test", s3_config.config_name());
+        assert_eq!("S3", s3_config.provider_name());
     }
 
     #[test]

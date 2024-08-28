@@ -273,11 +273,11 @@ impl DatanodeBuilder {
     /// Builds [ObjectStoreManager] from [StorageConfig].
     pub async fn build_object_store_manager(cfg: &StorageConfig) -> Result<ObjectStoreManagerRef> {
         let object_store = store::new_object_store(cfg.store.clone(), &cfg.data_home).await?;
-        let default_name = cfg.store.name();
+        let default_name = cfg.store.config_name();
         let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
         for store in &cfg.providers {
             object_store_manager.add(
-                store.name(),
+                store.config_name(),
                 store::new_object_store(store.clone(), &cfg.data_home).await?,
             );
         }
