@@ -57,6 +57,7 @@ use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
+use crate::sst::file::FileId;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -949,6 +950,13 @@ impl WorkerListener {
         }
         // Avoid compiler warning.
         let _ = request_num;
+    }
+
+    pub(crate) fn on_file_cache_filled(&self, _file_id: FileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_file_cache_filled(_file_id);
+        }
     }
 }
 

@@ -640,6 +640,22 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Failed to download file, region_id: {}, file_id: {}, file_type: {:?}",
+        region_id,
+        file_id,
+        file_type,
+    ))]
+    Download {
+        region_id: RegionId,
+        file_id: FileId,
+        file_type: FileType,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Failed to upload file, region_id: {}, file_id: {}, file_type: {:?}",
         region_id,
         file_id,
@@ -965,7 +981,7 @@ impl ErrorExt for Error {
 
             FilterRecordBatch { source, .. } => source.status_code(),
 
-            Upload { .. } => StatusCode::StorageUnavailable,
+            Download { .. } | Upload { .. } => StatusCode::StorageUnavailable,
             ChecksumMismatch { .. } => StatusCode::Unexpected,
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,

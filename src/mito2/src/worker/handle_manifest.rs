@@ -21,6 +21,8 @@ use std::collections::{HashMap, VecDeque};
 use common_telemetry::{info, warn};
 use store_api::storage::RegionId;
 
+use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::CacheManagerRef;
 use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
@@ -31,7 +33,7 @@ use crate::request::{
     TruncateResult, WorkerRequest,
 };
 use crate::sst::location;
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{RegionWorkerLoop, WorkerListener};
 
 pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
 
@@ -106,10 +108,12 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         let request_sender = self.sender.clone();
+        let cache_manager = self.cache_manager.clone();
+        let listener = self.listener.clone();
         // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
-            let result = edit_region(&region, edit.clone()).await;
+            let result = edit_region(&region, edit.clone(), cache_manager, listener).await;
             let notify = WorkerRequest::Background {
                 region_id,
                 notify: BackgroundNotify::RegionEdit(RegionEditResult {
@@ -287,15 +291,38 @@ impl<S> RegionWorkerLoop<S> {
 }
 
 /// Checks the edit, writes and applies it.
-async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
+async fn edit_region(
+    region: &MitoRegionRef,
+    edit: RegionEdit,
+    cache_manager: CacheManagerRef,
+    listener: WorkerListener,
+) -> Result<()> {
     let region_id = region.region_id;
-    for file_meta in &edit.files_to_add {
-        // TODO(LFC): Fill the file in write cache, too.
-        let layer = region.access_layer.clone();
-        let path = location::sst_file_path(layer.region_dir(), file_meta.file_id);
-        common_runtime::spawn_bg(async move {
-            let _ = layer.object_store().read(&path).await;
-        });
+    if let Some(write_cache) = cache_manager.write_cache() {
+        for file_meta in &edit.files_to_add {
+            let write_cache = write_cache.clone();
+            let layer = region.access_layer.clone();
+            let listener = listener.clone();
+
+            let index_key = IndexKey::new(region_id, file_meta.file_id, FileType::Parquet);
+            let remote_path = location::sst_file_path(layer.region_dir(), file_meta.file_id);
+            common_runtime::spawn_global(async move {
+                if write_cache
+                    .download(index_key, &remote_path, layer.object_store())
+                    .await
+                    .is_ok()
+                {
+                    // Triggers the filling of the parquet metadata cache.
+                    // The parquet file is already downloaded.
+                    let _ = write_cache
+                        .file_cache()
+                        .get_parquet_meta_data(index_key)
+                        .await;
+
+                    listener.on_file_cache_filled(index_key.file_id);
+                }
+            });
+        }
     }
 
     info!("Applying {edit:?} to region {}", region_id);

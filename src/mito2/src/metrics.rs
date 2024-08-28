@@ -189,6 +189,12 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
+    /// Download bytes counter.
+    pub static ref DOWNLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
+        "mito_download_bytes_total",
+        "mito download bytes total",
+    )
+    .unwrap();
     /// Upload bytes counter.
     pub static ref UPLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
         "mito_upload_bytes_total",

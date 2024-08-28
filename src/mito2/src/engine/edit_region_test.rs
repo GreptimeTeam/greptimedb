@@ -12,20 +12,95 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use object_store::ObjectStore;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
-use tokio::sync::Barrier;
+use tokio::sync::{oneshot, Barrier};
 
 use crate::config::MitoConfig;
+use crate::engine::listener::EventListener;
 use crate::engine::MitoEngine;
 use crate::manifest::action::RegionEdit;
 use crate::region::MitoRegionRef;
 use crate::sst::file::{FileId, FileMeta};
 use crate::test_util::{CreateRequestBuilder, TestEnv};
+
+#[tokio::test]
+async fn test_edit_region_fill_cache() {
+    let mut env = TestEnv::new();
+
+    struct EditRegionListener {
+        tx: Mutex<Option<oneshot::Sender<FileId>>>,
+    }
+
+    impl EventListener for EditRegionListener {
+        fn on_file_cache_filled(&self, file_id: FileId) {
+            let mut tx = self.tx.lock().unwrap();
+            tx.take().unwrap().send(file_id).unwrap();
+        }
+    }
+
+    let (tx, rx) = oneshot::channel();
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                // Write cache must be enabled to download the ingested SST file.
+                enable_experimental_write_cache: true,
+                ..Default::default()
+            },
+            None,
+            Some(Arc::new(EditRegionListener {
+                tx: Mutex::new(Some(tx)),
+            })),
+        )
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+
+    let file_id = FileId::random();
+    // Simulating the ingestion of an SST file.
+    env.get_object_store()
+        .unwrap()
+        .write(
+            &format!("{}/{}.parquet", region.region_dir(), file_id),
+            b"x".as_slice(),
+        )
+        .await
+        .unwrap();
+
+    let edit = RegionEdit {
+        files_to_add: vec![FileMeta {
+            region_id: region.region_id,
+            file_id,
+            level: 0,
+            ..Default::default()
+        }],
+        files_to_remove: vec![],
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+    };
+    engine.edit_region(region.region_id, edit).await.unwrap();
+
+    // Asserts that the background downloading of the SST is succeeded.
+    let actual = tokio::time::timeout(Duration::from_secs(9), rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(file_id, actual);
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_edit_region_concurrently() {
