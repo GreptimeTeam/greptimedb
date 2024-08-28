@@ -119,8 +119,7 @@ impl SortField {
                     }
                     ConcreteDataType::List(_) |
                     ConcreteDataType::Dictionary(_) |
-                    ConcreteDataType::Null(_) |
-                    ConcreteDataType::Json(_) => {
+                    ConcreteDataType::Null(_) => {
                         return error::NotSupportedFieldSnafu {
                             data_type: $self.data_type.clone()
                         }.fail()
@@ -147,7 +146,8 @@ impl SortField {
             Time, time,
             Interval, interval,
             Duration, duration,
-            Decimal128, decimal128
+            Decimal128, decimal128,
+            Json, binary
         );
 
         Ok(())
@@ -242,7 +242,7 @@ impl SortField {
             ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => 9,
             ConcreteDataType::Float32(_) => 5,
             ConcreteDataType::Float64(_) => 9,
-            ConcreteDataType::Binary(_) => {
+            ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => {
                 // Now the encoder encode binary as a list of bytes so we can't use
                 // skip bytes.
                 let pos_before = deserializer.position();
@@ -271,8 +271,7 @@ impl SortField {
             ConcreteDataType::Decimal128(_) => 19,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
-            | ConcreteDataType::Dictionary(_)
-            | ConcreteDataType::Json(_) => 0,
+            | ConcreteDataType::Dictionary(_) => 0,
         };
         deserializer.advance(to_skip);
         Ok(to_skip)

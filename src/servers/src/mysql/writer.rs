@@ -210,7 +210,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Float32(v) => row_writer.write_col(v.0)?,
                     Value::Float64(v) => row_writer.write_col(v.0)?,
                     Value::String(v) => row_writer.write_col(v.as_utf8())?,
-                    Value::Binary(v) => match column.coltype {
+                    Value::Binary(v) | Value::Json(v) => match column.coltype {
                         ColumnType::MYSQL_TYPE_JSON => {
                             row_writer.write_col(jsonb::to_string(&v))?;
                         }
@@ -228,7 +228,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     )?,
                     Value::Interval(v) => row_writer.write_col(v.to_iso8601_string())?,
                     Value::Duration(v) => row_writer.write_col(v.to_std_duration())?,
-                    Value::List(_) | Value::Json(_) => {
+                    Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(
                                 "cannot write value {:?} in mysql protocol: unimplemented",
