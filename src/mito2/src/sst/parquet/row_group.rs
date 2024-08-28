@@ -202,8 +202,8 @@ impl<'a> InMemoryRowGroup<'a> {
                     continue;
                 };
 
+                let column = self.metadata.column(idx);
                 if let Some(cache) = &self.cache_manager {
-                    let column = self.metadata.column(idx);
                     // Put the page to the cache if we don't cache the whole row group.
                     if !cache_row_group_pages(column) {
                         let page_key = PageKey::Compressed {
@@ -218,7 +218,7 @@ impl<'a> InMemoryRowGroup<'a> {
                 }
 
                 *chunk = Some(Arc::new(ColumnChunkData::Dense {
-                    offset: self.metadata.column(idx).byte_range().0 as usize,
+                    offset: column.byte_range().0 as usize,
                     data,
                 }));
             }
@@ -260,7 +260,7 @@ impl<'a> InMemoryRowGroup<'a> {
 
                     *chunk = cache.get_pages(&page_key).map(|page_value| {
                         Arc::new(ColumnChunkData::Dense {
-                            offset: self.metadata.column(idx).byte_range().0 as usize,
+                            offset: column.byte_range().0 as usize,
                             data: page_value.compressed.clone(),
                         })
                     });
