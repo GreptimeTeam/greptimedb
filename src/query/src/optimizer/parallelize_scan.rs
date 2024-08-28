@@ -61,7 +61,6 @@ impl ParallelizeScan {
                     debug!(
                         "Assign {total_range_num} ranges to {expected_partition_num} partitions"
                     );
-
                     // update the partition ranges
                     let new_exec = region_scan_exec
                         .with_new_partitions(partition_ranges)

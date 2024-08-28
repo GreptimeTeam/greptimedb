@@ -25,7 +25,7 @@ use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datafusion::physical_plan::DisplayFormatType;
 use smallvec::SmallVec;
-use store_api::region_engine::RegionScannerRef;
+use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
 use tokio::sync::{mpsc, Mutex, Semaphore};
@@ -704,6 +704,37 @@ impl ScanInput {
         let rows_in_files: usize = self.files.iter().map(|f| f.num_rows()).sum();
         let rows_in_memtables: usize = self.memtables.iter().map(|m| m.stats().num_rows()).sum();
         rows_in_files + rows_in_memtables
+    }
+
+    /// Retrieves [`PartitionRange`] from memtable and files
+    pub(crate) fn partition_ranges(&self) -> Vec<PartitionRange> {
+        let mut id = 0;
+        let mut container = Vec::with_capacity(self.memtables.len() + self.files.len());
+
+        for memtable in &self.memtables {
+            let range = PartitionRange {
+                start: memtable.stats().time_range().unwrap().0,
+                end: memtable.stats().time_range().unwrap().1,
+                estimated_size: memtable.stats().bytes_allocated(),
+                identifier: id,
+            };
+            id += 1;
+            container.push(range);
+        }
+
+        for file in &self.files {
+            let range = PartitionRange {
+                start: file.meta_ref().time_range.0,
+                end: file.meta_ref().time_range.1,
+                // TODO(ruihang): maintain the size in file meta
+                estimated_size: 0,
+                identifier: id,
+            };
+            id += 1;
+            container.push(range);
+        }
+
+        container
     }
 }
 
