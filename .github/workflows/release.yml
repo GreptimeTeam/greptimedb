@@ -98,6 +98,16 @@ permissions:
   contents: write # Allows the action to create a release.
 
 jobs:
+  check-builder-rust-version:
+    name: Check rust version in builder
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Rust toolchain version
+        shell: bash
+        run: |
+          ./scripts/check-builder-rust-version.sh
+
   allocate-runners:
     name: Allocate runners
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
