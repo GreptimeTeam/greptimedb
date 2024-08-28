@@ -29,9 +29,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
-env:
-  RUST_TOOLCHAIN: nightly-2024-06-06
-
 jobs:
   check-typos-and-docs:
     name: Check typos and docs
@@ -64,9 +61,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -82,9 +77,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -107,9 +100,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: Swatinem/rust-cache@v2
         with:
           # Shares across multiple jobs
@@ -161,9 +152,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -181,7 +170,7 @@ jobs:
           name: bins
           path: .
       - name: Unzip binaries
-        run: | 
+        run: |
           tar -xvf ./bins.tar.gz
           rm ./bins.tar.gz
       - name: Run GreptimeDB
@@ -221,9 +210,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -274,9 +261,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: Swatinem/rust-cache@v2
         with:
           # Shares across multiple jobs
@@ -287,7 +272,7 @@ jobs:
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc --profile ci -- --bin greptime 
+        run: cargo gc --profile ci -- --bin greptime
       - name: Pack greptime binary
         shell: bash
         run: |
@@ -301,7 +286,7 @@ jobs:
           artifacts-dir: bin
           version: current
 
-  distributed-fuzztest: 
+  distributed-fuzztest:
     name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
     runs-on: ubuntu-latest
     needs:  build-greptime-ci
@@ -344,9 +329,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -416,12 +399,12 @@ jobs:
       - name: Describe Nodes
         if: failure()
         shell: bash
-        run: | 
-          kubectl describe nodes      
+        run: |
+          kubectl describe nodes
       - name: Export kind logs
         if: failure()
         shell: bash
-        run: | 
+        run: |
           kind export logs /tmp/kind
       - name: Upload logs
         if: failure()
@@ -433,13 +416,13 @@ jobs:
       - name: Delete cluster
         if: success()
         shell: bash
-        run: | 
+        run: |
           kind delete cluster
           docker stop $(docker ps -a -q)
           docker rm $(docker ps -a -q)
           docker system prune -f
 
-  distributed-fuzztest-with-chaos: 
+  distributed-fuzztest-with-chaos:
     name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
     runs-on: ubuntu-latest
     needs:  build-greptime-ci
@@ -447,7 +430,7 @@ jobs:
     strategy:
       matrix:
         target: ["fuzz_migrate_mito_regions", "fuzz_failover_mito_regions", "fuzz_failover_metric_regions"]
-        mode: 
+        mode:
           - name: "Remote WAL"
             minio: true
             kafka: true
@@ -484,9 +467,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -557,12 +538,12 @@ jobs:
       - name: Describe Nodes
         if: failure()
         shell: bash
-        run: | 
-          kubectl describe nodes      
+        run: |
+          kubectl describe nodes
       - name: Export kind logs
         if: failure()
         shell: bash
-        run: | 
+        run: |
           kind export logs /tmp/kind
       - name: Upload logs
         if: failure()
@@ -574,7 +555,7 @@ jobs:
       - name: Delete cluster
         if: success()
         shell: bash
-        run: | 
+        run: |
           kind delete cluster
           docker stop $(docker ps -a -q)
           docker rm $(docker ps -a -q)
@@ -627,9 +608,8 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -648,9 +628,8 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -674,9 +653,8 @@ jobs:
         with:
           version: "14.0"
       - name: Install toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: llvm-tools-preview
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2

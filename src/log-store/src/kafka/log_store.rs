@@ -20,19 +20,20 @@ use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use futures::future::try_join_all;
 use futures_util::StreamExt;
-use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{
     Entry, Id as EntryId, MultiplePartEntry, MultiplePartHeader, NaiveEntry,
 };
 use store_api::logstore::provider::{KafkaProvider, Provider};
-use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream};
+use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream, WalIndex};
 use store_api::storage::RegionId;
 
+use super::index::build_region_wal_index_iterator;
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
-use crate::kafka::index::GlobalIndexCollector;
+use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer};
+use crate::kafka::index::{GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE};
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
     convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
@@ -205,6 +206,7 @@ impl LogStore for KafkaLogStore {
         &self,
         provider: &Provider,
         entry_id: EntryId,
+        index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
         let provider = provider
             .as_kafka_provider()
@@ -232,35 +234,41 @@ impl LogStore for KafkaLogStore {
             .await
             .context(GetOffsetSnafu {
                 topic: &provider.topic,
-            })?
-            - 1;
-        // Reads entries with offsets in the range [start_offset, end_offset].
-        let start_offset = entry_id as i64;
+            })?;
 
-        debug!(
-            "Start reading entries in range [{}, {}] for ns {}",
-            start_offset, end_offset, provider
-        );
+        let region_indexes = if let (Some(index), Some(collector)) =
+            (index, self.client_manager.global_index_collector())
+        {
+            collector
+                .read_remote_region_index(index.location_id, provider, index.region_id, entry_id)
+                .await?
+        } else {
+            None
+        };
 
-        // Abort if there're no new entries.
-        // FIXME(niebayes): how come this case happens?
-        if start_offset > end_offset {
-            warn!(
-                "No new entries for ns {} in range [{}, {}]",
-                provider, start_offset, end_offset
-            );
+        let Some(iterator) = build_region_wal_index_iterator(
+            entry_id,
+            end_offset as u64,
+            region_indexes,
+            self.max_batch_bytes,
+            MIN_BATCH_WINDOW_SIZE,
+        ) else {
+            let range = entry_id..end_offset as u64;
+            warn!("No new entries in range {:?} of ns {}", range, provider);
             return Ok(futures_util::stream::empty().boxed());
-        }
+        };
 
-        let mut stream_consumer = StreamConsumerBuilder::new(client, StartOffset::At(start_offset))
-            .with_max_batch_size(self.max_batch_bytes as i32)
-            .with_max_wait_ms(self.consumer_wait_timeout.as_millis() as i32)
-            .build();
+        debug!("Reading entries with {:?} of ns {}", iterator, provider);
 
-        debug!(
-            "Built a stream consumer for ns {} to consume entries in range [{}, {}]",
-            provider, start_offset, end_offset
-        );
+        // Safety: Must be ok.
+        let mut stream_consumer = ConsumerBuilder::default()
+            .client(client)
+            // Safety: checked before.
+            .buffer(RecordsBuffer::new(iterator))
+            .max_batch_size(self.max_batch_bytes)
+            .max_wait_ms(self.consumer_wait_timeout.as_millis() as u32)
+            .build()
+            .unwrap();
 
         // A buffer is used to collect records to construct a complete entry.
         let mut entry_records: HashMap<RegionId, Vec<Record>> = HashMap::new();
@@ -511,7 +519,7 @@ mod tests {
         // 5 region
         assert_eq!(response.last_entry_ids.len(), 5);
         let got_entries = logstore
-            .read(&provider, 0)
+            .read(&provider, 0, None)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -584,7 +592,7 @@ mod tests {
         // 5 region
         assert_eq!(response.last_entry_ids.len(), 5);
         let got_entries = logstore
-            .read(&provider, 0)
+            .read(&provider, 0, None)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod admin;
 mod copy_database;
 mod copy_table_from;
 mod copy_table_to;
@@ -277,6 +278,7 @@ impl StatementExecutor {
             Statement::ShowIndex(show_index) => self.show_index(show_index, query_ctx).await,
             Statement::ShowStatus(_) => self.show_status(query_ctx).await,
             Statement::Use(db) => self.use_database(db, query_ctx).await,
+            Statement::Admin(admin) => self.execute_admin_command(admin, query_ctx).await,
         }
     }
 

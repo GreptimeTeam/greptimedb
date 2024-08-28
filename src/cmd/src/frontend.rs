@@ -261,7 +261,7 @@ impl StartCommand {
             &opts.component.tracing,
             opts.component.node_id.clone(),
         );
-        log_versions(version(), short_version());
+        log_versions(version(), short_version(), APP_NAME);
 
         info!("Frontend start command: {:#?}", self);
         info!("Frontend options: {:#?}", opts);

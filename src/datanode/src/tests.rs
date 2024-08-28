@@ -27,7 +27,7 @@ use common_runtime::Runtime;
 use query::dataframe::DataFrame;
 use query::plan::LogicalPlan;
 use query::planner::LogicalPlanner;
-use query::query_engine::DescribeResult;
+use query::query_engine::{DescribeResult, QueryEngineState};
 use query::{QueryEngine, QueryEngineContext};
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
@@ -84,6 +84,9 @@ impl QueryEngine for MockQueryEngine {
     }
 
     fn engine_context(&self, _query_ctx: QueryContextRef) -> QueryEngineContext {
+        unimplemented!()
+    }
+    fn engine_state(&self) -> &QueryEngineState {
         unimplemented!()
     }
 }

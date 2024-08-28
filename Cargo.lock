@@ -898,6 +898,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backon"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2caf634d05fe0642d0fb1ab43497fa627088ecd93f84b2d0f2a5d7b91f7730db"
+dependencies = [
+ "fastrand",
+]
+
+[[package]]
 name = "backtrace"
 version = "0.3.73"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1955,6 +1964,7 @@ dependencies = [
  "statrs",
  "store-api",
  "table",
+ "tokio",
 ]
 
 [[package]]
@@ -2111,7 +2121,7 @@ version = "0.9.2"
 dependencies = [
  "async-stream",
  "async-trait",
- "backon",
+ "backon 1.0.2",
  "common-base",
  "common-error",
  "common-macro",
@@ -4715,7 +4725,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.5.7",
+ "socket2 0.4.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -5840,6 +5850,7 @@ dependencies = [
  "common-time",
  "common-wal",
  "delta-encoding",
+ "derive_builder 0.12.0",
  "futures",
  "futures-util",
  "itertools 0.10.5",
@@ -7040,7 +7051,7 @@ checksum = "ba615070686c8781ce97376fdafca29d7c42f47b31d2230d7c8c1642ec823950"
 dependencies = [
  "anyhow",
  "async-trait",
- "backon",
+ "backon 0.4.4",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -8525,7 +8536,7 @@ dependencies = [
  "indoc",
  "libc",
  "memoffset 0.9.1",
- "parking_lot 0.12.3",
+ "parking_lot 0.11.2",
  "portable-atomic",
  "pyo3-build-config",
  "pyo3-ffi",

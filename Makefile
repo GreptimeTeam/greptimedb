@@ -8,6 +8,7 @@ CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
 IMAGE_TAG ?= latest
+DEV_BUILDER_IMAGE_TAG ?= 2024-06-06-b4b105ad-20240827021230
 BUILDX_MULTI_PLATFORM_BUILD ?= false
 BUILDX_BUILDER_NAME ?= gtbuilder
 BASE_IMAGE ?= ubuntu
@@ -77,7 +78,7 @@ build: ## Build debug version greptime.
 build-by-dev-builder: ## Build greptime by dev-builder.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
-	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:latest \
+	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} \
 	make build \
 	CARGO_EXTENSION="${CARGO_EXTENSION}" \
 	CARGO_PROFILE=${CARGO_PROFILE} \
@@ -91,7 +92,7 @@ build-by-dev-builder: ## Build greptime by dev-builder.
 build-android-bin: ## Build greptime binary for android.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
-	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-android:latest \
+	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-android:${DEV_BUILDER_IMAGE_TAG} \
 	make build \
 	CARGO_EXTENSION="ndk --platform 23 -t aarch64-linux-android" \
 	CARGO_PROFILE=release \
@@ -105,7 +106,7 @@ build-android-bin: ## Build greptime binary for android.
 strip-android-bin: build-android-bin ## Strip greptime binary for android.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb \
-	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-android:latest \
+	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-android:${DEV_BUILDER_IMAGE_TAG} \
 	bash -c '$${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-debug /greptimedb/target/aarch64-linux-android/release/greptime'
 
 .PHONY: clean
@@ -145,7 +146,7 @@ dev-builder: multi-platform-buildx ## Build dev-builder image.
 	docker buildx build --builder ${BUILDX_BUILDER_NAME} \
 	--build-arg="RUST_TOOLCHAIN=${RUST_TOOLCHAIN}" \
 	-f docker/dev-builder/${BASE_IMAGE}/Dockerfile \
-	-t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
+	-t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
 
 .PHONY: multi-platform-buildx
 multi-platform-buildx: ## Create buildx multi-platform builder.
@@ -203,7 +204,7 @@ stop-etcd: ## Stop single node etcd for testing purpose.
 run-it-in-container: start-etcd ## Run integration tests in dev-builder.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v /tmp:/tmp \
-	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:latest \
+	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} \
 	make test sqlness-test BUILD_JOBS=${BUILD_JOBS}
 
 .PHONY: start-cluster

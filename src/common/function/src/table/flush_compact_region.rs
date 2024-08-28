@@ -77,7 +77,7 @@ mod tests {
     use datatypes::vectors::UInt64Vector;
 
     use super::*;
-    use crate::function::{Function, FunctionContext};
+    use crate::function::{AsyncFunction, FunctionContext};
 
     macro_rules! define_region_function_test {
         ($name: ident, $func: ident) => {
@@ -97,8 +97,8 @@ mod tests {
                                      } if valid_types == ConcreteDataType::numerics()));
                 }
 
-                #[test]
-                fn [<test_ $name _missing_table_mutation>]() {
+                #[tokio::test]
+                async fn [<test_ $name _missing_table_mutation>]() {
                     let f = $func;
 
                     let args = vec![99];
@@ -108,15 +108,15 @@ mod tests {
                         .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
                         .collect::<Vec<_>>();
 
-                    let result = f.eval(FunctionContext::default(), &args).unwrap_err();
+                    let result = f.eval(FunctionContext::default(), &args).await.unwrap_err();
                     assert_eq!(
                         "Missing TableMutationHandler, not expected",
                         result.to_string()
                     );
                 }
 
-                #[test]
-                fn [<test_ $name>]() {
+                #[tokio::test]
+                async fn [<test_ $name>]() {
                     let f = $func;
 
 
@@ -127,7 +127,7 @@ mod tests {
                         .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
                         .collect::<Vec<_>>();
 
-                    let result = f.eval(FunctionContext::mock(), &args).unwrap();
+                    let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
 
                     let expect: VectorRef = Arc::new(UInt64Vector::from_slice([42]));
                     assert_eq!(expect, result);

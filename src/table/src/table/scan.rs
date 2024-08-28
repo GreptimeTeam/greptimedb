@@ -41,7 +41,7 @@ use crate::table::metrics::StreamMetrics;
 /// A plan to read multiple partitions from a region of a table.
 #[derive(Debug)]
 pub struct RegionScanExec {
-    scanner: Mutex<RegionScannerRef>,
+    scanner: Arc<Mutex<RegionScannerRef>>,
     arrow_schema: ArrowSchemaRef,
     /// The expected output ordering for the plan.
     output_ordering: Option<Vec<PhysicalSortExpr>>,
@@ -70,7 +70,7 @@ impl RegionScanExec {
         let append_mode = scanner_props.append_mode();
         let total_rows = scanner_props.total_rows();
         Self {
-            scanner: Mutex::new(scanner),
+            scanner: Arc::new(Mutex::new(scanner)),
             arrow_schema,
             output_ordering: None,
             metric: ExecutionPlanMetricsSet::new(),
@@ -102,9 +102,28 @@ impl RegionScanExec {
     }
 
     /// Update the partition ranges of underlying scanner.
-    pub fn set_partitions(&self, partitions: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
-        let mut scanner = self.scanner.lock().unwrap();
-        scanner.prepare(partitions)
+    pub fn with_new_partitions(
+        &self,
+        partitions: Vec<Vec<PartitionRange>>,
+    ) -> Result<Self, BoxedError> {
+        let num_partitions = partitions.len();
+        let mut properties = self.properties.clone();
+        properties.partitioning = Partitioning::UnknownPartitioning(num_partitions);
+
+        {
+            let mut scanner = self.scanner.lock().unwrap();
+            scanner.prepare(partitions)?;
+        }
+
+        Ok(Self {
+            scanner: self.scanner.clone(),
+            arrow_schema: self.arrow_schema.clone(),
+            output_ordering: self.output_ordering.clone(),
+            metric: self.metric.clone(),
+            properties,
+            append_mode: self.append_mode,
+            total_rows: self.total_rows,
+        })
     }
 }
 

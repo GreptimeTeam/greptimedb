@@ -159,8 +159,10 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::SET => self.parse_set_variables(),
 
+                    Keyword::ADMIN => self.parse_admin_command(),
+
                     Keyword::NoKeyword
-                        if w.value.to_uppercase() == tql_parser::TQL && w.quote_style.is_none() =>
+                        if w.quote_style.is_none() && w.value.to_uppercase() == tql_parser::TQL =>
                     {
                         self.parse_tql()
                     }

@@ -41,7 +41,6 @@ use datafusion_physical_expr::EquivalenceProperties;
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
-use greptime_proto::v1::QueryContext;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use session::context::QueryContextRef;
@@ -184,24 +183,25 @@ impl MergeScanExec {
         context: Arc<TaskContext>,
         partition: usize,
     ) -> Result<SendableRecordBatchStream> {
+        // prepare states to move
         let regions = self.regions.clone();
         let region_query_handler = self.region_query_handler.clone();
         let metric = MergeScanMetric::new(&self.metric);
-        let schema = Self::arrow_schema_to_schema(self.schema())?;
-
-        let dbname = context.task_id().unwrap_or_default();
-        let tracing_context = TracingContext::from_json(context.session_id().as_str());
-        let current_catalog = self.query_ctx.current_catalog().to_string();
-        let current_schema = self.query_ctx.current_schema().to_string();
-        let current_channel = self.query_ctx.channel();
-        let timezone = self.query_ctx.timezone().to_string();
-        let extensions = self.query_ctx.extensions();
-        let target_partition = self.target_partition;
-
+        let schema = self.schema.clone();
+        let query_ctx = self.query_ctx.clone();
         let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
         let plan = self.plan.clone();
+        let target_partition = self.target_partition;
+        let dbname = context.task_id().unwrap_or_default();
+        let tracing_context = TracingContext::from_json(context.session_id().as_str());
+        let current_channel = self.query_ctx.channel();
+
         let stream = Box::pin(stream!({
-            MERGE_SCAN_REGIONS.observe(regions.len() as f64);
+            // only report metrics once for each MergeScan
+            if partition == 0 {
+                MERGE_SCAN_REGIONS.observe(regions.len() as f64);
+            }
+
             let _finish_timer = metric.finish_time().timer();
             let mut ready_timer = metric.ready_time().timer();
             let mut first_consume_timer = Some(metric.first_consume_time().timer());
@@ -216,13 +216,7 @@ impl MergeScanExec {
                     header: Some(RegionRequestHeader {
                         tracing_context: tracing_context.to_w3c(),
                         dbname: dbname.clone(),
-                        query_context: Some(QueryContext {
-                            current_catalog: current_catalog.clone(),
-                            current_schema: current_schema.clone(),
-                            timezone: timezone.clone(),
-                            extensions: extensions.clone(),
-                            channel: current_channel as u32,
-                        }),
+                        query_context: Some(query_ctx.as_ref().into()),
                     }),
                     region_id,
                     plan: plan.clone(),

@@ -26,11 +26,35 @@ use crate::function::{Function, FunctionContext};
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseFunction;
 
-const NAME: &str = "database";
+#[derive(Clone, Debug, Default)]
+pub struct CurrentSchemaFunction;
+
+const DATABASE_FUNCTION_NAME: &str = "database";
+const CURRENT_SCHEMA_FUNCTION_NAME: &str = "current_schema";
 
 impl Function for DatabaseFunction {
     fn name(&self) -> &str {
-        NAME
+        DATABASE_FUNCTION_NAME
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::string_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::uniform(0, vec![], Volatility::Immutable)
+    }
+
+    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+        let db = func_ctx.query_ctx.current_schema();
+
+        Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
+    }
+}
+
+impl Function for CurrentSchemaFunction {
+    fn name(&self) -> &str {
+        CURRENT_SCHEMA_FUNCTION_NAME
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
@@ -51,6 +75,12 @@ impl Function for DatabaseFunction {
 impl fmt::Display for DatabaseFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DATABASE")
+    }
+}
+
+impl fmt::Display for CurrentSchemaFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CURRENT_SCHEMA")
     }
 }
 
