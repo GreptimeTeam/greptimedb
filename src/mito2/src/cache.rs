@@ -38,7 +38,9 @@ use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
-use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
+use crate::metrics::{
+    CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS, GET_CACHE_ELAPSED, PUT_CACHE_ELAPSED,
+};
 use crate::read::Batch;
 use crate::sst::file::FileId;
 
@@ -158,6 +160,7 @@ impl CacheManager {
 
     /// Gets pages for the row group.
     pub fn get_pages(&self, page_key: &PageKey) -> Option<Arc<PageValue>> {
+        let _timer = GET_CACHE_ELAPSED.start_timer();
         self.page_cache.as_ref().and_then(|page_cache| {
             let value = page_cache.get(page_key);
             update_hit_miss(value, PAGE_TYPE)
@@ -166,6 +169,7 @@ impl CacheManager {
 
     /// Puts pages of the row group into the cache.
     pub fn put_pages(&self, page_key: PageKey, pages: Arc<PageValue>) {
+        let _timer = PUT_CACHE_ELAPSED.start_timer();
         if let Some(cache) = &self.page_cache {
             CACHE_BYTES
                 .with_label_values(&[PAGE_TYPE])

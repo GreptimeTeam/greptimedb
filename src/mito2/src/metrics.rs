@@ -133,6 +133,8 @@ lazy_static! {
         vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
+    pub static ref GET_CACHE_ELAPSED: Histogram = READ_STAGE_ELAPSED.with_label_values(&["get_cache"]);
+    pub static ref PUT_CACHE_ELAPSED: Histogram = READ_STAGE_ELAPSED.with_label_values(&["put_cache"]);
     /// Counter of rows read from different source.
     pub static ref READ_ROWS_TOTAL: IntCounterVec =
         register_int_counter_vec!("greptime_mito_read_rows_total", "mito read rows total", &[TYPE_LABEL]).unwrap();
