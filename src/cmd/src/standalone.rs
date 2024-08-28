@@ -178,6 +178,16 @@ impl Configurable for StandaloneOptions {
     }
 }
 
+/// The [`StandaloneOptions`] is only defined in cmd crate,
+/// we don't want to make `frontend` depends on it, so impl [`Into`]
+/// rather than [`From`].
+#[allow(clippy::from_over_into)]
+impl Into<FrontendOptions> for StandaloneOptions {
+    fn into(self) -> FrontendOptions {
+        self.frontend_options()
+    }
+}
+
 impl StandaloneOptions {
     pub fn frontend_options(&self) -> FrontendOptions {
         let cloned_opts = self.clone();
@@ -510,7 +520,7 @@ impl StartCommand {
                 .build(),
         );
         let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            opts.wal.into(),
+            opts.wal.clone().into(),
             kv_backend.clone(),
         ));
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
@@ -533,7 +543,7 @@ impl StartCommand {
         .await?;
 
         let mut frontend = FrontendBuilder::new(
-            fe_opts.clone(),
+            fe_opts,
             kv_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager.clone(),
@@ -561,7 +571,7 @@ impl StartCommand {
 
         let (tx, _rx) = broadcast::channel(1);
 
-        let servers = Services::new(fe_opts, Arc::new(frontend.clone()), plugins)
+        let servers = Services::new(opts, Arc::new(frontend.clone()), plugins)
             .build()
             .await
             .context(StartFrontendSnafu)?;
