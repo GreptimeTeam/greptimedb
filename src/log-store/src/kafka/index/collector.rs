@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use common_telemetry::{error, info};
 use futures::future::try_join_all;
+use object_store::ErrorKind;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
@@ -28,8 +29,9 @@ use tokio::select;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex as TokioMutex;
 
+use super::default_index_file;
 use crate::error::{self, Result};
-use crate::kafka::index::encoder::IndexEncoder;
+use crate::kafka::index::encoder::{DatanodeWalIndexes, IndexEncoder};
 use crate::kafka::index::JsonIndexEncoder;
 use crate::kafka::worker::{DumpIndexRequest, TruncateIndexRequest, WorkerRequest};
 
@@ -52,10 +54,11 @@ pub trait IndexCollector: Send + Sync {
 
 /// The [`GlobalIndexCollector`] struct is responsible for managing index entries
 /// across multiple providers.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GlobalIndexCollector {
     providers: Arc<TokioMutex<HashMap<Arc<KafkaProvider>, Sender<WorkerRequest>>>>,
-    task: CollectionTask,
+    operator: object_store::ObjectStore,
+    _handle: CollectionTaskHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -103,7 +106,7 @@ impl CollectionTask {
     /// The background task performs two main operations:
     /// - Persists the WAL index to the specified `path` at every `dump_index_interval`.
     /// - Updates the latest index ID for each WAL provider at every `checkpoint_interval`.
-    fn run(&self) {
+    fn run(self) -> CollectionTaskHandle {
         let mut dump_index_interval = tokio::time::interval(self.dump_index_interval);
         let running = self.running.clone();
         let moved_self = self.clone();
@@ -122,13 +125,21 @@ impl CollectionTask {
                 }
             }
         });
+        CollectionTaskHandle {
+            running: self.running.clone(),
+        }
     }
 }
 
-impl Drop for CollectionTask {
+impl Drop for CollectionTaskHandle {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
     }
+}
+
+#[derive(Debug, Default)]
+struct CollectionTaskHandle {
+    running: Arc<AtomicBool>,
 }
 
 impl GlobalIndexCollector {
@@ -148,16 +159,65 @@ impl GlobalIndexCollector {
         let task = CollectionTask {
             providers: providers.clone(),
             dump_index_interval,
-            operator,
+            operator: operator.clone(),
             path,
             running: Arc::new(AtomicBool::new(true)),
         };
-        task.run();
-        Self { providers, task }
+        let handle = task.run();
+        Self {
+            providers,
+            operator,
+            _handle: handle,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_for_test(operator: object_store::ObjectStore) -> Self {
+        Self {
+            providers: Default::default(),
+            operator,
+            _handle: Default::default(),
+        }
     }
 }
 
 impl GlobalIndexCollector {
+    /// Retrieve [`EntryId`]s for a specified `region_id` in `datanode_id`
+    /// that are greater than or equal to a given `entry_id`.
+    pub(crate) async fn read_remote_region_index(
+        &self,
+        location_id: u64,
+        provider: &KafkaProvider,
+        region_id: RegionId,
+        entry_id: EntryId,
+    ) -> Result<Option<(BTreeSet<EntryId>, EntryId)>> {
+        let path = default_index_file(location_id);
+
+        let bytes = match self.operator.read(&path).await {
+            Ok(bytes) => bytes.to_vec(),
+            Err(err) => {
+                if err.kind() == ErrorKind::NotFound {
+                    return Ok(None);
+                } else {
+                    return Err(err).context(error::ReadIndexSnafu { path });
+                }
+            }
+        };
+
+        match DatanodeWalIndexes::decode(&bytes)?.provider(provider) {
+            Some(indexes) => {
+                let last_index = indexes.last_index();
+                let indexes = indexes
+                    .region(region_id)
+                    .unwrap_or_default()
+                    .split_off(&entry_id);
+
+                Ok(Some((indexes, last_index)))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Creates a new [`ProviderLevelIndexCollector`] for a specified provider.
     pub(crate) async fn provider_level_index_collector(
         &self,
@@ -265,4 +325,93 @@ impl IndexCollector for NoopCollector {
     fn set_latest_entry_id(&mut self, _entry_id: EntryId) {}
 
     fn dump(&mut self, _encoder: &dyn IndexEncoder) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeSet, HashMap};
+
+    use store_api::logstore::provider::KafkaProvider;
+    use store_api::storage::RegionId;
+
+    use crate::kafka::index::collector::RegionIndexes;
+    use crate::kafka::index::encoder::IndexEncoder;
+    use crate::kafka::index::JsonIndexEncoder;
+    use crate::kafka::{default_index_file, GlobalIndexCollector};
+
+    #[tokio::test]
+    async fn test_read_remote_region_index() {
+        let operator = object_store::ObjectStore::new(object_store::services::Memory::default())
+            .unwrap()
+            .finish();
+
+        let path = default_index_file(0);
+        let encoder = JsonIndexEncoder::default();
+        encoder.encode(
+            &KafkaProvider::new("my_topic_0".to_string()),
+            &RegionIndexes {
+                regions: HashMap::from([(RegionId::new(1, 1), BTreeSet::from([1, 5, 15]))]),
+                latest_entry_id: 20,
+            },
+        );
+        let bytes = encoder.finish().unwrap();
+        let mut writer = operator.writer(&path).await.unwrap();
+        writer.write(bytes).await.unwrap();
+        writer.close().await.unwrap();
+
+        let collector = GlobalIndexCollector::new_for_test(operator.clone());
+        // Index file doesn't exist
+        let result = collector
+            .read_remote_region_index(
+                1,
+                &KafkaProvider::new("my_topic_0".to_string()),
+                RegionId::new(1, 1),
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(result.is_none());
+
+        // RegionId doesn't exist
+        let (indexes, last_index) = collector
+            .read_remote_region_index(
+                0,
+                &KafkaProvider::new("my_topic_0".to_string()),
+                RegionId::new(1, 2),
+                5,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(indexes, BTreeSet::new());
+        assert_eq!(last_index, 20);
+
+        // RegionId(1, 1), Start EntryId: 5
+        let (indexes, last_index) = collector
+            .read_remote_region_index(
+                0,
+                &KafkaProvider::new("my_topic_0".to_string()),
+                RegionId::new(1, 1),
+                5,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(indexes, BTreeSet::from([5, 15]));
+        assert_eq!(last_index, 20);
+
+        // RegionId(1, 1), Start EntryId: 20
+        let (indexes, last_index) = collector
+            .read_remote_region_index(
+                0,
+                &KafkaProvider::new("my_topic_0".to_string()),
+                RegionId::new(1, 1),
+                20,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(indexes, BTreeSet::new());
+        assert_eq!(last_index, 20);
+    }
 }

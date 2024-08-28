@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::min;
-use std::collections::VecDeque;
+use std::cmp::{max, min};
+use std::collections::{BTreeSet, VecDeque};
+use std::fmt::Debug;
 use std::ops::Range;
 
 use store_api::logstore::EntryId;
@@ -27,7 +28,7 @@ pub(crate) struct NextBatchHint {
 }
 
 /// An iterator over WAL (Write-Ahead Log) entries index for a region.
-pub trait RegionWalIndexIterator: Send + Sync {
+pub trait RegionWalIndexIterator: Send + Sync + Debug {
     /// Returns next batch hint.
     fn next_batch_hint(&self, avg_size: usize) -> Option<NextBatchHint>;
 
@@ -36,9 +37,13 @@ pub trait RegionWalIndexIterator: Send + Sync {
 
     // Advances the iterator and returns the next EntryId.
     fn next(&mut self) -> Option<EntryId>;
+
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Represents a range [next_entry_id, end_entry_id) of WAL entries for a region.
+#[derive(Debug)]
 pub struct RegionWalRange {
     current_entry_id: EntryId,
     end_entry_id: EntryId,
@@ -96,10 +101,18 @@ impl RegionWalIndexIterator for RegionWalRange {
             None
         }
     }
+
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
+
+pub const MIN_BATCH_WINDOW_SIZE: usize = 4 * 1024 * 1024;
 
 /// Represents an index of Write-Ahead Log entries for a region,
 /// stored as a vector of [EntryId]s.
+#[derive(Debug)]
 pub struct RegionWalVecIndex {
     index: VecDeque<EntryId>,
     min_batch_window_size: usize,
@@ -134,11 +147,17 @@ impl RegionWalIndexIterator for RegionWalVecIndex {
     fn next(&mut self) -> Option<EntryId> {
         self.index.pop_front()
     }
+
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Represents an iterator over multiple region WAL indexes.
 ///
 /// Allowing iteration through multiple WAL indexes.
+#[derive(Debug)]
 pub struct MultipleRegionWalIndexIterator {
     iterator: VecDeque<Box<dyn RegionWalIndexIterator>>,
 }
@@ -184,6 +203,53 @@ impl RegionWalIndexIterator for MultipleRegionWalIndexIterator {
         }
 
         self.iterator.front_mut().and_then(|iter| iter.next())
+    }
+
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Builds [`RegionWalIndexIterator`].
+///
+/// Returns None means there are no entries to replay.
+pub fn build_region_wal_index_iterator(
+    start_entry_id: EntryId,
+    end_entry_id: EntryId,
+    region_indexes: Option<(BTreeSet<EntryId>, EntryId)>,
+    max_batch_bytes: usize,
+    min_window_size: usize,
+) -> Option<Box<dyn RegionWalIndexIterator>> {
+    if (start_entry_id..end_entry_id).is_empty() {
+        return None;
+    }
+
+    match region_indexes {
+        Some((region_indexes, last_index)) => {
+            if region_indexes.is_empty() && last_index >= end_entry_id {
+                return None;
+            }
+
+            let mut iterator: Vec<Box<dyn RegionWalIndexIterator>> = Vec::with_capacity(2);
+            if !region_indexes.is_empty() {
+                let index = RegionWalVecIndex::new(region_indexes, min_window_size);
+                iterator.push(Box::new(index));
+            }
+            let known_last_index = max(last_index, start_entry_id);
+            if known_last_index < end_entry_id {
+                let range = known_last_index..end_entry_id;
+                let index = RegionWalRange::new(range, max_batch_bytes);
+                iterator.push(Box::new(index));
+            }
+
+            Some(Box::new(MultipleRegionWalIndexIterator::new(iterator)))
+        }
+        None => {
+            let range = start_entry_id..end_entry_id;
+
+            Some(Box::new(RegionWalRange::new(range, max_batch_bytes)))
+        }
     }
 }
 
@@ -352,5 +418,70 @@ mod tests {
         assert_eq!(iter.next_batch_hint(10), None,);
         assert_eq!(iter.peek(), None);
         assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_build_region_wal_index_iterator() {
+        let iterator = build_region_wal_index_iterator(1024, 1024, None, 5, 5);
+        assert!(iterator.is_none());
+
+        let iterator = build_region_wal_index_iterator(1024, 1023, None, 5, 5);
+        assert!(iterator.is_none());
+
+        let iterator =
+            build_region_wal_index_iterator(1024, 1024, Some((BTreeSet::new(), 1024)), 5, 5);
+        assert!(iterator.is_none());
+
+        let iterator =
+            build_region_wal_index_iterator(1, 1024, Some((BTreeSet::new(), 1024)), 5, 5);
+        assert!(iterator.is_none());
+
+        let iterator =
+            build_region_wal_index_iterator(1, 1024, Some((BTreeSet::new(), 1025)), 5, 5);
+        assert!(iterator.is_none());
+
+        let iterator = build_region_wal_index_iterator(
+            1,
+            1024,
+            Some((BTreeSet::from([512, 756]), 1024)),
+            5,
+            5,
+        )
+        .unwrap();
+        let iter = iterator
+            .as_any()
+            .downcast_ref::<MultipleRegionWalIndexIterator>()
+            .unwrap();
+        assert_eq!(iter.iterator.len(), 1);
+        let vec_index = iter.iterator[0]
+            .as_any()
+            .downcast_ref::<RegionWalVecIndex>()
+            .unwrap();
+        assert_eq!(vec_index.index, VecDeque::from([512, 756]));
+
+        let iterator = build_region_wal_index_iterator(
+            1,
+            1024,
+            Some((BTreeSet::from([512, 756]), 1023)),
+            5,
+            5,
+        )
+        .unwrap();
+        let iter = iterator
+            .as_any()
+            .downcast_ref::<MultipleRegionWalIndexIterator>()
+            .unwrap();
+        assert_eq!(iter.iterator.len(), 2);
+        let vec_index = iter.iterator[0]
+            .as_any()
+            .downcast_ref::<RegionWalVecIndex>()
+            .unwrap();
+        assert_eq!(vec_index.index, VecDeque::from([512, 756]));
+        let wal_range = iter.iterator[1]
+            .as_any()
+            .downcast_ref::<RegionWalRange>()
+            .unwrap();
+        assert_eq!(wal_range.current_entry_id, 1023);
+        assert_eq!(wal_range.end_entry_id, 1024);
     }
 }

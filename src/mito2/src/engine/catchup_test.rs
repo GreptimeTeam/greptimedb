@@ -94,6 +94,7 @@ async fn test_catchup_with_last_entry_id() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: last_entry_id,
+                location_id: None,
             }),
         )
         .await;
@@ -125,6 +126,7 @@ async fn test_catchup_with_last_entry_id() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: last_entry_id,
+                location_id: None,
             }),
         )
         .await;
@@ -191,6 +193,7 @@ async fn test_catchup_with_incorrect_last_entry_id() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: incorrect_last_entry_id,
+                location_id: None,
             }),
         )
         .await
@@ -207,6 +210,7 @@ async fn test_catchup_with_incorrect_last_entry_id() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: incorrect_last_entry_id,
+                location_id: None,
             }),
         )
         .await;
@@ -255,6 +259,7 @@ async fn test_catchup_without_last_entry_id() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: None,
+                location_id: None,
             }),
         )
         .await;
@@ -285,6 +290,7 @@ async fn test_catchup_without_last_entry_id() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: None,
+                location_id: None,
             }),
         )
         .await;
@@ -354,6 +360,7 @@ async fn test_catchup_with_manifest_update() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: None,
+                location_id: None,
             }),
         )
         .await;
@@ -390,6 +397,7 @@ async fn test_catchup_with_manifest_update() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: None,
+                location_id: None,
             }),
         )
         .await;
@@ -411,6 +419,7 @@ async fn test_catchup_not_exist() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: None,
+                location_id: None,
             }),
         )
         .await

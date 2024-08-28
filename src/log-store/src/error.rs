@@ -304,6 +304,15 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display("Failed to read index, path: {path}"))]
+    ReadIndex {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: object_store::Error,
+        path: String,
+    },
+
     #[snafu(display(
         "The length of meta if exceeded the limit: {}, actual: {}",
         limit,

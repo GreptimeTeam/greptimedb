@@ -27,6 +27,7 @@ impl HandlerContext {
             region_id,
             last_entry_id,
             wait_for_replay_timeout,
+            location_id,
         }: UpgradeRegion,
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
@@ -62,6 +63,7 @@ impl HandlerContext {
                                 RegionRequest::Catchup(RegionCatchupRequest {
                                     set_writable: true,
                                     entry_id: last_entry_id,
+                                    location_id,
                                 }),
                             )
                             .await?;
@@ -151,6 +153,7 @@ mod tests {
                     region_id,
                     last_entry_id: None,
                     wait_for_replay_timeout,
+                    location_id: None,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -191,6 +194,7 @@ mod tests {
                     region_id,
                     last_entry_id: None,
                     wait_for_replay_timeout,
+                    location_id: None,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -232,6 +236,7 @@ mod tests {
                     region_id,
                     last_entry_id: None,
                     wait_for_replay_timeout,
+                    location_id: None,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -274,8 +279,9 @@ mod tests {
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
-                    last_entry_id: None,
                     wait_for_replay_timeout,
+                    last_entry_id: None,
+                    location_id: None,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -293,6 +299,7 @@ mod tests {
                 region_id,
                 last_entry_id: None,
                 wait_for_replay_timeout: Some(Duration::from_millis(500)),
+                location_id: None,
             })
             .await;
         assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -337,6 +344,7 @@ mod tests {
                 region_id,
                 last_entry_id: None,
                 wait_for_replay_timeout: None,
+                location_id: None,
             })
             .await;
         assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -354,6 +362,7 @@ mod tests {
                 region_id,
                 last_entry_id: None,
                 wait_for_replay_timeout: Some(Duration::from_millis(200)),
+                location_id: None,
             })
             .await;
         assert_matches!(reply, InstructionReply::UpgradeRegion(_));
