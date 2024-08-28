@@ -137,6 +137,12 @@ impl From<QueryContext> for api::v1::QueryContext {
     }
 }
 
+impl From<&QueryContext> for api::v1::QueryContext {
+    fn from(ctx: &QueryContext) -> Self {
+        ctx.clone().into()
+    }
+}
+
 impl QueryContext {
     pub fn arc() -> QueryContextRef {
         Arc::new(QueryContextBuilder::default().build())
