@@ -92,6 +92,7 @@ DROP TABLE last_row_table;
 
 Affected Rows: 0
 
+-- SQLNESS REPLACE (line\s\d+\scolumn\s\d+) PLACE
 create table if not exists invalid_merge_mode(
     host string,
     ts timestamp,
@@ -103,7 +104,7 @@ create table if not exists invalid_merge_mode(
 engine=mito
 with('merge_mode'='first_row');
 
-Error: 1004(InvalidArguments), Invalid options: Matching variant not found at line 1 column 76
+Error: 1004(InvalidArguments), Invalid options: Matching variant not found at PLACE
 
 create table if not exists invalid_merge_mode(
     host string,

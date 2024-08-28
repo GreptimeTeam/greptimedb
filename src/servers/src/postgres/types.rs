@@ -78,7 +78,7 @@ pub(super) fn encode_value(
         Value::Float32(v) => builder.encode_field(&v.0),
         Value::Float64(v) => builder.encode_field(&v.0),
         Value::String(v) => builder.encode_field(&v.as_utf8()),
-        Value::Binary(v) => match datatype {
+        Value::Binary(v) | Value::Json(v) => match datatype {
             ConcreteDataType::Json(_) => builder.encode_field(&jsonb::to_string(v)),
             _ => {
                 let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
@@ -131,8 +131,7 @@ pub(super) fn encode_value(
         }
         Value::Interval(v) => builder.encode_field(&PgInterval::from(*v)),
         Value::Decimal128(v) => builder.encode_field(&v.to_string()),
-        // Value of json type is represented as Value::Binary(_)
-        Value::List(_) | Value::Duration(_) | Value::Json(_) => {
+        Value::List(_) | Value::Duration(_) => {
             Err(PgWireError::ApiError(Box::new(Error::Internal {
                 err_msg: format!(
                     "cannot write value {:?} in postgres protocol: unimplemented",

@@ -44,6 +44,7 @@ SELECT * from last_row_table ORDER BY host, ts;
 
 DROP TABLE last_row_table;
 
+-- SQLNESS REPLACE (line\s\d+\scolumn\s\d+) PLACE
 create table if not exists invalid_merge_mode(
     host string,
     ts timestamp,

@@ -778,7 +778,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Float32(v) => serde_json::Value::from(v.0),
             Value::Float64(v) => serde_json::Value::from(v.0),
             Value::String(bytes) => serde_json::Value::String(bytes.into_string()),
-            Value::Binary(bytes) | Value::Json(bytes) => serde_json::to_value(bytes)?,
+            Value::Binary(bytes) => serde_json::to_value(bytes)?,
             Value::Date(v) => serde_json::Value::Number(v.val().into()),
             Value::DateTime(v) => serde_json::Value::Number(v.val().into()),
             Value::List(v) => serde_json::to_value(v)?,
@@ -787,6 +787,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Interval(v) => serde_json::to_value(v.to_i128())?,
             Value::Duration(v) => serde_json::to_value(v.value())?,
             Value::Decimal128(v) => serde_json::to_value(v.to_string())?,
+            Value::Json(bytes) => jsonb::from_slice(&bytes).unwrap_or_default().into(),
         };
 
         Ok(json_value)
@@ -992,7 +993,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::Float32(v) => Value::Float32(v),
             ValueRef::Float64(v) => Value::Float64(v),
             ValueRef::String(v) => Value::String(v.into()),
-            ValueRef::Binary(v) | ValueRef::Json(v) => Value::Binary(v.into()),
+            ValueRef::Binary(v) => Value::Binary(v.into()),
             ValueRef::Date(v) => Value::Date(v),
             ValueRef::DateTime(v) => Value::DateTime(v),
             ValueRef::Timestamp(v) => Value::Timestamp(v),
@@ -1001,6 +1002,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::Duration(v) => Value::Duration(v),
             ValueRef::List(v) => v.to_value(),
             ValueRef::Decimal128(v) => Value::Decimal128(v),
+            ValueRef::Json(v) => Value::Json(v.into()),
         }
     }
 }
@@ -2136,6 +2138,15 @@ mod tests {
                 items: vec![Value::Int32(123)],
                 datatype: ConcreteDataType::int32_datatype(),
             }))
+        );
+
+        let jsonb_value =
+            jsonb::parse_value(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#.as_bytes())
+                .unwrap();
+        let json_value: serde_json::Value = jsonb_value.clone().into();
+        assert_eq!(
+            json_value,
+            to_json(Value::Json(jsonb_value.to_vec().into()))
         );
     }
 
