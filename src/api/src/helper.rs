@@ -137,7 +137,6 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                     ConcreteDataType::decimal128_default_datatype()
                 }
             }
-            ColumnDataType::Json => ConcreteDataType::json_datatype(),
         }
     }
 }
@@ -237,7 +236,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::UInt64(_) => ColumnDataType::Uint64,
             ConcreteDataType::Float32(_) => ColumnDataType::Float32,
             ConcreteDataType::Float64(_) => ColumnDataType::Float64,
-            ConcreteDataType::Binary(_) => ColumnDataType::Binary,
+            ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => ColumnDataType::Binary,
             ConcreteDataType::String(_) => ColumnDataType::String,
             ConcreteDataType::Date(_) => ColumnDataType::Date,
             ConcreteDataType::DateTime(_) => ColumnDataType::Datetime,
@@ -259,7 +258,6 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 IntervalType::MonthDayNano(_) => ColumnDataType::IntervalMonthDayNano,
             },
             ConcreteDataType::Decimal128(_) => ColumnDataType::Decimal128,
-            ConcreteDataType::Json(_) => ColumnDataType::Json,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
             | ConcreteDataType::Dictionary(_)
@@ -395,10 +393,6 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
         },
         ColumnDataType::Decimal128 => Values {
             decimal128_values: Vec::with_capacity(capacity),
-            ..Default::default()
-        },
-        ColumnDataType::Json => Values {
-            json_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
     }
@@ -575,7 +569,6 @@ pub fn pb_value_to_value_ref<'a>(
                 ))
             }
         }
-        ValueData::JsonValue(v) => ValueRef::Json(v),
     }
 }
 
@@ -840,7 +833,12 @@ pub fn is_column_type_value_eq(
     expect_type: &ConcreteDataType,
 ) -> bool {
     ColumnDataTypeWrapper::try_new(type_value, type_extension)
-        .map(|wrapper| ConcreteDataType::from(wrapper) == *expect_type)
+        .map(|wrapper| {
+            let datatype = ConcreteDataType::from(wrapper);
+            (datatype == *expect_type)
+                || (datatype == ConcreteDataType::binary_datatype()
+                    && *expect_type == ConcreteDataType::json_datatype())
+        })
         .unwrap_or(false)
 }
 
@@ -938,7 +936,7 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
             value_data: Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
         },
         Value::Json(v) => v1::Value {
-            value_data: Some(ValueData::JsonValue(v.to_vec())),
+            value_data: Some(ValueData::BinaryValue(v.to_vec())),
         },
         Value::List(_) | Value::Duration(_) => return None,
     };
@@ -978,7 +976,6 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
         ValueData::IntervalDayTimeValue(_) => ColumnDataType::IntervalDayTime,
         ValueData::IntervalMonthDayNanoValue(_) => ColumnDataType::IntervalMonthDayNano,
         ValueData::Decimal128Value(_) => ColumnDataType::Decimal128,
-        ValueData::JsonValue(_) => ColumnDataType::Json,
     };
     Some(value_type)
 }
@@ -1036,7 +1033,7 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 }
             }),
             Value::Decimal128(v) => Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
-            Value::Json(v) => Some(ValueData::JsonValue(v.to_vec())),
+            Value::Json(v) => Some(ValueData::BinaryValue(v.to_vec())),
             Value::List(_) | Value::Duration(_) => unreachable!(),
         },
     }
