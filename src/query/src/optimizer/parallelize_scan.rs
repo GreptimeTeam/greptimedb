@@ -81,11 +81,15 @@ impl ParallelizeScan {
     /// Distribute [`PartitionRange`]s to each partition.
     ///
     /// Currently we use a simple round-robin strategy to assign ranges to partitions.
+    /// This method may return partitions with smaller number than `expected_partition_num`
+    /// if the number of ranges is smaller than `expected_partition_num`. But this will
+    /// return at least one partition.
     fn assign_partition_range(
         ranges: Vec<PartitionRange>,
         expected_partition_num: usize,
     ) -> Vec<Vec<PartitionRange>> {
-        let mut partition_ranges = vec![vec![]; expected_partition_num];
+        let actual_partition_num = expected_partition_num.min(ranges.len()).max(1);
+        let mut partition_ranges = vec![vec![]; actual_partition_num];
 
         // round-robin assignment
         for (i, range) in ranges.into_iter().enumerate() {
@@ -94,5 +98,114 @@ impl ParallelizeScan {
         }
 
         partition_ranges
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use common_time::timestamp::TimeUnit;
+    use common_time::Timestamp;
+
+    use super::*;
+
+    #[test]
+    fn test_assign_partition_range() {
+        let ranges = vec![
+            PartitionRange {
+                start: Timestamp::new(0, TimeUnit::Second),
+                end: Timestamp::new(10, TimeUnit::Second),
+                estimated_size: 100,
+                identifier: 1,
+            },
+            PartitionRange {
+                start: Timestamp::new(10, TimeUnit::Second),
+                end: Timestamp::new(20, TimeUnit::Second),
+                estimated_size: 200,
+                identifier: 2,
+            },
+            PartitionRange {
+                start: Timestamp::new(20, TimeUnit::Second),
+                end: Timestamp::new(30, TimeUnit::Second),
+                estimated_size: 150,
+                identifier: 3,
+            },
+            PartitionRange {
+                start: Timestamp::new(30, TimeUnit::Second),
+                end: Timestamp::new(40, TimeUnit::Second),
+                estimated_size: 250,
+                identifier: 4,
+            },
+        ];
+
+        // assign to 2 partitions
+        let expected_partition_num = 2;
+        let result =
+            ParallelizeScan::assign_partition_range(ranges.clone(), expected_partition_num);
+        let expected = vec![
+            vec![
+                PartitionRange {
+                    start: Timestamp::new(0, TimeUnit::Second),
+                    end: Timestamp::new(10, TimeUnit::Second),
+                    estimated_size: 100,
+                    identifier: 1,
+                },
+                PartitionRange {
+                    start: Timestamp::new(20, TimeUnit::Second),
+                    end: Timestamp::new(30, TimeUnit::Second),
+                    estimated_size: 150,
+                    identifier: 3,
+                },
+            ],
+            vec![
+                PartitionRange {
+                    start: Timestamp::new(10, TimeUnit::Second),
+                    end: Timestamp::new(20, TimeUnit::Second),
+                    estimated_size: 200,
+                    identifier: 2,
+                },
+                PartitionRange {
+                    start: Timestamp::new(30, TimeUnit::Second),
+                    end: Timestamp::new(40, TimeUnit::Second),
+                    estimated_size: 250,
+                    identifier: 4,
+                },
+            ],
+        ];
+        assert_eq!(result, expected);
+
+        // assign 4 ranges to 5 partitions. Only 4 partitions are returned.
+        let expected_partition_num = 5;
+        let result = ParallelizeScan::assign_partition_range(ranges, expected_partition_num);
+        let expected = vec![
+            vec![PartitionRange {
+                start: Timestamp::new(0, TimeUnit::Second),
+                end: Timestamp::new(10, TimeUnit::Second),
+                estimated_size: 100,
+                identifier: 1,
+            }],
+            vec![PartitionRange {
+                start: Timestamp::new(10, TimeUnit::Second),
+                end: Timestamp::new(20, TimeUnit::Second),
+                estimated_size: 200,
+                identifier: 2,
+            }],
+            vec![PartitionRange {
+                start: Timestamp::new(20, TimeUnit::Second),
+                end: Timestamp::new(30, TimeUnit::Second),
+                estimated_size: 150,
+                identifier: 3,
+            }],
+            vec![PartitionRange {
+                start: Timestamp::new(30, TimeUnit::Second),
+                end: Timestamp::new(40, TimeUnit::Second),
+                estimated_size: 250,
+                identifier: 4,
+            }],
+        ];
+        assert_eq!(result, expected);
+
+        // assign 0 ranges to 5 partitions. Only 1 partition is returned.
+        let result = ParallelizeScan::assign_partition_range(vec![], 5);
+        assert_eq!(result.len(), 1);
     }
 }

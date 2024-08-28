@@ -143,7 +143,7 @@ impl ScannerPartitioning {
 }
 
 /// Represents one data range within a partition
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PartitionRange {
     /// Start time of time index column. Inclusive.
     pub start: Timestamp,
