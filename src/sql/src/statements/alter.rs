@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{Debug, Display};
+use std::{collections::HashMap, fmt::{Debug, Display}, ops::ControlFlow};
 
 use common_query::AddColumnLocation;
 use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
+use sqlparser::ast::{Visit, VisitMut, Visitor, VisitorMut};
+
+use super::OptionMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct AlterTable {
@@ -71,6 +74,11 @@ pub enum AlterTableOperation {
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
     RenameTable { new_table_name: String },
+    /// `SET COLUMN <column_name> FULLTEXT WITH`
+    AlterColumnFulltext {
+        column_name: Ident,
+        options: OptionMap,
+    },
 }
 
 impl Display for AlterTableOperation {
@@ -96,6 +104,12 @@ impl Display for AlterTableOperation {
                 target_type,
             } => {
                 write!(f, r#"MODIFY COLUMN {column_name} {target_type}"#)
+            }
+            AlterTableOperation::AlterColumnFulltext {
+                column_name,
+                options,
+            } => {
+                write!(f, r#"SET COLUMN {column_name} FULLTEXT WITH {:?}"#, options.hash_options)
             }
         }
     }

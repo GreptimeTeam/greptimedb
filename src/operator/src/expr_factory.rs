@@ -18,9 +18,9 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, ColumnDataType,
-    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
-    DropColumns, ExpireAfter, RenameTable, SemanticType, TableName,
+    AddColumn, AddColumns, AddFulltext, AlterExpr, ChangeColumnType, ChangeColumnTypes,
+    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    DropColumn, DropColumns, ExpireAfter, RenameTable, SemanticType, TableName,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -482,6 +482,13 @@ pub(crate) fn to_alter_expr(
         }),
         AlterTableOperation::RenameTable { new_table_name } => Kind::RenameTable(RenameTable {
             new_table_name: new_table_name.to_string(),
+        }),
+        AlterTableOperation::AlterColumnFulltext {
+            column_name,
+            options,
+        } => Kind::AddFulltext(AddFulltext {
+            column_name: column_name.value.to_string(),
+            options: options.hash_options.clone(),
         }),
     };
 

@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use common_query::AddColumnLocation;
 use snafu::ResultExt;
+use sqlparser::ast::{Expr, SqlOption};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::Token;
@@ -94,9 +97,35 @@ impl<'a> ParserContext<'a> {
                 }
             };
             AlterTableOperation::RenameTable { new_table_name }
+        } else if self.parser.parse_keyword(Keyword::SET) {
+            let _ = self.parser.parse_keyword(Keyword::COLUMN);
+            let column_name = Self::canonicalize_identifier(self.parser.parse_identifier(false)?);
+
+            let _ = self.parser.parse_keyword(Keyword::FULLTEXT);
+
+            let options= self
+                .parser
+                .parse_options(Keyword::WITH)?
+                .into_iter()
+                .map(|option: SqlOption| -> Result<(String, String)> {
+                    let (key, value) = (option.name, option.value);
+                    let v = match value {
+                        Expr::Value(sqlparser::ast::Value::SingleQuotedString(v))
+                        | Expr::Value(sqlparser::ast::Value::DoubleQuotedString(v)) => v,
+                        Expr::Identifier(v) => v.value,
+                        Expr::Value(sqlparser::ast::Value::Number(v, _)) => v.to_string(),
+                        _ => return error::InvalidTableOptionValueSnafu { key, value }.fail(),
+                    };
+                    let k = key.value.to_lowercase();
+                    Ok((k, v))
+                })
+                .collect::<Result<HashMap<String, String>>>()
+                .unwrap();
+
+            AlterTableOperation::AlterColumnFulltext { column_name, options: options.into() }
         } else {
             return Err(ParserError::ParserError(format!(
-                "expect keyword ADD or DROP or MODIFY or RENAME after ALTER TABLE, found {}",
+                "expect keyword ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found {}",
                 self.parser.peek_token()
             )));
         };

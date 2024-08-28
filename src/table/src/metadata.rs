@@ -20,7 +20,9 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
-use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{
+    ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder, SchemaRef,
+};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -208,6 +210,10 @@ impl TableMeta {
                     .next_column_id(self.next_column_id);
                 Ok(meta_builder)
             }
+            AlterKind::AddFulltexts {
+                column_name,
+                options,
+            } => self.change_column_fulltext(table_name, column_name, options.clone()),
         }
     }
 
@@ -584,6 +590,39 @@ impl TableMeta {
         let _ = meta_builder
             .schema(Arc::new(new_schema))
             .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
+    }
+
+    fn change_column_fulltext(
+        &self,
+        table_name: &str,
+        column_name: &String,
+        options: HashMap<String, String>,
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+
+        let index = table_schema
+            .column_index_by_name(column_name)
+            .with_context(|| error::ColumnNotExistsSnafu {
+                column_name,
+                table_name,
+            })?;
+        let mut column = &table_schema.column_schemas()[index];
+
+        let fulltext_options = column
+            .fulltext_options()
+            .context(error::FulltextOptionsSnafu { column_name })?;
+
+        let mut fulltext_options = match fulltext_options {
+            Some(fulltext_options) => fulltext_options,
+            None => FulltextOptions::default(),
+        };
+
+        let new_column = column.clone()
+            .with_fulltext_options(fulltext_options)
+            .context(error::FulltextOptionsSnafu { column_name })?;
 
         Ok(meta_builder)
     }

@@ -106,6 +106,7 @@ fn create_proto_alter_kind(
             })))
         }
         Kind::RenameTable(_) => Ok(None),
+        Kind::AddFulltext(_) => todo!(),
     }
 }
 
