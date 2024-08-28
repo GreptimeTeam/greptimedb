@@ -12,6 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use async_trait::async_trait;
+use bench::BenchTableMetadataCommand;
+use clap::Parser;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
+pub use repl::Repl;
+use tracing_appender::non_blocking::WorkerGuard;
+
+use self::export::ExportCommand;
+use crate::cli::import::ImportCommand;
+use crate::error::Result;
+use crate::options::GlobalOptions;
+use crate::App;
+
 mod bench;
 
 // Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
@@ -21,20 +34,10 @@ mod export;
 mod helper;
 
 // Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
+mod database;
+mod import;
 #[allow(unused)]
 mod repl;
-
-use async_trait::async_trait;
-use bench::BenchTableMetadataCommand;
-use clap::Parser;
-use common_telemetry::logging::{LoggingOptions, TracingOptions};
-pub use repl::Repl;
-use tracing_appender::non_blocking::WorkerGuard;
-
-use self::export::ExportCommand;
-use crate::error::Result;
-use crate::options::GlobalOptions;
-use crate::App;
 
 pub const APP_NAME: &str = "greptime-cli";
 
@@ -114,6 +117,7 @@ enum SubCommand {
     // Attach(AttachCommand),
     Bench(BenchTableMetadataCommand),
     Export(ExportCommand),
+    Import(ImportCommand),
 }
 
 impl SubCommand {
@@ -122,6 +126,7 @@ impl SubCommand {
             // SubCommand::Attach(cmd) => cmd.build().await,
             SubCommand::Bench(cmd) => cmd.build(guard).await,
             SubCommand::Export(cmd) => cmd.build(guard).await,
+            SubCommand::Import(cmd) => cmd.build(guard).await,
         }
     }
 }
