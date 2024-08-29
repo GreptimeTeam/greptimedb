@@ -27,7 +27,10 @@ use snafu::ResultExt;
 use crate::access_layer::{new_fs_cache_store, SstWriteRequest};
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
-use crate::metrics::{FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL};
+use crate::metrics::{
+    FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
+    WRITE_CACHE_DOWNLOAD_ELAPSED,
+};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::IndexerBuilder;
@@ -164,6 +167,79 @@ impl WriteCache {
         }
 
         Ok(Some(sst_info))
+    }
+
+    /// Downloads a file in `remote_path` from the remote object store to the local cache
+    /// (specified by `index_key`).
+    pub(crate) async fn download(
+        &self,
+        index_key: IndexKey,
+        remote_path: &str,
+        remote_store: &ObjectStore,
+    ) -> Result<()> {
+        const DOWNLOAD_READER_CONCURRENCY: usize = 8;
+        const DOWNLOAD_READER_CHUNK_SIZE: ReadableSize = ReadableSize::mb(8);
+
+        let file_type = index_key.file_type;
+        let timer = WRITE_CACHE_DOWNLOAD_ELAPSED
+            .with_label_values(&[match file_type {
+                FileType::Parquet => "download_parquet",
+                FileType::Puffin => "download_puffin",
+            }])
+            .start_timer();
+
+        let remote_metadata = remote_store
+            .stat(remote_path)
+            .await
+            .context(error::OpenDalSnafu)?;
+        let reader = remote_store
+            .reader_with(remote_path)
+            .concurrent(DOWNLOAD_READER_CONCURRENCY)
+            .chunk(DOWNLOAD_READER_CHUNK_SIZE.as_bytes() as usize)
+            .await
+            .context(error::OpenDalSnafu)?
+            .into_futures_async_read(0..remote_metadata.content_length())
+            .await
+            .context(error::OpenDalSnafu)?;
+
+        let cache_path = self.file_cache.cache_file_path(index_key);
+        let mut writer = self
+            .file_cache
+            .local_store()
+            .writer(&cache_path)
+            .await
+            .context(error::OpenDalSnafu)?
+            .into_futures_async_write();
+
+        let region_id = index_key.region_id;
+        let file_id = index_key.file_id;
+        let bytes_written =
+            futures::io::copy(reader, &mut writer)
+                .await
+                .context(error::DownloadSnafu {
+                    region_id,
+                    file_id,
+                    file_type,
+                })?;
+        writer.close().await.context(error::DownloadSnafu {
+            region_id,
+            file_id,
+            file_type,
+        })?;
+
+        WRITE_CACHE_DOWNLOAD_BYTES_TOTAL.inc_by(bytes_written);
+
+        let elapsed = timer.stop_and_record();
+        debug!(
+            "Successfully download file '{}' to local '{}', file size: {}, region: {}, cost: {:?}s",
+            remote_path, cache_path, bytes_written, region_id, elapsed,
+        );
+
+        let index_value = IndexValue {
+            file_size: bytes_written as _,
+        };
+        self.file_cache.put(index_key, index_value).await;
+        Ok(())
     }
 
     /// Uploads a Parquet file or a Puffin file to the remote object store.
