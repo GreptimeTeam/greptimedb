@@ -67,11 +67,6 @@ impl StatementExecutor {
 
         let mut exported_rows = 0;
         for table_name in table_names {
-            // TODO(hl): remove this hardcode once we've removed numbers table.
-            if table_name == "numbers" {
-                continue;
-            }
-
             let table = self
                 .get_table(&TableReference {
                     catalog: &req.catalog_name,
@@ -79,6 +74,10 @@ impl StatementExecutor {
                     table: &table_name,
                 })
                 .await?;
+            // Only base tables, ignores views and temporary tables.
+            if table.table_type() != table::metadata::TableType::Base {
+                continue;
+            }
             // Ignores physical tables of metric engine.
             if table.table_info().meta.engine == METRIC_ENGINE_NAME
                 && !table
