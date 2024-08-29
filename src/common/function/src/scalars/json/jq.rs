@@ -14,7 +14,7 @@
 
 use std::fmt::{self, Display};
 
-use common_query::error::{Result, UnsupportedInputDataTypeSnafu};
+use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
 use common_query::prelude::Signature;
 use datafusion::logical_expr::Volatility;
 use datatypes::data_type::ConcreteDataType;
@@ -25,13 +25,13 @@ use datatypes::vectors::{MutableVector, StringVectorBuilder};
 use crate::function::{Function, FunctionContext};
 
 #[derive(Clone, Debug, Default)]
-pub struct GetByPathFunction;
+pub struct JqFunction;
 
-const NAME: &str = "get_by_path";
+const NAME: &str = "jq";
 
-impl Function for GetByPathFunction {
+impl Function for JqFunction {
     fn name(&self) -> &str {
-        "get_by_path"
+        "jq"
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
@@ -41,16 +41,16 @@ impl Function for GetByPathFunction {
     fn signature(&self) -> Signature {
         Signature::exact(
             vec![
-                ConcreteDataType::json_datatype(),
                 ConcreteDataType::string_datatype(),
+                ConcreteDataType::json_datatype(),
             ],
             Volatility::Immutable,
         )
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        let jsons = &columns[0];
-        let paths = &columns[1];
+        let jsons = &columns[1];
+        let paths = &columns[0];
 
         let size = jsons.len();
         let datatype = jsons.data_type();
@@ -65,8 +65,16 @@ impl Function for GetByPathFunction {
                     let path = path.as_string().unwrap();
                     let result = match (json, path) {
                         (Some(json), Some(path)) => {
-                            let json_path =
-                                jsonb::jsonpath::parse_json_path(path.as_bytes()).unwrap();
+                            let json_path = match jsonb::jsonpath::parse_json_path(path.as_bytes())
+                            {
+                                Ok(json_path) => json_path,
+                                Err(_) => {
+                                    return InvalidFuncArgsSnafu {
+                                        err_msg: format!("Invalid JSON path: {}", path),
+                                    }
+                                    .fail();
+                                }
+                            };
                             let mut sub_jsonb = Vec::new();
                             let mut sub_offsets = Vec::new();
                             match jsonb::get_by_path(
@@ -98,9 +106,9 @@ impl Function for GetByPathFunction {
     }
 }
 
-impl Display for GetByPathFunction {
+impl Display for JqFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "GET_BY_PATH")
+        write!(f, "JQ")
     }
 }
 
@@ -115,21 +123,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_by_path_function() {
-        let get_by_path = GetByPathFunction;
+    fn test_jq_function() {
+        let jq = JqFunction;
 
-        assert_eq!("get_by_path", get_by_path.name());
+        assert_eq!("jq", jq.name());
         assert_eq!(
             ConcreteDataType::string_datatype(),
-            get_by_path
-                .return_type(&[
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::string_datatype()
-                ])
-                .unwrap()
+            jq.return_type(&[
+                ConcreteDataType::json_datatype(),
+                ConcreteDataType::string_datatype()
+            ])
+            .unwrap()
         );
 
-        assert!(matches!(get_by_path.signature(),
+        assert!(matches!(jq.signature(),
                          Signature {
                              type_signature: TypeSignature::Exact(valid_types),
                              volatility: Volatility::Immutable
@@ -155,7 +162,7 @@ mod tests {
         let json_vector = BinaryVector::from_vec(jsonbs);
         let path_vector = StringVector::from_vec(paths);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
-        let vector = get_by_path.eval(FunctionContext::default(), &args).unwrap();
+        let vector = jq.eval(FunctionContext::default(), &args).unwrap();
 
         assert_eq!(3, vector.len());
         for (i, gt) in results.iter().enumerate() {
