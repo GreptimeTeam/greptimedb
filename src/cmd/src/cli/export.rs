@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_telemetry::{debug, error, info};
 use serde_json::Value;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
@@ -131,9 +131,7 @@ impl Export {
     /// Iterate over all db names.
     async fn all_db_names(&self) -> Result<Vec<String>> {
         let result = self.database_client.sql_in_public("SHOW DATABASES").await?;
-        let Some(records) = result else {
-            EmptyResultSnafu.fail()?
-        };
+        let records = result.context(EmptyResultSnafu)?;
         let mut result = Vec::with_capacity(records.len());
         for value in records {
             let Value::String(schema) = &value[0] else {
@@ -156,7 +154,11 @@ impl Export {
         &self,
         catalog: &str,
         schema: &str,
-    ) -> Result<(Vec<TableReference>, Vec<TableReference>)> {
+    ) -> Result<(
+        Vec<TableReference>,
+        Vec<TableReference>,
+        Vec<TableReference>,
+    )> {
         // Puts all metric table first
         let sql = format!(
             "SELECT table_catalog, table_schema, table_name \
@@ -166,9 +168,7 @@ impl Export {
                 and table_schema = \'{schema}\'"
         );
         let result = self.database_client.sql_in_public(&sql).await?;
-        let Some(records) = result else {
-            EmptyResultSnafu.fail()?
-        };
+        let records = result.context(EmptyResultSnafu)?;
         let mut metric_physical_tables = HashSet::with_capacity(records.len());
         for value in records {
             let mut t = Vec::with_capacity(3);
@@ -183,26 +183,25 @@ impl Export {
 
         // TODO: SQL injection hurts
         let sql = format!(
-            "SELECT table_catalog, table_schema, table_name \
+            "SELECT table_catalog, table_schema, table_name, table_type \
             FROM information_schema.tables \
-            WHERE table_type = \'BASE TABLE\' \
+            WHERE (table_type = \'BASE TABLE\' OR table_type = \'VIEW\') \
                 and table_catalog = \'{catalog}\' \
                 and table_schema = \'{schema}\'",
         );
         let result = self.database_client.sql_in_public(&sql).await?;
-        let Some(records) = result else {
-            EmptyResultSnafu.fail()?
-        };
+        let records = result.context(EmptyResultSnafu)?;
 
-        debug!("Fetched table list: {:?}", records);
+        debug!("Fetched table/view list: {:?}", records);
 
         if records.is_empty() {
-            return Ok((vec![], vec![]));
+            return Ok((vec![], vec![], vec![]));
         }
 
         let mut remaining_tables = Vec::with_capacity(records.len());
+        let mut views = Vec::new();
         for value in records {
-            let mut t = Vec::with_capacity(3);
+            let mut t = Vec::with_capacity(4);
             for v in &value {
                 let Value::String(value) = v else {
                     unreachable!()
@@ -210,27 +209,37 @@ impl Export {
                 t.push(value);
             }
             let table = (t[0].clone(), t[1].clone(), t[2].clone());
+            let table_type = t[3].as_str();
             // Ignores the physical table
             if !metric_physical_tables.contains(&table) {
-                remaining_tables.push(table);
+                if table_type == "VIEW" {
+                    views.push(table);
+                } else {
+                    remaining_tables.push(table);
+                }
             }
         }
 
         Ok((
             metric_physical_tables.into_iter().collect(),
             remaining_tables,
+            views,
         ))
     }
 
-    async fn show_create_table(&self, catalog: &str, schema: &str, table: &str) -> Result<String> {
+    async fn show_create(
+        &self,
+        show_type: &str,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<String> {
         let sql = format!(
-            r#"SHOW CREATE TABLE "{}"."{}"."{}""#,
-            catalog, schema, table
+            r#"SHOW CREATE {} "{}"."{}"."{}""#,
+            show_type, catalog, schema, table
         );
         let result = self.database_client.sql_in_public(&sql).await?;
-        let Some(records) = result else {
-            EmptyResultSnafu.fail()?
-        };
+        let records = result.context(EmptyResultSnafu)?;
         let Value::String(create_table) = &records[0][1] else {
             unreachable!()
         };
@@ -248,9 +257,10 @@ impl Export {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
-                let (metric_physical_tables, remaining_tables) =
+                let (metric_physical_tables, remaining_tables, views) =
                     self.get_table_list(&self.catalog, &schema).await?;
-                let table_count = metric_physical_tables.len() + remaining_tables.len();
+                let table_count =
+                    metric_physical_tables.len() + remaining_tables.len() + views.len();
                 let output_dir = Path::new(&self.output_dir)
                     .join(&self.catalog)
                     .join(format!("{schema}/"));
@@ -260,12 +270,24 @@ impl Export {
                 let output_file = Path::new(&output_dir).join("create_tables.sql");
                 let mut file = File::create(output_file).await.context(FileIoSnafu)?;
                 for (c, s, t) in metric_physical_tables.into_iter().chain(remaining_tables) {
-                    match self.show_create_table(&c, &s, &t).await {
+                    match self.show_create("TABLE", &c, &s, &t).await {
                         Err(e) => {
                             error!(e; r#"Failed to export table "{}"."{}"."{}""#, c, s, t)
                         }
                         Ok(create_table) => {
                             file.write_all(create_table.as_bytes())
+                                .await
+                                .context(FileIoSnafu)?;
+                        }
+                    }
+                }
+                for (c, s, v) in views {
+                    match self.show_create("VIEW", &c, &s, &v).await {
+                        Err(e) => {
+                            error!(e; r#"Failed to export view "{}"."{}"."{}""#, c, s, v)
+                        }
+                        Ok(create_view) => {
+                            file.write_all(create_view.as_bytes())
                                 .await
                                 .context(FileIoSnafu)?;
                         }
