@@ -100,6 +100,14 @@ pub struct Import {
 
 impl Import {
     async fn import_create_table(&self) -> Result<()> {
+        self.do_sql_job("create_tables.sql").await
+    }
+
+    async fn import_database_data(&self) -> Result<()> {
+        self.do_sql_job("copy_from.sql").await
+    }
+
+    async fn do_sql_job(&self, filename: &str) -> Result<()> {
         let timer = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.get_db_names().await?;
@@ -110,17 +118,15 @@ impl Import {
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
                 let database_input_dir = self.catalog_path().join(&schema);
-                let create_tables_sql_file = database_input_dir.join("create_tables.sql");
-                let create_tables_sql = tokio::fs::read_to_string(create_tables_sql_file)
+                let sql_file = database_input_dir.join(filename);
+                let sql = tokio::fs::read_to_string(sql_file)
                     .await
                     .context(FileIoSnafu)?;
-                if create_tables_sql.is_empty() {
-                    info!("Empty `create_tables.sql` {:?}", database_input_dir);
+                if sql.is_empty() {
+                    info!("Empty `{filename}` {database_input_dir:?}");
                 } else {
-                    self.database_client
-                        .sql(&create_tables_sql, &schema)
-                        .await?;
-                    info!("Imported schema for database {}", schema);
+                    self.database_client.sql(&sql, &schema).await?;
+                    info!("Imported `{filename}` for database {schema}");
                 }
 
                 Ok::<(), Error>(())
@@ -133,18 +139,14 @@ impl Import {
             .filter(|r| match r {
                 Ok(_) => true,
                 Err(e) => {
-                    error!(e; "import schema job failed");
+                    error!(e; "import {filename} job failed");
                     false
                 }
             })
             .count();
         let elapsed = timer.elapsed();
-        info!("Success {success}/{db_count} jobs, cost: {:?}", elapsed);
+        info!("Success {success}/{db_count} `{filename}` jobs, cost: {elapsed:?}");
 
-        Ok(())
-    }
-
-    async fn import_database_data(&self) -> Result<()> {
         Ok(())
     }
 

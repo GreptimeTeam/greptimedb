@@ -120,29 +120,34 @@ pub struct Export {
 }
 
 impl Export {
-    /// Iterate over all db names.
-    ///
-    /// Newbie: `db_name` is catalog + schema.
-    async fn iter_db_names(&self) -> Result<Vec<(String, String)>> {
+    async fn get_db_names(&self) -> Result<Vec<String>> {
         if let Some(schema) = &self.schema {
-            Ok(vec![(self.catalog.clone(), schema.clone())])
+            Ok(vec![schema.clone()])
         } else {
-            let result = self.database_client.sql_in_public("SHOW DATABASES").await?;
-            let Some(records) = result else {
-                EmptyResultSnafu.fail()?
-            };
-            let mut result = Vec::with_capacity(records.len());
-            for value in records {
-                let Value::String(schema) = &value[0] else {
-                    unreachable!()
-                };
-                if schema == common_catalog::consts::INFORMATION_SCHEMA_NAME {
-                    continue;
-                }
-                result.push((self.catalog.clone(), schema.clone()));
-            }
-            Ok(result)
+            self.all_db_names().await
         }
+    }
+
+    /// Iterate over all db names.
+    async fn all_db_names(&self) -> Result<Vec<String>> {
+        let result = self.database_client.sql_in_public("SHOW DATABASES").await?;
+        let Some(records) = result else {
+            EmptyResultSnafu.fail()?
+        };
+        let mut result = Vec::with_capacity(records.len());
+        for value in records {
+            let Value::String(schema) = &value[0] else {
+                unreachable!()
+            };
+            if schema == common_catalog::consts::INFORMATION_SCHEMA_NAME {
+                continue;
+            }
+            if schema == common_catalog::consts::PG_CATALOG_NAME {
+                continue;
+            }
+            result.push(schema.clone());
+        }
+        Ok(result)
     }
 
     /// Return a list of [`TableReference`] to be exported.
@@ -236,18 +241,18 @@ impl Export {
     async fn export_create_table(&self) -> Result<()> {
         let timer = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
-        let db_names = self.iter_db_names().await?;
+        let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
         let mut tasks = Vec::with_capacity(db_names.len());
-        for (catalog, schema) in db_names {
+        for schema in db_names {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
                 let (metric_physical_tables, remaining_tables) =
-                    self.get_table_list(&catalog, &schema).await?;
+                    self.get_table_list(&self.catalog, &schema).await?;
                 let table_count = metric_physical_tables.len() + remaining_tables.len();
                 let output_dir = Path::new(&self.output_dir)
-                    .join(&catalog)
+                    .join(&self.catalog)
                     .join(format!("{schema}/"));
                 tokio::fs::create_dir_all(&output_dir)
                     .await
@@ -268,7 +273,8 @@ impl Export {
                 }
 
                 info!(
-                    "Finished exporting {catalog}.{schema} with {table_count} table schemas to path: {}",
+                    "Finished exporting {}.{schema} with {table_count} table schemas to path: {}",
+                    self.catalog,
                     output_dir.to_string_lossy()
                 );
 
@@ -297,15 +303,15 @@ impl Export {
     async fn export_database_data(&self) -> Result<()> {
         let timer = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
-        let db_names = self.iter_db_names().await?;
+        let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
         let mut tasks = Vec::with_capacity(db_count);
-        for (catalog, schema) in db_names {
+        for schema in db_names {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
                 let output_dir = Path::new(&self.output_dir)
-                    .join(&catalog)
+                    .join(&self.catalog)
                     .join(format!("{schema}/"));
                 tokio::fs::create_dir_all(&output_dir)
                     .await
@@ -329,7 +335,7 @@ impl Export {
 
                 let sql = format!(
                     r#"COPY DATABASE "{}"."{}" TO '{}' {};"#,
-                    catalog,
+                    self.catalog,
                     schema,
                     output_dir.to_str().unwrap(),
                     with_options
@@ -340,7 +346,8 @@ impl Export {
                 self.database_client.sql_in_public(&sql).await?;
 
                 info!(
-                    "Finished exporting {catalog}.{schema} data into path: {}",
+                    "Finished exporting {}.{schema} data into path: {}",
+                    self.catalog,
                     output_dir.to_string_lossy()
                 );
 
@@ -350,7 +357,7 @@ impl Export {
                     BufWriter::new(File::create(copy_from_file).await.context(FileIoSnafu)?);
                 let copy_database_from_sql = format!(
                     r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='parquet');"#,
-                    catalog,
+                    self.catalog,
                     schema,
                     output_dir.to_str().unwrap()
                 );
@@ -360,7 +367,7 @@ impl Export {
                     .context(FileIoSnafu)?;
                 writer.flush().await.context(FileIoSnafu)?;
 
-                info!("Finished exporting {catalog}.{schema} copy_from.sql");
+                info!("Finished exporting {}.{schema} copy_from.sql", self.catalog);
 
                 Ok::<(), Error>(())
             })
@@ -379,7 +386,7 @@ impl Export {
             .count();
         let elapsed = timer.elapsed();
 
-        info!("Success {success}/{db_count} jobs, costs: {:?}", elapsed);
+        info!("Success {success}/{db_count} jobs, costs: {elapsed:?}");
 
         Ok(())
     }
