@@ -784,6 +784,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to upgrade catalog manager reference"))]
+    UpgradeCatalogManagerRef {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -931,6 +937,8 @@ impl ErrorExt for Error {
 
             Error::ExecuteAdminFunction { source, .. } => source.status_code(),
             Error::BuildRecordBatch { source, .. } => source.status_code(),
+
+            Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
         }
     }
 

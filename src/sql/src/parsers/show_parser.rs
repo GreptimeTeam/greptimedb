@@ -21,8 +21,9 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowCreateView, ShowDatabases, ShowFlows,
-    ShowIndex, ShowKind, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
+    ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateView,
+    ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowStatus, ShowTableStatus, ShowTables,
+    ShowVariables, ShowViews,
 };
 use crate::statements::statement::Statement;
 
@@ -74,7 +75,9 @@ impl<'a> ParserContext<'a> {
             // SHOW {INDEX | INDEXES | KEYS}
             self.parse_show_index()
         } else if self.consume_token("CREATE") {
-            if self.consume_token("TABLE") {
+            if self.consume_token("DATABASE") {
+                self.parse_show_create_database()
+            } else if self.consume_token("TABLE") {
                 self.parse_show_create_table()
             } else if self.consume_token("FLOW") {
                 self.parse_show_create_flow()
@@ -107,6 +110,25 @@ impl<'a> ParserContext<'a> {
         } else {
             self.unsupported(self.peek_token_as_string())
         }
+    }
+
+    fn parse_show_create_database(&mut self) -> Result<Statement> {
+        let raw_database_name =
+            self.parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    expected: "a database name",
+                    actual: self.peek_token_as_string(),
+                })?;
+        let database_name = Self::canonicalize_object_name(raw_database_name);
+        ensure!(
+            !database_name.0.is_empty(),
+            InvalidDatabaseNameSnafu {
+                name: database_name.to_string(),
+            }
+        );
+        Ok(Statement::ShowCreateDatabase(ShowCreateDatabase {
+            database_name,
+        }))
     }
 
     /// Parse SHOW CREATE TABLE statement
