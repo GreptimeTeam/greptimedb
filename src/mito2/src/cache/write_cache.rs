@@ -29,7 +29,7 @@ use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, Inde
 use crate::error::{self, Result};
 use crate::metrics::{
     FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
-    WRITE_CACHE_DOWNLOAD_ELAPSED_TOTAL,
+    WRITE_CACHE_DOWNLOAD_ELAPSED,
 };
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -181,7 +181,7 @@ impl WriteCache {
         const DOWNLOAD_READER_CHUNK_SIZE: ReadableSize = ReadableSize::mb(8);
 
         let file_type = index_key.file_type;
-        let timer = WRITE_CACHE_DOWNLOAD_ELAPSED_TOTAL
+        let timer = WRITE_CACHE_DOWNLOAD_ELAPSED
             .with_label_values(&[match file_type {
                 FileType::Parquet => "download_parquet",
                 FileType::Puffin => "download_puffin",

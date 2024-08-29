@@ -195,9 +195,9 @@ lazy_static! {
         "mito write cache download bytes total",
     ).unwrap();
     /// Timer of the downloading task in the write cache.
-    pub static ref WRITE_CACHE_DOWNLOAD_ELAPSED_TOTAL: HistogramVec = register_histogram_vec!(
-        "mito_write_cache_download_elapsed_total",
-        "mito write cache download elapsed total",
+    pub static ref WRITE_CACHE_DOWNLOAD_ELAPSED: HistogramVec = register_histogram_vec!(
+        "mito_write_cache_download_elapsed",
+        "mito write cache download elapsed",
         &[TYPE_LABEL],
     ).unwrap();
     /// Upload bytes counter.
