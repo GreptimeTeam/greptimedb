@@ -189,12 +189,17 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
-    /// Download bytes counter.
-    pub static ref DOWNLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
-        "mito_download_bytes_total",
-        "mito download bytes total",
-    )
-    .unwrap();
+    /// Download bytes counter in the write cache.
+    pub static ref WRITE_CACHE_DOWNLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
+        "mito_write_cache_download_bytes_total",
+        "mito write cache download bytes total",
+    ).unwrap();
+    /// Timer of the downloading task in the write cache.
+    pub static ref WRITE_CACHE_DOWNLOAD_ELAPSED_TOTAL: HistogramVec = register_histogram_vec!(
+        "mito_write_cache_download_elapsed_total",
+        "mito write cache download elapsed total",
+        &[TYPE_LABEL],
+    ).unwrap();
     /// Upload bytes counter.
     pub static ref UPLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
         "mito_upload_bytes_total",

@@ -15,7 +15,7 @@
 //! A write-through cache for remote object stores.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
@@ -27,7 +27,10 @@ use snafu::ResultExt;
 use crate::access_layer::{new_fs_cache_store, SstWriteRequest};
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
-use crate::metrics::{DOWNLOAD_BYTES_TOTAL, FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL};
+use crate::metrics::{
+    FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
+    WRITE_CACHE_DOWNLOAD_ELAPSED_TOTAL,
+};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::IndexerBuilder;
@@ -177,7 +180,13 @@ impl WriteCache {
         const DOWNLOAD_READER_CONCURRENCY: usize = 8;
         const DOWNLOAD_READER_CHUNK_SIZE: ReadableSize = ReadableSize::mb(8);
 
-        let start = Instant::now();
+        let file_type = index_key.file_type;
+        let timer = WRITE_CACHE_DOWNLOAD_ELAPSED_TOTAL
+            .with_label_values(&[match file_type {
+                FileType::Parquet => "download_parquet",
+                FileType::Puffin => "download_puffin",
+            }])
+            .start_timer();
 
         let remote_metadata = remote_store
             .stat(remote_path)
@@ -204,7 +213,6 @@ impl WriteCache {
 
         let region_id = index_key.region_id;
         let file_id = index_key.file_id;
-        let file_type = index_key.file_type;
         let bytes_written =
             futures::io::copy(reader, &mut writer)
                 .await
@@ -219,14 +227,12 @@ impl WriteCache {
             file_type,
         })?;
 
-        DOWNLOAD_BYTES_TOTAL.inc_by(bytes_written);
+        WRITE_CACHE_DOWNLOAD_BYTES_TOTAL.inc_by(bytes_written);
 
+        let elapsed = timer.stop_and_record();
         debug!(
-            "Successfully download file '{}' to local '{}', region: {}, cost: {:?}",
-            remote_path,
-            cache_path,
-            region_id,
-            start.elapsed(),
+            "Successfully download file '{}' to local '{}', file size: {}, region: {}, cost: {:?}s",
+            remote_path, cache_path, bytes_written, region_id, elapsed,
         );
 
         let index_value = IndexValue {
