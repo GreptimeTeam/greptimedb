@@ -277,7 +277,7 @@ impl ScalarExpr {
                 // put a slice to corresponding batch
                 let slice_offset = prev_cond_idx;
                 let slice_length = idx - prev_cond_idx;
-                let to_be_append = batch.slice(slice_offset, slice_length);
+                let to_be_append = batch.slice(slice_offset, slice_length)?;
 
                 let to_put_back = match prev_cond {
                     Some(true) => (
@@ -300,7 +300,7 @@ impl ScalarExpr {
         if let Some(slice_offset) = prev_start_idx {
             let prev_cond = prev_cond.unwrap();
             let slice_length = bool_conds.len() - slice_offset;
-            let to_be_append = batch.slice(slice_offset, slice_length);
+            let to_be_append = batch.slice(slice_offset, slice_length)?;
             let to_put_back = match prev_cond {
                 Some(true) => (
                     Some(true),
@@ -812,7 +812,7 @@ mod test {
             let raw_len = raw.len();
             let vectors = vec![Int32Vector::from(raw).slice(0, raw_len)];
 
-            let batch = Batch::new(vectors, raw_len);
+            let batch = Batch::try_new(vectors, raw_len).unwrap();
             let expected = Int32Vector::from(vec![
                 None,
                 Some(42),
@@ -831,7 +831,7 @@ mod test {
             let raw_len = raw.len();
             let vectors = vec![Int32Vector::from(raw).slice(0, raw_len)];
 
-            let batch = Batch::new(vectors, raw_len);
+            let batch = Batch::try_new(vectors, raw_len).unwrap();
             let expected = Int32Vector::from(vec![Some(42)]).slice(0, raw_len);
             assert_eq!(expr.eval_batch(&batch).unwrap(), expected);
 
@@ -839,7 +839,7 @@ mod test {
             let raw_len = raw.len();
             let vectors = vec![Int32Vector::from(raw).slice(0, raw_len)];
 
-            let batch = Batch::new(vectors, raw_len);
+            let batch = Batch::try_new(vectors, raw_len).unwrap();
             let expected = NullVector::new(raw_len).slice(0, raw_len);
             assert_eq!(expr.eval_batch(&batch).unwrap(), expected);
         }
