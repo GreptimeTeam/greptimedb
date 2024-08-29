@@ -124,7 +124,7 @@ greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", r
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
-jsonb = { git = "https://github.com/CookiePieWw/jsonb.git", branch = "trigger-preserve-order-feature"}
+jsonb = { git = "https://github.com/CookiePieWw/jsonb.git", branch = "trigger-preserve-order-feature" }
 lazy_static = "1.4"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd" }
 mockall = "0.11.4"
