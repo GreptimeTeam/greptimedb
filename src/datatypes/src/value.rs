@@ -1268,7 +1268,7 @@ impl<'a> TryFrom<ValueRef<'a>> for serde_json::Value {
             ValueRef::Interval(v) => serde_json::to_value(v.to_i128())?,
             ValueRef::Duration(v) => serde_json::to_value(v.value())?,
             ValueRef::Decimal128(v) => serde_json::to_value(v.to_string())?,
-            ValueRef::Json(v) => serde_json::to_value(jsonb::to_string(v))?,
+            ValueRef::Json(v) => jsonb::from_slice(v).unwrap_or_default().into(),
         };
 
         Ok(json_value)

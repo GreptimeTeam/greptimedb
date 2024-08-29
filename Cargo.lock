@@ -5370,8 +5370,7 @@ dependencies = [
 [[package]]
 name = "jsonb"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f98d1dd2023aa6a1b74f23432e2db5a9122bf53ae98053efc650951d31f59ffb"
+source = "git+https://github.com/CookiePieWw/jsonb.git?branch=trigger-preserve-order-feature#27055849b612b0b6ddad5a4d582e8862ab7afc6d"
 dependencies = [
  "byteorder",
  "fast-float",
