@@ -12,6 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod admin;
+mod copy_database;
+mod copy_table_from;
+mod copy_table_to;
+mod ddl;
+mod describe;
+mod dml;
+mod set;
+mod show;
+mod tql;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -57,17 +68,6 @@ use crate::error::{
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
-
-mod admin;
-mod copy_database;
-mod copy_table_from;
-mod copy_table_to;
-mod ddl;
-mod describe;
-mod dml;
-mod set;
-mod show;
-mod tql;
 
 #[derive(Clone)]
 pub struct StatementExecutor {
