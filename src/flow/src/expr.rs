@@ -180,9 +180,6 @@ impl Batch {
     }
 
     /// Slices the `Batch`, returning a new `Batch`.
-    ///
-    /// # Panics
-    /// This function panics if `offset + length > self.row_count()`.
     pub fn slice(&self, offset: usize, length: usize) -> Result<Batch, EvalError> {
         let batch = self
             .batch()
