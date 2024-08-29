@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use std::sync::Arc;
-mod get_by_path;
+mod jq;
 
-use get_by_path::GetByPathFunction;
+use jq::JqFunction;
 
 use crate::function_registry::FunctionRegistry;
 
@@ -23,6 +23,6 @@ pub(crate) struct JsonFunction;
 
 impl JsonFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(GetByPathFunction));
+        registry.register(Arc::new(JqFunction));
     }
 }
