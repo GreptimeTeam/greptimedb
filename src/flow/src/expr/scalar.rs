@@ -30,7 +30,7 @@ use crate::expr::error::{
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::expr::{Batch, DfScalarFunction};
-use crate::repr::{ColumnType, RelationType};
+use crate::repr::ColumnType;
 /// A scalar expression with a known type.
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TypedExpr {
@@ -43,77 +43,6 @@ pub struct TypedExpr {
 impl TypedExpr {
     pub fn new(expr: ScalarExpr, typ: ColumnType) -> Self {
         Self { expr, typ }
-    }
-}
-
-impl TypedExpr {
-    /// expand multi-value expression to multiple expressions with new indices
-    ///
-    /// Currently it just mean expand `TumbleWindow` to `TumbleWindowFloor` and `TumbleWindowCeiling`
-    ///
-    /// TODO(discord9): test if nested reduce combine with df scalar function would cause problem
-    pub fn expand_multi_value(
-        input_typ: &RelationType,
-        exprs: &[TypedExpr],
-    ) -> Result<Vec<TypedExpr>, Error> {
-        // old indices in mfp, expanded expr
-        let mut ret = vec![];
-        let input_arity = input_typ.column_types.len();
-        for (old_idx, expr) in exprs.iter().enumerate() {
-            if let ScalarExpr::CallUnmaterializable(UnmaterializableFunc::TumbleWindow {
-                ts,
-                window_size,
-                start_time,
-            }) = &expr.expr
-            {
-                let floor = UnaryFunc::TumbleWindowFloor {
-                    window_size: *window_size,
-                    start_time: *start_time,
-                };
-                let ceil = UnaryFunc::TumbleWindowCeiling {
-                    window_size: *window_size,
-                    start_time: *start_time,
-                };
-                let floor = ScalarExpr::CallUnary {
-                    func: floor,
-                    expr: Box::new(ts.expr.clone()),
-                }
-                .with_type(ts.typ.clone());
-                ret.push((None, floor));
-
-                let ceil = ScalarExpr::CallUnary {
-                    func: ceil,
-                    expr: Box::new(ts.expr.clone()),
-                }
-                .with_type(ts.typ.clone());
-                ret.push((None, ceil));
-            } else {
-                ret.push((Some(input_arity + old_idx), expr.clone()))
-            }
-        }
-
-        // get shuffled index(old_idx -> new_idx)
-        // note index is offset by input_arity because mfp is designed to be first include input columns then intermediate columns
-        let shuffle = ret
-            .iter()
-            .map(|(old_idx, _)| *old_idx) // [Option<opt_idx>]
-            .enumerate()
-            .map(|(new, old)| (old, new + input_arity))
-            .flat_map(|(old, new)| old.map(|o| (o, new)))
-            .chain((0..input_arity).map(|i| (i, i))) // also remember to chain the input columns as not changed
-            .collect::<BTreeMap<_, _>>();
-
-        // shuffle expr's index
-        let exprs = ret
-            .into_iter()
-            .map(|(_, mut expr)| {
-                // invariant: it is expect that no expr will try to refer the column being expanded
-                expr.expr.permute_map(&shuffle)?;
-                Ok(expr)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(exprs)
     }
 }
 
@@ -210,6 +139,13 @@ impl ScalarExpr {
 }
 
 impl ScalarExpr {
+    pub fn cast(self, typ: ConcreteDataType) -> Self {
+        ScalarExpr::CallUnary {
+            func: UnaryFunc::Cast(typ),
+            expr: Box::new(self),
+        }
+    }
+
     /// apply optimization to the expression, like flatten variadic function
     pub fn optimize(&mut self) {
         self.flatten_varidic_fn();
