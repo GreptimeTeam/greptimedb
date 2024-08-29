@@ -715,7 +715,7 @@ impl ScanInput {
             let range = PartitionRange {
                 start: memtable.stats().time_range().unwrap().0,
                 end: memtable.stats().time_range().unwrap().1,
-                estimated_size: memtable.stats().bytes_allocated(),
+                num_rows: memtable.stats().num_rows(),
                 identifier: id,
             };
             id += 1;
@@ -726,8 +726,7 @@ impl ScanInput {
             let range = PartitionRange {
                 start: file.meta_ref().time_range.0,
                 end: file.meta_ref().time_range.1,
-                // TODO(ruihang): maintain the size in file meta
-                estimated_size: 0,
+                num_rows: file.meta_ref().num_rows as usize,
                 identifier: id,
             };
             id += 1;

@@ -149,9 +149,8 @@ pub struct PartitionRange {
     pub start: Timestamp,
     /// End time of time index column. Inclusive.
     pub end: Timestamp,
-    /// Estimate size of this range. Is used to balance ranges between partitions.
-    /// No base unit, just a number.
-    pub estimated_size: usize,
+    /// Number of rows in this range. Is used to balance ranges between partitions.
+    pub num_rows: usize,
     /// Identifier to this range. Assigned by storage engine.
     pub identifier: usize,
 }

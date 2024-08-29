@@ -113,25 +113,25 @@ mod test {
             PartitionRange {
                 start: Timestamp::new(0, TimeUnit::Second),
                 end: Timestamp::new(10, TimeUnit::Second),
-                estimated_size: 100,
+                num_rows: 100,
                 identifier: 1,
             },
             PartitionRange {
                 start: Timestamp::new(10, TimeUnit::Second),
                 end: Timestamp::new(20, TimeUnit::Second),
-                estimated_size: 200,
+                num_rows: 200,
                 identifier: 2,
             },
             PartitionRange {
                 start: Timestamp::new(20, TimeUnit::Second),
                 end: Timestamp::new(30, TimeUnit::Second),
-                estimated_size: 150,
+                num_rows: 150,
                 identifier: 3,
             },
             PartitionRange {
                 start: Timestamp::new(30, TimeUnit::Second),
                 end: Timestamp::new(40, TimeUnit::Second),
-                estimated_size: 250,
+                num_rows: 250,
                 identifier: 4,
             },
         ];
@@ -145,13 +145,13 @@ mod test {
                 PartitionRange {
                     start: Timestamp::new(0, TimeUnit::Second),
                     end: Timestamp::new(10, TimeUnit::Second),
-                    estimated_size: 100,
+                    num_rows: 100,
                     identifier: 1,
                 },
                 PartitionRange {
                     start: Timestamp::new(20, TimeUnit::Second),
                     end: Timestamp::new(30, TimeUnit::Second),
-                    estimated_size: 150,
+                    num_rows: 150,
                     identifier: 3,
                 },
             ],
@@ -159,13 +159,13 @@ mod test {
                 PartitionRange {
                     start: Timestamp::new(10, TimeUnit::Second),
                     end: Timestamp::new(20, TimeUnit::Second),
-                    estimated_size: 200,
+                    num_rows: 200,
                     identifier: 2,
                 },
                 PartitionRange {
                     start: Timestamp::new(30, TimeUnit::Second),
                     end: Timestamp::new(40, TimeUnit::Second),
-                    estimated_size: 250,
+                    num_rows: 250,
                     identifier: 4,
                 },
             ],
@@ -179,25 +179,25 @@ mod test {
             vec![PartitionRange {
                 start: Timestamp::new(0, TimeUnit::Second),
                 end: Timestamp::new(10, TimeUnit::Second),
-                estimated_size: 100,
+                num_rows: 100,
                 identifier: 1,
             }],
             vec![PartitionRange {
                 start: Timestamp::new(10, TimeUnit::Second),
                 end: Timestamp::new(20, TimeUnit::Second),
-                estimated_size: 200,
+                num_rows: 200,
                 identifier: 2,
             }],
             vec![PartitionRange {
                 start: Timestamp::new(20, TimeUnit::Second),
                 end: Timestamp::new(30, TimeUnit::Second),
-                estimated_size: 150,
+                num_rows: 150,
                 identifier: 3,
             }],
             vec![PartitionRange {
                 start: Timestamp::new(30, TimeUnit::Second),
                 end: Timestamp::new(40, TimeUnit::Second),
-                estimated_size: 250,
+                num_rows: 250,
                 identifier: 4,
             }],
         ];
