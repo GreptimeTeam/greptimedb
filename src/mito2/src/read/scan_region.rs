@@ -713,6 +713,7 @@ impl ScanInput {
 
         for memtable in &self.memtables {
             let range = PartitionRange {
+                // TODO: filter out empty memtables in the future.
                 start: memtable.stats().time_range().unwrap().0,
                 end: memtable.stats().time_range().unwrap().1,
                 num_rows: memtable.stats().num_rows(),
