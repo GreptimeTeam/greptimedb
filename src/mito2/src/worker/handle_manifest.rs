@@ -18,6 +18,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use api::v1::region::compact_request;
 use common_telemetry::{info, warn};
 use store_api::storage::RegionId;
 
@@ -148,6 +149,9 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
 
+        let need_compaction =
+            edit_result.result.is_ok() && !edit_result.edit.files_to_add.is_empty();
+
         if edit_result.result.is_ok() {
             // Applies the edit to the region.
             region
@@ -163,6 +167,26 @@ impl<S> RegionWorkerLoop<S> {
         if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id) {
             if let Some(request) = edit_queue.dequeue() {
                 self.handle_region_edit(request).await;
+            }
+        }
+
+        if need_compaction {
+            if let Err(e) = self
+                .compaction_scheduler
+                .schedule_compaction(
+                    region.region_id,
+                    compact_request::Options::Regular(Default::default()),
+                    &region.version_control,
+                    &region.access_layer,
+                    OptionOutputTx::none(),
+                    &region.manifest_ctx,
+                )
+                .await
+            {
+                warn!(
+                    "Failed to schedule compaction after editing region: {}, err: {}",
+                    region.region_id, e
+                );
             }
         }
     }

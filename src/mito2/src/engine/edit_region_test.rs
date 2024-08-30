@@ -30,6 +30,64 @@ use crate::sst::file::{FileId, FileMeta};
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
+async fn test_edit_region_schedule_compaction() {
+    let mut env = TestEnv::new();
+
+    struct EditRegionListener {
+        tx: Mutex<Option<oneshot::Sender<RegionId>>>,
+    }
+
+    impl EventListener for EditRegionListener {
+        fn on_compaction_scheduled(&self, region_id: RegionId) {
+            let mut tx = self.tx.lock().unwrap();
+            tx.take().unwrap().send(region_id).unwrap();
+        }
+    }
+
+    let (tx, rx) = oneshot::channel();
+    let engine = env
+        .create_engine_with(
+            MitoConfig::default(),
+            None,
+            Some(Arc::new(EditRegionListener {
+                tx: Mutex::new(Some(tx)),
+            })),
+        )
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+
+    let edit = RegionEdit {
+        files_to_add: vec![FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            level: 0,
+            ..Default::default()
+        }],
+        files_to_remove: vec![],
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+    };
+    engine.edit_region(region.region_id, edit).await.unwrap();
+
+    // Asserts that the compaction of the region is scheduled.
+    let actual = tokio::time::timeout(Duration::from_secs(9), rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(region_id, actual);
+}
+
+#[tokio::test]
 async fn test_edit_region_fill_cache() {
     let mut env = TestEnv::new();
 
