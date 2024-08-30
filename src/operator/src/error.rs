@@ -676,18 +676,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Invalid partition columns when creating table '{}', reason: {}",
-        table,
-        reason
-    ))]
-    InvalidPartitionColumns {
-        table: String,
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to prepare file table"))]
     PrepareFileTable {
         #[snafu(implicit)]
@@ -806,7 +794,6 @@ impl ErrorExt for Error {
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::ColumnNoneDefaultValue { .. }
-            | Error::InvalidPartitionColumns { .. }
             | Error::PrepareFileTable { .. }
             | Error::InferFileTableSchema { .. }
             | Error::SchemaIncompatible { .. }
