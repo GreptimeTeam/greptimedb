@@ -75,7 +75,7 @@ impl<'a> ParserContext<'a> {
             // SHOW {INDEX | INDEXES | KEYS}
             self.parse_show_index()
         } else if self.consume_token("CREATE") {
-            if self.consume_token("DATABASE") {
+            if self.consume_token("DATABASE") || self.consume_token("SCHEMA") {
                 self.parse_show_create_database()
             } else if self.consume_token("TABLE") {
                 self.parse_show_create_table()
