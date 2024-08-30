@@ -332,7 +332,7 @@ pub fn sql_value_to_value(
                 _ => return InvalidUnaryOpSnafu { unary_op, value }.fail(),
             },
 
-            Value::String(_) | Value::Binary(_) | Value::List(_) | Value::Json(_) => {
+            Value::String(_) | Value::Binary(_) | Value::List(_) => {
                 return InvalidUnaryOpSnafu { unary_op, value }.fail()
             }
         }

@@ -464,7 +464,7 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
                 .push(convert_i128_to_interval(val.to_i128())),
         },
         Value::Decimal128(val) => values.decimal128_values.push(convert_to_pb_decimal128(val)),
-        Value::List(_) | Value::Duration(_) | Value::Json(_) => unreachable!(),
+        Value::List(_) | Value::Duration(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();
 }
@@ -957,9 +957,6 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
         Value::Decimal128(v) => v1::Value {
             value_data: Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
         },
-        Value::Json(v) => v1::Value {
-            value_data: Some(ValueData::BinaryValue(v.to_vec())),
-        },
         Value::List(_) | Value::Duration(_) => return None,
     };
 
@@ -1055,7 +1052,6 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 }
             }),
             Value::Decimal128(v) => Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
-            Value::Json(v) => Some(ValueData::BinaryValue(v.to_vec())),
             Value::List(_) | Value::Duration(_) => unreachable!(),
         },
     }

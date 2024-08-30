@@ -81,8 +81,6 @@ pub enum Value {
     Interval(Interval),
 
     List(ListValue),
-
-    Json(Bytes),
 }
 
 impl Display for Value {
@@ -125,7 +123,6 @@ impl Display for Value {
                 write!(f, "{}[{}]", v.datatype.name(), items)
             }
             Value::Decimal128(v) => write!(f, "{}", v),
-            Value::Json(v) => write!(f, "{}", jsonb::to_string(v)),
         }
     }
 }
@@ -162,7 +159,6 @@ macro_rules! define_data_type_func {
                 $struct::Decimal128(d) => {
                     ConcreteDataType::decimal128_datatype(d.precision(), d.scale())
                 }
-                $struct::Json(_) => ConcreteDataType::json_datatype(),
             }
         }
     };
@@ -213,7 +209,6 @@ impl Value {
             Value::Interval(v) => ValueRef::Interval(*v),
             Value::Duration(v) => ValueRef::Duration(*v),
             Value::Decimal128(v) => ValueRef::Decimal128(*v),
-            Value::Json(v) => ValueRef::Json(v),
         }
     }
 
@@ -338,7 +333,6 @@ impl Value {
                 TimeUnit::Nanosecond => LogicalTypeId::DurationNanosecond,
             },
             Value::Decimal128(_) => LogicalTypeId::Decimal128,
-            Value::Json(_) => LogicalTypeId::Json,
         }
     }
 
@@ -370,7 +364,7 @@ impl Value {
             Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
             Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
             Value::String(v) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
-            Value::Binary(v) | Value::Json(v) => ScalarValue::Binary(Some(v.to_vec())),
+            Value::Binary(v) => ScalarValue::Binary(Some(v.to_vec())),
             Value::Date(v) => ScalarValue::Date32(Some(v.val())),
             Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
             Value::Null => to_null_scalar_value(output_type)?,
@@ -442,11 +436,7 @@ impl Value {
             Value::Duration(x) => Some(Value::Duration(x.negative())),
             Value::Interval(x) => Some(Value::Interval(x.negative())),
 
-            Value::Binary(_)
-            | Value::String(_)
-            | Value::Boolean(_)
-            | Value::List(_)
-            | Value::Json(_) => None,
+            Value::Binary(_) | Value::String(_) | Value::Boolean(_) | Value::List(_) => None,
         }
     }
 }
@@ -787,7 +777,6 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Interval(v) => serde_json::to_value(v.to_i128())?,
             Value::Duration(v) => serde_json::to_value(v.value())?,
             Value::Decimal128(v) => serde_json::to_value(v.to_string())?,
-            Value::Json(bytes) => jsonb::from_slice(&bytes).unwrap_or_default().into(),
         };
 
         Ok(json_value)
@@ -1002,7 +991,6 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::Duration(v) => Value::Duration(v),
             ValueRef::List(v) => v.to_value(),
             ValueRef::Decimal128(v) => Value::Decimal128(v),
-            ValueRef::Json(v) => Value::Json(v.into()),
         }
     }
 }
@@ -1042,9 +1030,6 @@ pub enum ValueRef<'a> {
 
     // Compound types:
     List(ListValueRef<'a>),
-
-    // Json type:
-    Json(&'a [u8]),
 }
 
 macro_rules! impl_as_for_value_ref {
@@ -1076,7 +1061,7 @@ impl<'a> ValueRef<'a> {
     pub fn as_binary(&self) -> Result<Option<&[u8]>> {
         match self {
             ValueRef::Null => Ok(None),
-            ValueRef::Binary(v) | ValueRef::Json(v) => Ok(Some(*v)),
+            ValueRef::Binary(v) => Ok(Some(*v)),
             other => error::CastTypeSnafu {
                 msg: format!(
                     "Failed to cast value ref {:?} to {}",
@@ -1290,7 +1275,6 @@ impl<'a> TryFrom<ValueRef<'a>> for serde_json::Value {
             ValueRef::Interval(v) => serde_json::to_value(v.to_i128())?,
             ValueRef::Duration(v) => serde_json::to_value(v.value())?,
             ValueRef::Decimal128(v) => serde_json::to_value(v.to_string())?,
-            ValueRef::Json(v) => jsonb::from_slice(v).unwrap_or_default().into(),
         };
 
         Ok(json_value)
@@ -1380,7 +1364,7 @@ impl<'a> ValueRef<'a> {
             ValueRef::Float32(_) => 4,
             ValueRef::Float64(_) => 8,
             ValueRef::String(v) => std::mem::size_of_val(v),
-            ValueRef::Binary(v) | ValueRef::Json(v) => std::mem::size_of_val(v),
+            ValueRef::Binary(v) => std::mem::size_of_val(v),
             ValueRef::Date(_) => 4,
             ValueRef::DateTime(_) => 8,
             ValueRef::Timestamp(_) => 16,
@@ -2146,7 +2130,7 @@ mod tests {
         let json_value: serde_json::Value = jsonb_value.clone().into();
         assert_eq!(
             json_value,
-            to_json(Value::Json(jsonb_value.to_vec().into()))
+            to_json(Value::Binary(jsonb_value.to_vec().into()))
         );
     }
 
