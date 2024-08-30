@@ -126,7 +126,7 @@ fn parse_string_to_value(
         ConcreteDataType::Binary(_) => Ok(Value::Binary(s.as_bytes().into())),
         ConcreteDataType::Json(_) => {
             if let Ok(json) = jsonb::parse_value(s.as_bytes()) {
-                Ok(Value::Json(json.to_vec().into()))
+                Ok(Value::Binary(json.to_vec().into()))
             } else {
                 ParseSqlValueSnafu {
                     msg: format!("Failed to parse {s} to Json value"),
@@ -320,7 +320,7 @@ pub fn sql_value_to_value(
                 _ => return InvalidUnaryOpSnafu { unary_op, value }.fail(),
             },
 
-            Value::String(_) | Value::Binary(_) | Value::List(_) | Value::Json(_) => {
+            Value::String(_) | Value::Binary(_) | Value::List(_) => {
                 return InvalidUnaryOpSnafu { unary_op, value }.fail()
             }
         }

@@ -78,7 +78,7 @@ pub(super) fn encode_value(
         Value::Float32(v) => builder.encode_field(&v.0),
         Value::Float64(v) => builder.encode_field(&v.0),
         Value::String(v) => builder.encode_field(&v.as_utf8()),
-        Value::Binary(v) | Value::Json(v) => match datatype {
+        Value::Binary(v) => match datatype {
             ConcreteDataType::Json(_) => builder.encode_field(&jsonb::to_string(v)),
             _ => {
                 let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();

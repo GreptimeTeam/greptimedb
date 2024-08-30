@@ -56,7 +56,7 @@ impl DataType for JsonType {
 
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
-            Value::Json(v) => Some(Value::Json(v)),
+            Value::Binary(v) => Some(Value::Binary(v)),
             _ => None,
         }
     }

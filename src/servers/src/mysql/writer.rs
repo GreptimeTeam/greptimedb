@@ -210,7 +210,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Float32(v) => row_writer.write_col(v.0)?,
                     Value::Float64(v) => row_writer.write_col(v.0)?,
                     Value::String(v) => row_writer.write_col(v.as_utf8())?,
-                    Value::Binary(v) | Value::Json(v) => match column.coltype {
+                    Value::Binary(v) => match column.coltype {
                         ColumnType::MYSQL_TYPE_JSON => {
                             row_writer.write_col(jsonb::to_string(&v))?;
                         }
