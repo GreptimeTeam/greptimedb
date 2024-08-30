@@ -16,7 +16,7 @@ insert into t values
     (7, 'c', '🌔', 8.0),
     (8, 'd', '🌕', 9.0);
 
-select flush_table('t');
+admin flush_table('t');
 
 select
         last_value(host order by ts),

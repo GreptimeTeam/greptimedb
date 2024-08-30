@@ -20,10 +20,10 @@ insert into t values
 
 Affected Rows: 9
 
-select flush_table('t');
+admin flush_table('t');
 
 +------------------------+
-| flush_table(Utf8("t")) |
+| ADMIN flush_table('t') |
 +------------------------+
 | 0                      |
 +------------------------+
