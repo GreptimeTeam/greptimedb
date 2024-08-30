@@ -560,7 +560,7 @@ fn validate_database(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<(
         [catalog, schema] => (catalog.value.clone(), schema.value.clone()),
         _ => InvalidSqlSnafu {
             err_msg: format!(
-                "expect table name to be <catalog>.<schema> or <schema>, actual: {name}",
+                "expect database name to be <catalog>.<schema> or <schema>, actual: {name}",
             ),
         }
         .fail()?,
