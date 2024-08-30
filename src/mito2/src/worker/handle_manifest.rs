@@ -306,9 +306,10 @@ async fn edit_region(
 
             let index_key = IndexKey::new(region_id, file_meta.file_id, FileType::Parquet);
             let remote_path = location::sst_file_path(layer.region_dir(), file_meta.file_id);
+            let file_size = file_meta.file_size;
             common_runtime::spawn_global(async move {
                 if write_cache
-                    .download(index_key, &remote_path, layer.object_store())
+                    .download(index_key, &remote_path, layer.object_store(), file_size)
                     .await
                     .is_ok()
                 {
