@@ -45,4 +45,7 @@ lazy_static! {
     /// Meta kv cache miss counter.
     pub static ref METRIC_META_KV_CACHE_MISS: IntCounterVec =
         register_int_counter_vec!("greptime_meta_kv_cache_miss", "meta kv cache miss", &["op"]).unwrap();
+    //  Heartbeat received by metasrv.
+    pub static ref METRIC_META_HEARTBEAT_RECV: IntCounterVec =
+        register_int_counter_vec!("greptime_meta_heartbeat_recv", "heartbeats received by metasrv", &["pusher_key"]).unwrap();
 }
