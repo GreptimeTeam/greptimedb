@@ -193,10 +193,6 @@ impl SortField {
                         data_type: ConcreteDataType::Null(n.clone()),
                     }
                     .fail(),
-                    ConcreteDataType::Json(j) => NotSupportedFieldSnafu {
-                        data_type: ConcreteDataType::Json(j.clone()),
-                    }
-                    .fail(),
                 }
             };
         }
