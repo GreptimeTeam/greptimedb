@@ -176,6 +176,7 @@ impl WriteCache {
         index_key: IndexKey,
         remote_path: &str,
         remote_store: &ObjectStore,
+        file_size: u64,
     ) -> Result<()> {
         const DOWNLOAD_READER_CONCURRENCY: usize = 8;
         const DOWNLOAD_READER_CHUNK_SIZE: ReadableSize = ReadableSize::mb(8);
@@ -188,17 +189,13 @@ impl WriteCache {
             }])
             .start_timer();
 
-        let remote_metadata = remote_store
-            .stat(remote_path)
-            .await
-            .context(error::OpenDalSnafu)?;
         let reader = remote_store
             .reader_with(remote_path)
             .concurrent(DOWNLOAD_READER_CONCURRENCY)
             .chunk(DOWNLOAD_READER_CHUNK_SIZE.as_bytes() as usize)
             .await
             .context(error::OpenDalSnafu)?
-            .into_futures_async_read(0..remote_metadata.content_length())
+            .into_futures_async_read(0..file_size)
             .await
             .context(error::OpenDalSnafu)?;
 
