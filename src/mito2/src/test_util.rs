@@ -364,7 +364,7 @@ impl TestEnv {
                 .as_path()
                 .display()
                 .to_string();
-            let mut builder = Fs::default();
+            let builder = Fs::default();
             let object_store = ObjectStore::new(builder.root(&data_path)).unwrap().finish();
             object_store_manager.add(storage_name, object_store);
         }
