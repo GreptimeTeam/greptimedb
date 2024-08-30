@@ -4279,7 +4279,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=c437b55725b7f5224fe9d46db21072b4a682ee4b#c437b55725b7f5224fe9d46db21072b4a682ee4b"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f57e1ba8d2473e90b104c390601708be053f5f03#f57e1ba8d2473e90b104c390601708be053f5f03"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -5370,7 +5370,7 @@ dependencies = [
 [[package]]
 name = "jsonb"
 version = "0.4.1"
-source = "git+https://github.com/CookiePieWw/jsonb.git?branch=trigger-preserve-order-feature#27055849b612b0b6ddad5a4d582e8862ab7afc6d"
+source = "git+https://github.com/CookiePieWw/jsonb.git?rev=d0166c130fce903bf6c58643417a3173a6172d31#d0166c130fce903bf6c58643417a3173a6172d31"
 dependencies = [
  "byteorder",
  "fast-float",

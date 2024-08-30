@@ -103,7 +103,17 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::Uint64 => ConcreteDataType::uint64_datatype(),
             ColumnDataType::Float32 => ConcreteDataType::float32_datatype(),
             ColumnDataType::Float64 => ConcreteDataType::float64_datatype(),
-            ColumnDataType::Binary => ConcreteDataType::binary_datatype(),
+            ColumnDataType::Binary => {
+                if let Some(TypeExt::JsonType(_)) = datatype_wrapper
+                    .datatype_ext
+                    .as_ref()
+                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref())
+                {
+                    ConcreteDataType::json_datatype()
+                } else {
+                    ConcreteDataType::binary_datatype()
+                }
+            }
             ColumnDataType::String => ConcreteDataType::string_datatype(),
             ColumnDataType::Date => ConcreteDataType::date_datatype(),
             ColumnDataType::Datetime => ConcreteDataType::datetime_datatype(),
@@ -275,6 +285,15 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                             scale: decimal_type.scale() as i32,
                         })),
                     })
+            }
+            ColumnDataType::Binary => {
+                if datatype == ConcreteDataType::json_datatype() {
+                    Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::JsonType(true)),
+                    })
+                } else {
+                    None
+                }
             }
             _ => None,
         };
