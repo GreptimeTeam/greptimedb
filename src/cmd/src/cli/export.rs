@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -120,6 +120,10 @@ pub struct Export {
 }
 
 impl Export {
+    fn catalog_path(&self) -> PathBuf {
+        PathBuf::from(&self.output_dir).join(&self.catalog)
+    }
+
     async fn get_db_names(&self) -> Result<Vec<String>> {
         let db_names = self.all_db_names().await?;
         let Some(schema) = &self.schema else {
@@ -182,8 +186,11 @@ impl Export {
                 and table_catalog = \'{catalog}\' \
                 and table_schema = \'{schema}\'"
         );
-        let result = self.database_client.sql_in_public(&sql).await?;
-        let records = result.context(EmptyResultSnafu)?;
+        let records = self
+            .database_client
+            .sql_in_public(&sql)
+            .await?
+            .context(EmptyResultSnafu)?;
         let mut metric_physical_tables = HashSet::with_capacity(records.len());
         for value in records {
             let mut t = Vec::with_capacity(3);
@@ -203,8 +210,11 @@ impl Export {
                 and table_catalog = \'{catalog}\' \
                 and table_schema = \'{schema}\'",
         );
-        let result = self.database_client.sql_in_public(&sql).await?;
-        let records = result.context(EmptyResultSnafu)?;
+        let records = self
+            .database_client
+            .sql_in_public(&sql)
+            .await?
+            .context(EmptyResultSnafu)?;
 
         debug!("Fetched table/view list: {:?}", records);
 
@@ -255,8 +265,11 @@ impl Export {
             ),
             None => format!(r#"SHOW CREATE {} "{}"."{}""#, show_type, catalog, schema),
         };
-        let result = self.database_client.sql_in_public(&sql).await?;
-        let records = result.context(EmptyResultSnafu)?;
+        let records = self
+            .database_client
+            .sql_in_public(&sql)
+            .await?
+            .context(EmptyResultSnafu)?;
         let Value::String(create) = &records[0][1] else {
             unreachable!()
         };
@@ -269,13 +282,11 @@ impl Export {
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
         for schema in db_names {
-            let output_dir = Path::new(&self.output_dir)
-                .join(&self.catalog)
-                .join(format!("{schema}/"));
-            tokio::fs::create_dir_all(&output_dir)
+            let db_dir = self.catalog_path().join(format!("{schema}/"));
+            tokio::fs::create_dir_all(&db_dir)
                 .await
                 .context(FileIoSnafu)?;
-            let file = Path::new(&output_dir).join("create_database.sql");
+            let file = db_dir.join("create_database.sql");
             let mut file = File::create(file).await.context(FileIoSnafu)?;
             match self
                 .show_create("DATABASE", &self.catalog, &schema, None)
@@ -312,13 +323,11 @@ impl Export {
                     self.get_table_list(&self.catalog, &schema).await?;
                 let table_count =
                     metric_physical_tables.len() + remaining_tables.len() + views.len();
-                let output_dir = Path::new(&self.output_dir)
-                    .join(&self.catalog)
-                    .join(format!("{schema}/"));
-                tokio::fs::create_dir_all(&output_dir)
+                let db_dir = self.catalog_path().join(format!("{schema}/"));
+                tokio::fs::create_dir_all(&db_dir)
                     .await
                     .context(FileIoSnafu)?;
-                let file = Path::new(&output_dir).join("create_tables.sql");
+                let file = db_dir.join("create_tables.sql");
                 let mut file = File::create(file).await.context(FileIoSnafu)?;
                 for (c, s, t) in metric_physical_tables.into_iter().chain(remaining_tables) {
                     match self.show_create("TABLE", &c, &s, Some(&t)).await {
@@ -348,7 +357,7 @@ impl Export {
                 info!(
                     "Finished exporting {}.{schema} with {table_count} table schemas to path: {}",
                     self.catalog,
-                    output_dir.to_string_lossy()
+                    db_dir.to_string_lossy()
                 );
 
                 Ok::<(), Error>(())
@@ -383,10 +392,8 @@ impl Export {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
-                let output_dir = Path::new(&self.output_dir)
-                    .join(&self.catalog)
-                    .join(format!("{schema}/"));
-                tokio::fs::create_dir_all(&output_dir)
+                let db_dir = self.catalog_path().join(format!("{schema}/"));
+                tokio::fs::create_dir_all(&db_dir)
                     .await
                     .context(FileIoSnafu)?;
 
@@ -410,7 +417,7 @@ impl Export {
                     r#"COPY DATABASE "{}"."{}" TO '{}' {};"#,
                     self.catalog,
                     schema,
-                    output_dir.to_str().unwrap(),
+                    db_dir.to_str().unwrap(),
                     with_options
                 );
 
@@ -421,18 +428,18 @@ impl Export {
                 info!(
                     "Finished exporting {}.{schema} data into path: {}",
                     self.catalog,
-                    output_dir.to_string_lossy()
+                    db_dir.to_string_lossy()
                 );
 
                 // The export copy from sql
-                let copy_from_file = output_dir.join("copy_from.sql");
+                let copy_from_file = db_dir.join("copy_from.sql");
                 let mut writer =
                     BufWriter::new(File::create(copy_from_file).await.context(FileIoSnafu)?);
                 let copy_database_from_sql = format!(
                     r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='parquet');"#,
                     self.catalog,
                     schema,
-                    output_dir.to_str().unwrap()
+                    db_dir.to_str().unwrap()
                 );
                 writer
                     .write(copy_database_from_sql.as_bytes())

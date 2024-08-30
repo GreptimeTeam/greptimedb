@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_telemetry::{error, info, warn};
 use snafu::ResultExt;
 use tokio::sync::Semaphore;
@@ -100,14 +101,17 @@ pub struct Import {
 
 impl Import {
     async fn import_create_table(&self) -> Result<()> {
-        self.do_sql_job("create_tables.sql").await
+        // Use default db to creates other dbs
+        self.do_sql_job("create_database.sql", Some(DEFAULT_SCHEMA_NAME))
+            .await?;
+        self.do_sql_job("create_tables.sql", None).await
     }
 
     async fn import_database_data(&self) -> Result<()> {
-        self.do_sql_job("copy_from.sql").await
+        self.do_sql_job("copy_from.sql", None).await
     }
 
-    async fn do_sql_job(&self, filename: &str) -> Result<()> {
+    async fn do_sql_job(&self, filename: &str, exec_db: Option<&str>) -> Result<()> {
         let timer = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.get_db_names().await?;
@@ -125,7 +129,8 @@ impl Import {
                 if sql.is_empty() {
                     info!("Empty `{filename}` {database_input_dir:?}");
                 } else {
-                    self.database_client.sql(&sql, &schema).await?;
+                    let db = exec_db.unwrap_or(&schema);
+                    self.database_client.sql(&sql, db).await?;
                     info!("Imported `{filename}` for database {schema}");
                 }
 
