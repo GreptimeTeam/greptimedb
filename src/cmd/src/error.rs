@@ -354,6 +354,14 @@ pub enum Error {
         error: tonic::transport::Error,
         msg: Option<String>,
     },
+
+    #[snafu(display("Cannot find schema {schema} in catalog {catalog}"))]
+    SchemaNotFound {
+        catalog: String,
+        schema: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -415,6 +423,7 @@ impl ErrorExt for Error {
             }
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::TonicTransport { .. } => StatusCode::Internal,
+            Error::SchemaNotFound { .. } => StatusCode::Unexpected,
         }
     }
 

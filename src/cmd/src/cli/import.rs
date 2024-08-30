@@ -25,7 +25,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::cli::database::DatabaseClient;
 use crate::cli::{database, Instance, Tool};
-use crate::error::{Error, FileIoSnafu, Result};
+use crate::error::{Error, FileIoSnafu, Result, SchemaNotFoundSnafu};
 
 #[derive(Debug, Default, Clone, ValueEnum)]
 enum ImportTarget {
@@ -155,11 +155,23 @@ impl Import {
     }
 
     async fn get_db_names(&self) -> Result<Vec<String>> {
-        if let Some(schema) = &self.schema {
-            Ok(vec![schema.clone()])
-        } else {
-            self.all_db_names().await
+        let db_names = self.all_db_names().await?;
+        let Some(schema) = &self.schema else {
+            return Ok(db_names);
+        };
+
+        for db_name in db_names {
+            // Check if the schema exists
+            if db_name.to_lowercase() == schema.to_lowercase() {
+                return Ok(vec![db_name]);
+            }
         }
+
+        SchemaNotFoundSnafu {
+            catalog: &self.catalog,
+            schema,
+        }
+        .fail()
     }
 
     // Get all database names in the input directory.
