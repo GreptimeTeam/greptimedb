@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_telemetry::info;
 use store_api::storage::TimeSeriesRowSelector;
 
 use crate::cache::{
@@ -213,6 +214,10 @@ impl RowGroupLastRowReader {
     /// Updates row group's last row cache if cache manager is present.
     fn maybe_update_cache(&mut self) {
         if let Some(cache) = &self.cache_manager {
+            if self.yielded_batches.len() == 0 {
+                // we always expect that row groups yields batches.
+                return;
+            }
             let value = Arc::new(SelectorResultValue {
                 result: std::mem::take(&mut self.yielded_batches),
                 projection: self
