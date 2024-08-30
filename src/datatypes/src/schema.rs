@@ -25,6 +25,7 @@ use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
 use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
+use crate::prelude::DataType;
 pub use crate::schema::column_schema::{
     ColumnSchema, FulltextAnalyzer, FulltextOptions, Metadata, COMMENT_KEY, FULLTEXT_KEY,
     TIME_INDEX_KEY,
@@ -34,6 +35,8 @@ pub use crate::schema::raw::RawSchema;
 
 /// Key used to store version number of the schema in metadata.
 pub const VERSION_KEY: &str = "greptime:version";
+/// Key used to store actual column type in field metadata.
+pub const TYPE_KEY: &str = "greptime:type";
 
 /// A common schema, should be immutable.
 #[derive(Clone, PartialEq, Eq)]
@@ -260,10 +263,8 @@ fn collect_fields(column_schemas: &[ColumnSchema]) -> Result<FieldsAndIndices> {
 
         // Json column performs the same as binary column in Arrow, so we need to mark it
         if column_schema.data_type.is_json() {
-            field.set_metadata(HashMap::from([(
-                String::from("is_json"),
-                String::from("true"),
-            )]));
+            let metadata = HashMap::from([(TYPE_KEY.to_string(), column_schema.data_type.name())]);
+            field = field.with_metadata(metadata);
         }
         fields.push(field);
         ensure!(

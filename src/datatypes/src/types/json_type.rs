@@ -24,6 +24,8 @@ use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
+/// JsonType is a data type for JSON data. It is stored as binary data of jsonb format.
+/// It utilizes current binary value and vector implementation.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct JsonType;
 

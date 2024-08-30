@@ -19,6 +19,7 @@ use arrow::datatypes::Field;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 
+use super::TYPE_KEY;
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error, Result};
 use crate::schema::constraint::ColumnDefaultConstraint;
@@ -269,8 +270,12 @@ impl TryFrom<&Field> for ColumnSchema {
 
     fn try_from(field: &Field) -> Result<ColumnSchema> {
         let mut data_type = ConcreteDataType::try_from(field.data_type())?;
-        if field.metadata().contains_key("is_json") {
-            data_type = ConcreteDataType::json_datatype();
+        // Override the data type if it is specified in the metadata.
+        if field.metadata().contains_key(TYPE_KEY) {
+            data_type = match field.metadata().get(TYPE_KEY).unwrap().as_str() {
+                "Json" => ConcreteDataType::json_datatype(),
+                _ => data_type,
+            };
         }
         let mut metadata = field.metadata().clone();
         let default_constraint = match metadata.remove(DEFAULT_CONSTRAINT_KEY) {
@@ -530,5 +535,28 @@ mod tests {
         let formatted_int32 = format!("{:?}", column_schema_int32);
         assert_eq!(formatted_int8, "test_column_1 Int8 null");
         assert_eq!(formatted_int32, "test_column_2 Int32 not null");
+    }
+
+    #[test]
+    fn test_from_field_to_column_schema() {
+        let field = Field::new("test", ArrowDataType::Int32, true);
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(ConcreteDataType::int32_datatype(), column_schema.data_type);
+        assert!(column_schema.is_nullable);
+        assert!(!column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert!(column_schema.metadata.is_empty());
+
+        let field = Field::new("test", ArrowDataType::Binary, true);
+        let field =
+            field.with_metadata(Metadata::from([(TYPE_KEY.to_string(), "Json".to_string())]));
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(ConcreteDataType::json_datatype(), column_schema.data_type);
+        assert!(column_schema.is_nullable);
+        assert!(!column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert!(column_schema.metadata.is_empty());
     }
 }

@@ -170,7 +170,7 @@ impl SortField {
                             Ok(Value::from(Option::<$f>::deserialize(deserializer).context(error::DeserializeFieldSnafu)?))
                         }
                     )*
-                    ConcreteDataType::Binary(_) => Ok(Value::from(
+                    ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => Ok(Value::from(
                         Option::<Vec<u8>>::deserialize(deserializer)
                             .context(error::DeserializeFieldSnafu)?
                             .map(Bytes::from),
@@ -191,10 +191,6 @@ impl SortField {
                     .fail(),
                     ConcreteDataType::Null(n) => NotSupportedFieldSnafu {
                         data_type: ConcreteDataType::Null(n.clone()),
-                    }
-                    .fail(),
-                    ConcreteDataType::Json(j) => NotSupportedFieldSnafu {
-                        data_type: ConcreteDataType::Json(j.clone()),
                     }
                     .fail(),
                 }
