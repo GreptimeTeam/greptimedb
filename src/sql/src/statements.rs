@@ -260,7 +260,19 @@ pub fn sql_value_to_value(
         SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
             parse_string_to_value(column_name, s.clone(), data_type, timezone)?
         }
-        SqlValue::HexStringLiteral(s) => parse_hex_string(s)?,
+        SqlValue::HexStringLiteral(s) => {
+            // Should not directly write binary into json column
+            ensure!(
+                !matches!(data_type, ConcreteDataType::Json(_)),
+                ColumnTypeMismatchSnafu {
+                    column_name,
+                    expect: ConcreteDataType::binary_datatype(),
+                    actual: ConcreteDataType::json_datatype(),
+                }
+            );
+
+            parse_hex_string(s)?
+        }
         SqlValue::Placeholder(s) => return InvalidSqlValueSnafu { value: s }.fail(),
 
         // TODO(dennis): supports binary string
@@ -884,6 +896,16 @@ mod tests {
         );
         assert!(v.is_err());
         assert!(format!("{v:?}").contains("invalid character"), "v is {v:?}",);
+
+        let sql_val = SqlValue::DoubleQuotedString("MorningMyFriends".to_string());
+        let v = sql_value_to_value(
+            "a",
+            &ConcreteDataType::json_datatype(),
+            &sql_val,
+            None,
+            None,
+        );
+        assert!(v.is_err());
     }
 
     #[test]
@@ -1047,6 +1069,36 @@ mod tests {
                 unreachable!()
             }
         }
+    }
+
+    #[test]
+    fn test_parse_json_to_jsonb() {
+        match parse_string_to_value(
+            "json_col",
+            r#"{"a": "b"}"#.to_string(),
+            &ConcreteDataType::json_datatype(),
+            None,
+        ) {
+            Ok(Value::Binary(b)) => {
+                assert_eq!(
+                    b,
+                    jsonb::parse_value(r#"{"a": "b"}"#.as_bytes())
+                        .unwrap()
+                        .to_vec()
+                );
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        assert!(parse_string_to_value(
+            "json_col",
+            r#"Nicola Kovac is the best rifler in the world"#.to_string(),
+            &ConcreteDataType::json_datatype(),
+            None,
+        )
+        .is_err())
     }
 
     #[test]
