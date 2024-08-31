@@ -959,10 +959,10 @@ impl WorkerListener {
         }
     }
 
-    pub(crate) fn on_compaction_scheduled(&self, region_id: RegionId) {
+    pub(crate) fn on_compaction_scheduled(&self, _region_id: RegionId) {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
-            listener.on_compaction_scheduled(region_id);
+            listener.on_compaction_scheduled(_region_id);
         }
     }
 }

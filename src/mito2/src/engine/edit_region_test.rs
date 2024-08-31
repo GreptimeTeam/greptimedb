@@ -15,6 +15,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common_time::util::current_time_millis;
 use object_store::ObjectStore;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
@@ -22,6 +23,7 @@ use store_api::storage::RegionId;
 use tokio::sync::{oneshot, Barrier};
 
 use crate::config::MitoConfig;
+use crate::engine::flush_test::MockTimeProvider;
 use crate::engine::listener::EventListener;
 use crate::engine::MitoEngine;
 use crate::manifest::action::RegionEdit;
@@ -44,14 +46,20 @@ async fn test_edit_region_schedule_compaction() {
         }
     }
 
-    let (tx, rx) = oneshot::channel();
+    let (tx, mut rx) = oneshot::channel();
+    let config = MitoConfig {
+        min_compaction_interval: Duration::from_secs(60 * 60),
+        ..Default::default()
+    };
+    let time_provider = Arc::new(MockTimeProvider::new(current_time_millis()));
     let engine = env
-        .create_engine_with(
-            MitoConfig::default(),
+        .create_engine_with_time(
+            config.clone(),
             None,
             Some(Arc::new(EditRegionListener {
                 tx: Mutex::new(Some(tx)),
             })),
+            time_provider.clone(),
         )
         .await;
 
@@ -65,7 +73,7 @@ async fn test_edit_region_schedule_compaction() {
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
 
-    let edit = RegionEdit {
+    let new_edit = || RegionEdit {
         files_to_add: vec![FileMeta {
             region_id: region.region_id,
             file_id: FileId::random(),
@@ -77,9 +85,25 @@ async fn test_edit_region_schedule_compaction() {
         flushed_entry_id: None,
         flushed_sequence: None,
     };
-    engine.edit_region(region.region_id, edit).await.unwrap();
+    engine
+        .edit_region(region.region_id, new_edit())
+        .await
+        .unwrap();
+    // Makes some time for the worker loop to process the request.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Asserts that the compaction of the region is not scheduled,
+    // because the minimum time interval between two compactions is not passed.
+    assert_eq!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty));
 
-    // Asserts that the compaction of the region is scheduled.
+    // Simulates the time has passed the min compaction interval,
+    time_provider
+        .set_now(current_time_millis() + config.min_compaction_interval.as_millis() as i64);
+    // ... then edits the region again,
+    engine
+        .edit_region(region.region_id, new_edit())
+        .await
+        .unwrap();
+    // ... finally asserts that the compaction of the region is scheduled.
     let actual = tokio::time::timeout(Duration::from_secs(9), rx)
         .await
         .unwrap()
@@ -209,7 +233,13 @@ async fn test_edit_region_concurrently() {
     }
 
     let mut env = TestEnv::new();
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            // Suppress the compaction to not impede the speed of this kinda stress testing.
+            min_compaction_interval: Duration::from_secs(60 * 60),
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     engine

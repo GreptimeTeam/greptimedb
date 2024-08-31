@@ -68,6 +68,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
         };
+        region.update_compaction_millis();
 
         region
             .version_control

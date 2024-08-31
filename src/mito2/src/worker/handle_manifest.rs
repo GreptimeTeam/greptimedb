@@ -171,6 +171,16 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         if need_compaction {
+            self.schedule_compaction(&region).await;
+        }
+    }
+
+    /// Schedule compaction for the region if necessary.
+    pub(crate) async fn schedule_compaction(&mut self, region: &MitoRegionRef) {
+        let now = self.time_provider.current_time_millis();
+        if now - region.last_compaction_millis()
+            >= self.config.min_compaction_interval.as_millis() as i64
+        {
             if let Err(e) = self
                 .compaction_scheduler
                 .schedule_compaction(
@@ -184,7 +194,7 @@ impl<S> RegionWorkerLoop<S> {
                 .await
             {
                 warn!(
-                    "Failed to schedule compaction after editing region: {}, err: {}",
+                    "Failed to schedule compaction for region: {}, err: {}",
                     region.region_id, e
                 );
             }

@@ -306,7 +306,7 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
 }
 
 #[derive(Debug)]
-struct MockTimeProvider {
+pub(crate) struct MockTimeProvider {
     now: AtomicI64,
     elapsed: AtomicI64,
 }
@@ -326,14 +326,14 @@ impl TimeProvider for MockTimeProvider {
 }
 
 impl MockTimeProvider {
-    fn new(now: i64) -> Self {
+    pub(crate) fn new(now: i64) -> Self {
         Self {
             now: AtomicI64::new(now),
             elapsed: AtomicI64::new(0),
         }
     }
 
-    fn set_now(&self, now: i64) {
+    pub(crate) fn set_now(&self, now: i64) {
         self.now.store(now, Ordering::Relaxed);
     }
 
