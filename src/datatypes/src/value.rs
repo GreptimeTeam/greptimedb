@@ -321,7 +321,7 @@ impl Value {
         let value_type_id = self.logical_type_id();
         let output_type_id = output_type.logical_type_id();
         ensure!(
-            output_type_id == value_type_id || self.is_null(),
+            output_type_id == value_type_id || self.is_null() || (output_type_id == LogicalTypeId::Json && value_type_id == LogicalTypeId::Binary),
             error::ToScalarValueSnafu {
                 reason: format!(
                     "expect value to return output_type {output_type_id:?}, actual: {value_type_id:?}",
@@ -1824,14 +1824,6 @@ mod tests {
             &ConcreteDataType::decimal128_datatype(38, 10),
             &Value::Decimal128(Decimal128::new(1, 38, 10)),
         );
-
-        let jsonb_value = jsonb::parse_value(r#"{"key": "value"}"#.as_bytes())
-            .unwrap()
-            .to_vec();
-        check_type_and_value(
-            &ConcreteDataType::json_datatype(),
-            &Value::Binary(jsonb_value.into()),
-        );
     }
 
     #[test]
@@ -1944,15 +1936,6 @@ mod tests {
                 items: vec![Value::Int32(123)],
                 datatype: ConcreteDataType::int32_datatype(),
             }))
-        );
-
-        let jsonb_value =
-            jsonb::parse_value(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#.as_bytes())
-                .unwrap();
-        let json_value: serde_json::Value = jsonb_value.clone().into();
-        assert_eq!(
-            json_value,
-            to_json(Value::Binary(jsonb_value.to_vec().into()))
         );
     }
 

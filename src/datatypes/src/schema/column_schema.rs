@@ -549,14 +549,19 @@ mod tests {
         assert!(column_schema.metadata.is_empty());
 
         let field = Field::new("test", ArrowDataType::Binary, true);
-        let field =
-            field.with_metadata(Metadata::from([(TYPE_KEY.to_string(), "Json".to_string())]));
+        let field = field.with_metadata(Metadata::from([(
+            TYPE_KEY.to_string(),
+            ConcreteDataType::json_datatype().name(),
+        )]));
         let column_schema = ColumnSchema::try_from(&field).unwrap();
         assert_eq!("test", column_schema.name);
         assert_eq!(ConcreteDataType::json_datatype(), column_schema.data_type);
         assert!(column_schema.is_nullable);
         assert!(!column_schema.is_time_index);
         assert!(column_schema.default_constraint.is_none());
-        assert!(column_schema.metadata.is_empty());
+        assert_eq!(
+            column_schema.metadata.get(TYPE_KEY).unwrap(),
+            &ConcreteDataType::json_datatype().name()
+        );
     }
 }
