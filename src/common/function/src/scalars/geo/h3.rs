@@ -28,7 +28,7 @@ use snafu::{ensure, ResultExt};
 
 use crate::function::{Function, FunctionContext};
 
-/// Function that return geohash string for a given geospatial coordinate.
+/// Function that return h3 encoding string for a given geospatial coordinate.
 #[derive(Clone, Debug, Default)]
 pub struct H3Function;
 
