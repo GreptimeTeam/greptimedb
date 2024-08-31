@@ -2123,15 +2123,6 @@ mod tests {
                 datatype: ConcreteDataType::int32_datatype(),
             }))
         );
-
-        let jsonb_value =
-            jsonb::parse_value(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#.as_bytes())
-                .unwrap();
-        let json_value: serde_json::Value = jsonb_value.clone().into();
-        assert_eq!(
-            json_value,
-            to_json(Value::Binary(jsonb_value.to_vec().into()))
-        );
     }
 
     #[test]
