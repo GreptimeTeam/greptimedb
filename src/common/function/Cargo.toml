@@ -27,6 +27,8 @@ common-time.workspace = true
 common-version.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true
+geohash = { version = "0.13", optional = true }
+h3o = { version = "0.6", optional = true }
 num = "0.4"
 num-traits = "0.2"
 once_cell.workspace = true
@@ -39,8 +41,6 @@ sql.workspace = true
 statrs = "0.16"
 store-api.workspace = true
 table.workspace = true
-geohash = { version = "0.13", optional = true }
-h3o = { version = "0.6", optional = true }
 
 [dev-dependencies]
 ron = "0.7"
