@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_telemetry::{error, info};
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::FileMeta;
@@ -77,15 +78,38 @@ impl FilePurger for LocalFilePurger {
             cache.remove_parquet_meta_data(file_meta.region_id, file_meta.file_id);
         }
 
+        let cache_manager = self.cache_manager.clone();
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
             if let Err(e) = sst_layer.delete_sst(&file_meta).await {
-                error!(e; "Failed to delete SST file, file_id: {}, region: {}", 
+                error!(e; "Failed to delete SST file, file_id: {}, region: {}",
                     file_meta.file_id, file_meta.region_id);
             } else {
                 info!(
                     "Successfully deleted SST file, file_id: {}, region: {}",
                     file_meta.file_id, file_meta.region_id
                 );
+            }
+
+            if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache())
+            {
+                // Removes the inverted index from the cache.
+                if file_meta.inverted_index_available() {
+                    write_cache
+                        .remove(IndexKey::new(
+                            file_meta.region_id,
+                            file_meta.file_id,
+                            FileType::Puffin,
+                        ))
+                        .await;
+                }
+                // Remove the SST file from the cache.
+                write_cache
+                    .remove(IndexKey::new(
+                        file_meta.region_id,
+                        file_meta.file_id,
+                        FileType::Parquet,
+                    ))
+                    .await;
             }
         })) {
             error!(e; "Failed to schedule the file purge request");
