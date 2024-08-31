@@ -179,7 +179,6 @@ impl FileCache {
         }
     }
 
-    #[allow(unused)]
     /// Removes a file from the cache explicitly.
     pub(crate) async fn remove(&self, key: IndexKey) {
         let file_path = self.cache_file_path(key);

@@ -169,6 +169,11 @@ impl WriteCache {
         Ok(Some(sst_info))
     }
 
+    /// Removes a file from the cache by `index_key`.
+    pub(crate) async fn remove(&self, index_key: IndexKey) {
+        self.file_cache.remove(index_key).await
+    }
+
     /// Downloads a file in `remote_path` from the remote object store to the local cache
     /// (specified by `index_key`).
     pub(crate) async fn download(
@@ -424,6 +429,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remote_index_data.to_vec(), cache_index_data.to_vec());
+
+        // Removes the file from the cache.
+        let sst_index_key = IndexKey::new(region_id, file_id, FileType::Parquet);
+        write_cache.remove(sst_index_key).await;
+        assert!(!write_cache.file_cache.contains_key(&sst_index_key));
+        write_cache.remove(index_key).await;
+        assert!(!write_cache.file_cache.contains_key(&index_key));
     }
 
     #[tokio::test]
