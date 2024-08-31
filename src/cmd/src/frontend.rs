@@ -320,6 +320,7 @@ impl StartCommand {
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
+            None,
         );
 
         let executor = HandlerGroupExecutor::new(vec![

@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::v1::meta::ProcedureDetailResponse;
 use common_procedure::{
     watcher, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId,
 };
@@ -826,6 +827,15 @@ impl ProcedureExecutor for DdlManager {
             })?;
 
         Ok(procedure::procedure_state_to_pb_response(&state))
+    }
+
+    async fn list_procedure(&self, _ctx: &ExecutorContext) -> Result<ProcedureDetailResponse> {
+        let metas = self
+            .procedure_manager
+            .list_procedure()
+            .await
+            .context(QueryProcedureSnafu)?;
+        Ok(procedure::procedure_details_to_pb_response(metas))
     }
 }
 

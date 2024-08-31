@@ -326,6 +326,7 @@ mod tests {
             None,
             backend.clone(),
             layered_cache_registry,
+            None,
         );
         let table_metadata_manager = TableMetadataManager::new(backend);
         let mut view_info = common_meta::key::test_utils::new_test_table_info(1024, vec![]);

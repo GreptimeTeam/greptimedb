@@ -98,6 +98,8 @@ pub const INFORMATION_SCHEMA_CLUSTER_INFO_TABLE_ID: u32 = 31;
 pub const INFORMATION_SCHEMA_VIEW_TABLE_ID: u32 = 32;
 /// id for information_schema.FLOWS
 pub const INFORMATION_SCHEMA_FLOW_TABLE_ID: u32 = 33;
+/// id for information_schema.procedure_info
+pub const INFORMATION_SCHEMA_PROCEDURE_INFO_TABLE_ID: u32 = 34;
 /// ----- End of information_schema tables -----
 
 /// ----- Begin of pg_catalog tables -----

@@ -18,7 +18,7 @@ use std::time::Duration;
 use api::v1::meta::{
     procedure_service_server, DdlTaskRequest as PbDdlTaskRequest,
     DdlTaskResponse as PbDdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse,
-    ProcedureStateResponse, QueryProcedureRequest,
+    ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse, QueryProcedureRequest,
 };
 use common_meta::ddl::ExecutorContext;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
@@ -145,5 +145,21 @@ impl procedure_service_server::ProcedureService for Metasrv {
         };
 
         Ok(Response::new(resp))
+    }
+
+    async fn details(
+        &self,
+        request: Request<ProcedureDetailRequest>,
+    ) -> GrpcResult<ProcedureDetailResponse> {
+        let ProcedureDetailRequest { header } = request.into_inner();
+        let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let metas = self
+            .procedure_manager()
+            .list_procedure()
+            .await
+            .context(error::QueryProcedureSnafu)?;
+        Ok(Response::new(procedure::procedure_details_to_pb_response(
+            metas,
+        )))
     }
 }

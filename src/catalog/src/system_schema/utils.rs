@@ -18,6 +18,7 @@ use std::sync::{Arc, Weak};
 
 use common_config::Mode;
 use common_meta::key::TableMetadataManagerRef;
+use common_procedure::ProcedureManagerRef;
 use meta_client::client::MetaClient;
 use snafu::OptionExt;
 
@@ -67,4 +68,19 @@ pub fn table_meta_manager(
         .as_any()
         .downcast_ref::<KvBackendCatalogManager>()
         .map(|manager| manager.table_metadata_manager_ref().clone()))
+}
+
+/// Try to get the `[ProcedureManagerRef]` from `[CatalogManager]` weak reference.
+pub fn procedure_manager(
+    catalog_manager: &Weak<dyn CatalogManager>,
+) -> Result<Option<ProcedureManagerRef>> {
+    let catalog_manager = catalog_manager
+        .upgrade()
+        .context(UpgradeWeakCatalogManagerRefSnafu)?;
+
+    Ok(catalog_manager
+        .as_any()
+        .downcast_ref::<KvBackendCatalogManager>()
+        .map(|manager| manager.procedure_manager().clone())
+        .expect("Just used in standalone mode"))
 }

@@ -27,7 +27,9 @@ use crate::error::{self, ProcedurePanicSnafu, Result, RollbackTimesExceededSnafu
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::procedure::{Output, StringKey};
 use crate::store::{ProcedureMessage, ProcedureStore};
-use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
+use crate::{
+    BoxedProcedure, Context, Error, Procedure, ProcedureId, ProcedureState, ProcedureWithId, Status,
+};
 
 /// A guard to cleanup procedure state.
 struct ProcedureGuard {
@@ -130,6 +132,8 @@ impl Runner {
         // Execute the procedure. We need to release the lock whenever the execution
         // is successful or fail.
         self.execute_procedure_in_loop().await;
+        self.meta
+            .set_end_time_ms(common_time::util::current_time_millis() as u64);
 
         // We can't remove the metadata of the procedure now as users and its parent might
         // need to query its state.
@@ -368,6 +372,7 @@ impl Runner {
             procedure_state,
             Some(self.meta.id),
             procedure.lock_key(),
+            procedure.type_name(),
         ));
         let runner = Runner {
             meta: meta.clone(),

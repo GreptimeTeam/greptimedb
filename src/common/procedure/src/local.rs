@@ -35,7 +35,7 @@ use crate::error::{
     StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
 };
 use crate::local::runner::Runner;
-use crate::procedure::{BoxedProcedureLoader, InitProcedureState};
+use crate::procedure::{BoxedProcedureLoader, InitProcedureState, ProcedureInfo};
 use crate::store::{ProcedureMessage, ProcedureMessages, ProcedureStore, StateStoreRef};
 use crate::{
     BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
@@ -57,6 +57,8 @@ const META_TTL: Duration = Duration::from_secs(60 * 10);
 pub(crate) struct ProcedureMeta {
     /// Id of this procedure.
     id: ProcedureId,
+    /// Type of this procedure.
+    type_name: String,
     /// Parent procedure id.
     parent_id: Option<ProcedureId>,
     /// Notify to wait for subprocedures.
@@ -69,6 +71,10 @@ pub(crate) struct ProcedureMeta {
     state_receiver: Receiver<ProcedureState>,
     /// Id of child procedures.
     children: Mutex<Vec<ProcedureId>>,
+    /// Start execution time of this procedure.
+    start_time_ms: u64,
+    /// End execution time of this procedure.
+    end_time_ms: Mutex<u64>,
 }
 
 impl ProcedureMeta {
@@ -77,6 +83,7 @@ impl ProcedureMeta {
         procedure_state: ProcedureState,
         parent_id: Option<ProcedureId>,
         lock_key: LockKey,
+        type_name: &str,
     ) -> ProcedureMeta {
         let (state_sender, state_receiver) = watch::channel(procedure_state);
         ProcedureMeta {
@@ -87,11 +94,14 @@ impl ProcedureMeta {
             state_sender,
             state_receiver,
             children: Mutex::new(Vec::new()),
+            start_time_ms: common_time::util::current_time_millis() as u64,
+            end_time_ms: Mutex::new(0),
+            type_name: type_name.to_string(),
         }
     }
 
     /// Returns current [ProcedureState].
-    fn state(&self) -> ProcedureState {
+    pub fn state(&self) -> ProcedureState {
         self.state_receiver.borrow().clone()
     }
 
@@ -116,6 +126,31 @@ impl ProcedureMeta {
     /// Returns the number of subprocedures.
     fn num_children(&self) -> usize {
         self.children.lock().unwrap().len()
+    }
+
+    /// Returns the id of the procedure.
+    fn id(&self) -> ProcedureId {
+        self.id
+    }
+
+    /// Returns the type name of the procedure.
+    fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    /// Returns the start time of the procedure.
+    fn start_time_ms(&self) -> u64 {
+        self.start_time_ms
+    }
+
+    /// Returns the end time of the procedure.
+    fn end_time_ms(&self) -> u64 {
+        *self.end_time_ms.lock().unwrap()
+    }
+
+    /// update the end time of the procedure.
+    fn set_end_time_ms(&self, end_time_ms: u64) {
+        *self.end_time_ms.lock().unwrap() = end_time_ms;
     }
 }
 
@@ -208,6 +243,21 @@ impl ManagerContext {
     fn state(&self, procedure_id: ProcedureId) -> Option<ProcedureState> {
         let procedures = self.procedures.read().unwrap();
         procedures.get(&procedure_id).map(|meta| meta.state())
+    }
+
+    /// Returns the [ProcedureMeta] of all procedures.
+    fn list_procedure(&self) -> Vec<ProcedureInfo> {
+        let procedures = self.procedures.read().unwrap();
+        procedures
+            .values()
+            .map(|meta| ProcedureInfo {
+                id: meta.id(),
+                type_name: meta.type_name().to_string(),
+                start_time_ms: meta.start_time_ms(),
+                end_time_ms: meta.end_time_ms(),
+                state: meta.state(),
+            })
+            .collect()
     }
 
     /// Returns the [Watcher] of specific `procedure_id`.
@@ -438,6 +488,7 @@ impl LocalManager {
             procedure_state,
             None,
             procedure.lock_key(),
+            procedure.type_name(),
         ));
         let runner = Runner {
             meta: meta.clone(),
@@ -641,6 +692,10 @@ impl ProcedureManager for LocalManager {
     fn procedure_watcher(&self, procedure_id: ProcedureId) -> Option<Watcher> {
         self.manager_ctx.watcher(procedure_id)
     }
+
+    async fn list_procedure(&self) -> Result<Vec<ProcedureInfo>> {
+        Ok(self.manager_ctx.list_procedure())
+    }
 }
 
 struct RemoveOutdatedMetaFunction {
@@ -675,6 +730,7 @@ pub(crate) mod test_util {
             ProcedureState::Running,
             None,
             LockKey::default(),
+            "ProcedureTest",
         )
     }
 

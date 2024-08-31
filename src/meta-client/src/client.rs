@@ -22,7 +22,7 @@ mod cluster;
 mod store;
 mod util;
 
-use api::v1::meta::Role;
+use api::v1::meta::{ProcedureDetailResponse, Role};
 use cluster::Client as ClusterClient;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -255,6 +255,16 @@ impl ProcedureExecutor for MetaClient {
         pid: &str,
     ) -> MetaResult<ProcedureStateResponse> {
         self.query_procedure_state(pid)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
+    async fn list_procedure(&self, _ctx: &ExecutorContext) -> MetaResult<ProcedureDetailResponse> {
+        self.procedure_client()
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?
+            .list_procedure()
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)

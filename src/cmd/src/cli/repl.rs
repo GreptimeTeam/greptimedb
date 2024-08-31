@@ -281,6 +281,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         Some(meta_client.clone()),
         cached_meta_backend.clone(),
         layered_cache_registry,
+        None,
     );
     let plugins: Plugins = Default::default();
     let state = Arc::new(QueryEngineState::new(

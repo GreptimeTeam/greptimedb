@@ -45,3 +45,4 @@ pub const TABLE_CONSTRAINTS: &str = "table_constraints";
 pub const CLUSTER_INFO: &str = "cluster_info";
 pub const VIEWS: &str = "views";
 pub const FLOWS: &str = "flows";
+pub const PROCEDURE_INFO: &str = "procedure_info";

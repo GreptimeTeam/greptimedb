@@ -1337,6 +1337,7 @@ dependencies = [
  "common-error",
  "common-macro",
  "common-meta",
+ "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-telemetry",
@@ -2127,6 +2128,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
+ "common-time",
  "futures",
  "futures-util",
  "humantime-serde",
@@ -4271,7 +4273,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=c437b55725b7f5224fe9d46db21072b4a682ee4b#c437b55725b7f5224fe9d46db21072b4a682ee4b"
+source = "git+https://github.com/realtaobo/greptime-proto.git?rev=3a372068e9c832c4b2cdb9bb52e09f7cfcd3c9b0#3a372068e9c832c4b2cdb9bb52e09f7cfcd3c9b0"
 dependencies = [
  "prost 0.12.6",
  "serde",
