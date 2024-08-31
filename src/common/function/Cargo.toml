@@ -7,6 +7,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["geo"]
+geo = ["geohash", "h3o"]
+
 [dependencies]
 api.workspace = true
 arc-swap = "1.0"
@@ -35,6 +39,8 @@ sql.workspace = true
 statrs = "0.16"
 store-api.workspace = true
 table.workspace = true
+geohash = { version = "0.13", optional = true }
+h3o = { version = "0.6", optional = true }
 
 [dev-dependencies]
 ron = "0.7"
