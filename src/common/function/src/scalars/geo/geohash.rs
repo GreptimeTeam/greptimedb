@@ -90,7 +90,7 @@ impl Function for GeohashFunction {
                     let encoded = geohash::encode(coord, r as usize)
                         .map_err(|e| {
                             BoxedError::new(PlainError::new(
-                                format!("Geohash error: {}", e.to_string()),
+                                format!("Geohash error: {}", e),
                                 StatusCode::EngineExecuteQuery,
                             ))
                         })

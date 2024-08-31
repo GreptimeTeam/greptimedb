@@ -89,7 +89,7 @@ impl Function for H3Function {
                     let coord = LatLng::new(lat, lon)
                         .map_err(|e| {
                             BoxedError::new(PlainError::new(
-                                format!("H3 error: {}", e.to_string()),
+                                format!("H3 error: {}", e),
                                 StatusCode::EngineExecuteQuery,
                             ))
                         })
@@ -97,7 +97,7 @@ impl Function for H3Function {
                     let r = Resolution::try_from(r as u8)
                         .map_err(|e| {
                             BoxedError::new(PlainError::new(
-                                format!("H3 error: {}", e.to_string()),
+                                format!("H3 error: {}", e),
                                 StatusCode::EngineExecuteQuery,
                             ))
                         })
