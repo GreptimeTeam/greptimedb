@@ -746,6 +746,8 @@ pub async fn test_config_api(store_type: StorageType) {
         r#"
 mode = "standalone"
 enable_telemetry = true
+init_regions_in_background = false
+init_regions_parallelism = 16
 
 [http]
 addr = "127.0.0.1:4000"
