@@ -23,7 +23,7 @@ use api::v1::CreateTableExpr;
 use common_catalog::consts::{INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME};
 use futures::future::BoxFuture;
 use futures_util::stream::BoxStream;
-use session::context::Channel;
+use session::context::QueryContext;
 use table::metadata::TableId;
 use table::TableRef;
 
@@ -46,25 +46,34 @@ pub trait CatalogManager: Send + Sync {
 
     async fn catalog_names(&self) -> Result<Vec<String>>;
 
-    async fn schema_names(&self, catalog: &str, channel: Channel) -> Result<Vec<String>>;
+    async fn schema_names(
+        &self,
+        catalog: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<Vec<String>>;
 
     async fn table_names(
         &self,
         catalog: &str,
         schema: &str,
-        channel: Channel,
+        query_ctx: Option<&QueryContext>,
     ) -> Result<Vec<String>>;
 
     async fn catalog_exists(&self, catalog: &str) -> Result<bool>;
 
-    async fn schema_exists(&self, catalog: &str, schema: &str, channel: Channel) -> Result<bool>;
+    async fn schema_exists(
+        &self,
+        catalog: &str,
+        schema: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<bool>;
 
     async fn table_exists(
         &self,
         catalog: &str,
         schema: &str,
         table: &str,
-        channel: Channel,
+        query_ctx: Option<&QueryContext>,
     ) -> Result<bool>;
 
     /// Returns the table by catalog, schema and table name.
@@ -73,7 +82,7 @@ pub trait CatalogManager: Send + Sync {
         catalog: &str,
         schema: &str,
         table_name: &str,
-        channel: Channel,
+        query_ctx: Option<&QueryContext>,
     ) -> Result<Option<TableRef>>;
 
     /// Returns all tables with a stream by catalog and schema.
@@ -81,7 +90,7 @@ pub trait CatalogManager: Send + Sync {
         &'a self,
         catalog: &'a str,
         schema: &'a str,
-        channel: Channel,
+        query_ctx: Option<&'a QueryContext>,
     ) -> BoxStream<'a, Result<TableRef>>;
 
     /// Check if `schema` is a reserved schema name

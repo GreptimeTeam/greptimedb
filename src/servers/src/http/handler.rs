@@ -338,13 +338,8 @@ async fn validate_schema(
     sql_handler: ServerSqlQueryHandlerRef,
     query_ctx: QueryContextRef,
 ) -> Option<(StatusCode, String)> {
-    let channel = query_ctx.channel();
     match sql_handler
-        .is_valid_schema(
-            query_ctx.current_catalog(),
-            &query_ctx.current_schema(),
-            channel,
-        )
+        .is_valid_schema(query_ctx.current_catalog(), &query_ctx.current_schema())
         .await
     {
         Ok(true) => None,

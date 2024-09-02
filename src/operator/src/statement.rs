@@ -42,7 +42,7 @@ use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
-use session::context::{Channel, QueryContextRef};
+use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
@@ -256,10 +256,9 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
 
-                let channel = query_ctx.channel();
                 let table_ref = self
                     .catalog_manager
-                    .table(&catalog, &schema, &table, channel)
+                    .table(&catalog, &schema, &table, Some(&query_ctx))
                     .await
                     .context(CatalogSnafu)?
                     .context(TableNotFoundSnafu { table_name: &table })?;
@@ -285,7 +284,7 @@ impl StatementExecutor {
         let catalog = query_ctx.current_catalog();
         ensure!(
             self.catalog_manager
-                .schema_exists(catalog, db.as_ref(), query_ctx.channel())
+                .schema_exists(catalog, db.as_ref(), Some(&query_ctx))
                 .await
                 .context(CatalogSnafu)?,
             SchemaNotFoundSnafu { schema_info: &db }
@@ -354,7 +353,7 @@ impl StatementExecutor {
             table,
         } = table_ref;
         self.catalog_manager
-            .table(catalog, schema, table, Channel::Unknown)
+            .table(catalog, schema, table, None)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

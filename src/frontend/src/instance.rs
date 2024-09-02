@@ -67,7 +67,7 @@ use servers::query_handler::{
     PromStoreProtocolHandler, ScriptHandler,
 };
 use servers::server::ServerHandlers;
-use session::context::{Channel, QueryContextRef};
+use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
@@ -354,11 +354,12 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn is_valid_schema(&self, catalog: &str, schema: &str, channel: Channel) -> Result<bool> {
+    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.catalog_manager
-            .schema_exists(catalog, schema, channel)
+            .schema_exists(catalog, schema, None)
             .await
             .context(error::CatalogSnafu)
+            .map(|b| b && !self.catalog_manager.is_reserved_schema_name(schema))
     }
 }
 

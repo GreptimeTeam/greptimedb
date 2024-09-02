@@ -31,7 +31,7 @@ use servers::error::{Error, NotSupportedSnafu, Result};
 use servers::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerRef};
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
-use session::context::{Channel, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::ensure;
 use sql::statements::statement::Statement;
 use table::TableRef;
@@ -108,12 +108,7 @@ impl SqlQueryHandler for DummyInstance {
         }
     }
 
-    async fn is_valid_schema(
-        &self,
-        catalog: &str,
-        schema: &str,
-        _channel: Channel,
-    ) -> Result<bool> {
+    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
     }
 }

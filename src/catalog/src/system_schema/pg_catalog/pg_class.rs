@@ -27,13 +27,12 @@ use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder, VectorRef};
 use futures::TryStreamExt;
-use session::context::Channel::Postgres;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 use table::metadata::TableType;
 
 use super::pg_namespace::oid_map::PGNamespaceOidMapRef;
-use super::{OID_COLUMN_NAME, PG_CLASS};
+use super::{query_ctx, OID_COLUMN_NAME, PG_CLASS};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
@@ -204,10 +203,10 @@ impl PGClassBuilder {
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
         let predicates = Predicates::from_scan_request(&request);
         for schema_name in catalog_manager
-            .schema_names(&catalog_name, Postgres)
+            .schema_names(&catalog_name, query_ctx())
             .await?
         {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, Postgres);
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, query_ctx());
             while let Some(table) = stream.try_next().await? {
                 let table_info = table.table_info();
                 self.add_class(

@@ -36,7 +36,7 @@ use datatypes::schema::Schema;
 use futures_util::future;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
-use session::context::{Channel, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 use snafu::ResultExt;
 use sql::statements::insert::Insert;
@@ -608,7 +608,7 @@ impl Inserter {
         table: &str,
     ) -> Result<Option<TableRef>> {
         self.catalog_manager
-            .table(catalog, schema, table, Channel::Unknown)
+            .table(catalog, schema, table, None)
             .await
             .context(CatalogSnafu)
     }

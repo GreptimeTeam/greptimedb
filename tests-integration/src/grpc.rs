@@ -36,7 +36,7 @@ mod test {
     use query::plan::LogicalPlan;
     use query::query_engine::DefaultSerializer;
     use servers::query_handler::grpc::GrpcQueryHandler;
-    use session::context::{Channel, QueryContext};
+    use session::context::QueryContext;
     use store_api::storage::RegionId;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
@@ -182,7 +182,7 @@ mod test {
                 "greptime",
                 "database_created_through_grpc",
                 "table_created_through_grpc",
-                Channel::Unknown,
+                None,
             )
             .await
             .unwrap()
@@ -511,7 +511,7 @@ CREATE TABLE {table_name} (
         let table = instance
             .frontend()
             .catalog_manager()
-            .table("greptime", "public", table_name, Channel::Unknown)
+            .table("greptime", "public", table_name, None)
             .await
             .unwrap()
             .unwrap();

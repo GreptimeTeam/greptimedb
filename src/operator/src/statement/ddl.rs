@@ -48,7 +48,7 @@ use query::plan::extract_and_rewrite_full_table_names;
 use query::query_engine::DefaultSerializer;
 use query::sql::create_table_stmt;
 use regex::Regex;
-use session::context::{Channel, QueryContextRef};
+use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::alter::AlterTable;
@@ -104,10 +104,9 @@ impl StatementExecutor {
         let (catalog, schema, table) = table_idents_to_full_name(&stmt.source_name, &ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
-        let channel = ctx.channel();
         let table_ref = self
             .catalog_manager
-            .table(&catalog, &schema, &table, channel)
+            .table(&catalog, &schema, &table, Some(&ctx))
             .await
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu { table_name: &table })?;
@@ -201,7 +200,6 @@ impl StatementExecutor {
             .fail();
         };
 
-        let channel = query_ctx.channel();
         // if table exists.
         if let Some(table) = self
             .catalog_manager
@@ -209,7 +207,7 @@ impl StatementExecutor {
                 &create_table.catalog_name,
                 &create_table.schema_name,
                 &create_table.table_name,
-                channel,
+                Some(&query_ctx),
             )
             .await
             .context(CatalogSnafu)?
@@ -488,7 +486,6 @@ impl StatementExecutor {
             }
         );
 
-        let channel = ctx.channel();
         // if view or table exists.
         if let Some(table) = self
             .catalog_manager
@@ -496,7 +493,7 @@ impl StatementExecutor {
                 &expr.catalog_name,
                 &expr.schema_name,
                 &expr.view_name,
-                channel,
+                Some(&ctx),
             )
             .await
             .context(CatalogSnafu)?
@@ -666,7 +663,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let view_info = if let Some(view) = self
             .catalog_manager
-            .table(&catalog, &schema, &view, Channel::Unknown)
+            .table(&catalog, &schema, &view, None)
             .await
             .context(CatalogSnafu)?
         {
@@ -770,14 +767,13 @@ impl StatementExecutor {
                 }
             );
 
-            let channel = query_context.channel();
             if let Some(table) = self
                 .catalog_manager
                 .table(
                     &table_name.catalog_name,
                     &table_name.schema_name,
                     &table_name.table_name,
-                    channel,
+                    Some(&query_context),
                 )
                 .await
                 .context(CatalogSnafu)?
@@ -828,7 +824,7 @@ impl StatementExecutor {
 
         if self
             .catalog_manager
-            .schema_exists(&catalog, &schema, Channel::Unknown)
+            .schema_exists(&catalog, &schema, None)
             .await
             .context(CatalogSnafu)?
         {
@@ -864,14 +860,13 @@ impl StatementExecutor {
             }
         );
 
-        let channel = query_context.channel();
         let table = self
             .catalog_manager
             .table(
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
-                channel,
+                Some(&query_context),
             )
             .await
             .context(CatalogSnafu)?
@@ -956,10 +951,14 @@ impl StatementExecutor {
 
         let table_name = expr.table_name.clone();
 
-        let channel = query_context.channel();
         let table = self
             .catalog_manager
-            .table(&catalog_name, &schema_name, &table_name, channel)
+            .table(
+                &catalog_name,
+                &schema_name,
+                &table_name,
+                Some(&query_context),
+            )
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
@@ -1182,7 +1181,7 @@ impl StatementExecutor {
 
         if !self
             .catalog_manager
-            .schema_exists(catalog, database, Channel::Unknown)
+            .schema_exists(catalog, database, None)
             .await
             .context(CatalogSnafu)?
             && !self.catalog_manager.is_reserved_schema_name(database)

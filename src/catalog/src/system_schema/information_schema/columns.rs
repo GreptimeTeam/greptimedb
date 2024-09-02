@@ -34,12 +34,11 @@ use datatypes::vectors::{
     ConstantVector, Int64Vector, Int64VectorBuilder, StringVector, StringVectorBuilder, VectorRef,
 };
 use futures::TryStreamExt;
-use session::context::Channel::{self, Mysql};
 use snafu::{OptionExt, ResultExt};
 use sql::statements;
 use store_api::storage::{ScanRequest, TableId};
 
-use super::{InformationTable, COLUMNS};
+use super::{query_ctx, InformationTable, COLUMNS};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
@@ -258,8 +257,11 @@ impl InformationSchemaColumnsBuilder {
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager.schema_names(&catalog_name, Mysql).await? {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, Channel::Mysql);
+        for schema_name in catalog_manager
+            .schema_names(&catalog_name, query_ctx())
+            .await?
+        {
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, query_ctx());
 
             while let Some(table) = stream.try_next().await? {
                 let keys = &table.table_info().meta.primary_key_indices;

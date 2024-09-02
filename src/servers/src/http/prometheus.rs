@@ -42,7 +42,7 @@ use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use session::context::{Channel, QueryContext};
+use session::context::QueryContext;
 use snafu::{Location, OptionExt, ResultExt};
 
 pub use super::prometheus_resp::PrometheusJsonResponse;
@@ -405,16 +405,11 @@ async fn get_all_column_names(
     schema: &str,
     manager: &CatalogManagerRef,
 ) -> std::result::Result<HashSet<String>, catalog::error::Error> {
-    let table_names = manager
-        .table_names(catalog, schema, Channel::Prometheus)
-        .await?;
+    let table_names = manager.table_names(catalog, schema, None).await?;
 
     let mut labels = HashSet::new();
     for table_name in table_names {
-        let Some(table) = manager
-            .table(catalog, schema, &table_name, Channel::Unknown)
-            .await?
-        else {
+        let Some(table) = manager.table(catalog, schema, &table_name, None).await? else {
             continue;
         };
         for column in table.primary_key_columns() {
@@ -434,7 +429,6 @@ async fn retrieve_series_from_query_result(
     metrics: &mut HashMap<String, u64>,
 ) -> Result<()> {
     let result = result?;
-    let channel = query_ctx.channel();
 
     // fetch tag list
     let table = manager
@@ -442,7 +436,7 @@ async fn retrieve_series_from_query_result(
             query_ctx.current_catalog(),
             &query_ctx.current_schema(),
             table_name,
-            channel,
+            Some(query_ctx),
         )
         .await
         .context(CatalogSnafu)?
@@ -698,7 +692,7 @@ pub async fn label_values_query(
     if label_name == METRIC_NAME_LABEL {
         let mut table_names = match handler
             .catalog_manager()
-            .table_names(&catalog, &schema, query_ctx.channel())
+            .table_names(&catalog, &schema, Some(&query_ctx))
             .await
         {
             Ok(table_names) => table_names,
@@ -780,12 +774,15 @@ async fn retrieve_field_names(
 ) -> Result<HashSet<String>> {
     let mut field_columns = HashSet::new();
     let catalog = query_ctx.current_catalog();
-    let channel = query_ctx.channel();
     let schema = query_ctx.current_schema();
 
     if matches.is_empty() {
         // query all tables if no matcher is provided
-        while let Some(table) = manager.tables(catalog, &schema, channel).next().await {
+        while let Some(table) = manager
+            .tables(catalog, &schema, Some(query_ctx))
+            .next()
+            .await
+        {
             let table = table.context(CatalogSnafu)?;
             for column in table.field_columns() {
                 field_columns.insert(column.name);
@@ -796,7 +793,7 @@ async fn retrieve_field_names(
 
     for table_name in matches {
         let table = manager
-            .table(catalog, &schema, &table_name, channel)
+            .table(catalog, &schema, &table_name, Some(query_ctx))
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

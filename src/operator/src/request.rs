@@ -24,7 +24,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info};
 use futures_util::future;
 use partition::manager::{PartitionInfo, PartitionRuleManagerRef};
-use session::context::{Channel, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 use store_api::storage::RegionId;
 use table::requests::{CompactTableRequest, FlushTableRequest};
@@ -219,7 +219,7 @@ impl Requester {
     ) -> Result<Vec<PartitionInfo>> {
         let table = self
             .catalog_manager
-            .table(catalog, schema, table_name, Channel::Unknown)
+            .table(catalog, schema, table_name, None)
             .await
             .context(CatalogSnafu)?;
 

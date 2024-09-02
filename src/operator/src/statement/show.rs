@@ -132,10 +132,9 @@ impl StatementExecutor {
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
-        let channel = query_ctx.channel();
         let table_ref = self
             .catalog_manager
-            .table(&catalog, &schema, &view, channel)
+            .table(&catalog, &schema, &view, Some(&query_ctx))
             .await
             .context(CatalogSnafu)?
             .context(ViewNotFoundSnafu { view_name: &view })?;

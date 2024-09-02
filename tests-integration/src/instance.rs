@@ -35,7 +35,7 @@ mod tests {
     use query::query_engine::DefaultSerializer;
     use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
     use servers::query_handler::sql::SqlQueryHandler;
-    use session::context::{Channel, QueryContext, QueryContextRef};
+    use session::context::{QueryContext, QueryContextRef};
     use sql::statements::statement::Statement;
     use store_api::storage::RegionId;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -278,7 +278,7 @@ mod tests {
         assert!(instance
             .frontend()
             .catalog_manager()
-            .table("greptime", "public", "demo", Channel::Unknown)
+            .table("greptime", "public", "demo", None)
             .await
             .unwrap()
             .is_none())

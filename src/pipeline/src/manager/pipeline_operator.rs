@@ -96,7 +96,6 @@ impl PipelineOperator {
 
     async fn create_pipeline_table_if_not_exists(&self, ctx: QueryContextRef) -> Result<()> {
         let catalog = ctx.current_catalog();
-        let channel = ctx.channel();
 
         // exist in cache
         if self.get_pipeline_table_from_cache(catalog).is_some() {
@@ -115,7 +114,7 @@ impl PipelineOperator {
                 &expr.catalog_name,
                 &expr.schema_name,
                 &expr.table_name,
-                channel,
+                Some(&ctx),
             )
             .await
             .context(CatalogSnafu)?
@@ -136,7 +135,7 @@ impl PipelineOperator {
         // get from catalog
         let table = self
             .catalog_manager
-            .table(catalog, schema, table_name, channel)
+            .table(catalog, schema, table_name, Some(&ctx))
             .await
             .context(CatalogSnafu)?
             .context(PipelineTableNotFoundSnafu)?;

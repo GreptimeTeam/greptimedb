@@ -22,7 +22,6 @@ use common_catalog::format_full_table_name;
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList};
 use datafusion::datasource::TableProvider;
-use session::context::Channel;
 use snafu::OptionExt;
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -113,12 +112,7 @@ impl SchemaProvider for DummySchemaProvider {
     async fn table(&self, name: &str) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
         let table = self
             .catalog_manager
-            .table(
-                &self.catalog_name,
-                &self.schema_name,
-                name,
-                Channel::Unknown,
-            )
+            .table(&self.catalog_name, &self.schema_name, name, None)
             .await?
             .with_context(|| TableNotExistSnafu {
                 table: format_full_table_name(&self.catalog_name, &self.schema_name, name),

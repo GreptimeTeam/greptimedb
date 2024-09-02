@@ -35,12 +35,11 @@ use datatypes::vectors::{
 use futures::{StreamExt, TryStreamExt};
 use partition::manager::PartitionInfo;
 use partition::partition::PartitionDef;
-use session::context::Channel::{self, Mysql};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, ScanRequest, TableId};
 use table::metadata::{TableInfo, TableType};
 
-use super::PARTITIONS;
+use super::{query_ctx, PARTITIONS};
 use crate::error::{
     CreateRecordBatchSnafu, FindPartitionsSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu,
@@ -241,9 +240,12 @@ impl InformationSchemaPartitionsBuilder {
 
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager.schema_names(&catalog_name, Mysql).await? {
+        for schema_name in catalog_manager
+            .schema_names(&catalog_name, query_ctx())
+            .await?
+        {
             let table_info_stream = catalog_manager
-                .tables(&catalog_name, &schema_name, Channel::Mysql)
+                .tables(&catalog_name, &schema_name, query_ctx())
                 .try_filter_map(|t| async move {
                     let table_info = t.table_info();
                     if table_info.table_type == TableType::Temporary {

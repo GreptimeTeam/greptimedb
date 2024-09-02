@@ -37,7 +37,7 @@ use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_migration::RegionMigrationProcedureTask;
 use meta_srv::selector::{Namespace, Selector, SelectorOptions};
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::{Channel, QueryContext, QueryContextRef};
+use session::context::{QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
@@ -1013,12 +1013,7 @@ async fn prepare_testing_metric_table(cluster: &GreptimeDbCluster) -> TableId {
     let table = cluster
         .frontend
         .catalog_manager()
-        .table(
-            DEFAULT_CATALOG_NAME,
-            DEFAULT_SCHEMA_NAME,
-            "phy",
-            Channel::Unknown,
-        )
+        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy", None)
         .await
         .unwrap()
         .unwrap();
@@ -1048,7 +1043,7 @@ async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
             TEST_TABLE_NAME,
-            Channel::Unknown,
+            None,
         )
         .await
         .unwrap()

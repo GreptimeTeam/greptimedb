@@ -19,7 +19,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
 use query::parser::PromQuery;
 use query::plan::LogicalPlan;
-use session::context::{Channel, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
 
@@ -61,7 +61,6 @@ pub trait SqlQueryHandler {
         &self,
         catalog: &str,
         schema: &str,
-        channel: Channel,
     ) -> std::result::Result<bool, Self::Error>;
 }
 
@@ -122,9 +121,9 @@ where
             .context(error::DescribeStatementSnafu)
     }
 
-    async fn is_valid_schema(&self, catalog: &str, schema: &str, channel: Channel) -> Result<bool> {
+    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.0
-            .is_valid_schema(catalog, schema, channel)
+            .is_valid_schema(catalog, schema)
             .await
             .map_err(BoxedError::new)
             .context(error::CheckDatabaseValiditySnafu)

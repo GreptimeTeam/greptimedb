@@ -249,11 +249,10 @@ impl DatafusionQueryEngine {
         let catalog_name = table_name.catalog.as_ref();
         let schema_name = table_name.schema.as_ref();
         let table_name = table_name.table.as_ref();
-        let channel = query_context.channel();
 
         self.state
             .catalog_manager()
-            .table(catalog_name, schema_name, table_name, channel)
+            .table(catalog_name, schema_name, table_name, Some(query_context))
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu { table: table_name })

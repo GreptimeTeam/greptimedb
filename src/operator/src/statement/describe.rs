@@ -15,7 +15,7 @@
 use common_error::ext::BoxedError;
 use common_query::Output;
 use common_telemetry::tracing;
-use session::context::{Channel, QueryContextRef};
+use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
@@ -39,7 +39,7 @@ impl StatementExecutor {
 
         let table = self
             .catalog_manager
-            .table(&catalog, &schema, &table, Channel::Mysql)
+            .table(&catalog, &schema, &table, Some(&query_ctx))
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

@@ -521,7 +521,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         if !self
             .query_handler
-            .is_valid_schema(&catalog, &schema, Channel::Mysql)
+            .is_valid_schema(&catalog, &schema)
             .await?
         {
             return w

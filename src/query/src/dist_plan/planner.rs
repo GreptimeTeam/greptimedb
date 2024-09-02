@@ -27,7 +27,7 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::TableReference;
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
-use session::context::{Channel, QueryContext};
+use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 pub use table::metadata::TableType;
@@ -128,7 +128,7 @@ impl DistExtensionPlanner {
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
-                Channel::Unknown,
+                None,
             )
             .await
             .context(CatalogSnafu)?

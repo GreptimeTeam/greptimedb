@@ -255,6 +255,7 @@ impl QueryContext {
 
 impl QueryContextBuilder {
     pub fn build(self) -> QueryContext {
+        let channel = self.channel.unwrap_or_default();
         QueryContext {
             current_catalog: self
                 .current_catalog
@@ -264,8 +265,10 @@ impl QueryContextBuilder {
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
             extensions: self.extensions.unwrap_or_default(),
-            configuration_parameter: self.configuration_parameter.unwrap_or_default(),
-            channel: self.channel.unwrap_or_default(),
+            configuration_parameter: self
+                .configuration_parameter
+                .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
+            channel,
         }
     }
 

@@ -100,10 +100,9 @@ impl Instance {
         table_name: &str,
         query: &Query,
     ) -> Result<Output> {
-        let channel = ctx.channel();
         let table = self
             .catalog_manager
-            .table(catalog_name, schema_name, table_name, channel)
+            .table(catalog_name, schema_name, table_name, Some(ctx))
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

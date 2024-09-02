@@ -25,7 +25,7 @@ use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
 use futures_util::future;
 use partition::manager::PartitionRuleManagerRef;
-use session::context::{Channel, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::DeleteRequest as TableDeleteRequest;
 use table::TableRef;
@@ -232,7 +232,7 @@ impl Deleter {
 
     async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {
         self.catalog_manager
-            .table(catalog, schema, table, Channel::Unknown)
+            .table(catalog, schema, table, None)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

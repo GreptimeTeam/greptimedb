@@ -215,13 +215,12 @@ async fn query_from_information_schema_table(
     sort: Vec<Expr>,
     kind: ShowKind,
 ) -> Result<Output> {
-    let channel = query_ctx.channel();
     let table = catalog_manager
         .table(
             query_ctx.current_catalog(),
             INFORMATION_SCHEMA_NAME,
             table_name,
-            channel,
+            Some(&query_ctx),
         )
         .await
         .context(error::CatalogSnafu)?

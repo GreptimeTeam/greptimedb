@@ -36,7 +36,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use meta_client::client::MetaClient;
 use moka::sync::Cache;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
-use session::context::Channel;
+use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 use table::dist_table::DistTable;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
@@ -153,7 +153,11 @@ impl CatalogManager for KvBackendCatalogManager {
         Ok(keys)
     }
 
-    async fn schema_names(&self, catalog: &str, channel: Channel) -> Result<Vec<String>> {
+    async fn schema_names(
+        &self,
+        catalog: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<Vec<String>> {
         let stream = self
             .table_metadata_manager
             .schema_manager()
@@ -164,7 +168,7 @@ impl CatalogManager for KvBackendCatalogManager {
             .map_err(BoxedError::new)
             .context(ListSchemasSnafu { catalog })?;
 
-        keys.extend(self.system_catalog.schema_names(channel));
+        keys.extend(self.system_catalog.schema_names(query_ctx));
 
         Ok(keys.into_iter().collect())
     }
@@ -173,7 +177,7 @@ impl CatalogManager for KvBackendCatalogManager {
         &self,
         catalog: &str,
         schema: &str,
-        channel: Channel,
+        query_ctx: Option<&QueryContext>,
     ) -> Result<Vec<String>> {
         let stream = self
             .table_metadata_manager
@@ -187,7 +191,7 @@ impl CatalogManager for KvBackendCatalogManager {
             .into_iter()
             .map(|(k, _)| k)
             .collect::<Vec<_>>();
-        tables.extend_from_slice(&self.system_catalog.table_names(schema, channel));
+        tables.extend_from_slice(&self.system_catalog.table_names(schema, query_ctx));
 
         Ok(tables.into_iter().collect())
     }
@@ -200,8 +204,13 @@ impl CatalogManager for KvBackendCatalogManager {
             .context(TableMetadataManagerSnafu)
     }
 
-    async fn schema_exists(&self, catalog: &str, schema: &str, channel: Channel) -> Result<bool> {
-        if self.system_catalog.schema_exists(schema, channel) {
+    async fn schema_exists(
+        &self,
+        catalog: &str,
+        schema: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<bool> {
+        if self.system_catalog.schema_exists(schema, query_ctx) {
             return Ok(true);
         }
 
@@ -217,9 +226,9 @@ impl CatalogManager for KvBackendCatalogManager {
         catalog: &str,
         schema: &str,
         table: &str,
-        channel: Channel,
+        query_ctx: Option<&QueryContext>,
     ) -> Result<bool> {
-        if self.system_catalog.table_exists(schema, table, channel) {
+        if self.system_catalog.table_exists(schema, table, query_ctx) {
             return Ok(true);
         }
 
@@ -237,11 +246,12 @@ impl CatalogManager for KvBackendCatalogManager {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        channel: Channel,
+        query_ctx: Option<&QueryContext>,
     ) -> Result<Option<TableRef>> {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
         if let Some(table) =
             self.system_catalog
-                .table(catalog_name, schema_name, table_name, channel)
+                .table(catalog_name, schema_name, table_name, query_ctx)
         {
             return Ok(Some(table));
         }
@@ -265,7 +275,7 @@ impl CatalogManager for KvBackendCatalogManager {
             // falldown to pg_catalog
             if let Some(table) =
                 self.system_catalog
-                    .table(catalog_name, PG_CATALOG_NAME, table_name, channel)
+                    .table(catalog_name, PG_CATALOG_NAME, table_name, query_ctx)
             {
                 return Ok(Some(table));
             }
@@ -278,15 +288,15 @@ impl CatalogManager for KvBackendCatalogManager {
         &'a self,
         catalog: &'a str,
         schema: &'a str,
-        channel: Channel,
+        query_ctx: Option<&'a QueryContext>,
     ) -> BoxStream<'a, Result<TableRef>> {
         let sys_tables = try_stream!({
             // System tables
-            let sys_table_names = self.system_catalog.table_names(schema, channel);
+            let sys_table_names = self.system_catalog.table_names(schema, query_ctx);
             for table_name in sys_table_names {
                 if let Some(table) =
                     self.system_catalog
-                        .table(catalog, schema, &table_name, channel)
+                        .table(catalog, schema, &table_name, query_ctx)
                 {
                     yield table;
                 }
@@ -355,7 +365,8 @@ struct SystemCatalog {
 }
 
 impl SystemCatalog {
-    fn schema_names(&self, channel: Channel) -> Vec<String> {
+    fn schema_names(&self, query_ctx: Option<&QueryContext>) -> Vec<String> {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
         match channel {
             // pg_catalog only visible under postgres protocol
             Channel::Postgres => vec![
@@ -368,7 +379,8 @@ impl SystemCatalog {
         }
     }
 
-    fn table_names(&self, schema: &str, channel: Channel) -> Vec<String> {
+    fn table_names(&self, schema: &str, query_ctx: Option<&QueryContext>) -> Vec<String> {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
         match schema {
             INFORMATION_SCHEMA_NAME => self.information_schema_provider.table_names(),
             PG_CATALOG_NAME if channel == Channel::Postgres => {
@@ -381,14 +393,16 @@ impl SystemCatalog {
         }
     }
 
-    fn schema_exists(&self, schema: &str, channel: Channel) -> bool {
+    fn schema_exists(&self, schema: &str, query_ctx: Option<&QueryContext>) -> bool {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
         match channel {
             Channel::Postgres => schema == PG_CATALOG_NAME || schema == INFORMATION_SCHEMA_NAME,
             _ => schema == INFORMATION_SCHEMA_NAME,
         }
     }
 
-    fn table_exists(&self, schema: &str, table: &str, channel: Channel) -> bool {
+    fn table_exists(&self, schema: &str, table: &str, query_ctx: Option<&QueryContext>) -> bool {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
         if schema == INFORMATION_SCHEMA_NAME {
             self.information_schema_provider.table(table).is_some()
         } else if schema == DEFAULT_SCHEMA_NAME {
@@ -405,8 +419,9 @@ impl SystemCatalog {
         catalog: &str,
         schema: &str,
         table_name: &str,
-        channel: Channel,
+        query_ctx: Option<&QueryContext>,
     ) -> Option<TableRef> {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
         if schema == INFORMATION_SCHEMA_NAME {
             let information_schema_provider =
                 self.catalog_cache.get_with_by_ref(catalog, move || {

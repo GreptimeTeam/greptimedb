@@ -959,7 +959,7 @@ mod test {
     use query::parser::PromQuery;
     use query::plan::LogicalPlan;
     use query::query_engine::DescribeResult;
-    use session::context::{Channel, QueryContextRef};
+    use session::context::QueryContextRef;
     use tokio::sync::mpsc;
 
     use super::*;
@@ -1017,12 +1017,7 @@ mod test {
             unimplemented!()
         }
 
-        async fn is_valid_schema(
-            &self,
-            _catalog: &str,
-            _schema: &str,
-            _channel: Channel,
-        ) -> Result<bool> {
+        async fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
             Ok(true)
         }
     }

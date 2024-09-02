@@ -29,7 +29,7 @@ use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::OpentsdbProtocolHandler;
-use session::context::{Channel, QueryContextRef};
+use session::context::QueryContextRef;
 use tokio::sync::mpsc;
 
 struct DummyInstance {
@@ -96,12 +96,7 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
-    async fn is_valid_schema(
-        &self,
-        _catalog: &str,
-        _schema: &str,
-        _channel: Channel,
-    ) -> Result<bool> {
+    async fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
         Ok(true)
     }
 }

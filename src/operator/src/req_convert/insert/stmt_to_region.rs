@@ -20,7 +20,7 @@ use catalog::CatalogManager;
 use common_time::Timezone;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use partition::manager::PartitionRuleManager;
-use session::context::{Channel, QueryContext, QueryContextRef};
+use session::context::{QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements;
 use sql::statements::insert::Insert;
@@ -139,7 +139,7 @@ impl<'a> StatementToRegion<'a> {
 
     async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {
         self.catalog_manager
-            .table(catalog, schema, table, Channel::Unknown)
+            .table(catalog, schema, table, None)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
