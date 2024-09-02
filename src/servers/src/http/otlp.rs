@@ -39,7 +39,7 @@ use snafu::prelude::*;
 
 use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::error::{self, Result};
-use crate::query_handler::OpenTelemetryProtocolHandlerRef;
+use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineWay};
 
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "metrics"))]
@@ -154,12 +154,37 @@ where
     }
 }
 
+pub struct TableInfo {
+    table_name: String,
+}
+
+#[async_trait]
+impl<S> FromRequestParts<S> for TableInfo
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
+        let table_name = parts.headers.get("X-Table-Name");
+        match table_name {
+            Some(name) => Ok(TableInfo {
+                table_name: pipeline_header_error(name)?,
+            }),
+            None => Ok(TableInfo {
+                table_name: "opentelemetry_logs".to_string(),
+            }),
+        }
+    }
+}
+
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "traces"))]
 pub async fn logs(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(mut query_ctx): Extension<QueryContext>,
     pipeline_info: PipelineInfo,
+    table_info: TableInfo,
     RawBody(body): RawBody,
 ) -> Result<OtlpResponse<ExportLogsServiceResponse>> {
     let db = query_ctx.get_db_string();
@@ -170,16 +195,28 @@ pub async fn logs(
         .start_timer();
     let request = parse_logs_body(body).await?;
     // TODO remove unwrap
-    let pipeline_version = to_pipeline_version(pipeline_info.pipeline_version).unwrap();
-    let pipeline = handler
-        .get_pipeline(
-            &pipeline_info.pipeline_name,
-            pipeline_version,
-            query_ctx.clone(),
-        )
-        .await?;
+    let pipeline_way;
+    if pipeline_info.pipeline_name == "identity" {
+        pipeline_way = PipelineWay::Identity;
+    } else {
+        let pipeline_version = to_pipeline_version(pipeline_info.pipeline_version).unwrap();
+        let pipeline = match handler
+            .get_pipeline(
+                &pipeline_info.pipeline_name,
+                pipeline_version,
+                query_ctx.clone(),
+            )
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+        pipeline_way = PipelineWay::Custom(pipeline);
+    }
     handler
-        .logs(request, pipeline, "".to_string(), query_ctx)
+        .logs(request, pipeline_way, table_info.table_name, query_ctx)
         .await
         .map(|o| OtlpResponse {
             resp_body: ExportLogsServiceResponse {

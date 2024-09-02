@@ -12,18 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::BTreeMap;
 
-use api::v1::{RowInsertRequest, RowInsertRequests};
+use ahash::{HashMap, HashMapExt};
+use api::v1::value::ValueData;
+use api::v1::{
+    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
+    Value as GreptimeValue,
+};
+use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::LogRecord;
-use pipeline::{Array, GreptimeTransformer, Map, Pipeline, Value as PipelineValue};
+use pipeline::{Array, Map, Value as PipelineValue};
 
 use super::trace::attributes::OtlpAnyValue;
 use crate::error::Result;
 use crate::otlp::trace::span::bytes_to_hex_string;
+use crate::query_handler::PipelineWay;
 
 /// Normalize otlp instrumentation, metric and attribute names
 ///
@@ -44,22 +50,40 @@ fn normalize_otlp_name(name: &str) -> String {
 /// Returns `InsertRequests` and total number of rows to ingest
 pub fn to_grpc_insert_requests(
     request: ExportLogsServiceRequest,
-    pipeline: Arc<Pipeline<GreptimeTransformer>>,
+    pipeline: PipelineWay,
     table_name: String,
 ) -> Result<(RowInsertRequests, usize)> {
-    let result = parse_export_logs_service_request(request);
-    let transformed_data = pipeline
-        .exec(PipelineValue::Array(Array { values: result }))
-        .unwrap();
-    let len = transformed_data.rows.len();
-    let insert_request = RowInsertRequest {
-        rows: Some(transformed_data),
-        table_name: table_name,
-    };
-    let insert_requests = RowInsertRequests {
-        inserts: vec![insert_request],
-    };
-    Ok((insert_requests, len))
+    match pipeline {
+        PipelineWay::Identity => {
+            let rows = parse_export_logs_service_request_to_rows(request);
+            let len = rows.rows.len();
+            let insert_request = RowInsertRequest {
+                rows: Some(rows),
+                table_name,
+            };
+            Ok((
+                RowInsertRequests {
+                    inserts: vec![insert_request],
+                },
+                len,
+            ))
+        }
+        PipelineWay::Custom(p) => {
+            let result = parse_export_logs_service_request(request);
+            let transformed_data = p
+                .exec(PipelineValue::Array(Array { values: result }))
+                .unwrap();
+            let len = transformed_data.rows.len();
+            let insert_request = RowInsertRequest {
+                rows: Some(transformed_data),
+                table_name,
+            };
+            let insert_requests = RowInsertRequests {
+                inserts: vec![insert_request],
+            };
+            Ok((insert_requests, len))
+        }
+    }
 }
 
 fn scope_to_pipeline_value(
@@ -80,6 +104,20 @@ fn scope_to_pipeline_value(
             PipelineValue::Null,
             PipelineValue::Null,
         ))
+}
+
+fn scope_to_jsonb(
+    scope: Option<InstrumentationScope>,
+) -> (JsonbValue<'static>, Option<String>, Option<String>) {
+    scope
+        .map(|x| {
+            (
+                key_value_to_jsonb(x.attributes),
+                Some(x.version),
+                Some(x.name),
+            )
+        })
+        .unwrap_or((JsonbValue::Null, None, None))
 }
 
 fn log_to_pipeline_value(
@@ -139,6 +177,150 @@ fn log_to_pipeline_value(
     map.insert("ScopeAttributes".to_string(), scope_attrs);
     map.insert("LogAttributes".to_string(), log_attrs);
     PipelineValue::Map(Map { values: map })
+}
+
+fn build_identity_schema() -> Vec<ColumnSchema> {
+    [
+        ("ScopeName", ColumnDataType::String, SemanticType::Tag),
+        ("ScopeVersion", ColumnDataType::String, SemanticType::Tag),
+        ("ScopeAttributes", ColumnDataType::Json, SemanticType::Field),
+        ("ScopeSchemaUrl", ColumnDataType::String, SemanticType::Tag),
+        (
+            "ResourceSchemaUrl",
+            ColumnDataType::String,
+            SemanticType::Tag,
+        ),
+        (
+            "ResourceAttributes",
+            ColumnDataType::Json,
+            SemanticType::Field,
+        ),
+        ("LogAttributes", ColumnDataType::Json, SemanticType::Field),
+        (
+            "Timestamp",
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
+        ),
+        (
+            "ObservedTimestamp",
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Tag,
+        ),
+        ("TraceId", ColumnDataType::String, SemanticType::Tag),
+        ("SpanId", ColumnDataType::String, SemanticType::Tag),
+        ("TraceFlags", ColumnDataType::Uint32, SemanticType::Tag),
+        ("SeverityText", ColumnDataType::String, SemanticType::Tag),
+        ("SeverityNumber", ColumnDataType::Int32, SemanticType::Tag),
+        ("Body", ColumnDataType::String, SemanticType::Tag),
+    ]
+    .iter()
+    .map(|(field_name, column_type, semantic_type)| ColumnSchema {
+        column_name: field_name.to_string(),
+        datatype: *column_type as i32,
+        semantic_type: *semantic_type as i32,
+        datatype_extension: None,
+        options: None,
+    })
+    .collect::<Vec<ColumnSchema>>()
+}
+
+fn build_identity_row(
+    log: LogRecord,
+    resource_schema_url: String,
+    resource_attr: JsonbValue<'_>,
+    scope_schema_url: String,
+    scope_name: Option<String>,
+    scope_version: Option<String>,
+    scope_attrs: JsonbValue<'_>,
+) -> Row {
+    let mut row = Vec::new();
+    // scope_name, scope_version, scope_attrs, scope_schema_url, resource_schema_url, resource_attr, log_attrs
+    row.push(GreptimeValue {
+        value_data: scope_name.map(|x| ValueData::StringValue(x)),
+    });
+    row.push(GreptimeValue {
+        value_data: scope_version.map(|x| ValueData::StringValue(x)),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::JsonValue(scope_attrs.to_vec())),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::StringValue(scope_schema_url)),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::StringValue(resource_schema_url)),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::JsonValue(resource_attr.to_vec())),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::JsonValue(
+            key_value_to_jsonb(log.attributes).to_vec(),
+        )),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::TimestampNanosecondValue(
+            log.time_unix_nano as i64,
+        )),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::TimestampNanosecondValue(
+            log.observed_time_unix_nano as i64,
+        )),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::StringValue(bytes_to_hex_string(&log.trace_id))),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::StringValue(bytes_to_hex_string(&log.span_id))),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::U32Value(log.flags)),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::StringValue(log.severity_text)),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::I32Value(log.severity_number)),
+    });
+    row.push(GreptimeValue {
+        value_data: log
+            .body
+            .as_ref()
+            .map(|x| ValueData::StringValue(log_body_to_string(x))),
+    });
+    Row { values: row }
+}
+
+fn parse_export_logs_service_request_to_rows(request: ExportLogsServiceRequest) -> Rows {
+    let mut result = Vec::new();
+    for r in request.resource_logs {
+        let resource_attr = r
+            .resource
+            .map(|x| key_value_to_jsonb(x.attributes))
+            .unwrap_or(JsonbValue::Null);
+        let resource_schema_url = r.schema_url;
+        for scope_logs in r.scope_logs {
+            let (scope_attrs, scope_version, scope_name) = scope_to_jsonb(scope_logs.scope);
+            let scope_schema_url = scope_logs.schema_url;
+            for log in scope_logs.log_records {
+                let value = build_identity_row(
+                    log,
+                    resource_schema_url.clone(),
+                    resource_attr.clone(),
+                    scope_schema_url.clone(),
+                    scope_name.clone(),
+                    scope_version.clone(),
+                    scope_attrs.clone(),
+                );
+                result.push(value);
+            }
+        }
+    }
+    Rows {
+        schema: build_identity_schema(),
+        rows: result,
+    }
 }
 
 /// transform otlp logs request to pipeline value
@@ -216,6 +398,43 @@ fn key_value_to_map(key_values: Vec<KeyValue>) -> HashMap<String, PipelineValue>
         map.insert(normalize_otlp_name(&kv.key), value);
     }
     map
+}
+
+fn any_value_to_jsonb(value: any_value::Value) -> JsonbValue<'static> {
+    match value {
+        any_value::Value::StringValue(s) => JsonbValue::String(s.into()),
+        any_value::Value::IntValue(i) => JsonbValue::Number(JsonbNumber::Int64(i)),
+        any_value::Value::DoubleValue(d) => JsonbValue::Number(JsonbNumber::Float64(d)),
+        any_value::Value::BoolValue(b) => JsonbValue::Bool(b),
+        any_value::Value::ArrayValue(a) => {
+            let values = a
+                .values
+                .into_iter()
+                .map(|v| match v.value {
+                    Some(value) => any_value_to_jsonb(value),
+                    None => JsonbValue::Null,
+                })
+                .collect();
+            JsonbValue::Array(values)
+        }
+        any_value::Value::KvlistValue(kv) => key_value_to_jsonb(kv.values),
+        any_value::Value::BytesValue(b) => JsonbValue::String(bytes_to_hex_string(&b).into()),
+    }
+}
+
+fn key_value_to_jsonb(key_values: Vec<KeyValue>) -> JsonbValue<'static> {
+    let mut map = BTreeMap::new();
+    for kv in key_values {
+        let value = match kv.value {
+            Some(value) => match value.value {
+                Some(value) => any_value_to_jsonb(value),
+                None => JsonbValue::Null,
+            },
+            None => JsonbValue::Null,
+        };
+        map.insert(normalize_otlp_name(&kv.key), value);
+    }
+    JsonbValue::Object(map)
 }
 
 fn log_body_to_string(body: &AnyValue) -> String {

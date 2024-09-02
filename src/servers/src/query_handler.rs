@@ -105,6 +105,10 @@ pub trait PromStoreProtocolHandler {
     async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }
 
+pub enum PipelineWay {
+    Identity,
+    Custom(Arc<Pipeline<GreptimeTransformer>>),
+}
 #[async_trait]
 pub trait OpenTelemetryProtocolHandler: LogHandler {
     /// Handling opentelemetry metrics request
@@ -124,7 +128,7 @@ pub trait OpenTelemetryProtocolHandler: LogHandler {
     async fn logs(
         &self,
         request: ExportLogsServiceRequest,
-        pipeline: Arc<Pipeline<GreptimeTransformer>>,
+        pipeline: PipelineWay,
         table_name: String,
         ctx: QueryContextRef,
     ) -> Result<Output>;
