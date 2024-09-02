@@ -7852,6 +7852,7 @@ dependencies = [
  "futures",
  "greptime-proto",
  "itertools 0.10.5",
+ "jsonb",
  "lazy_static",
  "moka",
  "once_cell",
@@ -10327,6 +10328,7 @@ dependencies = [
 name = "servers"
 version = "0.9.2"
 dependencies = [
+ "ahash 0.8.11",
  "aide",
  "api",
  "arrow",

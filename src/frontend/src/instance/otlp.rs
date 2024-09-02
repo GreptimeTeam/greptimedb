@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
@@ -21,12 +19,11 @@ use common_error::ext::BoxedError;
 use common_telemetry::tracing;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use pipeline::{GreptimeTransformer, Pipeline};
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
 use servers::otlp::plugin::TraceParserRef;
-use servers::query_handler::OpenTelemetryProtocolHandler;
+use servers::query_handler::{OpenTelemetryProtocolHandler, PipelineWay};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
@@ -100,7 +97,7 @@ impl OpenTelemetryProtocolHandler for Instance {
     async fn logs(
         &self,
         request: opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest,
-        pipeline: Arc<Pipeline<GreptimeTransformer>>,
+        pipeline: PipelineWay,
         table_name: String,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
