@@ -27,7 +27,7 @@ runs:
     - name: Install rust toolchain
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        targets: ${{ inputs.arch }}
+        target: ${{ inputs.arch }}
         components: llvm-tools-preview
 
     - name: Rust Cache
