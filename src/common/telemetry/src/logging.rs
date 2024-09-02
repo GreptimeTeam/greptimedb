@@ -234,7 +234,13 @@ pub fn init_global_logging(
                     opentelemetry_otlp::new_exporter().tonic().with_endpoint(
                         opts.otlp_endpoint
                             .as_ref()
-                            .map(|e| format!("http://{}", e))
+                            .map(|e| {
+                                if e.starts_with("http") {
+                                    e.to_string()
+                                } else {
+                                    format!("http://{}", e)
+                                }
+                            })
                             .unwrap_or(DEFAULT_OTLP_ENDPOINT.to_string()),
                     ),
                 )

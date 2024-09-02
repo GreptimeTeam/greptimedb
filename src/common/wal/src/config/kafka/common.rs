@@ -187,7 +187,7 @@ impl Default for KafkaConnectionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct KafkaTopicConfig {
-    /// Number of topics to be created upon start.
+    /// Number of topics.
     pub num_topics: usize,
     /// Number of partitions per topic.
     pub num_partitions: i32,

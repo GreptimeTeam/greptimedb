@@ -52,12 +52,13 @@ pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Ident;
 use sql::parser::ParserContext;
-use sql::statements::create::{CreateFlow, CreateView, Partitions};
+use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions};
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowTableStatus, ShowTables,
     ShowVariables, ShowViews,
 };
 use sql::statements::statement::Statement;
+use sql::statements::OptionMap;
 use sqlparser::ast::ObjectName;
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
@@ -130,6 +131,17 @@ static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
         ),
         ColumnSchema::new(
             COLUMN_SEMANTIC_TYPE_COLUMN,
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
+    ]))
+});
+
+static SHOW_CREATE_DATABASE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("Database", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new(
+            "Create Database",
             ConcreteDataType::string_datatype(),
             false,
         ),
@@ -666,6 +678,26 @@ pub async fn show_status(_query_ctx: QueryContextRef) -> Result<Output> {
         ],
     )
     .context(error::CreateRecordBatchSnafu)?;
+    Ok(Output::new_with_record_batches(records))
+}
+
+pub fn show_create_database(database_name: &str, options: OptionMap) -> Result<Output> {
+    let stmt = CreateDatabase {
+        name: ObjectName(vec![Ident {
+            value: database_name.to_string(),
+            quote_style: None,
+        }]),
+        if_not_exists: true,
+        options,
+    };
+    let sql = format!("{stmt}");
+    let columns = vec![
+        Arc::new(StringVector::from(vec![database_name.to_string()])) as _,
+        Arc::new(StringVector::from(vec![sql])) as _,
+    ];
+    let records =
+        RecordBatches::try_from_columns(SHOW_CREATE_DATABASE_OUTPUT_SCHEMA.clone(), columns)
+            .context(error::CreateRecordBatchSnafu)?;
     Ok(Output::new_with_record_batches(records))
 }
 

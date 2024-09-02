@@ -177,6 +177,8 @@ jobs:
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
           dev-mode: true # Only build the standard greptime binary.
           working-dir: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
+          image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
+          image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -206,6 +208,8 @@ jobs:
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
           dev-mode: true # Only build the standard greptime binary.
           working-dir: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
+          image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
+          image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub

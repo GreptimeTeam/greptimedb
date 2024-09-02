@@ -358,7 +358,7 @@ struct SystemCatalog {
     catalog_cache: Cache<String, Arc<InformationSchemaProvider>>,
     pg_catalog_cache: Cache<String, Arc<PGCatalogProvider>>,
 
-    // system_schema_provier for default catalog
+    // system_schema_provider for default catalog
     information_schema_provider: Arc<InformationSchemaProvider>,
     pg_catalog_provider: Arc<PGCatalogProvider>,
     backend: KvBackendRef,

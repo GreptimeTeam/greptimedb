@@ -26,6 +26,7 @@ use sql::statements::show::{
     ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind,
     ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
+use sql::statements::OptionMap;
 use table::metadata::TableType;
 use table::table_name::TableName;
 use table::TableRef;
@@ -93,6 +94,15 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
+    pub async fn show_create_database(
+        &self,
+        database_name: &str,
+        opts: OptionMap,
+    ) -> Result<Output> {
+        query::sql::show_create_database(database_name, opts).context(ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
     pub async fn show_create_table(
         &self,
         table_name: TableName,
@@ -118,8 +128,7 @@ impl StatementExecutor {
 
         let partitions = create_partitions_stmt(partitions)?;
 
-        query::sql::show_create_table(table, partitions, query_ctx)
-            .context(error::ExecuteStatementSnafu)
+        query::sql::show_create_table(table, partitions, query_ctx).context(ExecuteStatementSnafu)
     }
 
     #[tracing::instrument(skip_all)]

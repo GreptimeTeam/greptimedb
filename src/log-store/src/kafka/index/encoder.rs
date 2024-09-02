@@ -50,7 +50,7 @@ pub struct DeltaEncodedRegionIndexes {
 
 impl DeltaEncodedRegionIndexes {
     /// Retrieves the original (decoded) index values for a given region.
-    fn region(&self, region_id: RegionId) -> Option<BTreeSet<u64>> {
+    pub(crate) fn region(&self, region_id: RegionId) -> Option<BTreeSet<u64>> {
         let decoded = self
             .regions
             .get(&region_id)
@@ -60,7 +60,7 @@ impl DeltaEncodedRegionIndexes {
     }
 
     /// Retrieves the last index.
-    fn last_index(&self) -> u64 {
+    pub(crate) fn last_index(&self) -> u64 {
         self.last_index
     }
 }
@@ -86,7 +86,7 @@ impl DatanodeWalIndexes {
         value
     }
 
-    fn decode(byte: &[u8]) -> Result<Self> {
+    pub(crate) fn decode(byte: &[u8]) -> Result<Self> {
         serde_json::from_slice(byte).context(error::DecodeJsonSnafu)
     }
 
@@ -118,7 +118,7 @@ impl IndexEncoder for JsonIndexEncoder {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap, HashSet};
+    use std::collections::{BTreeSet, HashMap};
 
     use store_api::logstore::provider::KafkaProvider;
     use store_api::storage::RegionId;

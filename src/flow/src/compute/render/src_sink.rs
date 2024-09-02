@@ -27,11 +27,67 @@ use crate::compute::render::Context;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, Toff};
 use crate::error::{Error, PlanSnafu};
 use crate::expr::error::InternalSnafu;
-use crate::expr::EvalError;
+use crate::expr::{Batch, EvalError};
 use crate::repr::{DiffRow, Row, BROADCAST_CAP};
 
 #[allow(clippy::mutable_key_type)]
 impl<'referred, 'df> Context<'referred, 'df> {
+    /// simply send the batch to downstream, without fancy features like buffering
+    pub fn render_source_batch(
+        &mut self,
+        mut src_recv: broadcast::Receiver<Batch>,
+    ) -> Result<CollectionBundle<Batch>, Error> {
+        debug!("Rendering Source Batch");
+        let (send_port, recv_port) = self.df.make_edge::<_, Toff<Batch>>("source_batch");
+
+        let schd = self.compute_state.get_scheduler();
+        let inner_schd = schd.clone();
+        let now = self.compute_state.current_time_ref();
+        let err_collector = self.err_collector.clone();
+
+        let sub = self
+            .df
+            .add_subgraph_source("source_batch", send_port, move |_ctx, send| {
+                loop {
+                    match src_recv.try_recv() {
+                        Ok(batch) => {
+                            send.give(vec![batch]);
+                        }
+                        Err(TryRecvError::Empty) => {
+                            break;
+                        }
+                        Err(TryRecvError::Lagged(lag_offset)) => {
+                            // use `err_collector` instead of `error!` to locate which operator caused the error
+                            err_collector.run(|| -> Result<(), EvalError> {
+                                InternalSnafu {
+                                    reason: format!("Flow missing {} rows behind", lag_offset),
+                                }
+                                .fail()
+                            });
+                            break;
+                        }
+                        Err(TryRecvError::Closed) => {
+                            err_collector.run(|| -> Result<(), EvalError> {
+                                InternalSnafu {
+                                    reason: "Source Batch Channel is closed".to_string(),
+                                }
+                                .fail()
+                            });
+                            break;
+                        }
+                    }
+                }
+
+                let now = *now.borrow();
+                // always schedule source to run at now so we can
+                // repeatedly run source if needed
+                inner_schd.schedule_at(now);
+            });
+        schd.set_cur_subgraph(sub);
+        let bundle = CollectionBundle::from_collection(Collection::<Batch>::from_port(recv_port));
+        Ok(bundle)
+    }
+
     /// Render a source which comes from brocast channel into the dataflow
     /// will immediately send updates not greater than `now` and buffer the rest in arrangement
     pub fn render_source(
@@ -112,6 +168,32 @@ impl<'referred, 'df> Context<'referred, 'df> {
             collection: Collection::from_port(recv_port),
             arranged,
         })
+    }
+
+    pub fn render_unbounded_sink_batch(
+        &mut self,
+        bundle: CollectionBundle<Batch>,
+        sender: mpsc::UnboundedSender<Batch>,
+    ) {
+        let CollectionBundle {
+            collection,
+            arranged: _,
+        } = bundle;
+
+        let _sink = self.df.add_subgraph_sink(
+            "UnboundedSinkBatch",
+            collection.into_inner(),
+            move |_ctx, recv| {
+                let data = recv.take_inner();
+                for batch in data.into_iter().flat_map(|i| i.into_iter()) {
+                    // if the sender is closed unexpectedly, stop sending
+                    if sender.is_closed() || sender.send(batch).is_err() {
+                        common_telemetry::error!("UnboundedSinkBatch is closed");
+                        break;
+                    }
+                }
+            },
+        );
     }
 
     pub fn render_unbounded_sink(

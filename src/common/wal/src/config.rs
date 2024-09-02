@@ -53,6 +53,7 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
                 connection: config.connection,
                 backoff: config.backoff,
                 kafka_topic: config.kafka_topic,
+                auto_create_topics: config.auto_create_topics,
             }),
         }
     }
@@ -188,6 +189,7 @@ mod tests {
                 replication_factor: 1,
                 create_topic_timeout: Duration::from_secs(30),
             },
+            auto_create_topics: true,
         };
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
 

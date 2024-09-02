@@ -17,24 +17,19 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
-use datafusion::optimizer::simplify_expressions::SimplifyExpressions;
-use datafusion::optimizer::{OptimizerContext, OptimizerRule};
 use datatypes::data_type::ConcreteDataType as CDT;
-use query::parser::QueryLanguageParser;
-use query::plan::LogicalPlan;
-use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
 /// rename it to `substrait_proto`
-use substrait::{substrait_proto_df as substrait_proto, DFLogicalSubstraitConvertor};
+use substrait::substrait_proto_df as substrait_proto;
 use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 use crate::adapter::FlownodeContext;
-use crate::error::{DatafusionSnafu, Error, ExternalSnafu, NotImplementedSnafu, UnexpectedSnafu};
-use crate::plan::TypedPlan;
+use crate::error::{Error, NotImplementedSnafu, UnexpectedSnafu};
+use crate::expr::{TUMBLE_END, TUMBLE_START};
 /// a simple macro to generate a not implemented error
 macro_rules! not_impl_err {
     ($($arg:tt)*)  => {
@@ -102,68 +97,39 @@ impl FunctionExtensions {
     }
 }
 
-/// To reuse existing code for parse sql, the sql is first parsed into a datafusion logical plan,
-/// then to a substrait plan, and finally to a flow plan.
-pub async fn sql_to_flow_plan(
-    ctx: &mut FlownodeContext,
-    engine: &Arc<dyn QueryEngine>,
-    sql: &str,
-) -> Result<TypedPlan, Error> {
-    let query_ctx = ctx.query_context.clone().ok_or_else(|| {
-        UnexpectedSnafu {
-            reason: "Query context is missing",
-        }
-        .build()
-    })?;
-    let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
-    let plan = engine
-        .planner()
-        .plan(stmt, query_ctx)
-        .await
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
-    let LogicalPlan::DfPlan(plan) = plan;
-    let plan = SimplifyExpressions::new()
-        .rewrite(plan, &OptimizerContext::default())
-        .context(DatafusionSnafu {
-            context: "Fail to apply `SimplifyExpressions` optimization",
-        })?
-        .data;
-    let sub_plan = DFLogicalSubstraitConvertor {}
-        .to_sub_plan(&plan, DefaultSerializer)
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
-
-    let flow_plan = TypedPlan::from_substrait_plan(ctx, &sub_plan).await?;
-
-    Ok(flow_plan)
-}
-
 /// register flow-specific functions to the query engine
 pub fn register_function_to_query_engine(engine: &Arc<dyn QueryEngine>) {
-    engine.register_function(Arc::new(TumbleFunction {}));
+    engine.register_function(Arc::new(TumbleFunction::new("tumble")));
+    engine.register_function(Arc::new(TumbleFunction::new(TUMBLE_START)));
+    engine.register_function(Arc::new(TumbleFunction::new(TUMBLE_END)));
 }
 
 #[derive(Debug)]
-pub struct TumbleFunction {}
+pub struct TumbleFunction {
+    name: String,
+}
 
-const TUMBLE_NAME: &str = "tumble";
+impl TumbleFunction {
+    fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+        }
+    }
+}
 
 impl std::fmt::Display for TumbleFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", TUMBLE_NAME.to_ascii_uppercase())
+        write!(f, "{}", self.name.to_ascii_uppercase())
     }
 }
 
 impl common_function::function::Function for TumbleFunction {
     fn name(&self) -> &str {
-        TUMBLE_NAME
+        &self.name
     }
 
     fn return_type(&self, _input_types: &[CDT]) -> common_query::error::Result<CDT> {
-        Ok(CDT::datetime_datatype())
+        Ok(CDT::timestamp_millisecond_datatype())
     }
 
     fn signature(&self) -> common_query::prelude::Signature {
@@ -198,6 +164,7 @@ mod test {
     use prost::Message;
     use query::parser::QueryLanguageParser;
     use query::plan::LogicalPlan;
+    use query::query_engine::DefaultSerializer;
     use query::QueryEngine;
     use session::context::QueryContext;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -207,6 +174,7 @@ mod test {
 
     use super::*;
     use crate::adapter::node_context::IdToNameMap;
+    use crate::df_optimizer::apply_df_optimizer;
     use crate::expr::GlobalId;
     use crate::repr::{ColumnType, RelationType};
 
@@ -292,7 +260,7 @@ mod test {
         let factory = query::QueryEngineFactory::new(catalog_list, None, None, None, None, false);
 
         let engine = factory.query_engine();
-        engine.register_function(Arc::new(TumbleFunction {}));
+        register_function_to_query_engine(&engine);
 
         assert_eq!("datafusion", engine.name());
         engine
@@ -307,6 +275,7 @@ mod test {
             .await
             .unwrap();
         let LogicalPlan::DfPlan(plan) = plan;
+        let plan = apply_df_optimizer(plan).await.unwrap();
 
         // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
         let bytes = DFLogicalSubstraitConvertor {}
@@ -314,5 +283,23 @@ mod test {
             .unwrap();
 
         proto::Plan::decode(bytes).unwrap()
+    }
+
+    /// TODO(discord9): add more illegal sql tests
+    #[tokio::test]
+    async fn test_missing_key_check() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT avg(number) FROM numbers_with_ts GROUP BY tumble(ts, '1 hour'), number";
+
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
+        let plan = engine
+            .planner()
+            .plan(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        let LogicalPlan::DfPlan(plan) = plan;
+        let plan = apply_df_optimizer(plan).await;
+
+        assert!(plan.is_err());
     }
 }

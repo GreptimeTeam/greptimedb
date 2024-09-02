@@ -4,7 +4,7 @@ INSERT INTO test(i, j, k) VALUES (1, 11, 5), (2, 12, 5);
 
 SELECT * FROM test order by i;
 
-SELECT FLUSH_TABLE('test');
+ADMIN FLUSH_TABLE('test');
 
 ALTER TABLE test DROP COLUMN j;
 

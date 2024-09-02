@@ -18,7 +18,7 @@ use super::common::KafkaConnectionConfig;
 use crate::config::kafka::common::{backoff_prefix, BackoffConfig, KafkaTopicConfig};
 
 /// Kafka wal configurations for metasrv.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvKafkaConfig {
     /// The kafka connection config.
@@ -30,4 +30,17 @@ pub struct MetasrvKafkaConfig {
     /// The kafka config.
     #[serde(flatten)]
     pub kafka_topic: KafkaTopicConfig,
+    // Automatically create topics for WAL.
+    pub auto_create_topics: bool,
+}
+
+impl Default for MetasrvKafkaConfig {
+    fn default() -> Self {
+        Self {
+            connection: Default::default(),
+            backoff: Default::default(),
+            kafka_topic: Default::default(),
+            auto_create_topics: true,
+        }
+    }
 }

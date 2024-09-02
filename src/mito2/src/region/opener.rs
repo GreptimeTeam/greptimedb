@@ -202,8 +202,8 @@ impl RegionOpener {
             options.need_dedup(),
             options.merge_mode(),
         );
-        // Initial memtable id is 0.
         let part_duration = options.compaction.time_window();
+        // Initial memtable id is 0.
         let mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
             memtable_builder.clone(),
@@ -313,7 +313,7 @@ impl RegionOpener {
         let wal_entry_reader = self
             .wal_entry_reader
             .take()
-            .unwrap_or_else(|| wal.wal_entry_reader(&provider, region_id));
+            .unwrap_or_else(|| wal.wal_entry_reader(&provider, region_id, None));
         let on_region_opened = wal.on_region_opened();
         let object_store = self.object_store(&region_options.storage)?.clone();
 
@@ -335,8 +335,13 @@ impl RegionOpener {
             region_options.need_dedup(),
             region_options.merge_mode(),
         );
+        // Use compaction time window in the manifest if region doesn't provide
+        // the time window option.
+        let part_duration = region_options
+            .compaction
+            .time_window()
+            .or(manifest.compaction_time_window);
         // Initial memtable id is 0.
-        let part_duration = region_options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
             memtable_builder.clone(),

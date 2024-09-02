@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod admin;
 mod copy_database;
 mod copy_table_from;
 mod copy_table_to;
@@ -22,8 +23,10 @@ mod set;
 mod show;
 mod tql;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::CatalogManagerRef;
 use client::RecordBatches;
 use common_error::ext::BoxedError;
@@ -31,6 +34,7 @@ use common_meta::cache::TableRouteCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
+use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::view_info::{ViewInfoManager, ViewInfoManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -59,7 +63,8 @@ use table::TableRef;
 use self::set::{set_bytea_output, set_datestyle, set_timezone, validate_client_encoding};
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
+    PlanStatementSnafu, Result, SchemaNotFoundSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UpgradeCatalogManagerRefSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -250,6 +255,29 @@ impl StatementExecutor {
                 )
                 .await
             }
+            Statement::ShowCreateDatabase(show) => {
+                let (catalog, database) =
+                    idents_to_full_database_name(&show.database_name, &query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                let table_metadata_manager = self
+                    .catalog_manager
+                    .as_any()
+                    .downcast_ref::<KvBackendCatalogManager>()
+                    .map(|manager| manager.table_metadata_manager_ref().clone())
+                    .context(UpgradeCatalogManagerRefSnafu)?;
+                let opts: HashMap<String, String> = table_metadata_manager
+                    .schema_manager()
+                    .get(SchemaNameKey::new(&catalog, &database))
+                    .await
+                    .context(TableMetadataManagerSnafu)?
+                    .context(SchemaNotFoundSnafu {
+                        schema_info: &database,
+                    })?
+                    .into();
+
+                self.show_create_database(&database, opts.into()).await
+            }
             Statement::ShowCreateTable(show) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(&show.table_name, &query_ctx)
@@ -277,6 +305,7 @@ impl StatementExecutor {
             Statement::ShowIndex(show_index) => self.show_index(show_index, query_ctx).await,
             Statement::ShowStatus(_) => self.show_status(query_ctx).await,
             Statement::Use(db) => self.use_database(db, query_ctx).await,
+            Statement::Admin(admin) => self.execute_admin_command(admin, query_ctx).await,
         }
     }
 

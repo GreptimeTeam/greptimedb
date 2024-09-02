@@ -32,6 +32,7 @@ use crate::error;
 use crate::error::Result;
 use crate::handler::{HeartbeatHandlerGroup, Pusher};
 use crate::metasrv::{Context, Metasrv};
+use crate::metrics::METRIC_META_HEARTBEAT_RECV;
 use crate::service::{GrpcResult, GrpcStream};
 
 #[async_trait::async_trait]
@@ -65,7 +66,11 @@ impl heartbeat_server::Heartbeat for Metasrv {
                         if pusher_key.is_none() {
                             pusher_key = register_pusher(&handler_group, header, tx.clone()).await;
                         }
-
+                        if let Some(k) = &pusher_key {
+                            METRIC_META_HEARTBEAT_RECV.with_label_values(&[k]);
+                        } else {
+                            METRIC_META_HEARTBEAT_RECV.with_label_values(&["none"]);
+                        }
                         let res = handler_group
                             .handle(req, ctx.clone())
                             .await

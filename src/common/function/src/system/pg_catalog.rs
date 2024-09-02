@@ -14,11 +14,13 @@
 
 mod pg_get_userbyid;
 mod table_is_visible;
+mod version;
 
 use std::sync::Arc;
 
 use pg_get_userbyid::PGGetUserByIdFunction;
 use table_is_visible::PGTableIsVisibleFunction;
+use version::PGVersionFunction;
 
 use crate::function_registry::FunctionRegistry;
 
@@ -35,5 +37,6 @@ impl PGCatalogFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(PGTableIsVisibleFunction));
         registry.register(Arc::new(PGGetUserByIdFunction));
+        registry.register(Arc::new(PGVersionFunction));
     }
 }

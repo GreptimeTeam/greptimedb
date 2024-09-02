@@ -187,7 +187,8 @@ fn build_struct(
         }
 
 
-        impl crate::function::Function for #name {
+        #[async_trait::async_trait]
+        impl crate::function::AsyncFunction for #name {
             fn name(&self) -> &'static str {
                 #display_name
             }
@@ -200,7 +201,7 @@ fn build_struct(
                 #sig_fn()
             }
 
-            fn eval(&self, func_ctx: crate::function::FunctionContext, columns: &[datatypes::vectors::VectorRef]) ->  common_query::error::Result<datatypes::vectors::VectorRef> {
+            async fn eval(&self, func_ctx: crate::function::FunctionContext, columns: &[datatypes::vectors::VectorRef]) ->  common_query::error::Result<datatypes::vectors::VectorRef> {
                 // Ensure under the `greptime` catalog for security
                 crate::ensure_greptime!(func_ctx);
 
@@ -212,51 +213,36 @@ fn build_struct(
                 };
                 let columns = Vec::from(columns);
 
-                // TODO(dennis): DataFusion doesn't support async UDF currently
-                std::thread::spawn(move || {
-                    use snafu::OptionExt;
-                    use datatypes::data_type::DataType;
+                use snafu::OptionExt;
+                use datatypes::data_type::DataType;
 
-                    let query_ctx = &func_ctx.query_ctx;
-                    let handler = func_ctx
-                        .state
-                        .#handler
-                        .as_ref()
-                        .context(#snafu_type)?;
+                let query_ctx = &func_ctx.query_ctx;
+                let handler = func_ctx
+                    .state
+                    .#handler
+                    .as_ref()
+                    .context(#snafu_type)?;
 
-                    let mut builder = store_api::storage::ConcreteDataType::#ret()
-                        .create_mutable_vector(rows_num);
+                let mut builder = store_api::storage::ConcreteDataType::#ret()
+                    .create_mutable_vector(rows_num);
 
-                    if columns_num == 0 {
-                        let result = common_runtime::block_on_global(async move {
-                            #fn_name(handler, query_ctx, &[]).await
-                        })?;
+                if columns_num == 0 {
+                    let result = #fn_name(handler, query_ctx, &[]).await?;
+
+                    builder.push_value_ref(result.as_value_ref());
+                } else {
+                    for i in 0..rows_num {
+                        let args: Vec<_> = columns.iter()
+                            .map(|vector| vector.get_ref(i))
+                            .collect();
+
+                        let result = #fn_name(handler, query_ctx, &args).await?;
 
                         builder.push_value_ref(result.as_value_ref());
-                    } else {
-                        for i in 0..rows_num {
-                            let args: Vec<_> = columns.iter()
-                                .map(|vector| vector.get_ref(i))
-                                .collect();
-
-                            let result = common_runtime::block_on_global(async move {
-                                #fn_name(handler, query_ctx, &args).await
-                            })?;
-
-                            builder.push_value_ref(result.as_value_ref());
-                        }
                     }
+                }
 
-                    Ok(builder.to_vector())
-                })
-                    .join()
-                    .map_err(|e| {
-                        common_telemetry::error!(e; "Join thread error");
-                        common_query::error::Error::ThreadJoin {
-                            location: snafu::Location::default(),
-                        }
-                    })?
-
+                Ok(builder.to_vector())
             }
 
         }

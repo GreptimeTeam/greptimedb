@@ -143,15 +143,14 @@ impl ScannerPartitioning {
 }
 
 /// Represents one data range within a partition
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PartitionRange {
     /// Start time of time index column. Inclusive.
     pub start: Timestamp,
     /// End time of time index column. Inclusive.
     pub end: Timestamp,
-    /// Estimate size of this range. Is used to balance ranges between partitions.
-    /// No base unit, just a number.
-    pub estimated_size: usize,
+    /// Number of rows in this range. Is used to balance ranges between partitions.
+    pub num_rows: usize,
     /// Identifier to this range. Assigned by storage engine.
     pub identifier: usize,
 }

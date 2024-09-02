@@ -79,9 +79,9 @@ pub use standalone::StandaloneDatanodeManager;
 
 use self::prom_store::ExportMetricHandler;
 use crate::error::{
-    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, ParseSqlSnafu,
-    PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu, StartServerSnafu,
-    TableOperationSnafu,
+    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, InvalidSqlSnafu,
+    ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
+    StartServerSnafu, TableOperationSnafu,
 };
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
@@ -442,6 +442,9 @@ pub fn check_permission(
     }
 
     match stmt {
+        // Will be checked in execution.
+        // TODO(dennis): add a hook for admin commands.
+        Statement::Admin(_) => {}
         // These are executed by query engine, and will be checked there.
         Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
         // database ops won't be checked
@@ -450,6 +453,9 @@ pub fn check_permission(
         | Statement::DropDatabase(_)
         | Statement::DropFlow(_)
         | Statement::Use(_) => {}
+        Statement::ShowCreateDatabase(stmt) => {
+            validate_database(&stmt.database_name, query_ctx)?;
+        }
         Statement::ShowCreateTable(stmt) => {
             validate_param(&stmt.table_name, query_ctx)?;
         }
@@ -525,8 +531,8 @@ pub fn check_permission(
         },
         Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy_database)) => {
             match copy_database {
-                CopyDatabase::To(stmt) => validate_param(&stmt.database_name, query_ctx)?,
-                CopyDatabase::From(stmt) => validate_param(&stmt.database_name, query_ctx)?,
+                CopyDatabase::To(stmt) => validate_database(&stmt.database_name, query_ctx)?,
+                CopyDatabase::From(stmt) => validate_database(&stmt.database_name, query_ctx)?,
             }
         }
         Statement::TruncateTable(stmt) => {
@@ -540,6 +546,26 @@ fn validate_param(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> 
     let (catalog, schema, _) = table_idents_to_full_name(name, query_ctx)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
+
+    validate_catalog_and_schema(&catalog, &schema, query_ctx)
+        .map_err(BoxedError::new)
+        .context(SqlExecInterceptedSnafu)
+}
+
+fn validate_database(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> {
+    let (catalog, schema) = match &name.0[..] {
+        [schema] => (
+            query_ctx.current_catalog().to_string(),
+            schema.value.clone(),
+        ),
+        [catalog, schema] => (catalog.value.clone(), schema.value.clone()),
+        _ => InvalidSqlSnafu {
+            err_msg: format!(
+                "expect database name to be <catalog>.<schema> or <schema>, actual: {name}",
+            ),
+        }
+        .fail()?,
+    };
 
     validate_catalog_and_schema(&catalog, &schema, query_ctx)
         .map_err(BoxedError::new)

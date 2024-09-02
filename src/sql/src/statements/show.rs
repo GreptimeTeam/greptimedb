@@ -161,6 +161,19 @@ impl Display for ShowTableStatus {
     }
 }
 
+/// SQL structure for `SHOW CREATE DATABASE`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ShowCreateDatabase {
+    pub database_name: ObjectName,
+}
+
+impl Display for ShowCreateDatabase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let database_name = &self.database_name;
+        write!(f, r#"SHOW CREATE DATABASE {database_name}"#)
+    }
+}
+
 /// SQL structure for `SHOW CREATE TABLE`.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowCreateTable {

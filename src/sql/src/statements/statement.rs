@@ -19,6 +19,7 @@ use sqlparser::ast::Statement as SpStatement;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::error::{ConvertToDfStatementSnafu, Error};
+use crate::statements::admin::Admin;
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{
     CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView,
@@ -31,8 +32,9 @@ use crate::statements::insert::Insert;
 use crate::statements::query::Query;
 use crate::statements::set_variables::SetVariables;
 use crate::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowCreateView, ShowDatabases, ShowFlows,
-    ShowIndex, ShowKind, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
+    ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateView,
+    ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowStatus, ShowTableStatus, ShowTables,
+    ShowVariables, ShowViews,
 };
 use crate::statements::tql::Tql;
 use crate::statements::truncate::TruncateTable;
@@ -83,6 +85,8 @@ pub enum Statement {
     ShowCollation(ShowKind),
     // SHOW INDEX
     ShowIndex(ShowIndex),
+    // SHOW CREATE DATABASE
+    ShowCreateDatabase(ShowCreateDatabase),
     // SHOW CREATE TABLE
     ShowCreateTable(ShowCreateTable),
     // SHOW CREATE FLOW
@@ -110,6 +114,8 @@ pub enum Statement {
     ShowVariables(ShowVariables),
     // USE
     Use(String),
+    // Admin statement(extension)
+    Admin(Admin),
 }
 
 impl Display for Statement {
@@ -136,6 +142,7 @@ impl Display for Statement {
             Statement::ShowCreateTable(s) => s.fmt(f),
             Statement::ShowCreateFlow(s) => s.fmt(f),
             Statement::ShowFlows(s) => s.fmt(f),
+            Statement::ShowCreateDatabase(s) => s.fmt(f),
             Statement::ShowCreateView(s) => s.fmt(f),
             Statement::ShowViews(s) => s.fmt(f),
             Statement::ShowStatus(s) => s.fmt(f),
@@ -154,6 +161,7 @@ impl Display for Statement {
             }
             Statement::CreateView(s) => s.fmt(f),
             Statement::Use(s) => s.fmt(f),
+            Statement::Admin(admin) => admin.fmt(f),
         }
     }
 }

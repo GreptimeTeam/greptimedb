@@ -31,11 +31,11 @@ pub(crate) struct TableFunction;
 impl TableFunction {
     /// Register all table functions to [`FunctionRegistry`].
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(MigrateRegionFunction));
-        registry.register(Arc::new(FlushRegionFunction));
-        registry.register(Arc::new(CompactRegionFunction));
-        registry.register(Arc::new(FlushTableFunction));
-        registry.register(Arc::new(CompactTableFunction));
-        registry.register(Arc::new(FlushFlowFunction));
+        registry.register_async(Arc::new(MigrateRegionFunction));
+        registry.register_async(Arc::new(FlushRegionFunction));
+        registry.register_async(Arc::new(CompactRegionFunction));
+        registry.register_async(Arc::new(FlushTableFunction));
+        registry.register_async(Arc::new(CompactTableFunction));
+        registry.register_async(Arc::new(FlushFlowFunction));
     }
 }

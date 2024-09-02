@@ -93,6 +93,9 @@ pub trait QueryEngine: Send + Sync {
 
     /// Create a [`QueryEngineContext`].
     fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext;
+
+    /// Retrieve the query engine state [`QueryEngineState`]
+    fn engine_state(&self) -> &QueryEngineState;
 }
 
 pub struct QueryEngineFactory {

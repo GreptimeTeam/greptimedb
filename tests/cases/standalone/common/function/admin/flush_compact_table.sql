@@ -6,9 +6,9 @@ INSERT INTO test VALUES (1), (2), (3), (4), (5);
 
 SELECT * FROM test;
 
-SELECT FLUSH_TABLE('test');
+ADMIN FLUSH_TABLE('test');
 
-SELECT COMPACT_TABLE('test');
+ADMIN COMPACT_TABLE('test');
 
 --- doesn't change anything ---
 SELECT * FROM test;
