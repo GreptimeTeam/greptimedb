@@ -109,7 +109,6 @@ tower-http = { version = "0.4", features = ["full"] }
 urlencoding = "2.1"
 uuid.workspace = true
 zstd.workspace = true
-jsonb.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
