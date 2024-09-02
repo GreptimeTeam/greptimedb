@@ -321,6 +321,7 @@ impl Value {
         let value_type_id = self.logical_type_id();
         let output_type_id = output_type.logical_type_id();
         ensure!(
+            // Json type leverage Value(Binary) for storage.
             output_type_id == value_type_id || self.is_null() || (output_type_id == LogicalTypeId::Json && value_type_id == LogicalTypeId::Binary),
             error::ToScalarValueSnafu {
                 reason: format!(
@@ -1037,18 +1038,7 @@ impl<'a> ValueRef<'a> {
 
     /// Cast itself to binary slice.
     pub fn as_binary(&self) -> Result<Option<&[u8]>> {
-        match self {
-            ValueRef::Null => Ok(None),
-            ValueRef::Binary(v) => Ok(Some(*v)),
-            other => error::CastTypeSnafu {
-                msg: format!(
-                    "Failed to cast value ref {:?} to {}",
-                    other,
-                    stringify!(Binary)
-                ),
-            }
-            .fail(),
-        }
+        impl_as_for_value_ref!(self, Binary)
     }
 
     /// Cast itself to string slice.
