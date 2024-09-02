@@ -44,21 +44,32 @@ impl Function for GeohashFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::one_of(
-            vec![
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::float32_datatype(),
-                    ConcreteDataType::float32_datatype(),
-                    ConcreteDataType::int64_datatype(),
-                ]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::float64_datatype(),
-                    ConcreteDataType::float64_datatype(),
-                    ConcreteDataType::int64_datatype(),
-                ]),
-            ],
-            Volatility::Stable,
-        )
+        let mut signatures = Vec::new();
+        for coord_type in &[
+            ConcreteDataType::float32_datatype(),
+            ConcreteDataType::float64_datatype(),
+        ] {
+            for resolution_type in &[
+                ConcreteDataType::int8_datatype(),
+                ConcreteDataType::int16_datatype(),
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::uint8_datatype(),
+                ConcreteDataType::uint16_datatype(),
+                ConcreteDataType::uint32_datatype(),
+                ConcreteDataType::uint64_datatype(),
+            ] {
+                signatures.push(TypeSignature::Exact(vec![
+                    // latitude
+                    coord_type.clone(),
+                    // longitude
+                    coord_type.clone(),
+                    // resolution
+                    resolution_type.clone(),
+                ]));
+            }
+        }
+        Signature::one_of(signatures, Volatility::Stable)
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -80,14 +91,24 @@ impl Function for GeohashFunction {
         let mut results = StringVectorBuilder::with_capacity(size);
 
         for i in 0..size {
-            let lat = lat_vec.get(i).as_f64();
-            let lon = lon_vec.get(i).as_f64();
-            let resolution = resolution_vec.get(i);
+            let lat = lat_vec.get(i).as_f64_lossy();
+            let lon = lon_vec.get(i).as_f64_lossy();
+            let r = match resolution_vec.get(i) {
+                Value::Int8(v) => v as usize,
+                Value::Int16(v) => v as usize,
+                Value::Int32(v) => v as usize,
+                Value::Int64(v) => v as usize,
+                Value::UInt8(v) => v as usize,
+                Value::UInt16(v) => v as usize,
+                Value::UInt32(v) => v as usize,
+                Value::UInt64(v) => v as usize,
+                _ => unreachable!(),
+            };
 
-            let result = match (lat, lon, resolution) {
-                (Some(lat), Some(lon), Value::Int64(r)) => {
+            let result = match (lat, lon) {
+                (Some(lat), Some(lon)) => {
                     let coord = Coord { x: lon, y: lat };
-                    let encoded = geohash::encode(coord, r as usize)
+                    let encoded = geohash::encode(coord, r)
                         .map_err(|e| {
                             BoxedError::new(PlainError::new(
                                 format!("Geohash error: {}", e),
