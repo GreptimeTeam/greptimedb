@@ -710,7 +710,7 @@ impl HttpServer {
                     )),
             )
             .nest(
-                &format!("/{HTTP_API_VERSION}/admin"),
+                "/debug",
                 Router::new()
                     // handler for changing log level dynamically
                     .route(

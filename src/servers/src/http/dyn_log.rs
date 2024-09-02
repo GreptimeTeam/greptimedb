@@ -14,22 +14,17 @@
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use common_telemetry::info;
-use common_telemetry::tracing_subscriber::filter::{self, Targets};
-use common_telemetry::tracing_subscriber::reload::Handle;
-use common_telemetry::tracing_subscriber::Registry;
-use once_cell::sync::OnceCell;
+use common_telemetry::tracing_subscriber::filter;
+use common_telemetry::{info, RELOAD_HANDLE};
 use snafu::OptionExt;
 
 use crate::error::{InternalSnafu, InvalidParameterSnafu, Result};
-
-pub static RELOAD_HANDLE: OnceCell<Handle<Targets, Registry>> = OnceCell::new();
 
 #[axum_macros::debug_handler]
 pub async fn dyn_log_handler(level: String) -> Result<impl IntoResponse> {
     let new_filter = level.parse::<filter::Targets>().map_err(|e| {
         InvalidParameterSnafu {
-            reason: format!("Invalid filter: {e:?}"),
+            reason: format!("Invalid filter \"{level}\": {e:?}"),
         }
         .build()
     })?;
@@ -37,7 +32,7 @@ pub async fn dyn_log_handler(level: String) -> Result<impl IntoResponse> {
     RELOAD_HANDLE
         .get()
         .context(InternalSnafu {
-            err_msg: "Reload handler not initialized",
+            err_msg: "Reload handle not initialized",
         })?
         .modify(|filter| {
             old_filter = Some(filter.clone());
