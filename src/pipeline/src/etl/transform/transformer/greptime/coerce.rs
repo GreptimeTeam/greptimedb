@@ -414,11 +414,11 @@ fn coerce_nested_value(v: &Value, transform: &Transform) -> Result<Option<ValueD
     match v {
         Value::Map(_) => {
             let data: jsonb::Value = v.into();
-            Ok(Some(ValueData::JsonValue(data.to_vec())))
+            Ok(Some(ValueData::BinaryValue(data.to_vec())))
         }
         Value::Array(_) => {
             let data: jsonb::Value = v.into();
-            Ok(Some(ValueData::JsonValue(data.to_vec())))
+            Ok(Some(ValueData::BinaryValue(data.to_vec())))
         }
         _ => Err(format!("nested type not support {}", v.to_str_type())),
     }

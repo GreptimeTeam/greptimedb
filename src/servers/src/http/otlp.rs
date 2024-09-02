@@ -194,12 +194,18 @@ pub async fn logs(
         .with_label_values(&[db.as_str()])
         .start_timer();
     let request = parse_logs_body(body).await?;
-    // TODO remove unwrap
+
     let pipeline_way;
     if pipeline_info.pipeline_name == "identity" {
         pipeline_way = PipelineWay::Identity;
     } else {
-        let pipeline_version = to_pipeline_version(pipeline_info.pipeline_version).unwrap();
+        let pipeline_version =
+            to_pipeline_version(pipeline_info.pipeline_version).map_err(|_| {
+                error::InvalidParameterSnafu {
+                    reason: "X-Pipeline-Version".to_string(),
+                }
+                .build()
+            })?;
         let pipeline = match handler
             .get_pipeline(
                 &pipeline_info.pipeline_name,

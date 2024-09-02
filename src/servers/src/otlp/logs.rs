@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap as StdHashMap};
 
 use ahash::{HashMap, HashMapExt};
+use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-    Value as GreptimeValue,
+    ColumnDataType, ColumnDataTypeExtension, ColumnOptions, ColumnSchema, Row, RowInsertRequest,
+    RowInsertRequests, Rows, SemanticType, Value as GreptimeValue,
 };
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -35,7 +36,7 @@ use crate::query_handler::PipelineWay;
 ///
 /// <https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md#instrument-name-syntax>
 /// - since the name are case-insensitive, we transform them to lowercase for
-/// better sql usability
+/// - better sql usability
 /// - replace `.` and `-` with `_`
 fn normalize_otlp_name(name: &str) -> String {
     name.to_lowercase().replace(|c| c == '.' || c == '-', "_")
@@ -181,46 +182,133 @@ fn log_to_pipeline_value(
 
 fn build_identity_schema() -> Vec<ColumnSchema> {
     [
-        ("ScopeName", ColumnDataType::String, SemanticType::Tag),
-        ("ScopeVersion", ColumnDataType::String, SemanticType::Tag),
-        ("ScopeAttributes", ColumnDataType::Json, SemanticType::Field),
-        ("ScopeSchemaUrl", ColumnDataType::String, SemanticType::Tag),
+        (
+            "ScopeName",
+            ColumnDataType::String,
+            SemanticType::Tag,
+            None,
+            None,
+        ),
+        (
+            "ScopeVersion",
+            ColumnDataType::String,
+            SemanticType::Tag,
+            None,
+            None,
+        ),
+        (
+            "ScopeAttributes",
+            ColumnDataType::Binary,
+            SemanticType::Field,
+            Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(true)),
+            }),
+            None,
+        ),
+        (
+            "ScopeSchemaUrl",
+            ColumnDataType::String,
+            SemanticType::Tag,
+            None,
+            None,
+        ),
         (
             "ResourceSchemaUrl",
             ColumnDataType::String,
             SemanticType::Tag,
+            None,
+            None,
         ),
         (
             "ResourceAttributes",
-            ColumnDataType::Json,
+            ColumnDataType::Binary,
             SemanticType::Field,
+            Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(true)),
+            }),
+            None,
         ),
-        ("LogAttributes", ColumnDataType::Json, SemanticType::Field),
+        (
+            "LogAttributes",
+            ColumnDataType::Binary,
+            SemanticType::Field,
+            Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(true)),
+            }),
+            None,
+        ),
         (
             "Timestamp",
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
+            None,
+            None,
         ),
         (
             "ObservedTimestamp",
             ColumnDataType::TimestampNanosecond,
             SemanticType::Tag,
+            None,
+            None,
         ),
-        ("TraceId", ColumnDataType::String, SemanticType::Tag),
-        ("SpanId", ColumnDataType::String, SemanticType::Tag),
-        ("TraceFlags", ColumnDataType::Uint32, SemanticType::Tag),
-        ("SeverityText", ColumnDataType::String, SemanticType::Tag),
-        ("SeverityNumber", ColumnDataType::Int32, SemanticType::Tag),
-        ("Body", ColumnDataType::String, SemanticType::Tag),
+        (
+            "TraceId",
+            ColumnDataType::String,
+            SemanticType::Tag,
+            None,
+            None,
+        ),
+        (
+            "SpanId",
+            ColumnDataType::String,
+            SemanticType::Tag,
+            None,
+            None,
+        ),
+        (
+            "TraceFlags",
+            ColumnDataType::Uint32,
+            SemanticType::Tag,
+            None,
+            None,
+        ),
+        (
+            "SeverityText",
+            ColumnDataType::String,
+            SemanticType::Tag,
+            None,
+            None,
+        ),
+        (
+            "SeverityNumber",
+            ColumnDataType::Int32,
+            SemanticType::Tag,
+            None,
+            None,
+        ),
+        (
+            "Body",
+            ColumnDataType::String,
+            SemanticType::Tag,
+            None,
+            Some(ColumnOptions {
+                options: StdHashMap::from([(
+                    "fulltext".to_string(),
+                    r#"{"enable":true}"#.to_string(),
+                )]),
+            }),
+        ),
     ]
-    .iter()
-    .map(|(field_name, column_type, semantic_type)| ColumnSchema {
-        column_name: field_name.to_string(),
-        datatype: *column_type as i32,
-        semantic_type: *semantic_type as i32,
-        datatype_extension: None,
-        options: None,
-    })
+    .into_iter()
+    .map(
+        |(field_name, column_type, semantic_type, datatype_extension, options)| ColumnSchema {
+            column_name: field_name.to_string(),
+            datatype: column_type as i32,
+            semantic_type: semantic_type as i32,
+            datatype_extension,
+            options,
+        },
+    )
     .collect::<Vec<ColumnSchema>>()
 }
 
@@ -233,62 +321,63 @@ fn build_identity_row(
     scope_version: Option<String>,
     scope_attrs: JsonbValue<'_>,
 ) -> Row {
-    let mut row = Vec::new();
-    // scope_name, scope_version, scope_attrs, scope_schema_url, resource_schema_url, resource_attr, log_attrs
-    row.push(GreptimeValue {
-        value_data: scope_name.map(|x| ValueData::StringValue(x)),
-    });
-    row.push(GreptimeValue {
-        value_data: scope_version.map(|x| ValueData::StringValue(x)),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::JsonValue(scope_attrs.to_vec())),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::StringValue(scope_schema_url)),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::StringValue(resource_schema_url)),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::JsonValue(resource_attr.to_vec())),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::JsonValue(
-            key_value_to_jsonb(log.attributes).to_vec(),
-        )),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::TimestampNanosecondValue(
-            log.time_unix_nano as i64,
-        )),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::TimestampNanosecondValue(
-            log.observed_time_unix_nano as i64,
-        )),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::StringValue(bytes_to_hex_string(&log.trace_id))),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::StringValue(bytes_to_hex_string(&log.span_id))),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::U32Value(log.flags)),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::StringValue(log.severity_text)),
-    });
-    row.push(GreptimeValue {
-        value_data: Some(ValueData::I32Value(log.severity_number)),
-    });
-    row.push(GreptimeValue {
-        value_data: log
-            .body
-            .as_ref()
-            .map(|x| ValueData::StringValue(log_body_to_string(x))),
-    });
+    let row = vec![
+        GreptimeValue {
+            value_data: scope_name.map(ValueData::StringValue),
+        },
+        GreptimeValue {
+            value_data: scope_version.map(ValueData::StringValue),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::BinaryValue(scope_attrs.to_vec())),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::StringValue(scope_schema_url)),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::StringValue(resource_schema_url)),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::BinaryValue(resource_attr.to_vec())),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::BinaryValue(
+                key_value_to_jsonb(log.attributes).to_vec(),
+            )),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::TimestampNanosecondValue(
+                log.time_unix_nano as i64,
+            )),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::TimestampNanosecondValue(
+                log.observed_time_unix_nano as i64,
+            )),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::StringValue(bytes_to_hex_string(&log.trace_id))),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::StringValue(bytes_to_hex_string(&log.span_id))),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::U32Value(log.flags)),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::StringValue(log.severity_text)),
+        },
+        GreptimeValue {
+            value_data: Some(ValueData::I32Value(log.severity_number)),
+        },
+        GreptimeValue {
+            value_data: log
+                .body
+                .as_ref()
+                .map(|x| ValueData::StringValue(log_body_to_string(x))),
+        },
+    ];
+
     Row { values: row }
 }
 
