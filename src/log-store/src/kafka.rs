@@ -14,15 +14,10 @@
 
 pub(crate) mod client_manager;
 pub(crate) mod consumer;
-/// TODO(weny): remove it.
-#[allow(dead_code)]
-#[allow(unused_imports)]
 pub(crate) mod index;
 pub mod log_store;
 pub(crate) mod producer;
 pub(crate) mod util;
-/// TODO(weny): remove it.
-#[allow(dead_code)]
 pub(crate) mod worker;
 
 pub use index::{default_index_file, GlobalIndexCollector};

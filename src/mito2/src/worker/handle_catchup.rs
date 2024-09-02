@@ -74,7 +74,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let flushed_entry_id = region.version_control.current().last_entry_id;
         info!("Trying to replay memtable for region: {region_id}, flushed entry id: {flushed_entry_id}");
         let timer = Instant::now();
-        let wal_entry_reader = self.wal.wal_entry_reader(&region.provider, region_id);
+        let wal_entry_reader =
+            self.wal
+                .wal_entry_reader(&region.provider, region_id, request.location_id);
         let on_region_opened = self.wal.on_region_opened();
         let last_entry_id = replay_memtable(
             &region.provider,
@@ -93,7 +95,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         if let Some(expected_last_entry_id) = request.entry_id {
             ensure!(
-                expected_last_entry_id == last_entry_id,
+                // The replayed last entry id may be greater than the `expected_last_entry_id`.
+                last_entry_id >= expected_last_entry_id,
                 error::UnexpectedReplaySnafu {
                     region_id,
                     expected_last_entry_id,

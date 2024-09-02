@@ -38,7 +38,7 @@ runs:
   steps:
     - name: Configure AWS credentials
       if: startsWith(inputs.runner, 'ec2')
-      uses: aws-actions/configure-aws-credentials@v2
+      uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ inputs.aws-access-key-id }}
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}

@@ -89,6 +89,19 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
     }
 }
 
+impl From<SchemaNameValue> for HashMap<String, String> {
+    fn from(value: SchemaNameValue) -> Self {
+        let mut opts = HashMap::new();
+        if let Some(ttl) = value.ttl {
+            opts.insert(
+                OPT_KEY_TTL.to_string(),
+                format!("{}", humantime::format_duration(ttl)),
+            );
+        }
+        opts
+    }
+}
+
 impl<'a> SchemaNameKey<'a> {
     pub fn new(catalog: &'a str, schema: &'a str) -> Self {
         Self { catalog, schema }

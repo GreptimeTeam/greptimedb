@@ -25,7 +25,7 @@ use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMo
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::entry::{Entry, Id as EntryId, NaiveEntry};
 use store_api::logstore::provider::{Provider, RaftEngineProvider};
-use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream};
+use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream, WalIndex};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -252,6 +252,7 @@ impl LogStore for RaftEngineLogStore {
         &self,
         provider: &Provider,
         entry_id: EntryId,
+        _index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
         let ns = provider
             .as_raft_engine_provider()
@@ -545,7 +546,7 @@ mod tests {
         }
         let mut entries = HashSet::with_capacity(1024);
         let mut s = logstore
-            .read(&Provider::raft_engine_provider(1), 0)
+            .read(&Provider::raft_engine_provider(1), 0, None)
             .await
             .unwrap();
         while let Some(r) = s.next().await {
@@ -578,7 +579,7 @@ mod tests {
                 .await
                 .is_ok());
             let entries = logstore
-                .read(&Provider::raft_engine_provider(1), 1)
+                .read(&Provider::raft_engine_provider(1), 1, None)
                 .await
                 .unwrap()
                 .collect::<Vec<_>>()
@@ -596,7 +597,7 @@ mod tests {
 
         let entries = collect_entries(
             logstore
-                .read(&Provider::raft_engine_provider(1), 1)
+                .read(&Provider::raft_engine_provider(1), 1, None)
                 .await
                 .unwrap(),
         )
@@ -682,7 +683,7 @@ mod tests {
         logstore.obsolete(&namespace, region_id, 100).await.unwrap();
         assert_eq!(101, logstore.engine.first_index(namespace_id).unwrap());
 
-        let res = logstore.read(&namespace, 100).await.unwrap();
+        let res = logstore.read(&namespace, 100, None).await.unwrap();
         let mut vec = collect_entries(res).await;
         vec.sort_by(|a, b| a.entry_id().partial_cmp(&b.entry_id()).unwrap());
         assert_eq!(101, vec.first().unwrap().entry_id());

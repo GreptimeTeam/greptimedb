@@ -17,26 +17,19 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::engine::general_purpose;
-use base64::Engine;
 use clap::{Parser, ValueEnum};
-use client::DEFAULT_SCHEMA_NAME;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_telemetry::{debug, error, info};
 use serde_json::Value;
-use servers::http::greptime_result_v1::GreptimedbV1Response;
-use servers::http::GreptimeQueryOutput;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::cli::{Instance, Tool};
-use crate::error::{
-    EmptyResultSnafu, Error, FileIoSnafu, HttpQuerySqlSnafu, Result, SerdeJsonSnafu,
-};
+use crate::cli::database::DatabaseClient;
+use crate::cli::{database, Instance, Tool};
+use crate::error::{EmptyResultSnafu, Error, FileIoSnafu, Result};
 
 type TableReference = (String, String, String);
 
@@ -94,26 +87,21 @@ pub struct ExportCommand {
 
 impl ExportCommand {
     pub async fn build(&self, guard: Vec<WorkerGuard>) -> Result<Instance> {
-        let (catalog, schema) = split_database(&self.database)?;
+        let (catalog, schema) = database::split_database(&self.database)?;
 
-        let auth_header = if let Some(basic) = &self.auth_basic {
-            let encoded = general_purpose::STANDARD.encode(basic);
-            Some(format!("basic {}", encoded))
-        } else {
-            None
-        };
+        let database_client =
+            DatabaseClient::new(self.addr.clone(), catalog.clone(), self.auth_basic.clone());
 
         Ok(Instance::new(
             Box::new(Export {
-                addr: self.addr.clone(),
                 catalog,
                 schema,
+                database_client,
                 output_dir: self.output_dir.clone(),
                 parallelism: self.export_jobs,
                 target: self.target.clone(),
                 start_time: self.start_time.clone(),
                 end_time: self.end_time.clone(),
-                auth_header,
             }),
             guard,
         ))
@@ -121,78 +109,43 @@ impl ExportCommand {
 }
 
 pub struct Export {
-    addr: String,
     catalog: String,
     schema: Option<String>,
+    database_client: DatabaseClient,
     output_dir: String,
     parallelism: usize,
     target: ExportTarget,
     start_time: Option<String>,
     end_time: Option<String>,
-    auth_header: Option<String>,
 }
 
 impl Export {
-    /// Execute one single sql query.
-    async fn sql(&self, sql: &str) -> Result<Option<Vec<Vec<Value>>>> {
-        let url = format!(
-            "http://{}/v1/sql?db={}-{}&sql={}",
-            self.addr,
-            self.catalog,
-            self.schema.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME),
-            sql
-        );
-
-        let mut request = reqwest::Client::new()
-            .get(&url)
-            .header("Content-Type", "application/x-www-form-urlencoded");
-        if let Some(ref auth) = self.auth_header {
-            request = request.header("Authorization", auth);
+    async fn get_db_names(&self) -> Result<Vec<String>> {
+        if let Some(schema) = &self.schema {
+            Ok(vec![schema.clone()])
+        } else {
+            self.all_db_names().await
         }
-
-        let response = request.send().await.with_context(|_| HttpQuerySqlSnafu {
-            reason: format!("bad url: {}", url),
-        })?;
-        let response = response
-            .error_for_status()
-            .with_context(|_| HttpQuerySqlSnafu {
-                reason: format!("query failed: {}", sql),
-            })?;
-
-        let text = response.text().await.with_context(|_| HttpQuerySqlSnafu {
-            reason: "cannot get response text".to_string(),
-        })?;
-
-        let body = serde_json::from_str::<GreptimedbV1Response>(&text).context(SerdeJsonSnafu)?;
-        Ok(body.output().first().and_then(|output| match output {
-            GreptimeQueryOutput::Records(records) => Some(records.rows().clone()),
-            GreptimeQueryOutput::AffectedRows(_) => None,
-        }))
     }
 
     /// Iterate over all db names.
-    ///
-    /// Newbie: `db_name` is catalog + schema.
-    async fn iter_db_names(&self) -> Result<Vec<(String, String)>> {
-        if let Some(schema) = &self.schema {
-            Ok(vec![(self.catalog.clone(), schema.clone())])
-        } else {
-            let result = self.sql("SHOW DATABASES").await?;
-            let Some(records) = result else {
-                EmptyResultSnafu.fail()?
+    async fn all_db_names(&self) -> Result<Vec<String>> {
+        let result = self.database_client.sql_in_public("SHOW DATABASES").await?;
+        let records = result.context(EmptyResultSnafu)?;
+        let mut result = Vec::with_capacity(records.len());
+        for value in records {
+            let Value::String(schema) = &value[0] else {
+                unreachable!()
             };
-            let mut result = Vec::with_capacity(records.len());
-            for value in records {
-                let Value::String(schema) = &value[0] else {
-                    unreachable!()
-                };
-                if schema == common_catalog::consts::INFORMATION_SCHEMA_NAME {
-                    continue;
-                }
-                result.push((self.catalog.clone(), schema.clone()));
+            if schema == common_catalog::consts::INFORMATION_SCHEMA_NAME {
+                continue;
             }
-            Ok(result)
+            if schema == common_catalog::consts::PG_CATALOG_NAME {
+                continue;
+            }
+            result.push(schema.clone());
         }
+        Ok(result)
     }
 
     /// Return a list of [`TableReference`] to be exported.
@@ -201,7 +154,11 @@ impl Export {
         &self,
         catalog: &str,
         schema: &str,
-    ) -> Result<(Vec<TableReference>, Vec<TableReference>)> {
+    ) -> Result<(
+        Vec<TableReference>,
+        Vec<TableReference>,
+        Vec<TableReference>,
+    )> {
         // Puts all metric table first
         let sql = format!(
             "SELECT table_catalog, table_schema, table_name \
@@ -210,15 +167,13 @@ impl Export {
                 and table_catalog = \'{catalog}\' \
                 and table_schema = \'{schema}\'"
         );
-        let result = self.sql(&sql).await?;
-        let Some(records) = result else {
-            EmptyResultSnafu.fail()?
-        };
+        let result = self.database_client.sql_in_public(&sql).await?;
+        let records = result.context(EmptyResultSnafu)?;
         let mut metric_physical_tables = HashSet::with_capacity(records.len());
         for value in records {
             let mut t = Vec::with_capacity(3);
             for v in &value {
-                let serde_json::Value::String(value) = v else {
+                let Value::String(value) = v else {
                     unreachable!()
                 };
                 t.push(value);
@@ -228,54 +183,63 @@ impl Export {
 
         // TODO: SQL injection hurts
         let sql = format!(
-            "SELECT table_catalog, table_schema, table_name \
+            "SELECT table_catalog, table_schema, table_name, table_type \
             FROM information_schema.tables \
-            WHERE table_type = \'BASE TABLE\' \
+            WHERE (table_type = \'BASE TABLE\' OR table_type = \'VIEW\') \
                 and table_catalog = \'{catalog}\' \
                 and table_schema = \'{schema}\'",
         );
-        let result = self.sql(&sql).await?;
-        let Some(records) = result else {
-            EmptyResultSnafu.fail()?
-        };
+        let result = self.database_client.sql_in_public(&sql).await?;
+        let records = result.context(EmptyResultSnafu)?;
 
-        debug!("Fetched table list: {:?}", records);
+        debug!("Fetched table/view list: {:?}", records);
 
         if records.is_empty() {
-            return Ok((vec![], vec![]));
+            return Ok((vec![], vec![], vec![]));
         }
 
         let mut remaining_tables = Vec::with_capacity(records.len());
+        let mut views = Vec::new();
         for value in records {
-            let mut t = Vec::with_capacity(3);
+            let mut t = Vec::with_capacity(4);
             for v in &value {
-                let serde_json::Value::String(value) = v else {
+                let Value::String(value) = v else {
                     unreachable!()
                 };
                 t.push(value);
             }
             let table = (t[0].clone(), t[1].clone(), t[2].clone());
+            let table_type = t[3].as_str();
             // Ignores the physical table
             if !metric_physical_tables.contains(&table) {
-                remaining_tables.push(table);
+                if table_type == "VIEW" {
+                    views.push(table);
+                } else {
+                    remaining_tables.push(table);
+                }
             }
         }
 
         Ok((
             metric_physical_tables.into_iter().collect(),
             remaining_tables,
+            views,
         ))
     }
 
-    async fn show_create_table(&self, catalog: &str, schema: &str, table: &str) -> Result<String> {
+    async fn show_create(
+        &self,
+        show_type: &str,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<String> {
         let sql = format!(
-            r#"SHOW CREATE TABLE "{}"."{}"."{}""#,
-            catalog, schema, table
+            r#"SHOW CREATE {} "{}"."{}"."{}""#,
+            show_type, catalog, schema, table
         );
-        let result = self.sql(&sql).await?;
-        let Some(records) = result else {
-            EmptyResultSnafu.fail()?
-        };
+        let result = self.database_client.sql_in_public(&sql).await?;
+        let records = result.context(EmptyResultSnafu)?;
         let Value::String(create_table) = &records[0][1] else {
             unreachable!()
         };
@@ -286,18 +250,19 @@ impl Export {
     async fn export_create_table(&self) -> Result<()> {
         let timer = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
-        let db_names = self.iter_db_names().await?;
+        let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
         let mut tasks = Vec::with_capacity(db_names.len());
-        for (catalog, schema) in db_names {
+        for schema in db_names {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
-                let (metric_physical_tables, remaining_tables) =
-                    self.get_table_list(&catalog, &schema).await?;
-                let table_count = metric_physical_tables.len() + remaining_tables.len();
+                let (metric_physical_tables, remaining_tables, views) =
+                    self.get_table_list(&self.catalog, &schema).await?;
+                let table_count =
+                    metric_physical_tables.len() + remaining_tables.len() + views.len();
                 let output_dir = Path::new(&self.output_dir)
-                    .join(&catalog)
+                    .join(&self.catalog)
                     .join(format!("{schema}/"));
                 tokio::fs::create_dir_all(&output_dir)
                     .await
@@ -305,7 +270,7 @@ impl Export {
                 let output_file = Path::new(&output_dir).join("create_tables.sql");
                 let mut file = File::create(output_file).await.context(FileIoSnafu)?;
                 for (c, s, t) in metric_physical_tables.into_iter().chain(remaining_tables) {
-                    match self.show_create_table(&c, &s, &t).await {
+                    match self.show_create("TABLE", &c, &s, &t).await {
                         Err(e) => {
                             error!(e; r#"Failed to export table "{}"."{}"."{}""#, c, s, t)
                         }
@@ -316,9 +281,22 @@ impl Export {
                         }
                     }
                 }
+                for (c, s, v) in views {
+                    match self.show_create("VIEW", &c, &s, &v).await {
+                        Err(e) => {
+                            error!(e; r#"Failed to export view "{}"."{}"."{}""#, c, s, v)
+                        }
+                        Ok(create_view) => {
+                            file.write_all(create_view.as_bytes())
+                                .await
+                                .context(FileIoSnafu)?;
+                        }
+                    }
+                }
 
                 info!(
-                    "Finished exporting {catalog}.{schema} with {table_count} table schemas to path: {}",
+                    "Finished exporting {}.{schema} with {table_count} table schemas to path: {}",
+                    self.catalog,
                     output_dir.to_string_lossy()
                 );
 
@@ -332,7 +310,7 @@ impl Export {
             .filter(|r| match r {
                 Ok(_) => true,
                 Err(e) => {
-                    error!(e; "export job failed");
+                    error!(e; "export schema job failed");
                     false
                 }
             })
@@ -347,15 +325,15 @@ impl Export {
     async fn export_database_data(&self) -> Result<()> {
         let timer = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
-        let db_names = self.iter_db_names().await?;
+        let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
-        let mut tasks = Vec::with_capacity(db_names.len());
-        for (catalog, schema) in db_names {
+        let mut tasks = Vec::with_capacity(db_count);
+        for schema in db_names {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
                 let output_dir = Path::new(&self.output_dir)
-                    .join(&catalog)
+                    .join(&self.catalog)
                     .join(format!("{schema}/"));
                 tokio::fs::create_dir_all(&output_dir)
                     .await
@@ -379,7 +357,7 @@ impl Export {
 
                 let sql = format!(
                     r#"COPY DATABASE "{}"."{}" TO '{}' {};"#,
-                    catalog,
+                    self.catalog,
                     schema,
                     output_dir.to_str().unwrap(),
                     with_options
@@ -387,10 +365,11 @@ impl Export {
 
                 info!("Executing sql: {sql}");
 
-                self.sql(&sql).await?;
+                self.database_client.sql_in_public(&sql).await?;
 
                 info!(
-                    "Finished exporting {catalog}.{schema} data into path: {}",
+                    "Finished exporting {}.{schema} data into path: {}",
+                    self.catalog,
                     output_dir.to_string_lossy()
                 );
 
@@ -400,7 +379,7 @@ impl Export {
                     BufWriter::new(File::create(copy_from_file).await.context(FileIoSnafu)?);
                 let copy_database_from_sql = format!(
                     r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='parquet');"#,
-                    catalog,
+                    self.catalog,
                     schema,
                     output_dir.to_str().unwrap()
                 );
@@ -410,7 +389,7 @@ impl Export {
                     .context(FileIoSnafu)?;
                 writer.flush().await.context(FileIoSnafu)?;
 
-                info!("Finished exporting {catalog}.{schema} copy_from.sql");
+                info!("Finished exporting {}.{schema} copy_from.sql", self.catalog);
 
                 Ok::<(), Error>(())
             })
@@ -429,13 +408,12 @@ impl Export {
             .count();
         let elapsed = timer.elapsed();
 
-        info!("Success {success}/{db_count} jobs, costs: {:?}", elapsed);
+        info!("Success {success}/{db_count} jobs, costs: {elapsed:?}");
 
         Ok(())
     }
 }
 
-#[allow(deprecated)]
 #[async_trait]
 impl Tool for Export {
     async fn do_work(&self) -> Result<()> {
@@ -450,20 +428,6 @@ impl Tool for Export {
     }
 }
 
-/// Split at `-`.
-fn split_database(database: &str) -> Result<(String, Option<String>)> {
-    let (catalog, schema) = match database.split_once('-') {
-        Some((catalog, schema)) => (catalog, schema),
-        None => (DEFAULT_CATALOG_NAME, database),
-    };
-
-    if schema == "*" {
-        Ok((catalog.to_string(), None))
-    } else {
-        Ok((catalog.to_string(), Some(schema.to_string())))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -471,25 +435,9 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_telemetry::logging::LoggingOptions;
 
-    use crate::cli::export::split_database;
     use crate::error::Result as CmdResult;
     use crate::options::GlobalOptions;
     use crate::{cli, standalone, App};
-
-    #[test]
-    fn test_split_database() {
-        let result = split_database("catalog-schema").unwrap();
-        assert_eq!(result, ("catalog".to_string(), Some("schema".to_string())));
-
-        let result = split_database("schema").unwrap();
-        assert_eq!(result, ("greptime".to_string(), Some("schema".to_string())));
-
-        let result = split_database("catalog-*").unwrap();
-        assert_eq!(result, ("catalog".to_string(), None));
-
-        let result = split_database("*").unwrap();
-        assert_eq!(result, ("greptime".to_string(), None));
-    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_export_create_table_with_quoted_names() -> CmdResult<()> {

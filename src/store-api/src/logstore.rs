@@ -30,6 +30,22 @@ pub use crate::logstore::entry::Id as EntryId;
 use crate::logstore::provider::Provider;
 use crate::storage::RegionId;
 
+// The information used to locate WAL index for the specified region.
+#[derive(Debug, Clone, Copy)]
+pub struct WalIndex {
+    pub region_id: RegionId,
+    pub location_id: u64,
+}
+
+impl WalIndex {
+    pub fn new(region_id: RegionId, location_id: u64) -> Self {
+        Self {
+            region_id,
+            location_id,
+        }
+    }
+}
+
 /// `LogStore` serves as a Write-Ahead-Log for storage engine.
 #[async_trait::async_trait]
 pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
@@ -48,6 +64,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         &self,
         provider: &Provider,
         id: EntryId,
+        index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error>;
 
     /// Creates a new `Namespace` from the given ref.

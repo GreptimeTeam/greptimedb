@@ -26,6 +26,17 @@ SHOW FULL DATABASES;
 | public             |          |
 +--------------------+----------+
 
+SHOW CREATE DATABASE mydb;
+
++----------+------------------------------------+
+| Database | Create Database                    |
++----------+------------------------------------+
+| mydb     | CREATE DATABASE IF NOT EXISTS mydb |
+|          | WITH(                              |
+|          |   ttl = '1h'                       |
+|          | )                                  |
++----------+------------------------------------+
+
 USE mydb;
 
 Affected Rows: 0

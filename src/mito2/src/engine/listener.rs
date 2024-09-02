@@ -22,6 +22,8 @@ use common_telemetry::info;
 use store_api::storage::RegionId;
 use tokio::sync::Notify;
 
+use crate::sst::file::FileId;
+
 /// Mito engine background event listener.
 #[async_trait]
 pub trait EventListener: Send + Sync {
@@ -61,6 +63,9 @@ pub trait EventListener: Send + Sync {
     fn on_recv_requests(&self, request_num: usize) {
         let _ = request_num;
     }
+
+    /// Notifies the listener that the file cache is filled when, for example, editing region.
+    fn on_file_cache_filled(&self, _file_id: FileId) {}
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;

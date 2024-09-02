@@ -860,7 +860,7 @@ impl RegionServerInner {
         // complains "higher-ranked lifetime error". Rust can't prove some future is legit.
         // Possible related issue: https://github.com/rust-lang/rust/issues/102211
         //
-        // The walkaround is to put the async functions in the `common_runtime::spawn_global`. Or like
+        // The workaround is to put the async functions in the `common_runtime::spawn_global`. Or like
         // it here, collect the values first then use later separately.
 
         let regions = self

@@ -141,6 +141,8 @@ pub struct StandaloneOptions {
     pub region_engine: Vec<RegionEngineConfig>,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
+    pub init_regions_in_background: bool,
+    pub init_regions_parallelism: usize,
 }
 
 impl Default for StandaloneOptions {
@@ -168,6 +170,8 @@ impl Default for StandaloneOptions {
                 RegionEngineConfig::File(FileEngineConfig::default()),
             ],
             tracing: TracingOptions::default(),
+            init_regions_in_background: false,
+            init_regions_parallelism: 16,
         }
     }
 }
@@ -175,6 +179,16 @@ impl Default for StandaloneOptions {
 impl Configurable for StandaloneOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["wal.broker_endpoints"])
+    }
+}
+
+/// The [`StandaloneOptions`] is only defined in cmd crate,
+/// we don't want to make `frontend` depends on it, so impl [`Into`]
+/// rather than [`From`].
+#[allow(clippy::from_over_into)]
+impl Into<FrontendOptions> for StandaloneOptions {
+    fn into(self) -> FrontendOptions {
+        self.frontend_options()
     }
 }
 
@@ -208,6 +222,9 @@ impl StandaloneOptions {
             storage: cloned_opts.storage,
             region_engine: cloned_opts.region_engine,
             grpc: cloned_opts.grpc,
+            init_regions_in_background: cloned_opts.init_regions_in_background,
+            init_regions_parallelism: cloned_opts.init_regions_parallelism,
+            mode: Mode::Standalone,
             ..Default::default()
         }
     }
@@ -510,7 +527,7 @@ impl StartCommand {
                 .build(),
         );
         let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            opts.wal.into(),
+            opts.wal.clone().into(),
             kv_backend.clone(),
         ));
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
@@ -533,7 +550,7 @@ impl StartCommand {
         .await?;
 
         let mut frontend = FrontendBuilder::new(
-            fe_opts.clone(),
+            fe_opts,
             kv_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager.clone(),
@@ -561,7 +578,7 @@ impl StartCommand {
 
         let (tx, _rx) = broadcast::channel(1);
 
-        let servers = Services::new(fe_opts, Arc::new(frontend.clone()), plugins)
+        let servers = Services::new(opts, Arc::new(frontend.clone()), plugins)
             .build()
             .await
             .context(StartFrontendSnafu)?;

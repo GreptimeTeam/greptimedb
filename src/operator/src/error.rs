@@ -676,18 +676,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Invalid partition columns when creating table '{}', reason: {}",
-        table,
-        reason
-    ))]
-    InvalidPartitionColumns {
-        table: String,
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to prepare file table"))]
     PrepareFileTable {
         #[snafu(implicit)]
@@ -784,6 +772,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to upgrade catalog manager reference"))]
+    UpgradeCatalogManagerRef {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -806,7 +800,6 @@ impl ErrorExt for Error {
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::ColumnNoneDefaultValue { .. }
-            | Error::InvalidPartitionColumns { .. }
             | Error::PrepareFileTable { .. }
             | Error::InferFileTableSchema { .. }
             | Error::SchemaIncompatible { .. }
@@ -931,6 +924,8 @@ impl ErrorExt for Error {
 
             Error::ExecuteAdminFunction { source, .. } => source.status_code(),
             Error::BuildRecordBatch { source, .. } => source.status_code(),
+
+            Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
         }
     }
 

@@ -105,11 +105,13 @@ impl Arranged {
 /// This type maintains the invariant that it does contain at least one(or both) valid
 /// source of data, either a collection or at least one arrangement. This is for convenience
 /// of reading the data from the collection.
-pub struct CollectionBundle {
+///
+// TODO(discord9): make T default to Batch and obsolete the Row Mode
+pub struct CollectionBundle<T: 'static = DiffRow> {
     /// This is useful for passively reading the new updates from the collection
     ///
     /// Invariant: the timestamp of the updates should always not greater than now, since future updates should be stored in the arrangement
-    pub collection: Collection<DiffRow>,
+    pub collection: Collection<T>,
     /// the key [`ScalarExpr`] indicate how the keys(also a [`Row`]) used in Arranged is extract from collection's [`Row`]
     /// So it is the "index" of the arrangement
     ///
@@ -121,13 +123,16 @@ pub struct CollectionBundle {
     pub arranged: BTreeMap<Vec<ScalarExpr>, Arranged>,
 }
 
-impl CollectionBundle {
-    pub fn from_collection(collection: Collection<DiffRow>) -> Self {
+impl<T: 'static> CollectionBundle<T> {
+    pub fn from_collection(collection: Collection<T>) -> Self {
         Self {
             collection,
             arranged: BTreeMap::default(),
         }
     }
+}
+
+impl<T: 'static + Clone> CollectionBundle<T> {
     pub fn clone(&self, df: &mut Hydroflow) -> Self {
         Self {
             collection: self.collection.clone(df),
