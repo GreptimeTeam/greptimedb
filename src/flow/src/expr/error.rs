@@ -106,19 +106,19 @@ pub enum EvalError {
         location: Location,
     },
 
-    #[snafu(display("Arrow error: {raw:?}, context: {context}"))]
+    #[snafu(display("Arrow error: {error:?}, context: {context}"))]
     Arrow {
         #[snafu(source)]
-        raw: ArrowError,
+        error: ArrowError,
         context: String,
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("DataFusion error: {raw:?}, context: {context}"))]
+    #[snafu(display("DataFusion error: {error:?}, context: {context}"))]
     Datafusion {
         #[snafu(source)]
-        raw: DataFusionError,
+        error: DataFusionError,
         context: String,
         #[snafu(implicit)]
         location: Location,
