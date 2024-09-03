@@ -20,6 +20,7 @@ use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_plugins::GREPTIME_EXEC_WRITE_COST;
@@ -76,6 +77,11 @@ pub async fn sql(
 ) -> HttpResponse {
     let start = Instant::now();
     let sql_handler = &state.sql_handler;
+    if let Some(db) = &query_params.db.or(form_params.db) {
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+        query_ctx.set_current_catalog(&catalog);
+        query_ctx.set_current_schema(&schema);
+    }
     let db = query_ctx.get_db_string();
 
     query_ctx.set_channel(Channel::Http);
