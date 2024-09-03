@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_telemetry::{error, info, warn};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -165,18 +165,15 @@ impl Import {
             return Ok(db_names);
         };
 
-        for db_name in db_names {
-            // Check if the schema exists
-            if db_name.to_lowercase() == schema.to_lowercase() {
-                return Ok(vec![db_name]);
-            }
-        }
-
-        SchemaNotFoundSnafu {
-            catalog: &self.catalog,
-            schema,
-        }
-        .fail()
+        // Check if the schema exists
+        db_names
+            .into_iter()
+            .find(|db_name| db_name.to_lowercase() == schema.to_lowercase())
+            .map(|name| vec![name])
+            .context(SchemaNotFoundSnafu {
+                catalog: &self.catalog,
+                schema,
+            })
     }
 
     // Get all database names in the input directory.

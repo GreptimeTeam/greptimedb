@@ -130,6 +130,7 @@ impl Export {
             return Ok(db_names);
         };
 
+        // Check if the schema exists
         db_names
             .into_iter()
             .find(|db_name| db_name.to_lowercase() == schema.to_lowercase())
