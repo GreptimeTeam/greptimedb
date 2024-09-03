@@ -27,17 +27,14 @@ pub mod tables;
 mod views;
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Weak};
+use std::sync::{Arc, Weak};
 
-use common_catalog::consts::{
-    self, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME,
-};
+use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
 use common_meta::key::flow::FlowMetadataManager;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
-use session::context::{Channel, QueryContext};
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
 use table::TableRef;
@@ -301,13 +298,4 @@ where
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         InformationTable::to_stream(self, request)
     }
-}
-
-/// Provide query context to call the [`CatalogManager`]'s method.
-static MYSQL_QUERY_CTX: LazyLock<QueryContext> = LazyLock::new(|| {
-    QueryContext::with_channel(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Channel::Mysql)
-});
-
-fn query_ctx() -> Option<&'static QueryContext> {
-    Some(&MYSQL_QUERY_CTX)
 }

@@ -34,7 +34,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::{TableInfo, TableType};
 
-use super::{query_ctx, TABLES};
+use super::TABLES;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
@@ -234,11 +234,8 @@ impl InformationSchemaTablesBuilder {
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager
-            .schema_names(&catalog_name, query_ctx())
-            .await?
-        {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, query_ctx());
+        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, None);
 
             while let Some(table) = stream.try_next().await? {
                 let table_info = table.table_info();

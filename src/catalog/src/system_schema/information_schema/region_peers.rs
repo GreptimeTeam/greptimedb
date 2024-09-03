@@ -34,7 +34,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, ScanRequest, TableId};
 use table::metadata::TableType;
 
-use super::{query_ctx, REGION_PEERS};
+use super::REGION_PEERS;
 use crate::error::{
     CreateRecordBatchSnafu, FindRegionRoutesSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu,
@@ -176,12 +176,9 @@ impl InformationSchemaRegionPeersBuilder {
 
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager
-            .schema_names(&catalog_name, query_ctx())
-            .await?
-        {
+        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
             let table_id_stream = catalog_manager
-                .tables(&catalog_name, &schema_name, query_ctx())
+                .tables(&catalog_name, &schema_name, None)
                 .try_filter_map(|t| async move {
                     let table_info = t.table_info();
                     if table_info.table_type == TableType::Temporary {
