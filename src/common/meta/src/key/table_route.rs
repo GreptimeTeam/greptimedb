@@ -22,8 +22,8 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{
-    self, InvalidMetadataSnafu, MetadataCorruptionSnafu, Result, SerdeJsonSnafu,
-    TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
+    InvalidMetadataSnafu, MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
+    UnexpectedLogicalRouteTableSnafu,
 };
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
@@ -301,7 +301,7 @@ impl TableRouteManager {
             Some(route) => {
                 ensure!(
                     route.is_physical(),
-                    error::UnexpectedLogicalRouteTableSnafu {
+                    UnexpectedLogicalRouteTableSnafu {
                         err_msg: format!("{route:?} is a non-physical TableRouteValue.")
                     }
                 );
@@ -335,7 +335,7 @@ impl TableRouteManager {
 
     /// Returns the [TableRouteValue::Physical] recursively.
     ///
-    /// Returns a [TableRouteNotFound](crate::error::Error::TableRouteNotFound) Error if:
+    /// Returns a [TableRouteNotFound](error::Error::TableRouteNotFound) Error if:
     /// - the physical table(`logical_or_physical_table_id`) does not exist
     /// - the corresponding physical table of the logical table(`logical_or_physical_table_id`) does not exist.
     pub async fn get_physical_table_route(
