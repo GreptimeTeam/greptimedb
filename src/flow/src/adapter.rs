@@ -228,7 +228,7 @@ pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
 pub fn batches_to_rows_req(batches: Vec<Batch>) -> Result<Vec<DiffRequest>, Error> {
     let mut reqs = Vec::new();
     for batch in batches {
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(batch.row_count());
         for i in 0..batch.row_count() {
             let row = batch.get_row(i).context(EvalSnafu)?;
             rows.push((Row::new(row), 0));
