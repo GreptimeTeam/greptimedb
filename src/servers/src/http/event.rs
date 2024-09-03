@@ -16,6 +16,7 @@ use std::result::Result as StdResult;
 use std::sync::Arc;
 use std::time::Instant;
 
+use api::v1::value::ValueData;
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use axum::body::HttpBody;
 use axum::extract::{FromRequest, Multipart, Path, Query, State};
@@ -23,15 +24,19 @@ use axum::headers::ContentType;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{async_trait, BoxError, Extension, TypedHeader};
+use axum::{async_trait, BoxError, Extension, Json, TypedHeader};
+use base64::engine::general_purpose::URL_SAFE;
+use base64::Engine as _;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
+use common_time::time::Time;
+use common_time::{Date, DateTime, Timestamp};
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::PipelineVersion;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Deserializer, Value};
+use serde_json::{Deserializer, Map, Number, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -228,6 +233,145 @@ fn transform_ndjson_array_factory(
                 Ok(acc_array)
             }
         })
+}
+
+fn column_data_to_json(data: ValueData) -> Value {
+    match data {
+        ValueData::BinaryValue(b) => Value::String(URL_SAFE.encode(b)),
+        ValueData::BoolValue(b) => Value::Bool(b),
+        ValueData::U8Value(i) => Value::Number(i.into()),
+        ValueData::U16Value(i) => Value::Number(i.into()),
+        ValueData::U32Value(i) => Value::Number(i.into()),
+        ValueData::U64Value(i) => Value::Number(i.into()),
+        ValueData::I8Value(i) => Value::Number(i.into()),
+        ValueData::I16Value(i) => Value::Number(i.into()),
+        ValueData::I32Value(i) => Value::Number(i.into()),
+        ValueData::I64Value(i) => Value::Number(i.into()),
+        ValueData::F32Value(f) => Number::from_f64(f as f64)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        ValueData::F64Value(f) => Number::from_f64(f)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        ValueData::StringValue(s) => Value::String(s),
+        ValueData::DateValue(d) => Value::String(Date::from(d).to_string()),
+        ValueData::DatetimeValue(d) => Value::String(DateTime::from(d).to_string()),
+        ValueData::TimeSecondValue(d) => Value::String(Time::new_second(d).to_iso8601_string()),
+        ValueData::TimeMillisecondValue(d) => {
+            Value::String(Time::new_millisecond(d).to_iso8601_string())
+        }
+        ValueData::TimeMicrosecondValue(d) => {
+            Value::String(Time::new_microsecond(d).to_iso8601_string())
+        }
+        ValueData::TimeNanosecondValue(d) => {
+            Value::String(Time::new_nanosecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampMicrosecondValue(d) => {
+            Value::String(Timestamp::new_microsecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampMillisecondValue(d) => {
+            Value::String(Timestamp::new_millisecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampNanosecondValue(d) => {
+            Value::String(Timestamp::new_nanosecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampSecondValue(d) => {
+            Value::String(Timestamp::new_second(d).to_iso8601_string())
+        }
+        ValueData::IntervalYearMonthValue(d) => Value::String(format!("interval year [{}]", d)),
+        ValueData::IntervalMonthDayNanoValue(d) => Value::String(format!(
+            "interval month [{}][{}][{}]",
+            d.months, d.days, d.nanoseconds
+        )),
+        ValueData::IntervalDayTimeValue(d) => Value::String(format!("interval day [{}]", d)),
+        ValueData::Decimal128Value(d) => Value::String(format!("decimal128 [{}][{}]", d.hi, d.lo)),
+    }
+}
+
+#[axum_macros::debug_handler]
+pub async fn test_pipeline(
+    State(log_state): State<LogState>,
+    Query(query_params): Query<LogIngesterQueryParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    TypedHeader(content_type): TypedHeader<ContentType>,
+    payload: String,
+) -> Result<Response> {
+    let handler = log_state.log_handler;
+    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
+        reason: "pipeline_name is required",
+    })?;
+
+    let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
+
+    let ignore_errors = query_params.ignore_errors.unwrap_or(false);
+
+    let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
+
+    let pipeline = handler
+        .get_pipeline(&pipeline_name, version, query_ctx.clone())
+        .await?;
+
+    let mut intermediate_state = pipeline.init_intermediate_state();
+
+    let mut results = Vec::with_capacity(value.len());
+    for v in value {
+        pipeline
+            .prepare(v, &mut intermediate_state)
+            .map_err(|reason| PipelineTransformSnafu { reason }.build())
+            .context(PipelineSnafu)?;
+        let r = pipeline
+            .exec_mut(&mut intermediate_state)
+            .map_err(|reason| PipelineTransformSnafu { reason }.build())
+            .context(PipelineSnafu)?;
+        results.push(r);
+        pipeline.reset_intermediate_state(&mut intermediate_state);
+    }
+
+    let schema = pipeline.schemas().iter().map(|cs| {
+        let mut map = Map::new();
+        map.insert("name".to_string(), Value::String(cs.column_name.clone()));
+        map.insert(
+            "data_type".to_string(),
+            Value::String(cs.datatype().as_str_name().to_string()),
+        );
+        map.insert(
+            "colume_type".to_string(),
+            Value::String(cs.semantic_type().as_str_name().to_string()),
+        );
+        map.insert(
+            "fulltext".to_string(),
+            Value::Bool(
+                cs.options
+                    .clone()
+                    .is_some_and(|x| x.options.contains_key("fulltext")),
+            ),
+        );
+        Value::Object(map)
+    });
+    let rows = results.into_iter().map(|row| {
+        let row = row
+            .values
+            .into_iter()
+            .map(|v| {
+                v.value_data
+                    .map(|d| {
+                        let mut map = Map::new();
+                        map.insert("value".to_string(), column_data_to_json(d));
+                        Value::Object(map)
+                    })
+                    .unwrap_or(Value::Null)
+            })
+            .collect();
+        Value::Array(row)
+    });
+    let mut result = Map::new();
+    result.insert("schema".to_string(), Value::Array(schema.collect()));
+    result.insert("rows".to_string(), Value::Array(rows.collect()));
+    let result = Value::Object(result);
+    Ok(Json(result).into_response())
 }
 
 #[axum_macros::debug_handler]
