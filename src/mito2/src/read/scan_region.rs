@@ -284,9 +284,10 @@ impl ScanRegion {
             .collect();
 
         debug!(
-            "Scan region {}, request: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
+            "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
             self.version.metadata.region_id,
             self.request,
+            time_range,
             memtables.len(),
             files.len(),
             self.version.options.append_mode,
