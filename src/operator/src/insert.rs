@@ -45,7 +45,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
-use table::requests::InsertRequest as TableInsertRequest;
+use table::requests::{InsertRequest as TableInsertRequest, TTL_KEY};
 use table::table_reference::TableReference;
 use table::TableRef;
 
@@ -650,7 +650,12 @@ impl Inserter {
         create_type: AutoCreateTableType,
     ) -> Result<TableRef> {
         let mut hint_options = vec![];
-        let options: &[(&str, &str)] = match create_type {
+
+        if let Some(ttl) = ctx.extension(TTL_KEY) {
+            hint_options.push((TTL_KEY, ttl));
+        }
+
+        match create_type {
             AutoCreateTableType::Logical(_) => unreachable!(),
             AutoCreateTableType::Physical => {
                 if let Some(append_mode) = ctx.extension(APPEND_MODE_KEY) {
@@ -659,13 +664,18 @@ impl Inserter {
                 if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
                     hint_options.push((MERGE_MODE_KEY, merge_mode));
                 }
-                hint_options.as_slice()
             }
             // Set append_mode to true for log table.
             // because log tables should keep rows with the same ts and tags.
-            AutoCreateTableType::Log => &[(APPEND_MODE_KEY, "true")],
-            AutoCreateTableType::LastNonNull => &[(MERGE_MODE_KEY, "last_non_null")],
-        };
+            AutoCreateTableType::Log => {
+                hint_options.push((APPEND_MODE_KEY, "true"));
+            }
+            AutoCreateTableType::LastNonNull => {
+                hint_options.push((MERGE_MODE_KEY, "last_non_null"));
+            }
+        }
+        let options: &[(&str, &str)] = hint_options.as_slice();
+
         self.create_table_with_options(req, ctx, statement_executor, options)
             .await
     }
