@@ -17,15 +17,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_telemetry::{error, info, warn};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::cli::database::DatabaseClient;
 use crate::cli::{database, Instance, Tool};
-use crate::error::{Error, FileIoSnafu, Result};
+use crate::error::{Error, FileIoSnafu, Result, SchemaNotFoundSnafu};
 
 #[derive(Debug, Default, Clone, ValueEnum)]
 enum ImportTarget {
@@ -100,14 +101,17 @@ pub struct Import {
 
 impl Import {
     async fn import_create_table(&self) -> Result<()> {
-        self.do_sql_job("create_tables.sql").await
+        // Use default db to creates other dbs
+        self.do_sql_job("create_database.sql", Some(DEFAULT_SCHEMA_NAME))
+            .await?;
+        self.do_sql_job("create_tables.sql", None).await
     }
 
     async fn import_database_data(&self) -> Result<()> {
-        self.do_sql_job("copy_from.sql").await
+        self.do_sql_job("copy_from.sql", None).await
     }
 
-    async fn do_sql_job(&self, filename: &str) -> Result<()> {
+    async fn do_sql_job(&self, filename: &str, exec_db: Option<&str>) -> Result<()> {
         let timer = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.get_db_names().await?;
@@ -125,7 +129,8 @@ impl Import {
                 if sql.is_empty() {
                     info!("Empty `{filename}` {database_input_dir:?}");
                 } else {
-                    self.database_client.sql(&sql, &schema).await?;
+                    let db = exec_db.unwrap_or(&schema);
+                    self.database_client.sql(&sql, db).await?;
                     info!("Imported `{filename}` for database {schema}");
                 }
 
@@ -155,11 +160,20 @@ impl Import {
     }
 
     async fn get_db_names(&self) -> Result<Vec<String>> {
-        if let Some(schema) = &self.schema {
-            Ok(vec![schema.clone()])
-        } else {
-            self.all_db_names().await
-        }
+        let db_names = self.all_db_names().await?;
+        let Some(schema) = &self.schema else {
+            return Ok(db_names);
+        };
+
+        // Check if the schema exists
+        db_names
+            .into_iter()
+            .find(|db_name| db_name.to_lowercase() == schema.to_lowercase())
+            .map(|name| vec![name])
+            .context(SchemaNotFoundSnafu {
+                catalog: &self.catalog,
+                schema,
+            })
     }
 
     // Get all database names in the input directory.

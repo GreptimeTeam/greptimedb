@@ -24,7 +24,7 @@ use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteKey;
 use crate::key::view_info::ViewInfoKey;
-use crate::key::MetaKey;
+use crate::key::MetadataKey;
 
 /// KvBackend cache invalidator
 #[async_trait::async_trait]

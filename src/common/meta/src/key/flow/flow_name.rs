@@ -24,7 +24,7 @@ use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
-    BytesAdapter, DeserializedValueWithBytes, FlowId, MetaKey, TableMetaValue, NAME_PATTERN,
+    BytesAdapter, DeserializedValueWithBytes, FlowId, MetadataKey, MetadataValue, NAME_PATTERN,
 };
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
@@ -76,7 +76,7 @@ impl<'a> FlowNameKey<'a> {
     }
 }
 
-impl<'a> MetaKey<'a, FlowNameKey<'a>> for FlowNameKey<'a> {
+impl<'a> MetadataKey<'a, FlowNameKey<'a>> for FlowNameKey<'a> {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
@@ -95,7 +95,7 @@ pub struct FlowNameKeyInner<'a> {
     pub flow_name: &'a str,
 }
 
-impl<'a> MetaKey<'a, FlowNameKeyInner<'a>> for FlowNameKeyInner<'_> {
+impl<'a> MetadataKey<'a, FlowNameKeyInner<'a>> for FlowNameKeyInner<'_> {
     fn to_bytes(&self) -> Vec<u8> {
         format!(
             "{FLOW_NAME_KEY_PREFIX}/{}/{}",
@@ -106,7 +106,7 @@ impl<'a> MetaKey<'a, FlowNameKeyInner<'a>> for FlowNameKeyInner<'_> {
 
     fn from_bytes(bytes: &'a [u8]) -> Result<FlowNameKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
-            error::InvalidTableMetadataSnafu {
+            error::InvalidMetadataSnafu {
                 err_msg: format!(
                     "FlowNameKeyInner '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
@@ -117,7 +117,7 @@ impl<'a> MetaKey<'a, FlowNameKeyInner<'a>> for FlowNameKeyInner<'_> {
         let captures =
             FLOW_NAME_KEY_PATTERN
                 .captures(key)
-                .context(error::InvalidTableMetadataSnafu {
+                .context(error::InvalidMetadataSnafu {
                     err_msg: format!("Invalid FlowNameKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above

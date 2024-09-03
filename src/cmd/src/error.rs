@@ -317,6 +317,14 @@ pub enum Error {
         location: Location,
         source: meta_client::error::Error,
     },
+
+    #[snafu(display("Cannot find schema {schema} in catalog {catalog}"))]
+    SchemaNotFound {
+        catalog: String,
+        schema: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -374,6 +382,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::MetaClientInit { source, .. } => source.status_code(),
+            Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
         }
     }
 

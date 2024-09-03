@@ -22,12 +22,12 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{
-    self, InvalidTableMetadataSnafu, MetadataCorruptionSnafu, Result, SerdeJsonSnafu,
+    self, InvalidMetadataSnafu, MetadataCorruptionSnafu, Result, SerdeJsonSnafu,
     TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
 };
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
-    DeserializedValueWithBytes, MetaKey, RegionDistribution, TableMetaValue,
+    DeserializedValueWithBytes, MetadataKey, MetadataValue, RegionDistribution,
     TABLE_ROUTE_KEY_PATTERN, TABLE_ROUTE_PREFIX,
 };
 use crate::kv_backend::txn::Txn;
@@ -199,7 +199,7 @@ impl TableRouteValue {
     }
 }
 
-impl TableMetaValue for TableRouteValue {
+impl MetadataValue for TableRouteValue {
     fn try_from_raw_value(raw_value: &[u8]) -> Result<Self> {
         let r = serde_json::from_slice::<TableRouteValue>(raw_value);
         match r {
@@ -244,14 +244,14 @@ impl LogicalTableRouteValue {
     }
 }
 
-impl<'a> MetaKey<'a, TableRouteKey> for TableRouteKey {
+impl<'a> MetadataKey<'a, TableRouteKey> for TableRouteKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<TableRouteKey> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
-            InvalidTableMetadataSnafu {
+            InvalidMetadataSnafu {
                 err_msg: format!(
                     "TableRouteKey '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
@@ -259,12 +259,11 @@ impl<'a> MetaKey<'a, TableRouteKey> for TableRouteKey {
             }
             .build()
         })?;
-        let captures =
-            TABLE_ROUTE_KEY_PATTERN
-                .captures(key)
-                .context(InvalidTableMetadataSnafu {
-                    err_msg: format!("Invalid TableRouteKey '{key}'"),
-                })?;
+        let captures = TABLE_ROUTE_KEY_PATTERN
+            .captures(key)
+            .context(InvalidMetadataSnafu {
+                err_msg: format!("Invalid TableRouteKey '{key}'"),
+            })?;
         // Safety: pass the regex check above
         let table_id = captures[1].parse::<TableId>().unwrap();
         Ok(TableRouteKey { table_id })

@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::key::{DeserializedValueWithBytes, TableMetaValue};
+use crate::key::{DeserializedValueWithBytes, MetadataValue};
 use crate::kv_backend::txn::TxnOpResponse;
 use crate::rpc::KeyValue;
 
@@ -41,7 +41,7 @@ impl TxnOpGetResponseSet {
     ) -> impl FnMut(&mut TxnOpGetResponseSet) -> Result<Option<DeserializedValueWithBytes<T>>>
     where
         F: FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
-        T: Serialize + DeserializeOwned + TableMetaValue,
+        T: Serialize + DeserializeOwned + MetadataValue,
     {
         move |set| {
             f(set)

@@ -24,7 +24,7 @@ use table::table_name::TableName;
 use super::VIEW_INFO_KEY_PATTERN;
 use crate::error::{InvalidViewInfoSnafu, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{DeserializedValueWithBytes, MetaKey, TableMetaValue, VIEW_INFO_KEY_PREFIX};
+use crate::key::{DeserializedValueWithBytes, MetadataKey, MetadataValue, VIEW_INFO_KEY_PREFIX};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;
@@ -53,7 +53,7 @@ impl Display for ViewInfoKey {
     }
 }
 
-impl<'a> MetaKey<'a, ViewInfoKey> for ViewInfoKey {
+impl<'a> MetadataKey<'a, ViewInfoKey> for ViewInfoKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }

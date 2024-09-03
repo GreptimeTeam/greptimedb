@@ -355,8 +355,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid table metadata, err: {}", err_msg))]
-    InvalidTableMetadata {
+    #[snafu(display("Invalid metadata, err: {}", err_msg))]
+    InvalidMetadata {
         err_msg: String,
         #[snafu(implicit)]
         location: Location,
@@ -637,7 +637,7 @@ impl ErrorExt for Error {
             | ParseOption { .. }
             | RouteInfoCorrupted { .. }
             | InvalidProtoMsg { .. }
-            | InvalidTableMetadata { .. }
+            | InvalidMetadata { .. }
             | Unexpected { .. }
             | TableInfoNotFound { .. }
             | NextSequence { .. }
