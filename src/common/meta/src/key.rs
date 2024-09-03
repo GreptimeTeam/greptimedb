@@ -1952,7 +1952,7 @@ mod tests {
         let table_route_value = table_metadata_manager
             .table_route_manager
             .table_route_storage()
-            .get_raw(table_id)
+            .get_with_raw_bytes(table_id)
             .await
             .unwrap()
             .unwrap();
@@ -2005,7 +2005,7 @@ mod tests {
         let table_route_value = table_metadata_manager
             .table_route_manager
             .table_route_storage()
-            .get_raw(table_id)
+            .get_with_raw_bytes(table_id)
             .await
             .unwrap()
             .unwrap();

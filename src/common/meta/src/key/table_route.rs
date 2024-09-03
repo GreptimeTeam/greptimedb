@@ -537,7 +537,7 @@ impl TableRouteStorage {
     }
 
     /// Returns the [`TableRouteValue`] wrapped with [`DeserializedValueWithBytes`].
-    pub async fn get_raw(
+    pub async fn get_with_raw_bytes(
         &self,
         table_id: TableId,
     ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>> {
@@ -554,27 +554,27 @@ impl TableRouteStorage {
     /// Returns a [TableRouteNotFound](crate::error::Error::TableRouteNotFound) Error if:
     /// - the physical table(`logical_or_physical_table_id`) does not exist
     /// - the corresponding physical table of the logical table(`logical_or_physical_table_id`) does not exist.
-    pub async fn get_raw_physical_table_route(
+    pub async fn get_physical_table_route_with_raw_bytes(
         &self,
         logical_or_physical_table_id: TableId,
     ) -> Result<(TableId, DeserializedValueWithBytes<TableRouteValue>)> {
-        let table_route =
-            self.get_raw(logical_or_physical_table_id)
-                .await?
-                .context(TableRouteNotFoundSnafu {
-                    table_id: logical_or_physical_table_id,
-                })?;
+        let table_route = self
+            .get_with_raw_bytes(logical_or_physical_table_id)
+            .await?
+            .context(TableRouteNotFoundSnafu {
+                table_id: logical_or_physical_table_id,
+            })?;
 
         match table_route.get_inner_ref() {
             TableRouteValue::Physical(_) => Ok((logical_or_physical_table_id, table_route)),
             TableRouteValue::Logical(x) => {
                 let physical_table_id = x.physical_table_id();
-                let physical_table_route =
-                    self.get_raw(physical_table_id)
-                        .await?
-                        .context(TableRouteNotFoundSnafu {
-                            table_id: physical_table_id,
-                        })?;
+                let physical_table_route = self
+                    .get_with_raw_bytes(physical_table_id)
+                    .await?
+                    .context(TableRouteNotFoundSnafu {
+                        table_id: physical_table_id,
+                    })?;
                 Ok((physical_table_id, physical_table_route))
             }
         }
@@ -646,7 +646,7 @@ mod tests {
     async fn test_table_route_storage_get_raw_empty() {
         let kv = Arc::new(MemoryKvBackend::default());
         let table_route_storage = TableRouteStorage::new(kv);
-        let table_route = table_route_storage.get_raw(1024).await.unwrap();
+        let table_route = table_route_storage.get_with_raw_bytes(1024).await.unwrap();
         assert!(table_route.is_none());
     }
 
@@ -654,7 +654,7 @@ mod tests {
     async fn test_table_route_storage_get_raw() {
         let kv = Arc::new(MemoryKvBackend::default());
         let table_route_storage = TableRouteStorage::new(kv.clone());
-        let table_route = table_route_storage.get_raw(1024).await.unwrap();
+        let table_route = table_route_storage.get_with_raw_bytes(1024).await.unwrap();
         assert!(table_route.is_none());
         let table_route_manager = TableRouteManager::new(kv.clone());
         let table_route_value = TableRouteValue::Logical(LogicalTableRouteValue {
@@ -667,7 +667,7 @@ mod tests {
             .unwrap();
         let r = kv.txn(txn).await.unwrap();
         assert!(r.succeeded);
-        let table_route = table_route_storage.get_raw(1024).await.unwrap();
+        let table_route = table_route_storage.get_with_raw_bytes(1024).await.unwrap();
         assert!(table_route.is_some());
         let got = table_route.unwrap().inner;
         assert_eq!(got, table_route_value);
