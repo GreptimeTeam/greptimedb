@@ -211,7 +211,7 @@ lazy_static! {
 }
 
 /// The key of metadata.
-pub trait MetaKey<'a, T> {
+pub trait MetadataKey<'a, T> {
     fn to_bytes(&self) -> Vec<u8>;
 
     fn from_bytes(bytes: &'a [u8]) -> Result<T>;
@@ -226,7 +226,7 @@ impl From<Vec<u8>> for BytesAdapter {
     }
 }
 
-impl<'a> MetaKey<'a, BytesAdapter> for BytesAdapter {
+impl<'a> MetadataKey<'a, BytesAdapter> for BytesAdapter {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.clone()
     }
@@ -236,7 +236,7 @@ impl<'a> MetaKey<'a, BytesAdapter> for BytesAdapter {
     }
 }
 
-pub(crate) trait TableMetaKeyGetTxnOp {
+pub(crate) trait MetadataKeyGetTxnOp {
     fn build_get_op(
         &self,
     ) -> (
@@ -245,7 +245,7 @@ pub(crate) trait TableMetaKeyGetTxnOp {
     );
 }
 
-pub trait TableMetaValue {
+pub trait MetadataValue {
     fn try_from_raw_value(raw_value: &[u8]) -> Result<Self>
     where
         Self: Sized;
@@ -330,7 +330,7 @@ impl<T: DeserializeOwned + Serialize> Serialize for DeserializedValueWithBytes<T
     }
 }
 
-impl<'de, T: DeserializeOwned + Serialize + TableMetaValue> Deserialize<'de>
+impl<'de, T: DeserializeOwned + Serialize + MetadataValue> Deserialize<'de>
     for DeserializedValueWithBytes<T>
 {
     /// - Deserialize behaviors:
@@ -359,7 +359,7 @@ impl<T: Serialize + DeserializeOwned + Clone> Clone for DeserializedValueWithByt
     }
 }
 
-impl<T: Serialize + DeserializeOwned + TableMetaValue> DeserializedValueWithBytes<T> {
+impl<T: Serialize + DeserializeOwned + MetadataValue> DeserializedValueWithBytes<T> {
     /// Returns a struct containing a deserialized value and an original `bytes`.
     /// It accepts original bytes of inner.
     pub fn from_inner_bytes(bytes: Bytes) -> Result<Self> {
@@ -1156,10 +1156,10 @@ impl TableMetadataManager {
 }
 
 #[macro_export]
-macro_rules! impl_table_meta_value {
+macro_rules! impl_metadata_value {
     ($($val_ty: ty), *) => {
         $(
-            impl $crate::key::TableMetaValue for $val_ty {
+            impl $crate::key::MetadataValue for $val_ty {
                 fn try_from_raw_value(raw_value: &[u8]) -> Result<Self> {
                     serde_json::from_slice(raw_value).context(SerdeJsonSnafu)
                 }
@@ -1172,10 +1172,10 @@ macro_rules! impl_table_meta_value {
     }
 }
 
-macro_rules! impl_meta_key_get_txn_op {
+macro_rules! impl_metadata_key_get_txn_op {
     ($($key: ty), *) => {
         $(
-            impl $crate::key::TableMetaKeyGetTxnOp for $key {
+            impl $crate::key::MetadataKeyGetTxnOp for $key {
                 /// Returns a [TxnOp] to retrieve the corresponding value
                 /// and a filter to retrieve the value from the [TxnOpGetResponseSet]
                 fn build_get_op(
@@ -1197,7 +1197,7 @@ macro_rules! impl_meta_key_get_txn_op {
     }
 }
 
-impl_meta_key_get_txn_op! {
+impl_metadata_key_get_txn_op! {
     TableNameKey<'_>,
     TableInfoKey,
     ViewInfoKey,
@@ -1206,7 +1206,7 @@ impl_meta_key_get_txn_op! {
 }
 
 #[macro_export]
-macro_rules! impl_optional_meta_value {
+macro_rules! impl_optional_metadata_value {
     ($($val_ty: ty), *) => {
         $(
             impl $val_ty {
@@ -1222,7 +1222,7 @@ macro_rules! impl_optional_meta_value {
     }
 }
 
-impl_table_meta_value! {
+impl_metadata_value! {
     TableNameValue,
     TableInfoValue,
     ViewInfoValue,
@@ -1233,7 +1233,7 @@ impl_table_meta_value! {
     TableFlowValue
 }
 
-impl_optional_meta_value! {
+impl_optional_metadata_value! {
     CatalogNameValue,
     SchemaNameValue
 }

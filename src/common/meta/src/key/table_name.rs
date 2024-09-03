@@ -22,8 +22,8 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 use table::table_name::TableName;
 
-use super::{MetaKey, TableMetaValue, TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
-use crate::error::{Error, InvalidTableMetadataSnafu, Result};
+use super::{MetadataKey, MetadataValue, TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
+use crate::error::{Error, InvalidMetadataSnafu, Result};
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -63,14 +63,14 @@ impl Display for TableNameKey<'_> {
     }
 }
 
-impl<'a> MetaKey<'a, TableNameKey<'a>> for TableNameKey<'_> {
+impl<'a> MetadataKey<'a, TableNameKey<'a>> for TableNameKey<'_> {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
 
     fn from_bytes(bytes: &'a [u8]) -> Result<TableNameKey<'a>> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
-            InvalidTableMetadataSnafu {
+            InvalidMetadataSnafu {
                 err_msg: format!(
                     "TableNameKey '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
@@ -80,7 +80,7 @@ impl<'a> MetaKey<'a, TableNameKey<'a>> for TableNameKey<'_> {
         })?;
         let captures = TABLE_NAME_KEY_PATTERN
             .captures(key)
-            .context(InvalidTableMetadataSnafu {
+            .context(InvalidMetadataSnafu {
                 err_msg: format!("Invalid TableNameKey '{key}'"),
             })?;
         let catalog = captures.get(1).unwrap().as_str();
@@ -128,7 +128,7 @@ impl<'a> TryFrom<&'a str> for TableNameKey<'a> {
     fn try_from(s: &'a str) -> Result<Self> {
         let captures = TABLE_NAME_KEY_PATTERN
             .captures(s)
-            .context(InvalidTableMetadataSnafu {
+            .context(InvalidMetadataSnafu {
                 err_msg: format!("Illegal TableNameKey format: '{s}'"),
             })?;
         // Safety: pass the regex check above
