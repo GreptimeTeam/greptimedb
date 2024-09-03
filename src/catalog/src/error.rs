@@ -97,13 +97,6 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("System catalog is not valid: {}", msg))]
-    SystemCatalog {
-        msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Cannot find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
@@ -288,8 +281,6 @@ impl ErrorExt for Error {
 
             Error::FlowInfoNotFound { .. } => StatusCode::FlowNotFound,
 
-            Error::SystemCatalog { .. } => StatusCode::StorageUnavailable,
-
             Error::UpgradeWeakCatalogManagerRef { .. } => StatusCode::Internal,
 
             Error::CreateRecordBatch { source, .. } => source.status_code(),
@@ -337,27 +328,6 @@ mod tests {
     use snafu::GenerateImplicitData;
 
     use super::*;
-
-    #[test]
-    pub fn test_error_status_code() {
-        assert_eq!(
-            StatusCode::TableAlreadyExists,
-            Error::TableExists {
-                table: "some_table".to_string(),
-                location: Location::generate(),
-            }
-            .status_code()
-        );
-
-        assert_eq!(
-            StatusCode::StorageUnavailable,
-            Error::SystemCatalog {
-                msg: String::default(),
-                location: Location::generate(),
-            }
-            .status_code()
-        );
-    }
 
     #[test]
     pub fn test_errors_to_datafusion_error() {
