@@ -15,7 +15,7 @@
 use ahash::HashSet;
 use urlencoding::{decode, encode};
 
-use crate::etl::field::{Fields, OneInputOneOutPutField};
+use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, ProcessorBuilder, ProcessorKind,
     FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, METHOD_NAME,
@@ -81,7 +81,7 @@ impl UrlEncodingProcessorBuilder {
     fn build(self, intermediate_keys: &[String]) -> Result<UrlEncodingProcessor, String> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
-            let input = OneInputOneOutPutField::build(
+            let input = OneInputOneOutputField::build(
                 "urlencoding",
                 intermediate_keys,
                 field.input_field(),
@@ -100,7 +100,7 @@ impl UrlEncodingProcessorBuilder {
 /// only support string value
 #[derive(Debug, Default)]
 pub struct UrlEncodingProcessor {
-    fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutputField>,
     method: Method,
     ignore_missing: bool,
 }

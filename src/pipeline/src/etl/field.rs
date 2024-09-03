@@ -16,10 +16,6 @@ use std::ops::Deref;
 use std::str::FromStr;
 
 use super::processor::find_key_index;
-enum IndexInfo {
-    Index(usize),
-    NotSet,
-}
 
 /// Information about the input field including the name and index in intermediate keys.
 #[derive(Debug, Default, Clone)]
@@ -40,15 +36,15 @@ impl InputFieldInfo {
 
 /// Information about a field that has one input and one output.
 #[derive(Debug, Default, Clone)]
-pub struct OneInputOneOutPutField {
+pub struct OneInputOneOutputField {
     input: InputFieldInfo,
     output: Option<(String, usize)>,
 }
 
-impl OneInputOneOutPutField {
+impl OneInputOneOutputField {
     /// Create a new field with the given input and output.
     pub(crate) fn new(input: InputFieldInfo, output: (String, usize)) -> Self {
-        OneInputOneOutPutField {
+        OneInputOneOutputField {
             input,
             output: Some(output),
         }
@@ -65,7 +61,7 @@ impl OneInputOneOutPutField {
 
         let input_field_info = InputFieldInfo::new(input_field, input_index);
         let output_index = find_key_index(intermediate_keys, target_field, processor_kind)?;
-        Ok(OneInputOneOutPutField::new(
+        Ok(OneInputOneOutputField::new(
             input_field_info,
             (target_field.to_string(), output_index),
         ))

@@ -14,7 +14,7 @@
 
 use ahash::HashSet;
 
-use crate::etl::field::{Fields, OneInputOneOutPutField};
+use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
     ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, SEPARATOR_NAME,
@@ -59,7 +59,7 @@ impl JoinProcessorBuilder {
     pub fn build(self, intermediate_keys: &[String]) -> Result<JoinProcessor, String> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
-            let input = OneInputOneOutPutField::build(
+            let input = OneInputOneOutputField::build(
                 "join",
                 intermediate_keys,
                 field.input_field(),
@@ -79,7 +79,7 @@ impl JoinProcessorBuilder {
 /// A processor to join each element of an array into a single string using a separator string between each element
 #[derive(Debug, Default)]
 pub struct JoinProcessor {
-    fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutputField>,
     separator: Option<String>,
     ignore_missing: bool,
 }

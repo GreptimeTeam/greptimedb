@@ -30,7 +30,7 @@ const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
 pub use transformer::greptime::GreptimeTransformer;
 
-use super::field::{Fields, InputFieldInfo, OneInputOneOutPutField};
+use super::field::{Fields, InputFieldInfo, OneInputOneOutputField};
 use super::processor::{find_key_index, yaml_new_field, yaml_new_fields};
 
 pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
@@ -197,7 +197,7 @@ impl TransformBuilder {
             let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
             let output_index =
                 find_key_index(output_keys, field.target_or_input_field(), "transform")?;
-            let input = OneInputOneOutPutField::new(
+            let input = OneInputOneOutputField::new(
                 input_field_info,
                 (field.target_or_input_field().to_string(), output_index),
             );
@@ -216,7 +216,7 @@ impl TransformBuilder {
 /// only field is required
 #[derive(Debug, Clone)]
 pub struct Transform {
-    pub real_fields: Vec<OneInputOneOutPutField>,
+    pub real_fields: Vec<OneInputOneOutputField>,
 
     pub type_: Value,
 

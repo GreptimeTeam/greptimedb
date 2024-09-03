@@ -19,7 +19,7 @@ use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
-use crate::etl::field::{Fields, OneInputOneOutPutField};
+use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
     ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
@@ -112,7 +112,7 @@ impl DateProcessorBuilder {
     pub fn build(self, intermediate_keys: &[String]) -> Result<DateProcessor, String> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
-            let input = OneInputOneOutPutField::build(
+            let input = OneInputOneOutputField::build(
                 "date",
                 intermediate_keys,
                 field.input_field(),
@@ -191,7 +191,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
 /// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct DateProcessor {
-    fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutputField>,
     formats: Formats,
     timezone: Option<Arc<String>>,
     locale: Option<Arc<String>>, // to support locale

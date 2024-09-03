@@ -15,7 +15,7 @@
 use ahash::HashSet;
 use regex::Regex;
 
-use crate::etl::field::{Fields, OneInputOneOutPutField};
+use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
     ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
@@ -67,7 +67,7 @@ impl GsubProcessorBuilder {
     fn build(self, intermediate_keys: &[String]) -> Result<GsubProcessor, String> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
-            let input = OneInputOneOutPutField::build(
+            let input = OneInputOneOutputField::build(
                 "gsub",
                 intermediate_keys,
                 field.input_field(),
@@ -87,7 +87,7 @@ impl GsubProcessorBuilder {
 /// A processor to replace all matches of a pattern in string by a replacement, only support string value, and array string value
 #[derive(Debug, Default)]
 pub struct GsubProcessor {
-    fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutputField>,
     pattern: Option<Regex>,
     replacement: Option<String>,
     ignore_missing: bool,

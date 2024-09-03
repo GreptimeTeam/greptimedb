@@ -20,7 +20,7 @@ use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 
-use crate::etl::field::{InputFieldInfo, OneInputOneOutPutField};
+use crate::etl::field::{InputFieldInfo, OneInputOneOutputField};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transformer, Transforms};
 use crate::etl::value::{Timestamp, Value};
@@ -43,7 +43,7 @@ impl GreptimeTransformer {
         let default = Some(type_.clone());
 
         let transform = Transform {
-            real_fields: vec![OneInputOneOutPutField::new(
+            real_fields: vec![OneInputOneOutputField::new(
                 InputFieldInfo {
                     name: DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
                     index: usize::MAX,

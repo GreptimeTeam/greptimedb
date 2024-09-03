@@ -19,7 +19,7 @@ use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
-use crate::etl::field::{Fields, OneInputOneOutPutField};
+use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
     ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
@@ -136,7 +136,7 @@ impl TimestampProcessorBuilder {
     pub fn build(self, intermediate_keys: &[String]) -> Result<TimestampProcessor, String> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
-            let input = OneInputOneOutPutField::build(
+            let input = OneInputOneOutputField::build(
                 "timestamp",
                 intermediate_keys,
                 field.input_field(),
@@ -156,7 +156,7 @@ impl TimestampProcessorBuilder {
 /// support string, integer, float, time, epoch
 #[derive(Debug, Default)]
 pub struct TimestampProcessor {
-    fields: Vec<OneInputOneOutPutField>,
+    fields: Vec<OneInputOneOutputField>,
     formats: Formats,
     resolution: Resolution,
     ignore_missing: bool,
