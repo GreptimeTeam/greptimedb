@@ -285,19 +285,12 @@ impl Export {
                 .context(FileIoSnafu)?;
             let file = db_dir.join("create_database.sql");
             let mut file = File::create(file).await.context(FileIoSnafu)?;
-            match self
+            let create_database = self
                 .show_create("DATABASE", &self.catalog, &schema, None)
+                .await?;
+            file.write_all(create_database.as_bytes())
                 .await
-            {
-                Err(e) => {
-                    error!(e; r#"Failed to export database schema "{}"."{}""#, self.catalog, schema)
-                }
-                Ok(create_database) => {
-                    file.write_all(create_database.as_bytes())
-                        .await
-                        .context(FileIoSnafu)?;
-                }
-            }
+                .context(FileIoSnafu)?;
         }
 
         let elapsed = timer.elapsed();
@@ -327,28 +320,16 @@ impl Export {
                 let file = db_dir.join("create_tables.sql");
                 let mut file = File::create(file).await.context(FileIoSnafu)?;
                 for (c, s, t) in metric_physical_tables.into_iter().chain(remaining_tables) {
-                    match self.show_create("TABLE", &c, &s, Some(&t)).await {
-                        Err(e) => {
-                            error!(e; r#"Failed to export table "{}"."{}"."{}""#, c, s, t)
-                        }
-                        Ok(create_table) => {
-                            file.write_all(create_table.as_bytes())
-                                .await
-                                .context(FileIoSnafu)?;
-                        }
-                    }
+                    let create_table = self.show_create("TABLE", &c, &s, Some(&t)).await?;
+                    file.write_all(create_table.as_bytes())
+                        .await
+                        .context(FileIoSnafu)?;
                 }
                 for (c, s, v) in views {
-                    match self.show_create("VIEW", &c, &s, Some(&v)).await {
-                        Err(e) => {
-                            error!(e; r#"Failed to export view "{}"."{}"."{}""#, c, s, v)
-                        }
-                        Ok(create_view) => {
-                            file.write_all(create_view.as_bytes())
-                                .await
-                                .context(FileIoSnafu)?;
-                        }
-                    }
+                    let create_view = self.show_create("VIEW", &c, &s, Some(&v)).await?;
+                    file.write_all(create_view.as_bytes())
+                        .await
+                        .context(FileIoSnafu)?;
                 }
 
                 info!(
