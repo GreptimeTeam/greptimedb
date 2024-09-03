@@ -730,7 +730,7 @@ pub(crate) mod test_util {
             ProcedureState::Running,
             None,
             LockKey::default(),
-            "ProcedureTest",
+            "ProcedureAdapter",
         )
     }
 

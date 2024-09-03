@@ -1105,6 +1105,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_exceed_max_retry_later() {
+        common_telemetry::init_default_ut_logging();
         let exec_fn =
             |_| async { Err(Error::retry_later(MockError::new(StatusCode::Unexpected))) }.boxed();
         let rollback_fn = move |_| {
