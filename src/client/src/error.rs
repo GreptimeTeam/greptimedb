@@ -39,13 +39,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failure occurs during handling request"))]
-    HandleRequest {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to convert FlightData"))]
     ConvertFlightData {
         #[snafu(implicit)]
@@ -116,13 +109,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to send request with streaming: {}", err_msg))]
-    ClientStreaming {
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to parse ascii string: {}", value))]
     InvalidAscii {
         value: String,
@@ -138,12 +124,10 @@ impl ErrorExt for Error {
         match self {
             Error::IllegalFlightMessages { .. }
             | Error::MissingField { .. }
-            | Error::IllegalDatabaseResponse { .. }
-            | Error::ClientStreaming { .. } => StatusCode::Internal,
+            | Error::IllegalDatabaseResponse { .. } => StatusCode::Internal,
 
             Error::Server { code, .. } => *code,
             Error::FlightGet { source, .. }
-            | Error::HandleRequest { source, .. }
             | Error::RegionServer { source, .. }
             | Error::FlowServer { source, .. } => source.status_code(),
             Error::CreateChannel { source, .. }

@@ -583,13 +583,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to read puffin metadata"))]
-    PuffinReadMetadata {
-        source: puffin::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to read puffin blob"))]
     PuffinReadBlob {
         source: puffin::error::Error,
@@ -970,8 +963,7 @@ impl ErrorExt for Error {
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
-            PuffinReadMetadata { source, .. }
-            | PuffinReadBlob { source, .. }
+            PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
             | PuffinBuildReader { source, .. } => source.status_code(),

@@ -26,13 +26,6 @@ use store_api::storage::RegionId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Missing internal column {} in physical metric table", column))]
-    MissingInternalColumn {
-        column: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to create mito region, region type: {}", region_type))]
     CreateMitoRegion {
         region_type: String,
@@ -60,15 +53,6 @@ pub enum Error {
     #[snafu(display("Region `{}` already exists", region_id))]
     RegionAlreadyExists {
         region_id: RegionId,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to deserialize semantic type from {}", raw))]
-    DeserializeSemanticType {
-        raw: String,
-        #[snafu(source)]
-        error: serde_json::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -130,13 +114,6 @@ pub enum Error {
 
     #[snafu(display("Mito catchup operation fails"))]
     MitoCatchupOperation {
-        source: BoxedError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Mito compact operation fails"))]
-    MitoCompactOperation {
         source: BoxedError,
         #[snafu(implicit)]
         location: Location,
@@ -270,9 +247,7 @@ impl ErrorExt for Error {
                 StatusCode::Unsupported
             }
 
-            MissingInternalColumn { .. }
-            | DeserializeSemanticType { .. }
-            | DeserializeColumnMetadata { .. }
+            DeserializeColumnMetadata { .. }
             | SerializeColumnMetadata { .. }
             | DecodeColumnValue { .. }
             | ParseRegionId { .. }
@@ -290,8 +265,7 @@ impl ErrorExt for Error {
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. }
             | MitoCatchupOperation { source, .. }
-            | MitoFlushOperation { source, .. }
-            | MitoCompactOperation { source, .. } => source.status_code(),
+            | MitoFlushOperation { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
 

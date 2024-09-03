@@ -179,13 +179,6 @@ pub enum Error {
         source: common_query::error::Error,
     },
 
-    #[snafu(display("Failed to perform metasrv operation"))]
-    Metasrv {
-        #[snafu(implicit)]
-        location: Location,
-        source: meta_client::error::Error,
-    },
-
     #[snafu(display("Invalid table info in catalog"))]
     InvalidTableInfoInCatalog {
         #[snafu(implicit)]
@@ -294,7 +287,6 @@ impl ErrorExt for Error {
 
             Error::CreateTable { source, .. } => source.status_code(),
 
-            Error::Metasrv { source, .. } => source.status_code(),
             Error::DecodePlan { source, .. } => source.status_code(),
             Error::InvalidTableInfoInCatalog { source, .. } => source.status_code(),
 
