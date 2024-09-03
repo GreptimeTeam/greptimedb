@@ -352,7 +352,7 @@ pub enum Error {
     },
 
     #[snafu(display("Error accessing catalog"))]
-    CatalogError {
+    Catalog {
         source: catalog::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -613,7 +613,7 @@ impl ErrorExt for Error {
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. } => StatusCode::InvalidArguments,
 
-            CatalogError { source, .. } => source.status_code(),
+            Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
 
             Hyper { .. } => StatusCode::Unknown,

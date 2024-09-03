@@ -37,7 +37,8 @@ use tonic::metadata::AsciiMetadataKey;
 use tonic::transport::Channel;
 
 use crate::error::{
-    ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu, InvalidAsciiSnafu, ServerSnafu,
+    ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu, InvalidAsciiSnafu,
+    ServerSnafu,
 };
 use crate::{from_grpc_response, Client, Result};
 
@@ -225,16 +226,18 @@ impl Database {
 
         let mut client = self.client.make_flight_client()?;
 
-        let response = client.mut_inner().do_get(request).await.map_err(|e| {
+        let response = client.mut_inner().do_get(request).await.or_else(|e| {
             let tonic_code = e.code();
             let e: Error = e.into();
             let code = e.status_code();
             let msg = e.to_string();
-            let error = Error::FlightGet {
-                tonic_code,
-                addr: client.addr().to_string(),
-                source: BoxedError::new(ServerSnafu { code, msg }.build()),
-            };
+            let error =
+                Err(BoxedError::new(ServerSnafu { code, msg }.build())).with_context(|_| {
+                    FlightGetSnafu {
+                        addr: client.addr().to_string(),
+                        tonic_code,
+                    }
+                });
             error!(
                 "Failed to do Flight get, addr: {}, code: {}, source: {:?}",
                 client.addr(),

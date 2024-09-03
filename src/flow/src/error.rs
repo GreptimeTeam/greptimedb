@@ -68,13 +68,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table already exist: {name}"))]
-    TableAlreadyExist {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Flow not found, id={id}"))]
     FlowNotFound {
         id: FlowId,
@@ -202,9 +195,7 @@ impl ErrorExt for Error {
             Self::Eval { .. } | Self::JoinTask { .. } | Self::Datafusion { .. } => {
                 StatusCode::Internal
             }
-            Self::TableAlreadyExist { .. } | Self::FlowAlreadyExist { .. } => {
-                StatusCode::TableAlreadyExists
-            }
+            Self::FlowAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. }
             | Self::TableNotFoundMeta { .. }
             | Self::FlowNotFound { .. }

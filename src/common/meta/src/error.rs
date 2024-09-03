@@ -355,13 +355,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to rename table, reason: {}", reason))]
-    RenameTable {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid table metadata, err: {}", err_msg))]
     InvalidTableMetadata {
         err_msg: String,
@@ -673,9 +666,7 @@ impl ErrorExt for Error {
             | MetadataCorruption { .. }
             | StrFromUtf8 { .. } => StatusCode::Unexpected,
 
-            SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } | RenameTable { .. } => {
-                StatusCode::Internal
-            }
+            SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 
             SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
 

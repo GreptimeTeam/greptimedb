@@ -16,9 +16,9 @@ use api::v1::flow::{FlowRequest, FlowResponse};
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
 use common_meta::node_manager::Flownode;
-use snafu::{location, ResultExt};
+use snafu::ResultExt;
 
-use crate::error::Result;
+use crate::error::{FlowServerSnafu, Result};
 use crate::Client;
 
 #[derive(Debug)]
@@ -57,15 +57,10 @@ impl FlowRequester {
         let response = client
             .handle_create_remove(request)
             .await
-            .map_err(|e| {
+            .or_else(|e| {
                 let code = e.code();
                 let err: crate::error::Error = e.into();
-                crate::error::Error::FlowServer {
-                    addr,
-                    code,
-                    source: BoxedError::new(err),
-                    location: location!(),
-                }
+                Err(BoxedError::new(err)).context(FlowServerSnafu { addr, code })
             })?
             .into_inner();
         Ok(response)
@@ -88,15 +83,10 @@ impl FlowRequester {
         let response = client
             .handle_mirror_request(requests)
             .await
-            .map_err(|e| {
+            .or_else(|e| {
                 let code = e.code();
                 let err: crate::error::Error = e.into();
-                crate::error::Error::FlowServer {
-                    addr,
-                    code,
-                    source: BoxedError::new(err),
-                    location: location!(),
-                }
+                Err(BoxedError::new(err)).context(FlowServerSnafu { addr, code })
             })?
             .into_inner();
         Ok(response)

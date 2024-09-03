@@ -671,8 +671,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("BiError, first: {first}, second: {second}"))]
-    BiError {
+    #[snafu(display("BiErrors, first: {first}, second: {second}"))]
+    BiErrors {
         first: Box<Error>,
         second: Box<Error>,
         #[snafu(implicit)]
@@ -922,7 +922,7 @@ impl ErrorExt for Error {
             | ConvertMetaData { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
-            | BiError { .. }
+            | BiErrors { .. }
             | StopScheduler { .. }
             | ComputeVector { .. }
             | SerializeField { .. }

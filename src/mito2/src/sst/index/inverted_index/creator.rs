@@ -32,8 +32,8 @@ use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    BiSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PushIndexValueSnafu,
-    Result,
+    BiErrorsSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu,
+    PushIndexValueSnafu, Result,
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
@@ -246,7 +246,7 @@ impl InvertedIndexer {
             puffin_add_blob.context(PuffinAddBlobSnafu),
             index_finish.context(IndexFinishSnafu),
         ) {
-            (Err(e1), Err(e2)) => BiSnafu {
+            (Err(e1), Err(e2)) => BiErrorsSnafu {
                 first: Box::new(e1),
                 second: Box::new(e2),
             }
