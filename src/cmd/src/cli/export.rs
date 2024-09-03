@@ -130,18 +130,14 @@ impl Export {
             return Ok(db_names);
         };
 
-        for db_name in db_names {
-            // Check if the schema exists
-            if db_name.to_lowercase() == schema.to_lowercase() {
-                return Ok(vec![db_name]);
-            }
-        }
-
-        SchemaNotFoundSnafu {
-            catalog: &self.catalog,
-            schema,
-        }
-        .fail()
+        db_names
+            .into_iter()
+            .find(|db_name| db_name.to_lowercase() == schema.to_lowercase())
+            .map(|name| vec![name])
+            .context(SchemaNotFoundSnafu {
+                catalog: &self.catalog,
+                schema,
+            })
     }
 
     /// Iterate over all db names.
