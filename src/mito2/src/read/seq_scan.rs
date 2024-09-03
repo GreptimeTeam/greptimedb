@@ -112,6 +112,7 @@ impl SeqScan {
             self.semaphore.clone(),
             &mut metrics,
             self.compaction,
+            self.properties.num_partitions(),
         )
         .await?;
         // Safety: `build_merge_reader()` always returns a reader if partition is None.
@@ -184,10 +185,11 @@ impl SeqScan {
         semaphore: Arc<Semaphore>,
         metrics: &mut ScannerMetrics,
         compaction: bool,
+        parallelism: usize,
     ) -> Result<Option<BoxedBatchReader>> {
         // initialize parts list
         let mut parts = stream_ctx.parts.lock().await;
-        Self::maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
+        Self::maybe_init_parts(&stream_ctx.input, &mut parts, metrics, parallelism).await?;
         let parts_len = parts.0.len();
 
         let mut sources = Vec::with_capacity(parts_len);
@@ -211,11 +213,12 @@ impl SeqScan {
         semaphore: Arc<Semaphore>,
         metrics: &mut ScannerMetrics,
         compaction: bool,
+        parallelism: usize,
     ) -> Result<Option<BoxedBatchReader>> {
         let mut sources = Vec::new();
         let build_start = {
             let mut parts = stream_ctx.parts.lock().await;
-            Self::maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
+            Self::maybe_init_parts(&stream_ctx.input, &mut parts, metrics, parallelism).await?;
 
             let Some(part) = parts.0.get_part(range_id) else {
                 return Ok(None);
@@ -311,12 +314,13 @@ impl SeqScan {
         let semaphore = self.semaphore.clone();
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
+        let parallelism = self.properties.num_partitions();
         let stream = try_stream! {
             let first_poll = stream_ctx.query_start.elapsed();
 
             for partition_range in partition_ranges {
                 let maybe_reader =
-                    Self::build_merge_reader(&stream_ctx, partition_range.identifier, semaphore.clone(), &mut metrics, compaction)
+                    Self::build_merge_reader(&stream_ctx, partition_range.identifier, semaphore.clone(), &mut metrics, compaction, parallelism)
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
@@ -390,6 +394,7 @@ impl SeqScan {
         let stream_ctx = self.stream_ctx.clone();
         let semaphore = self.semaphore.clone();
         let compaction = self.compaction;
+        let parallelism = self.properties.num_partitions();
 
         // build stream
         let stream = try_stream! {
@@ -398,7 +403,7 @@ impl SeqScan {
             // init parts
             let parts_len = {
                 let mut parts = stream_ctx.parts.lock().await;
-                Self::maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics).await
+                Self::maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics, parallelism).await
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
                 parts.0.len()
@@ -411,6 +416,7 @@ impl SeqScan {
                     semaphore.clone(),
                     &mut metrics,
                     compaction,
+                    parallelism
                 )
                 .await
                 .map_err(BoxedError::new)
@@ -467,6 +473,7 @@ impl SeqScan {
         input: &ScanInput,
         part_list: &mut (ScanPartList, Duration),
         metrics: &mut ScannerMetrics,
+        parallelism: usize,
     ) -> Result<()> {
         if part_list.0.is_none() {
             let now = Instant::now();
@@ -477,9 +484,7 @@ impl SeqScan {
                 Some(input.mapper.column_ids()),
                 input.predicate.clone(),
             );
-            part_list
-                .0
-                .set_parts(distributor.build_parts(input.parallelism.parallelism));
+            part_list.0.set_parts(distributor.build_parts(parallelism));
             let build_part_cost = now.elapsed();
             part_list.1 = build_part_cost;
 
