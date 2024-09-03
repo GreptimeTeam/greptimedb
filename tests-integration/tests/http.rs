@@ -811,7 +811,6 @@ enable_log_recycle = true
 prefill_log_files = false
 
 [storage]
-name = ""
 type = "{}"
 providers = []
 
@@ -903,6 +902,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "selector_result_cache_size =",
         "metadata_cache_size =",
         "content_cache_size =",
+        "name =",
     ];
 
     input
