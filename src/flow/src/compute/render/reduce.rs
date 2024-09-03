@@ -983,6 +983,9 @@ impl AccumOutput {
 
     /// return (accums, output)
     fn into_accum_output(self) -> Result<(Vec<Value>, Vec<Value>), EvalError> {
+        if self.accum.is_empty() && self.output.is_empty() {
+            return Ok((vec![], vec![]));
+        }
         ensure!(
             !self.accum.is_empty() && self.accum.len() == self.output.len(),
             InternalSnafu {
