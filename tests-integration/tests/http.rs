@@ -811,6 +811,7 @@ enable_log_recycle = true
 prefill_log_files = false
 
 [storage]
+name = ""
 type = "{}"
 providers = []
 
