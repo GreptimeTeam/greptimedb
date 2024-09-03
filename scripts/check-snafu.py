@@ -47,6 +47,9 @@ def main():
     for name in unused_snafu:
         print(name)
 
+    if unused_snafu:
+        raise SystemExit(1)
+
 
 if __name__ == "__main__":
     main()
