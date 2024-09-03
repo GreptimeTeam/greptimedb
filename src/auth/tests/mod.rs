@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use auth::error::Error::InternalState;
+use auth::error::InternalStateSnafu;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, UserInfoRef};
 use sql::statements::show::{ShowDatabases, ShowKind};
 use sql::statements::statement::Statement;
@@ -33,9 +34,10 @@ impl PermissionChecker for DummyPermissionChecker {
         match req {
             PermissionReq::GrpcRequest(_) => Ok(PermissionResp::Allow),
             PermissionReq::SqlStatement(_) => Ok(PermissionResp::Reject),
-            _ => Err(InternalState {
+            _ => InternalStateSnafu {
                 msg: "testing".to_string(),
-            }),
+            }
+            .fail(),
         }
     }
 }

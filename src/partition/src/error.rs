@@ -20,7 +20,7 @@ use common_macro::stack_trace_debug;
 use datafusion_common::ScalarValue;
 use datafusion_expr::expr::Expr;
 use snafu::{Location, Snafu};
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionId;
 use table::metadata::TableId;
 
 use crate::expr::PartitionExpr;
@@ -46,14 +46,6 @@ pub enum Error {
     #[snafu(display("Failed to get meta info from cache, error: {}", err_msg))]
     GetCache {
         err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to find Datanode, table id: {}, region: {}", table_id, region))]
-    FindDatanode {
-        table_id: TableId,
-        region: RegionNumber,
         #[snafu(implicit)]
         location: Location,
     },
@@ -92,9 +84,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("The column '{}' does not have a default value.", column))]
-    MissingDefaultValue { column: String },
 
     #[snafu(display("Expect {} region keys, actual {}", expect, actual))]
     RegionKeysSize {
@@ -224,12 +213,9 @@ impl ErrorExt for Error {
 
             Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::InvalidTableRouteData { .. } => StatusCode::TableUnavailable,
-            Error::FindTableRoutes { .. } | Error::FindDatanode { .. } => {
-                StatusCode::TableUnavailable
-            }
+            Error::FindTableRoutes { .. } => StatusCode::TableUnavailable,
             Error::TableRouteNotFound { .. } => StatusCode::TableNotFound,
             Error::TableRouteManager { source, .. } => source.status_code(),
-            Error::MissingDefaultValue { .. } => StatusCode::IllegalState,
             Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
         }
     }

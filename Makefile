@@ -191,6 +191,7 @@ fix-clippy: ## Fix clippy violations.
 .PHONY: fmt-check
 fmt-check: ## Check code format.
 	cargo fmt --all -- --check
+	python3 scripts/check-snafu.py
 
 .PHONY: start-etcd
 start-etcd: ## Start single node etcd for testing purpose.

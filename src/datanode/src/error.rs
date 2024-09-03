@@ -98,13 +98,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Columns and values number mismatch, columns: {}, values: {}",
-        columns,
-        values
-    ))]
-    ColumnValuesNumberMismatch { columns: usize, values: usize },
-
     #[snafu(display("Failed to delete value from table: {}", table_name))]
     Delete {
         table_name: String,
@@ -156,13 +149,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Runtime resource error"))]
-    RuntimeResource {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_runtime::error::Error,
-    },
-
     #[snafu(display("Expect KvBackend but not found"))]
     MissingKvBackend {
         #[snafu(implicit)]
@@ -171,16 +157,6 @@ pub enum Error {
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
-
-    #[snafu(display("Not support SQL, error: {}", msg))]
-    NotSupportSql { msg: String },
-
-    #[snafu(display("Specified timestamp key or primary key column not found: {}", name))]
-    KeyColumnNotFound {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
 
     #[snafu(display("Illegal primary keys definition: {}", msg))]
     IllegalPrimaryKeysDef {
@@ -210,14 +186,6 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display(
-        "Table id provider not found, cannot execute SQL directly on datanode in distributed mode"
-    ))]
-    TableIdProviderNotFound {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Missing node id in Datanode config"))]
     MissingNodeId {
         #[snafu(implicit)]
@@ -230,9 +198,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
-    DatabaseNotFound { catalog: String, schema: String },
 
     #[snafu(display(
         "No valid default value can be built automatically, column: {}",
@@ -260,12 +225,6 @@ pub enum Error {
 
     #[snafu(display("Payload not exist"))]
     PayloadNotExist {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Missing WAL dir config"))]
-    MissingWalDirConfig {
         #[snafu(implicit)]
         location: Location,
     },
@@ -316,13 +275,6 @@ pub enum Error {
     #[snafu(display("Region engine {} is not registered", name))]
     RegionEngineNotFound {
         name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Unsupported gRPC request, kind: {}", kind))]
-    UnsupportedGrpcRequest {
-        kind: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -395,20 +347,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to setup plugin"))]
-    SetupPlugin {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to start plugin"))]
-    StartPlugin {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -430,19 +368,14 @@ impl ErrorExt for Error {
 
             Delete { source, .. } => source.status_code(),
 
-            ColumnValuesNumberMismatch { .. }
-            | InvalidSql { .. }
-            | NotSupportSql { .. }
-            | KeyColumnNotFound { .. }
+            InvalidSql { .. }
             | IllegalPrimaryKeysDef { .. }
             | MissingTimestampColumn { .. }
             | CatalogNotFound { .. }
             | SchemaNotFound { .. }
             | SchemaExists { .. }
-            | DatabaseNotFound { .. }
             | MissingNodeId { .. }
             | ColumnNoneDefaultValue { .. }
-            | MissingWalDirConfig { .. }
             | Catalog { .. }
             | MissingRequiredField { .. }
             | RegionEngineNotFound { .. }
@@ -456,12 +389,9 @@ impl ErrorExt for Error {
 
             AsyncTaskExecute { source, .. } => source.status_code(),
 
-            CreateDir { .. }
-            | RemoveDir { .. }
-            | ShutdownInstance { .. }
-            | DataFusion { .. }
-            | SetupPlugin { .. }
-            | StartPlugin { .. } => StatusCode::Internal,
+            CreateDir { .. } | RemoveDir { .. } | ShutdownInstance { .. } | DataFusion { .. } => {
+                StatusCode::Internal
+            }
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,
@@ -472,11 +402,8 @@ impl ErrorExt for Error {
             InitBackend { .. } => StatusCode::StorageUnavailable,
 
             OpenLogStore { source, .. } => source.status_code(),
-            RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
             MetaClientInit { source, .. } => source.status_code(),
-            UnsupportedOutput { .. }
-            | TableIdProviderNotFound { .. }
-            | UnsupportedGrpcRequest { .. } => StatusCode::Unsupported,
+            UnsupportedOutput { .. } => StatusCode::Unsupported,
             HandleRegionRequest { source, .. }
             | GetRegionMetadata { source, .. }
             | HandleBatchOpenRequest { source, .. } => source.status_code(),

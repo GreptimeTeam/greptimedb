@@ -583,13 +583,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to read puffin metadata"))]
-    PuffinReadMetadata {
-        source: puffin::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to read puffin blob"))]
     PuffinReadBlob {
         source: puffin::error::Error,
@@ -678,8 +671,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("BiError, first: {first}, second: {second}"))]
-    BiError {
+    #[snafu(display("BiErrors, first: {first}, second: {second}"))]
+    BiErrors {
         first: Box<Error>,
         second: Box<Error>,
         #[snafu(implicit)]
@@ -929,7 +922,7 @@ impl ErrorExt for Error {
             | ConvertMetaData { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
-            | BiError { .. }
+            | BiErrors { .. }
             | StopScheduler { .. }
             | ComputeVector { .. }
             | SerializeField { .. }
@@ -970,8 +963,7 @@ impl ErrorExt for Error {
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
-            PuffinReadMetadata { source, .. }
-            | PuffinReadBlob { source, .. }
+            PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
             | PuffinBuildReader { source, .. } => source.status_code(),

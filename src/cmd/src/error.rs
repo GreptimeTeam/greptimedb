@@ -31,13 +31,6 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to iter stream"))]
-    IterStream {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_meta::error::Error,
-    },
-
     #[snafu(display("Failed to init DDL manager"))]
     InitDdlManager {
         #[snafu(implicit)]
@@ -237,26 +230,11 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to start catalog manager"))]
-    StartCatalogManager {
-        #[snafu(implicit)]
-        location: Location,
-        source: catalog::error::Error,
-    },
-
     #[snafu(display("Failed to connect to Etcd at {etcd_addr}"))]
     ConnectEtcd {
         etcd_addr: String,
         #[snafu(source)]
         error: etcd_client::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to connect server at {addr}"))]
-    ConnectServer {
-        addr: String,
-        source: client::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -274,12 +252,6 @@ pub enum Error {
         reason: String,
         #[snafu(source)]
         error: reqwest::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Expect data from output, but got another thing"))]
-    NotDataFromOutput {
         #[snafu(implicit)]
         location: Location,
     },
@@ -346,15 +318,6 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Tonic transport error: {error:?} with msg: {msg:?}"))]
-    TonicTransport {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: tonic::transport::Error,
-        msg: Option<String>,
-    },
-
     #[snafu(display("Cannot find schema {schema} in catalog {catalog}"))]
     SchemaNotFound {
         catalog: String,
@@ -378,18 +341,16 @@ impl ErrorExt for Error {
             Error::BuildMetaServer { source, .. } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
 
-            Error::IterStream { source, .. }
-            | Error::InitMetadata { source, .. }
-            | Error::InitDdlManager { source, .. } => source.status_code(),
+            Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
+                source.status_code()
+            }
 
-            Error::ConnectServer { source, .. } => source.status_code(),
             Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
             | Error::InitTimezone { .. }
             | Error::ConnectEtcd { .. }
-            | Error::NotDataFromOutput { .. }
             | Error::CreateDir { .. }
             | Error::EmptyResult { .. } => StatusCode::InvalidArguments,
 
@@ -407,7 +368,6 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
-            Error::StartCatalogManager { source, .. } => source.status_code(),
 
             Error::SerdeJson { .. } | Error::FileIo { .. } | Error::SpawnThread { .. } => {
                 StatusCode::Unexpected
@@ -422,7 +382,6 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::MetaClientInit { source, .. } => source.status_code(),
-            Error::TonicTransport { .. } => StatusCode::Internal,
             Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
         }
     }

@@ -182,7 +182,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to perform IO operation"))]
-    CommonIoError {
+    CommonIo {
         #[snafu(source)]
         error: IoError,
         #[snafu(implicit)]
@@ -227,7 +227,7 @@ impl ErrorExt for Error {
             | DecodeProto { .. }
             | DecodeFst { .. }
             | KeysApplierUnexpectedPredicates { .. }
-            | CommonIoError { .. }
+            | CommonIo { .. }
             | UnknownIntermediateCodecMagic { .. }
             | FstCompile { .. } => StatusCode::Unexpected,
 

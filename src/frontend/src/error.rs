@@ -20,7 +20,6 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
-use store_api::storage::RegionNumber;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -61,13 +60,6 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Runtime resource error"))]
-    RuntimeResource {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_runtime::error::Error,
-    },
-
     #[snafu(display("Failed to start server"))]
     StartServer {
         #[snafu(implicit)]
@@ -96,13 +88,6 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display("Failed to convert vector to GRPC column, reason: {}", reason))]
-    VectorToGrpcColumn {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid SQL, error: {}", err_msg))]
     InvalidSql {
         err_msg: String,
@@ -113,13 +98,6 @@ pub enum Error {
     #[snafu(display("Incomplete GRPC request: {}", err_msg))]
     IncompleteGrpcRequest {
         err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to find Datanode by region: {:?}", region))]
-    FindDatanode {
-        region: RegionNumber,
         #[snafu(implicit)]
         location: Location,
     },
@@ -220,20 +198,6 @@ pub enum Error {
         source: servers::error::Error,
     },
 
-    #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
-    LeaderNotFound {
-        table: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to found context value: {}", key))]
-    ContextValueNotFound {
-        key: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Not supported: {}", feat))]
     NotSupported { feat: String },
 
@@ -282,14 +246,6 @@ pub enum Error {
         source: script::error::Error,
     },
 
-    #[snafu(display("Failed to copy table: {}", table_name))]
-    CopyTable {
-        table_name: String,
-        #[snafu(implicit)]
-        location: Location,
-        source: table::error::Error,
-    },
-
     #[snafu(display("Failed to insert value into table: {}", table_name))]
     Insert {
         table_name: String,
@@ -308,13 +264,6 @@ pub enum Error {
     #[snafu(display("Failed to pass permission check"))]
     Permission {
         source: auth::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Empty data: {}", msg))]
-    EmptyData {
-        msg: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -364,20 +313,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to setup plugin"))]
-    SetupPlugin {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to start plugin"))]
-    StartPlugin {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -395,7 +330,6 @@ impl ErrorExt for Error {
             | Error::ColumnNotFound { .. }
             | Error::UnsupportedFormat { .. }
             | Error::IllegalAuthConfig { .. }
-            | Error::EmptyData { .. }
             | Error::ColumnNoneDefaultValue { .. }
             | Error::IncompleteGrpcRequest { .. }
             | Error::InvalidTlsConfig { .. } => StatusCode::InvalidArguments,
@@ -408,7 +342,6 @@ impl ErrorExt for Error {
 
             Error::HandleHeartbeatResponse { source, .. } => source.status_code(),
 
-            Error::RuntimeResource { source, .. } => source.status_code(),
             Error::PromStoreRemoteQueryPlan { source, .. }
             | Error::ExecutePromql { source, .. } => source.status_code(),
 
@@ -420,24 +353,15 @@ impl ErrorExt for Error {
 
             Error::InvalidateTableCache { source, .. } => source.status_code(),
 
-            Error::Table { source, .. }
-            | Error::CopyTable { source, .. }
-            | Error::Insert { source, .. } => source.status_code(),
+            Error::Table { source, .. } | Error::Insert { source, .. } => source.status_code(),
 
             Error::OpenRaftEngineBackend { .. } => StatusCode::StorageUnavailable,
 
             Error::RequestQuery { source, .. } => source.status_code(),
 
-            Error::FindDatanode { .. } => StatusCode::RegionNotReady,
-
-            Error::VectorToGrpcColumn { .. }
-            | Error::CacheRequired { .. }
-            | Error::SetupPlugin { .. }
-            | Error::StartPlugin { .. } => StatusCode::Internal,
+            Error::CacheRequired { .. } => StatusCode::Internal,
 
             Error::InvalidRegionRequest { .. } => StatusCode::IllegalState,
-
-            Error::ContextValueNotFound { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
 
@@ -450,7 +374,6 @@ impl ErrorExt for Error {
             | Error::ReadTable { source, .. }
             | Error::ExecLogicalPlan { source, .. } => source.status_code(),
 
-            Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::InvokeRegionServer { source, .. } => source.status_code(),
 
             Error::External { source, .. } => source.status_code(),
