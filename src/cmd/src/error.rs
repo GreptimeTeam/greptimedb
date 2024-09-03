@@ -423,7 +423,7 @@ impl ErrorExt for Error {
             }
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::TonicTransport { .. } => StatusCode::Internal,
-            Error::SchemaNotFound { .. } => StatusCode::Unexpected,
+            Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
         }
     }
 
