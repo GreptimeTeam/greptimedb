@@ -51,6 +51,8 @@ from
 select
     ts
 from
-    t;
+    t
+order by
+    ts;
 
 drop table t;
