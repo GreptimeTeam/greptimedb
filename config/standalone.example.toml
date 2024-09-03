@@ -398,9 +398,23 @@ region = "us-west-2"
 
 # Custom storage options
 # [[storage.providers]]
+# name = "S3"
 # type = "S3"
+# bucket = "greptimedb"
+# root = "data"
+# access_key_id = "test"
+# secret_access_key = "123456"
+# endpoint = "https://s3.amazonaws.com"
+# region = "us-west-2"
 # [[storage.providers]]
+# name = "Gcs"
 # type = "Gcs"
+# bucket = "greptimedb"
+# root = "data"
+# scope = "test"
+# credential_path = "123456"
+# credential = "base64-credential"
+# endpoint = "https://storage.googleapis.com"
 
 ## The region engine options. You can configure multiple region engines.
 [[region_engine]]
