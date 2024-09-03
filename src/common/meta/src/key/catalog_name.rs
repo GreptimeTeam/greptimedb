@@ -20,8 +20,8 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, Error, InvalidTableMetadataSnafu, Result};
-use crate::key::{MetaKey, CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX};
+use crate::error::{self, Error, InvalidMetadataSnafu, Result};
+use crate::key::{MetadataKey, CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
@@ -56,14 +56,14 @@ impl<'a> CatalogNameKey<'a> {
     }
 }
 
-impl<'a> MetaKey<'a, CatalogNameKey<'a>> for CatalogNameKey<'_> {
+impl<'a> MetadataKey<'a, CatalogNameKey<'a>> for CatalogNameKey<'_> {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
 
     fn from_bytes(bytes: &'a [u8]) -> Result<CatalogNameKey<'a>> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
-            InvalidTableMetadataSnafu {
+            InvalidMetadataSnafu {
                 err_msg: format!(
                     "CatalogNameKey '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
@@ -87,7 +87,7 @@ impl<'a> TryFrom<&'a str> for CatalogNameKey<'a> {
     fn try_from(s: &'a str) -> Result<Self> {
         let captures = CATALOG_NAME_KEY_PATTERN
             .captures(s)
-            .context(InvalidTableMetadataSnafu {
+            .context(InvalidMetadataSnafu {
                 err_msg: format!("Illegal CatalogNameKey format: '{s}'"),
             })?;
 

@@ -22,7 +22,7 @@ use snafu::OptionExt;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
-use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetaKey, TableMetaValue};
+use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::peer::Peer;
@@ -68,7 +68,7 @@ impl FlowRouteKey {
     }
 }
 
-impl<'a> MetaKey<'a, FlowRouteKey> for FlowRouteKey {
+impl<'a> MetadataKey<'a, FlowRouteKey> for FlowRouteKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
@@ -101,7 +101,7 @@ impl FlowRouteKeyInner {
     }
 }
 
-impl<'a> MetaKey<'a, FlowRouteKeyInner> for FlowRouteKeyInner {
+impl<'a> MetadataKey<'a, FlowRouteKeyInner> for FlowRouteKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!(
             "{FLOW_ROUTE_KEY_PREFIX}/{}/{}",
@@ -112,7 +112,7 @@ impl<'a> MetaKey<'a, FlowRouteKeyInner> for FlowRouteKeyInner {
 
     fn from_bytes(bytes: &'a [u8]) -> Result<FlowRouteKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
-            error::InvalidTableMetadataSnafu {
+            error::InvalidMetadataSnafu {
                 err_msg: format!(
                     "FlowInfoKeyInner '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
@@ -123,7 +123,7 @@ impl<'a> MetaKey<'a, FlowRouteKeyInner> for FlowRouteKeyInner {
         let captures =
             FLOW_ROUTE_KEY_PATTERN
                 .captures(key)
-                .context(error::InvalidTableMetadataSnafu {
+                .context(error::InvalidMetadataSnafu {
                     err_msg: format!("Invalid FlowInfoKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above
@@ -209,7 +209,7 @@ impl FlowRouteManager {
 #[cfg(test)]
 mod tests {
     use super::FlowRouteKey;
-    use crate::key::MetaKey;
+    use crate::key::MetadataKey;
 
     #[test]
     fn test_key_serialization() {

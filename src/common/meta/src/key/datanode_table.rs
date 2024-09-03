@@ -22,10 +22,10 @@ use snafu::OptionExt;
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
-use super::MetaKey;
-use crate::error::{InvalidTableMetadataSnafu, Result};
+use super::MetadataKey;
+use crate::error::{InvalidMetadataSnafu, Result};
 use crate::key::{
-    RegionDistribution, TableMetaValue, DATANODE_TABLE_KEY_PATTERN, DATANODE_TABLE_KEY_PREFIX,
+    MetadataValue, RegionDistribution, DATANODE_TABLE_KEY_PATTERN, DATANODE_TABLE_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -77,14 +77,14 @@ impl DatanodeTableKey {
     }
 }
 
-impl<'a> MetaKey<'a, DatanodeTableKey> for DatanodeTableKey {
+impl<'a> MetadataKey<'a, DatanodeTableKey> for DatanodeTableKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<DatanodeTableKey> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
-            InvalidTableMetadataSnafu {
+            InvalidMetadataSnafu {
                 err_msg: format!(
                     "DatanodeTableKey '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
@@ -92,12 +92,11 @@ impl<'a> MetaKey<'a, DatanodeTableKey> for DatanodeTableKey {
             }
             .build()
         })?;
-        let captures =
-            DATANODE_TABLE_KEY_PATTERN
-                .captures(key)
-                .context(InvalidTableMetadataSnafu {
-                    err_msg: format!("Invalid DatanodeTableKey '{key}'"),
-                })?;
+        let captures = DATANODE_TABLE_KEY_PATTERN
+            .captures(key)
+            .context(InvalidMetadataSnafu {
+                err_msg: format!("Invalid DatanodeTableKey '{key}'"),
+            })?;
         // Safety: pass the regex check above
         let datanode_id = captures[1].parse::<DatanodeId>().unwrap();
         let table_id = captures[2].parse::<TableId>().unwrap();

@@ -23,9 +23,9 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use super::TABLE_INFO_KEY_PATTERN;
-use crate::error::{InvalidTableMetadataSnafu, Result};
+use crate::error::{InvalidMetadataSnafu, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{DeserializedValueWithBytes, MetaKey, TableMetaValue, TABLE_INFO_KEY_PREFIX};
+use crate::key::{DeserializedValueWithBytes, MetadataKey, MetadataValue, TABLE_INFO_KEY_PREFIX};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;
@@ -51,14 +51,14 @@ impl Display for TableInfoKey {
     }
 }
 
-impl<'a> MetaKey<'a, TableInfoKey> for TableInfoKey {
+impl<'a> MetadataKey<'a, TableInfoKey> for TableInfoKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<TableInfoKey> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
-            InvalidTableMetadataSnafu {
+            InvalidMetadataSnafu {
                 err_msg: format!(
                     "TableInfoKey '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
@@ -68,7 +68,7 @@ impl<'a> MetaKey<'a, TableInfoKey> for TableInfoKey {
         })?;
         let captures = TABLE_INFO_KEY_PATTERN
             .captures(key)
-            .context(InvalidTableMetadataSnafu {
+            .context(InvalidMetadataSnafu {
                 err_msg: format!("Invalid TableInfoKey '{key}'"),
             })?;
         // Safety: pass the regex check above
