@@ -128,21 +128,6 @@ impl ProcedureMeta {
         self.children.lock().unwrap().len()
     }
 
-    /// Returns the id of the procedure.
-    fn id(&self) -> ProcedureId {
-        self.id
-    }
-
-    /// Returns the type name of the procedure.
-    fn type_name(&self) -> &str {
-        &self.type_name
-    }
-
-    /// Returns the start time of the procedure.
-    fn start_time_ms(&self) -> u64 {
-        self.start_time_ms
-    }
-
     /// Returns the end time of the procedure.
     fn end_time_ms(&self) -> u64 {
         *self.end_time_ms.lock().unwrap()
@@ -251,11 +236,12 @@ impl ManagerContext {
         procedures
             .values()
             .map(|meta| ProcedureInfo {
-                id: meta.id(),
-                type_name: meta.type_name().to_string(),
-                start_time_ms: meta.start_time_ms(),
+                id: meta.id,
+                type_name: meta.type_name.clone(),
+                start_time_ms: meta.start_time_ms,
                 end_time_ms: meta.end_time_ms(),
                 state: meta.state(),
+                lock_keys: meta.lock_key.get_keys(),
             })
             .collect()
     }

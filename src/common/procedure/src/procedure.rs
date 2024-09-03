@@ -159,6 +159,14 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
         (**self).execute(ctx).await
     }
 
+    async fn rollback(&mut self, ctx: &Context) -> Result<()> {
+        (**self).rollback(ctx).await
+    }
+
+    fn rollback_supported(&self) -> bool {
+        (**self).rollback_supported()
+    }
+
     fn dump(&self) -> Result<String> {
         (**self).dump()
     }
@@ -226,6 +234,11 @@ impl LockKey {
     /// Returns the keys to lock.
     pub fn keys_to_lock(&self) -> impl Iterator<Item = &StringKey> {
         self.0.iter()
+    }
+
+    /// Returns the keys to lock.
+    pub fn get_keys(&self) -> Vec<String> {
+        self.0.iter().map(|key| key.clone().into_string()).collect()
     }
 }
 
@@ -432,6 +445,8 @@ pub struct ProcedureInfo {
     pub end_time_ms: u64,
     /// status of this procedure.
     pub state: ProcedureState,
+    /// Lock keys of this procedure.
+    pub lock_keys: Vec<String>,
 }
 
 #[cfg(test)]

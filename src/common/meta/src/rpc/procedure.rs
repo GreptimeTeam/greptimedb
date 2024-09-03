@@ -88,6 +88,7 @@ pub fn procedure_details_to_pb_response(metas: Vec<ProcedureInfo>) -> PbProcedur
                 status: status.into(),
                 start_time_ms: meta.start_time_ms,
                 end_time_ms: meta.end_time_ms,
+                lock_keys: meta.lock_keys,
                 error,
             }
         })

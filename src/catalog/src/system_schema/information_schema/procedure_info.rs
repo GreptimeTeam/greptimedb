@@ -48,6 +48,7 @@ const PROCEDURE_TYPE: &str = "procedure_type";
 const START_TIME: &str = "start_time";
 const END_TIME: &str = "end_time";
 const STATUS: &str = "status";
+const LOCK_KEYS: &str = "lock_keys";
 
 const INIT_CAPACITY: usize = 42;
 
@@ -88,6 +89,7 @@ impl InformationSchemaProcedureInfo {
                 true,
             ),
             ColumnSchema::new(STATUS, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(LOCK_KEYS, ConcreteDataType::string_datatype(), true),
         ]))
     }
 
@@ -142,6 +144,7 @@ struct InformationSchemaProcedureInfoBuilder {
     start_times: TimestampMillisecondVectorBuilder,
     end_times: TimestampMillisecondVectorBuilder,
     statuses: StringVectorBuilder,
+    lock_keys: StringVectorBuilder,
 }
 
 impl InformationSchemaProcedureInfoBuilder {
@@ -154,6 +157,7 @@ impl InformationSchemaProcedureInfoBuilder {
             start_times: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             end_times: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             statuses: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            lock_keys: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -218,6 +222,7 @@ impl InformationSchemaProcedureInfoBuilder {
             (START_TIME, &Value::from(start_time_ms)),
             (END_TIME, &Value::from(end_time_ms)),
             (STATUS, &Value::from(status)),
+            (LOCK_KEYS, &Value::from(procedure.lock_keys.join(","))),
         ];
         if !predicates.eval(&row) {
             return;
@@ -228,6 +233,7 @@ impl InformationSchemaProcedureInfoBuilder {
         self.start_times.push(Some(start_time_ms));
         self.end_times.push(Some(end_time_ms));
         self.statuses.push(Some(status));
+        self.lock_keys.push(Some(&procedure.lock_keys.join(",")));
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -237,6 +243,7 @@ impl InformationSchemaProcedureInfoBuilder {
             Arc::new(self.start_times.finish()),
             Arc::new(self.end_times.finish()),
             Arc::new(self.statuses.finish()),
+            Arc::new(self.lock_keys.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
