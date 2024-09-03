@@ -902,6 +902,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "selector_result_cache_size =",
         "metadata_cache_size =",
         "content_cache_size =",
+        "name =",
     ];
 
     input
