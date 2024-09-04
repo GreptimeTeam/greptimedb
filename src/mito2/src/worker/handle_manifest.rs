@@ -19,6 +19,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use common_telemetry::{info, warn};
+use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -303,7 +304,7 @@ async fn edit_region(
     edit: RegionEdit,
     cache_manager: CacheManagerRef,
     listener: WorkerListener,
-) -> Result<()> {
+) -> Result<ManifestVersion> {
     let region_id = region.region_id;
     if let Some(write_cache) = cache_manager.write_cache() {
         for file_meta in &edit.files_to_add {

@@ -30,6 +30,7 @@ use prometheus::HistogramTimer;
 use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::SetReadonlyResponse;
 use store_api::region_request::{
@@ -658,6 +659,8 @@ pub(crate) struct FlushFinished {
     pub(crate) _timer: HistogramTimer,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
+    /// The manifest version.
+    pub(crate) manifest_version: ManifestVersion,
     /// Memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
 }
@@ -742,7 +745,7 @@ pub(crate) struct TruncateResult {
     /// Result sender.
     pub(crate) sender: OptionOutputTx,
     /// Truncate result.
-    pub(crate) result: Result<()>,
+    pub(crate) result: Result<ManifestVersion>,
     /// Truncated entry id.
     pub(crate) truncated_entry_id: EntryId,
     /// Truncated sequence.
@@ -759,7 +762,7 @@ pub(crate) struct RegionChangeResult {
     /// Result sender.
     pub(crate) sender: OptionOutputTx,
     /// Result from the manifest manager.
-    pub(crate) result: Result<()>,
+    pub(crate) result: Result<ManifestVersion>,
 }
 
 /// Request to edit a region directly.
@@ -768,7 +771,7 @@ pub(crate) struct RegionEditRequest {
     pub(crate) region_id: RegionId,
     pub(crate) edit: RegionEdit,
     /// The sender to notify the result to the region engine.
-    pub(crate) tx: Sender<Result<()>>,
+    pub(crate) tx: Sender<Result<ManifestVersion>>,
 }
 
 /// Notifies the regin the result of editing region.
@@ -777,11 +780,11 @@ pub(crate) struct RegionEditResult {
     /// Region id.
     pub(crate) region_id: RegionId,
     /// Result sender.
-    pub(crate) sender: Sender<Result<()>>,
+    pub(crate) sender: Sender<Result<ManifestVersion>>,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
-    pub(crate) result: Result<()>,
+    pub(crate) result: Result<ManifestVersion>,
 }
 
 #[cfg(test)]

@@ -66,7 +66,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region.switch_state_to_writable(RegionState::Truncating);
 
         match truncate_result.result {
-            Ok(()) => {
+            Ok(_) => {
                 // Applies the truncate action to the region.
                 region.version_control.truncate(
                     truncate_result.truncated_entry_id,
