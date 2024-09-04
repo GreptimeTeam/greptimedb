@@ -823,8 +823,8 @@ max_retry_times = 3
 retry_delay = "500ms"
 
 [logging]
-enable_otlp_tracing = false
 append_stdout = true
+enable_otlp_tracing = false
 
 [[region_engine]]
 
@@ -883,6 +883,7 @@ write_interval = "30s"
 fn drop_lines_with_inconsistent_results(input: String) -> String {
     let inconsistent_results = [
         "dir =",
+        "log_format =",
         "data_home =",
         "bucket =",
         "root =",
