@@ -405,7 +405,7 @@ impl FlightCraft for RegionServer {
             .trace(tracing_context.attach(info_span!("RegionServer::handle_read")))
             .await?;
 
-        let stream = Box::pin(FlightRecordBatchStream::new(result, tracing_context));
+        let stream = Box::pin(FlightRecordBatchStream::new(result, tracing_context, false));
         Ok(Response::new(stream))
     }
 }

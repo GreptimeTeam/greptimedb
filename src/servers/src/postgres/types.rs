@@ -558,6 +558,23 @@ pub(super) fn parameters_to_scalar_values(
                     }
                 }
             }
+            &Type::JSONB => {
+                let data = portal.parameter::<serde_json::Value>(idx, &client_type)?;
+                match server_type {
+                    ConcreteDataType::Binary(_) => {
+                        ScalarValue::Binary(data.map(|d| jsonb::Value::from(d).to_vec()))
+                    }
+                    _ => {
+                        return Err(invalid_parameter_error(
+                            "invalid_parameter_type",
+                            Some(&format!(
+                                "Expected: {}, found: {}",
+                                server_type, client_type
+                            )),
+                        ));
+                    }
+                }
+            }
             _ => Err(invalid_parameter_error(
                 "unsupported_parameter_value",
                 Some(&format!("Found type: {}", client_type)),

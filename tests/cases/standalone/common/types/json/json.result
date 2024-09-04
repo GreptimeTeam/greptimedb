@@ -1,0 +1,74 @@
+CREATE TABLE jsons (j JSON, t timestamp time index);
+
+Affected Rows: 0
+
+--Insert valid json strings--
+INSERT INTO jsons VALUES('{"a":1, "b":2, "c":3}', 1), ('{"a":1, "b":2, "c":3, "d":4}', 2), ('{"a":1, "b":2, "c":3, "d":4, "e":5}', 3);
+
+Affected Rows: 3
+
+SELECT * FROM jsons;
+
++---------------------------------+-------------------------+
+| j                               | t                       |
++---------------------------------+-------------------------+
+| {"a":1,"b":2,"c":3}             | 1970-01-01T00:00:00.001 |
+| {"a":1,"b":2,"c":3,"d":4}       | 1970-01-01T00:00:00.002 |
+| {"a":1,"b":2,"c":3,"d":4,"e":5} | 1970-01-01T00:00:00.003 |
++---------------------------------+-------------------------+
+
+--Insert invalid hex strings--
+DELETE FROM jsons;
+
+Affected Rows: 3
+
+INSERT INTO jsons VALUES('\xaa\xff\xaa'::BYTEA, 1), ('\xaa\xff\xaa\xaa\xff\xaa'::BYTEA, 2), ('\xaa\xff\xaa\xaa\xff\xaa\xaa\xff\xaa'::BYTEA, 3);
+
+Affected Rows: 3
+
+SELECT * FROM blobs;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.blobs
+
+--Insert invalid json strings--
+DELETE FROM jsons;
+
+Affected Rows: 3
+
+INSERT INTO jsons VALUES('{"a":1, "b":2, "c":3', 4);
+
+Error: 2000(InvalidSyntax), Failed to parse value: Failed to parse {"a":1, "b":2, "c":3 to Json value
+
+INSERT INTO jsons VALUES('Morning my friends, have a nice day :)', 5);
+
+Error: 2000(InvalidSyntax), Failed to parse value: Failed to parse Morning my friends, have a nice day :) to Json value
+
+SELECT * FROM jsons;
+
+++
+++
+
+CREATE TABLE json_empty (j JSON, t timestamp time index);
+
+Affected Rows: 0
+
+INSERT INTO json_empty VALUES(NULL, 2);
+
+Affected Rows: 1
+
+SELECT * FROM json_empty;
+
++---+-------------------------+
+| j | t                       |
++---+-------------------------+
+|   | 1970-01-01T00:00:00.002 |
++---+-------------------------+
+
+drop table jsons;
+
+Affected Rows: 0
+
+drop table json_empty;
+
+Affected Rows: 0
+

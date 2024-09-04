@@ -24,7 +24,9 @@ use crate::error::{self, Result};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
-use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
+use crate::vectors::{
+    self, MutableVector, StringVector, StringVectorBuilder, Validity, Vector, VectorRef,
+};
 
 /// Vector of binary strings.
 #[derive(Debug, PartialEq)]
@@ -35,6 +37,16 @@ pub struct BinaryVector {
 impl BinaryVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
+    }
+
+    // Create a StringVector from a BinaryVector of json type
+    pub fn from_json_vector_to_string_vector(&self) -> StringVector {
+        let mut builder = StringVectorBuilder::with_capacity(self.len());
+        for i in 0..self.len() {
+            let value = self.get_data(i).map(jsonb::to_string);
+            builder.push(value.as_deref());
+        }
+        builder.finish()
     }
 }
 
