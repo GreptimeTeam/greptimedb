@@ -71,6 +71,13 @@ impl<S> RegionWorkerLoop<S> {
         };
         region.update_compaction_millis();
 
+        if let Err(e) = self
+            .notify_manifest_change(&region, request.manifest_version)
+            .await
+        {
+            error!(e; "Failed to notify manifest change, region: {}, version: {}", region_id, request.manifest_version);
+        }
+
         region
             .version_control
             .apply_edit(request.edit.clone(), &[], region.file_purger.clone());

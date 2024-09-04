@@ -18,7 +18,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
+use store_api::logstore::LogStore;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
@@ -75,7 +76,7 @@ impl RegionEditQueue {
     }
 }
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles region edit request.
     pub(crate) async fn handle_region_edit(&mut self, request: RegionEditRequest) {
         let region_id = request.region_id;
@@ -152,11 +153,15 @@ impl<S> RegionWorkerLoop<S> {
         let need_compaction =
             edit_result.result.is_ok() && !edit_result.edit.files_to_add.is_empty();
 
-        if edit_result.result.is_ok() {
+        if let Ok(version) = edit_result.result {
             // Applies the edit to the region.
             region
                 .version_control
                 .apply_edit(edit_result.edit, &[], region.file_purger.clone());
+
+            if let Err(e) = self.notify_manifest_change(&region, version).await {
+                error!(e; "Failed to notify manifest change, region: {}, version: {}", region.region_id, version);
+            }
         }
 
         // Sets the region as writable.
@@ -264,7 +269,10 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// Handles region change result.
-    pub(crate) fn handle_manifest_region_change_result(&self, change_result: RegionChangeResult) {
+    pub(crate) async fn handle_manifest_region_change_result(
+        &mut self,
+        change_result: RegionChangeResult,
+    ) {
         let region = match self.regions.get_region(change_result.region_id) {
             Some(region) => region,
             None => {
@@ -278,7 +286,10 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
 
-        if change_result.result.is_ok() {
+        if let Ok(version) = change_result.result {
+            if let Err(e) = self.notify_manifest_change(&region, version).await {
+                error!(e; "Failed to notify manifest change, region: {}, version: {}", region.region_id, version);
+            }
             // Apply the metadata to region's version.
             region
                 .version_control

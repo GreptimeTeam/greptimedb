@@ -14,7 +14,7 @@
 
 //! Handling truncate related requests.
 
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
@@ -66,7 +66,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region.switch_state_to_writable(RegionState::Truncating);
 
         match truncate_result.result {
-            Ok(_) => {
+            Ok(version) => {
+                if let Err(e) = self.notify_manifest_change(&region, version).await {
+                    error!(e; "Failed to notify manifest change, region: {}, version: {}", region_id, version);
+                }
                 // Applies the truncate action to the region.
                 region.version_control.truncate(
                     truncate_result.truncated_entry_id,

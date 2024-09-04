@@ -703,6 +703,8 @@ pub(crate) struct CompactionFinished {
     pub(crate) start_time: Instant,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
+    /// Manifest version
+    pub(crate) manifest_version: ManifestVersion,
 }
 
 impl CompactionFinished {

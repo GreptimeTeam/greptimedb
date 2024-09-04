@@ -39,6 +39,7 @@ use prometheus::IntGauge;
 use rand::{thread_rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
+use store_api::manifest::ManifestVersion;
 use store_api::region_engine::SetReadonlyResponse;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -48,8 +49,9 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{JoinSnafu, ReadonlyRegionSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
+use crate::manifest_notifier::ManifestNotifier;
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, WRITE_STALL_TOTAL};
 use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
@@ -824,9 +826,52 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
-            BackgroundNotify::RegionChange(req) => self.handle_manifest_region_change_result(req),
+            BackgroundNotify::RegionChange(req) => {
+                self.handle_manifest_region_change_result(req).await
+            }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
         }
+    }
+
+    /// Notifies follower regions to apply manifest change.
+    pub(crate) async fn notify_manifest_change(
+        &mut self,
+        region: &MitoRegionRef,
+        version: ManifestVersion,
+    ) -> Result<()> {
+        if !region.provider.is_remote_wal() {
+            return Ok(());
+        }
+
+        ensure!(
+            !region.is_readonly(),
+            ReadonlyRegionSnafu {
+                region_id: region.region_id
+            }
+        );
+
+        let mut notifier = ManifestNotifier::new(
+            region.region_id,
+            &region.version_control,
+            region.provider.clone(),
+        );
+        notifier.push_notification(version);
+        let mut writer = self.wal.writer();
+        notifier.add_wal_entry(&mut writer)?;
+        let append_response = writer.write_to_wal().await?;
+        // Safety: must exist
+        let last_entry_id = append_response
+            .last_entry_ids
+            .get(&region.region_id)
+            .unwrap();
+        notifier.set_next_entry_id(last_entry_id + 1);
+        notifier.finish();
+
+        info!(
+            "Successfully notify region manifest change, region: {}, version: {}",
+            region.region_id, version
+        );
+        Ok(())
     }
 
     /// Handles `set_readonly_gracefully`.

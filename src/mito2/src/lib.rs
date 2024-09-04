@@ -31,6 +31,7 @@ pub mod engine;
 pub mod error;
 pub mod flush;
 pub mod manifest;
+mod manifest_notifier;
 pub mod memtable;
 mod metrics;
 pub mod read;
