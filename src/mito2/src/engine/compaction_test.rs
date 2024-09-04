@@ -19,6 +19,12 @@ use api::v1::{ColumnSchema, Rows};
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::TimestampMillisecondVector;
+use futures::TryStreamExt;
+use log_store::kafka::log_store::KafkaLogStore;
+use rstest::rstest;
+use rstest_reuse::{self, apply};
+use store_api::logstore::provider::Provider;
+use store_api::logstore::LogStore;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     RegionCompactRequest, RegionDeleteRequest, RegionFlushRequest, RegionRequest,
@@ -30,8 +36,12 @@ use crate::config::MitoConfig;
 use crate::engine::listener::CompactionListener;
 use crate::engine::MitoEngine;
 use crate::test_util::{
-    build_rows_for_key, column_metadata_to_column_schema, put_rows, CreateRequestBuilder, TestEnv,
+    build_rows_for_key, column_metadata_to_column_schema, kafka_log_store_factory,
+    prepare_test_for_kafka_log_store, put_rows, single_kafka_log_store_factory,
+    CreateRequestBuilder, LogStoreFactory, TestEnv,
 };
+use crate::wal::entry_reader::decode_stream;
+use crate::wal::raw_entry_reader::flatten_stream;
 
 async fn put_and_flush(
     engine: &MitoEngine,
@@ -103,6 +113,66 @@ async fn collect_stream_ts(stream: SendableRecordBatchStream) -> Vec<i64> {
         res.extend(ts_col.iter_data().map(|t| t.unwrap().0.value()));
     }
     res
+}
+
+#[apply(single_kafka_log_store_factory)]
+async fn test_compaction_region_notification(factory: Option<LogStoreFactory>) {
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env =
+        TestEnv::with_prefix("compaction_notification").with_log_store_factory(factory.clone());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.max_active_window_runs", "1")
+        .insert_option("compaction.twcs.max_inactive_window_runs", "1")
+        .build();
+
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // Flush 5 SSTs for compaction.
+    put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
+    put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
+    put_and_flush(&engine, region_id, &column_schemas, 20..30).await;
+    delete_and_flush(&engine, region_id, &column_schemas, 15..30).await;
+    put_and_flush(&engine, region_id, &column_schemas, 15..25).await;
+
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 0);
+
+    let topic = topic.unwrap();
+    let log_store = env.log_store().unwrap().into_kafka_log_store();
+    let provider = Provider::kafka_provider(topic);
+    let stream = log_store.read(&provider, 0, None).await.unwrap();
+    let entries = decode_stream(flatten_stream::<KafkaLogStore>(stream, provider.clone()))
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    let notifications = entries
+        .into_iter()
+        .filter(|(_, entry)| matches!(entry.mutations[0].op_type(), api::v1::OpType::Notify))
+        .count();
+    assert_eq!(notifications, 6);
 }
 
 #[tokio::test]

@@ -70,7 +70,7 @@ impl ManifestNotifier {
     pub(crate) fn push_notification(&mut self, version: ManifestVersion) {
         self.wal_entry.mutations.push(Mutation {
             op_type: OpType::Notify.into(),
-            sequence: self.next_entry_id,
+            sequence: self.next_sequence,
             rows: None,
             manifest_notification: Some(api::v1::ManifestNotification { version }),
         });
@@ -99,6 +99,6 @@ impl ManifestNotifier {
 
     pub(crate) fn finish(&mut self) {
         self.version_control
-            .set_sequence_and_entry_id(self.next_sequence - 1, self.next_sequence - 1);
+            .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
     }
 }

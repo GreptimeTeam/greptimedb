@@ -112,6 +112,12 @@ pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
 #[tokio::test]
 pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFactory>) {}
 
+#[template]
+#[rstest]
+#[case::with_kafka(kafka_log_store_factory())]
+#[tokio::test]
+pub(crate) fn single_kafka_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
+
 #[derive(Clone)]
 pub(crate) struct RaftEngineLogStoreFactory;
 
@@ -182,6 +188,15 @@ pub(crate) enum LogStoreImpl {
     Kafka(Arc<KafkaLogStore>),
 }
 
+impl LogStoreImpl {
+    pub(crate) fn into_kafka_log_store(self) -> Arc<KafkaLogStore> {
+        match self {
+            LogStoreImpl::RaftEngine(_) => unreachable!(),
+            LogStoreImpl::Kafka(log_store) => log_store,
+        }
+    }
+}
+
 /// Env to test mito engine.
 pub struct TestEnv {
     /// Path to store data.
@@ -246,6 +261,10 @@ impl TestEnv {
 
     pub fn get_object_store_manager(&self) -> Option<Arc<ObjectStoreManager>> {
         self.object_store_manager.clone()
+    }
+
+    pub(crate) fn log_store(&self) -> Option<LogStoreImpl> {
+        self.log_store.clone()
     }
 
     /// Creates a new engine with specific config under this env.

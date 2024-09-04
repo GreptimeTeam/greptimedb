@@ -14,6 +14,7 @@
 
 use api::v1::region::compact_request;
 use common_telemetry::{error, info, warn};
+use store_api::logstore::LogStore;
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
 
@@ -23,7 +24,7 @@ use crate::region::MitoRegionRef;
 use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles compaction request submitted to region worker.
     pub(crate) async fn handle_compaction_request(
         &mut self,

@@ -24,6 +24,7 @@ use common_time::util::current_time_millis;
 use common_wal::options::WAL_OPTIONS_KEY;
 use rstest::rstest;
 use rstest_reuse::{self, apply};
+use store_api::logstore::LogStore;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
@@ -33,8 +34,8 @@ use crate::engine::listener::{FlushListener, StallListener};
 use crate::test_util::{
     build_rows, build_rows_for_key, flush_region, kafka_log_store_factory,
     multiple_log_store_factories, prepare_test_for_kafka_log_store, put_rows,
-    raft_engine_log_store_factory, reopen_region, rows_schema, CreateRequestBuilder,
-    LogStoreFactory, MockWriteBufferManager, TestEnv,
+    raft_engine_log_store_factory, reopen_region, rows_schema, single_kafka_log_store_factory,
+    CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv,
 };
 use crate::time_provider::TimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
@@ -247,7 +248,7 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
         return;
     };
 
-    let mut env = TestEnv::new().with_log_store_factory(factory.clone());
+    let mut env = TestEnv::with_prefix("flush-reopen").with_log_store_factory(factory.clone());
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -303,6 +304,55 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
     let version_data = region.version_control.current();
     assert_eq!(2, version_data.last_entry_id);
     assert_eq!(5, version_data.committed_sequence);
+}
+
+#[apply(single_kafka_log_store_factory)]
+async fn test_flush_notification(factory: Option<LogStoreFactory>) {
+    use futures::TryStreamExt;
+    use log_store::kafka::log_store::KafkaLogStore;
+    use store_api::logstore::provider::Provider;
+
+    use crate::wal::entry_reader::decode_stream;
+    use crate::wal::raw_entry_reader::flatten_stream;
+
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env =
+        TestEnv::with_prefix("flush-notification").with_log_store_factory(factory.clone());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 3, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    flush_region(&engine, region_id, None).await;
+
+    let topic = topic.unwrap();
+    let log_store = env.log_store().unwrap().into_kafka_log_store();
+    let provider = Provider::kafka_provider(topic);
+    let stream = log_store.read(&provider, 0, None).await.unwrap();
+    let entries = decode_stream(flatten_stream::<KafkaLogStore>(stream, provider.clone()))
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let notifications = entries
+        .into_iter()
+        .filter(|(_, entry)| matches!(entry.mutations[0].op_type(), api::v1::OpType::Notify))
+        .count();
+    assert_eq!(notifications, 1);
 }
 
 #[derive(Debug)]

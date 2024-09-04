@@ -21,6 +21,7 @@ use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
 
+use super::raw_entry_reader::EntryStream;
 use crate::error::{CorruptedEntrySnafu, DecodeWalSnafu, Result};
 use crate::wal::raw_entry_reader::RawEntryReader;
 use crate::wal::{EntryId, WalEntryStream};
@@ -64,31 +65,34 @@ impl<R> LogStoreEntryReader<R> {
 impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
     fn read(&mut self, ns: &'_ Provider, start_id: EntryId) -> Result<WalEntryStream<'static>> {
         let LogStoreEntryReader { reader } = self;
-        let mut stream = reader.read(ns, start_id)?;
+        let stream = reader.read(ns, start_id)?;
 
-        let stream = stream! {
-            let mut buffered_entry = None;
-            while let Some(next_entry) = stream.next().await {
-                match buffered_entry.take() {
-                    Some(entry) => {
-                        yield decode_raw_entry(entry);
-                        buffered_entry = Some(next_entry?);
-                    },
-                    None => {
-                        buffered_entry = Some(next_entry?);
-                    }
-                };
-            }
-            if let Some(entry) = buffered_entry {
-                // Ignores tail corrupted data.
-                if entry.is_complete() {
-                    yield decode_raw_entry(entry);
-                }
-            }
-        };
-
-        Ok(Box::pin(stream))
+        Ok(decode_stream(stream))
     }
+}
+
+pub(crate) fn decode_stream(mut stream: EntryStream<'static>) -> WalEntryStream<'static> {
+    stream! {
+        let mut buffered_entry = None;
+        while let Some(next_entry) = stream.next().await {
+            match buffered_entry.take() {
+                Some(entry) => {
+                    yield decode_raw_entry(entry);
+                    buffered_entry = Some(next_entry?);
+                },
+                None => {
+                    buffered_entry = Some(next_entry?);
+                }
+            };
+        }
+        if let Some(entry) = buffered_entry {
+            // Ignores tail corrupted data.
+            if entry.is_complete() {
+                yield decode_raw_entry(entry);
+            }
+        }
+    }
+    .boxed()
 }
 
 #[cfg(test)]

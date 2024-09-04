@@ -17,12 +17,14 @@ use std::sync::Arc;
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use futures::stream::BoxStream;
+use futures::StreamExt;
 use snafu::ResultExt;
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
+#[cfg(test)]
+use store_api::logstore::SendableEntryStream;
 use store_api::logstore::{LogStore, WalIndex};
 use store_api::storage::RegionId;
-use tokio_stream::StreamExt;
 
 use crate::error::{self, Result};
 use crate::wal::EntryId;
@@ -121,6 +123,29 @@ where
 
         Ok(Box::pin(stream))
     }
+}
+
+#[cfg(test)]
+pub(crate) fn flatten_stream<S: LogStore>(
+    mut stream: SendableEntryStream<'static, Entry, S::Error>,
+    provider: Provider,
+) -> EntryStream<'static> {
+    let stream = try_stream!({
+        while let Some(entries) = stream.next().await {
+            let entries =
+                entries
+                    .map_err(BoxedError::new)
+                    .with_context(|_| error::ReadWalSnafu {
+                        provider: provider.clone(),
+                    })?;
+
+            for entry in entries {
+                yield entry
+            }
+        }
+    });
+
+    stream.boxed()
 }
 
 #[cfg(test)]

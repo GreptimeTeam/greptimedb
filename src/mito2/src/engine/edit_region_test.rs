@@ -16,7 +16,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common_time::util::current_time_millis;
+use futures::TryStreamExt;
+use log_store::kafka::log_store::KafkaLogStore;
 use object_store::ObjectStore;
+use rstest::rstest;
+use rstest_reuse::{self, apply};
+use store_api::logstore::provider::Provider;
+use store_api::logstore::LogStore;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
@@ -29,7 +35,69 @@ use crate::engine::MitoEngine;
 use crate::manifest::action::RegionEdit;
 use crate::region::MitoRegionRef;
 use crate::sst::file::{FileId, FileMeta};
-use crate::test_util::{CreateRequestBuilder, TestEnv};
+use crate::test_util::{
+    kafka_log_store_factory, prepare_test_for_kafka_log_store, single_kafka_log_store_factory,
+    CreateRequestBuilder, LogStoreFactory, TestEnv,
+};
+use crate::wal::entry_reader::decode_stream;
+use crate::wal::raw_entry_reader::flatten_stream;
+
+#[apply(single_kafka_log_store_factory)]
+async fn test_edit_region_notification(factory: Option<LogStoreFactory>) {
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env = TestEnv::with_prefix("edit-notification").with_log_store_factory(factory.clone());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let file_id = FileId::random();
+    // Simulating the ingestion of an SST file.
+    env.get_object_store()
+        .unwrap()
+        .write(
+            &format!("{}/{}.parquet", region.region_dir(), file_id),
+            b"x".as_slice(),
+        )
+        .await
+        .unwrap();
+    let edit = RegionEdit {
+        files_to_add: vec![FileMeta {
+            region_id: region.region_id,
+            file_id,
+            level: 0,
+            ..Default::default()
+        }],
+        files_to_remove: vec![],
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+    };
+    engine.edit_region(region.region_id, edit).await.unwrap();
+    let topic = topic.unwrap();
+    let log_store = env.log_store().unwrap().into_kafka_log_store();
+    let provider = Provider::kafka_provider(topic);
+    let stream = log_store.read(&provider, 0, None).await.unwrap();
+    let entries = decode_stream(flatten_stream::<KafkaLogStore>(stream, provider.clone()))
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let notifications = entries
+        .into_iter()
+        .filter(|(_, entry)| matches!(entry.mutations[0].op_type(), api::v1::OpType::Notify))
+        .count();
+    assert_eq!(notifications, 1);
+}
 
 #[tokio::test]
 async fn test_edit_region_schedule_compaction() {
