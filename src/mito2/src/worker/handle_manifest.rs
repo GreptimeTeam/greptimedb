@@ -148,6 +148,9 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
 
+        let need_compaction =
+            edit_result.result.is_ok() && !edit_result.edit.files_to_add.is_empty();
+
         if edit_result.result.is_ok() {
             // Applies the edit to the region.
             region
@@ -164,6 +167,10 @@ impl<S> RegionWorkerLoop<S> {
             if let Some(request) = edit_queue.dequeue() {
                 self.handle_region_edit(request).await;
             }
+        }
+
+        if need_compaction {
+            self.schedule_compaction(&region).await;
         }
     }
 

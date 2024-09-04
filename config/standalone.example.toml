@@ -493,6 +493,10 @@ parallel_scan_channel_size = 32
 ## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
 
+## Minimum time interval between two compactions.
+## To align with the old behavior, the default value is 0 (no restrictions).
+min_compaction_interval = "0m"
+
 ## The options for index in Mito engine.
 [region_engine.mito.index]
 

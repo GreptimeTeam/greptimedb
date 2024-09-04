@@ -160,8 +160,12 @@ impl CompactionScheduler {
             self.listener.clone(),
         );
         self.region_status.insert(region_id, status);
-        self.schedule_compaction_request(request, compact_options)
-            .await
+        let result = self
+            .schedule_compaction_request(request, compact_options)
+            .await;
+
+        self.listener.on_compaction_scheduled(region_id);
+        result
     }
 
     /// Notifies the scheduler that the compaction job is finished successfully.

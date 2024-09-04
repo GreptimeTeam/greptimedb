@@ -102,6 +102,8 @@ pub(crate) struct MitoRegion {
     pub(crate) provider: Provider,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
+    /// Last compaction time in millis.
+    last_compaction_millis: AtomicI64,
     /// Provider to get current time.
     time_provider: TimeProviderRef,
     /// Memtable builder for the region.
@@ -149,6 +151,17 @@ impl MitoRegion {
     pub(crate) fn update_flush_millis(&self) {
         let now = self.time_provider.current_time_millis();
         self.last_flush_millis.store(now, Ordering::Relaxed);
+    }
+
+    /// Return last compaction time in millis.
+    pub(crate) fn last_compaction_millis(&self) -> i64 {
+        self.last_compaction_millis.load(Ordering::Relaxed)
+    }
+
+    /// Update compaction time to now millis.
+    pub(crate) fn update_compaction_millis(&self) {
+        let now = self.time_provider.current_time_millis();
+        self.last_compaction_millis.store(now, Ordering::Relaxed);
     }
 
     /// Returns the region dir.
