@@ -183,21 +183,21 @@ fn log_to_pipeline_value(
 fn build_identity_schema() -> Vec<ColumnSchema> {
     [
         (
-            "ScopeName",
+            "scope_name",
             ColumnDataType::String,
             SemanticType::Tag,
             None,
             None,
         ),
         (
-            "ScopeVersion",
+            "scope_version",
             ColumnDataType::String,
-            SemanticType::Tag,
+            SemanticType::Field,
             None,
             None,
         ),
         (
-            "ScopeAttributes",
+            "scope_attributes",
             ColumnDataType::Binary,
             SemanticType::Field,
             Some(ColumnDataTypeExtension {
@@ -206,21 +206,21 @@ fn build_identity_schema() -> Vec<ColumnSchema> {
             None,
         ),
         (
-            "ScopeSchemaUrl",
+            "scope_schemaUrl",
             ColumnDataType::String,
             SemanticType::Field,
             None,
             None,
         ),
         (
-            "ResourceSchemaUrl",
+            "resource_schema_url",
             ColumnDataType::String,
             SemanticType::Field,
             None,
             None,
         ),
         (
-            "ResourceAttributes",
+            "resource_attributes",
             ColumnDataType::Binary,
             SemanticType::Field,
             Some(ColumnDataTypeExtension {
@@ -229,7 +229,7 @@ fn build_identity_schema() -> Vec<ColumnSchema> {
             None,
         ),
         (
-            "LogAttributes",
+            "log_attributes",
             ColumnDataType::Binary,
             SemanticType::Field,
             Some(ColumnDataTypeExtension {
@@ -238,58 +238,58 @@ fn build_identity_schema() -> Vec<ColumnSchema> {
             None,
         ),
         (
-            "Timestamp",
+            "timestamp",
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
             None,
             None,
         ),
         (
-            "ObservedTimestamp",
+            "observed_timestamp",
             ColumnDataType::TimestampNanosecond,
-            SemanticType::Tag,
+            SemanticType::Field,
             None,
             None,
         ),
         (
-            "TraceId",
+            "trace_id",
             ColumnDataType::String,
             SemanticType::Tag,
             None,
             None,
         ),
         (
-            "SpanId",
+            "span_id",
             ColumnDataType::String,
             SemanticType::Tag,
             None,
             None,
         ),
         (
-            "TraceFlags",
+            "trace_flags",
             ColumnDataType::Uint32,
             SemanticType::Field,
             None,
             None,
         ),
         (
-            "SeverityText",
+            "severity_text",
             ColumnDataType::String,
             SemanticType::Field,
             None,
             None,
         ),
         (
-            "SeverityNumber",
+            "severity_number",
             ColumnDataType::Int32,
             SemanticType::Field,
             None,
             None,
         ),
         (
-            "Body",
+            "body",
             ColumnDataType::String,
-            SemanticType::Tag,
+            SemanticType::Field,
             None,
             Some(ColumnOptions {
                 options: StdHashMap::from([(
