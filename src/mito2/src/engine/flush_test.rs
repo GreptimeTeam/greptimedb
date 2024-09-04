@@ -274,8 +274,13 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
     let check_region = || {
         let region = engine.get_region(region_id).unwrap();
         let version_data = region.version_control.current();
-        assert_eq!(1, version_data.last_entry_id);
-        assert_eq!(3, version_data.committed_sequence);
+        if factory.is_kafka() {
+            assert_eq!(2, version_data.last_entry_id);
+            assert_eq!(4, version_data.committed_sequence);
+        } else {
+            assert_eq!(1, version_data.last_entry_id);
+            assert_eq!(3, version_data.committed_sequence);
+        }
         assert_eq!(1, version_data.version.flushed_entry_id);
         assert_eq!(3, version_data.version.flushed_sequence);
     };
@@ -302,8 +307,13 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
     put_rows(&engine, region_id, rows).await;
     let region = engine.get_region(region_id).unwrap();
     let version_data = region.version_control.current();
-    assert_eq!(2, version_data.last_entry_id);
-    assert_eq!(5, version_data.committed_sequence);
+    if factory.is_kafka() {
+        assert_eq!(3, version_data.last_entry_id);
+        assert_eq!(6, version_data.committed_sequence);
+    } else {
+        assert_eq!(2, version_data.last_entry_id);
+        assert_eq!(5, version_data.committed_sequence);
+    }
 }
 
 #[apply(single_kafka_log_store_factory)]

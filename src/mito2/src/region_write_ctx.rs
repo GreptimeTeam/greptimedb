@@ -152,7 +152,7 @@ impl RegionWriteCtx {
             Ok(OpType::Delete) => self.delete_num += num_rows,
             Ok(OpType::Put) => self.put_num += num_rows,
             Ok(OpType::Notify) => {
-                // Do nothing
+                self.next_sequence += 1;
             }
             Err(_) => (),
         }

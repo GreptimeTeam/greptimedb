@@ -182,6 +182,12 @@ pub(crate) enum LogStoreFactory {
     Kafka(KafkaLogStoreFactory),
 }
 
+impl LogStoreFactory {
+    pub fn is_kafka(&self) -> bool {
+        matches!(self, LogStoreFactory::Kafka(_))
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum LogStoreImpl {
     RaftEngine(Arc<RaftEngineLogStore>),
