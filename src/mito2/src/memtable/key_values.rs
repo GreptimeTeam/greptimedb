@@ -304,6 +304,7 @@ mod tests {
             op_type: OpType::Put as i32,
             sequence: START_SEQ,
             rows: Some(rows),
+            manifest_notification: None,
         }
     }
 
@@ -341,6 +342,7 @@ mod tests {
             op_type: OpType::Put as i32,
             sequence: 100,
             rows: None,
+            manifest_notification: None,
         };
         let kvs = KeyValues::new(&meta, mutation);
         assert!(kvs.is_none());

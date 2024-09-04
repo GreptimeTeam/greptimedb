@@ -349,6 +349,10 @@ impl WriteRequest {
                         ),
                     })?
             }
+            OpType::Notify => {
+                // Safety: checked above.
+                unreachable!()
+            }
         };
 
         // Convert default value into proto's value.
