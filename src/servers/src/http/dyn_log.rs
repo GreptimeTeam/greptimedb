@@ -45,9 +45,9 @@ pub async fn dyn_log_handler(level: String) -> Result<impl IntoResponse> {
             .build()
         })?;
     let change_note = format!(
-        "Log Level changed from {:?} to {:?}",
-        old_filter.map(|f| f.to_string()),
-        new_filter.to_string()
+        "Log Level changed from {} to {}",
+        old_filter.map(|f| f.to_string()).unwrap_or_default(),
+        new_filter
     );
     info!("{}", change_note.clone());
     Ok((StatusCode::OK, change_note))
