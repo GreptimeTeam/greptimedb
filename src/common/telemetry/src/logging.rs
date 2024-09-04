@@ -16,7 +16,7 @@
 use std::env;
 use std::sync::{Arc, Mutex, Once};
 
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_log::LogTracer;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::prelude::*;
@@ -34,6 +35,10 @@ use tracing_subscriber::{filter, EnvFilter, Registry};
 use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
 
 pub const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
+
+// Handle for reloading log level
+pub static RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Targets, Registry>> =
+    OnceCell::new();
 
 /// The logging options that used to initialize the logger.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -242,6 +247,12 @@ pub fn init_global_logging(
             .parse::<filter::Targets>()
             .expect("error parsing log level string");
 
+        let (dyn_filter, reload_handle) = tracing_subscriber::reload::Layer::new(filter.clone());
+
+        RELOAD_HANDLE
+            .set(reload_handle)
+            .expect("reload handle already set, maybe init_global_logging get called twice?");
+
         // Must enable 'tokio_unstable' cfg to use this feature.
         // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
         #[cfg(feature = "tokio-console")]
@@ -263,7 +274,7 @@ pub fn init_global_logging(
                 };
 
             Registry::default()
-                .with(filter)
+                .with(dyn_filter)
                 .with(tokio_console_layer)
                 .with(stdout_logging_layer)
                 .with(file_logging_layer)
@@ -275,7 +286,7 @@ pub fn init_global_logging(
 
         #[cfg(not(feature = "tokio-console"))]
         let subscriber = Registry::default()
-            .with(filter)
+            .with(dyn_filter)
             .with(stdout_logging_layer)
             .with(file_logging_layer)
             .with(err_file_logging_layer);
