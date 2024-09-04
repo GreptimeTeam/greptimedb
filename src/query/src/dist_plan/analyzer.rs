@@ -158,7 +158,10 @@ impl PlanRewriter {
             return true;
         }
 
-        match Categorizer::check_plan(plan, self.partition_cols.clone()) {
+        let result = Categorizer::check_plan(plan, self.partition_cols.clone());
+        common_telemetry::info!("[DEBUG] Categorizer result: {:?}", result);
+
+        match result {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
@@ -169,6 +172,7 @@ impl PlanRewriter {
                 if let Some(transformer) = transformer
                     && let Some(plan) = transformer(plan)
                 {
+                    common_telemetry::info!("ConditionalCommutative new plan: {:?}", plan);
                     self.stage.push(plan)
                 }
             }
@@ -176,6 +180,7 @@ impl PlanRewriter {
                 if let Some(transformer) = transformer
                     && let Some(plan) = transformer(plan)
                 {
+                    common_telemetry::info!("TransformedCommutative new plan: {:?}", plan);
                     self.stage.push(plan)
                 }
             }
@@ -277,8 +282,9 @@ impl TreeNodeRewriter for PlanRewriter {
             // add merge scan as the new root
             let mut node = MergeScanLogicalPlan::new(node, false).into_logical_plan();
             // expand stages
+            common_telemetry::info!("[DEBUG] end with stage, expanding: {:?}", self.stage);
             for new_stage in self.stage.drain(..) {
-                node = new_stage.with_new_exprs(node.expressions(), vec![node.clone()])?
+                node = new_stage.with_new_exprs(new_stage.expressions(), vec![node.clone()])?
             }
             self.set_expanded();
 
@@ -288,12 +294,14 @@ impl TreeNodeRewriter for PlanRewriter {
 
         // TODO(ruihang): avoid this clone
         if self.should_expand(&parent.clone()) {
-            // TODO(ruihang): does this work for nodes with multiple children?;
+            common_telemetry::info!("[DEBUG] expand with stage: {:?}", self.stage);
+            // TODO(ruihang): does this work for nodes with multiple children?
             // replace the current node with expanded one
             let mut node = MergeScanLogicalPlan::new(node, false).into_logical_plan();
             // expand stages
             for new_stage in self.stage.drain(..) {
-                node = new_stage.with_new_exprs(node.expressions(), vec![node.clone()])?
+                node = new_stage.with_new_exprs(new_stage.expressions(), vec![node.clone()])?
+                // node = new_stage.with_new
             }
             self.set_expanded();
 
