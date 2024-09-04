@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_telemetry::{error, info};
-use store_api::logstore::LogStore;
+use api::v1::region::compact_request;
+use common_telemetry::{error, info, warn};
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
 
 use crate::error::RegionNotFoundSnafu;
 use crate::metrics::COMPACTION_REQUEST_COUNT;
+use crate::region::MitoRegionRef;
 use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
-impl<S: LogStore> RegionWorkerLoop<S> {
+impl<S> RegionWorkerLoop<S> {
     /// Handles compaction request submitted to region worker.
     pub(crate) async fn handle_compaction_request(
         &mut self,
@@ -89,5 +90,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         self.compaction_scheduler
             .on_compaction_failed(req.region_id, req.err);
+    }
+
+    /// Schedule compaction for the region if necessary.
+    pub(crate) async fn schedule_compaction(&mut self, region: &MitoRegionRef) {
+        let now = self.time_provider.current_time_millis();
+        if now - region.last_compaction_millis()
+            >= self.config.min_compaction_interval.as_millis() as i64
+        {
+            if let Err(e) = self
+                .compaction_scheduler
+                .schedule_compaction(
+                    region.region_id,
+                    compact_request::Options::Regular(Default::default()),
+                    &region.version_control,
+                    &region.access_layer,
+                    OptionOutputTx::none(),
+                    &region.manifest_ctx,
+                )
+                .await
+            {
+                warn!(
+                    "Failed to schedule compaction for region: {}, err: {}",
+                    region.region_id, e
+                );
+            }
+        }
     }
 }

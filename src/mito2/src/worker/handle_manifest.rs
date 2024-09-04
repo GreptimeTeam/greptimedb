@@ -18,7 +18,6 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use api::v1::region::compact_request;
 use common_telemetry::{info, warn};
 use store_api::storage::RegionId;
 
@@ -172,32 +171,6 @@ impl<S> RegionWorkerLoop<S> {
 
         if need_compaction {
             self.schedule_compaction(&region).await;
-        }
-    }
-
-    /// Schedule compaction for the region if necessary.
-    pub(crate) async fn schedule_compaction(&mut self, region: &MitoRegionRef) {
-        let now = self.time_provider.current_time_millis();
-        if now - region.last_compaction_millis()
-            >= self.config.min_compaction_interval.as_millis() as i64
-        {
-            if let Err(e) = self
-                .compaction_scheduler
-                .schedule_compaction(
-                    region.region_id,
-                    compact_request::Options::Regular(Default::default()),
-                    &region.version_control,
-                    &region.access_layer,
-                    OptionOutputTx::none(),
-                    &region.manifest_ctx,
-                )
-                .await
-            {
-                warn!(
-                    "Failed to schedule compaction for region: {}, err: {}",
-                    region.region_id, e
-                );
-            }
         }
     }
 

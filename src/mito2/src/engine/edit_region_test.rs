@@ -89,8 +89,6 @@ async fn test_edit_region_schedule_compaction() {
         .edit_region(region.region_id, new_edit())
         .await
         .unwrap();
-    // Makes some time for the worker loop to process the request.
-    tokio::time::sleep(Duration::from_secs(1)).await;
     // Asserts that the compaction of the region is not scheduled,
     // because the minimum time interval between two compactions is not passed.
     assert_eq!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty));
