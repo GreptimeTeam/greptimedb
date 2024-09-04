@@ -16,7 +16,6 @@ use std::result::Result as StdResult;
 use std::sync::Arc;
 use std::time::Instant;
 
-use api::v1::value::ValueData;
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use axum::body::HttpBody;
 use axum::extract::{FromRequest, Multipart, Path, Query, State};
@@ -25,18 +24,15 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, Json, TypedHeader};
-use base64::engine::general_purpose::URL_SAFE;
-use base64::Engine as _;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
-use common_time::time::Time;
-use common_time::{Date, DateTime, Timestamp};
+use datatypes::value::column_data_to_json;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::PipelineVersion;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Deserializer, Map, Number, Value};
+use serde_json::{Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -233,59 +229,6 @@ fn transform_ndjson_array_factory(
                 Ok(acc_array)
             }
         })
-}
-
-fn column_data_to_json(data: ValueData) -> Value {
-    match data {
-        ValueData::BinaryValue(b) => Value::String(URL_SAFE.encode(b)),
-        ValueData::BoolValue(b) => Value::Bool(b),
-        ValueData::U8Value(i) => Value::Number(i.into()),
-        ValueData::U16Value(i) => Value::Number(i.into()),
-        ValueData::U32Value(i) => Value::Number(i.into()),
-        ValueData::U64Value(i) => Value::Number(i.into()),
-        ValueData::I8Value(i) => Value::Number(i.into()),
-        ValueData::I16Value(i) => Value::Number(i.into()),
-        ValueData::I32Value(i) => Value::Number(i.into()),
-        ValueData::I64Value(i) => Value::Number(i.into()),
-        ValueData::F32Value(f) => Number::from_f64(f as f64)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        ValueData::F64Value(f) => Number::from_f64(f)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        ValueData::StringValue(s) => Value::String(s),
-        ValueData::DateValue(d) => Value::String(Date::from(d).to_string()),
-        ValueData::DatetimeValue(d) => Value::String(DateTime::from(d).to_string()),
-        ValueData::TimeSecondValue(d) => Value::String(Time::new_second(d).to_iso8601_string()),
-        ValueData::TimeMillisecondValue(d) => {
-            Value::String(Time::new_millisecond(d).to_iso8601_string())
-        }
-        ValueData::TimeMicrosecondValue(d) => {
-            Value::String(Time::new_microsecond(d).to_iso8601_string())
-        }
-        ValueData::TimeNanosecondValue(d) => {
-            Value::String(Time::new_nanosecond(d).to_iso8601_string())
-        }
-        ValueData::TimestampMicrosecondValue(d) => {
-            Value::String(Timestamp::new_microsecond(d).to_iso8601_string())
-        }
-        ValueData::TimestampMillisecondValue(d) => {
-            Value::String(Timestamp::new_millisecond(d).to_iso8601_string())
-        }
-        ValueData::TimestampNanosecondValue(d) => {
-            Value::String(Timestamp::new_nanosecond(d).to_iso8601_string())
-        }
-        ValueData::TimestampSecondValue(d) => {
-            Value::String(Timestamp::new_second(d).to_iso8601_string())
-        }
-        ValueData::IntervalYearMonthValue(d) => Value::String(format!("interval year [{}]", d)),
-        ValueData::IntervalMonthDayNanoValue(d) => Value::String(format!(
-            "interval month [{}][{}][{}]",
-            d.months, d.days, d.nanoseconds
-        )),
-        ValueData::IntervalDayTimeValue(d) => Value::String(format!("interval day [{}]", d)),
-        ValueData::Decimal128Value(d) => Value::String(format!("decimal128 [{}][{}]", d.hi, d.lo)),
-    }
 }
 
 #[axum_macros::debug_handler]
