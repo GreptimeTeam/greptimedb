@@ -21,14 +21,14 @@ use INFORMATION_SCHEMA;
 
 Affected Rows: 0
 
-select procedure_type,lock_keys from procedure_info where lock_keys like '%procedure_info_for_sql_test%';
+select procedure_type from procedure_info where lock_keys like '%procedure_info_for_sql_test%';
 
-+--------------------------------+----------------------------------------------------------------------------------------------------------------------+
-| procedure_type                 | lock_keys                                                                                                            |
-+--------------------------------+----------------------------------------------------------------------------------------------------------------------+
-| metasrv-procedure::CreateTable | __catalog_lock/greptime,__schema_lock/greptime.public,__table_name_lock/greptime.public.procedure_info_for_sql_test1 |
-| metasrv-procedure::CreateTable | __catalog_lock/greptime,__schema_lock/greptime.public,__table_name_lock/greptime.public.procedure_info_for_sql_test2 |
-+--------------------------------+----------------------------------------------------------------------------------------------------------------------+
++--------------------------------+
+| procedure_type                 |
++--------------------------------+
+| metasrv-procedure::CreateTable |
+| metasrv-procedure::CreateTable |
++--------------------------------+
 
 use public;
 

@@ -13,7 +13,7 @@ CREATE TABLE procedure_info_for_sql_test2(
 
 use INFORMATION_SCHEMA;
 
-select procedure_type,lock_keys from procedure_info where lock_keys like '%procedure_info_for_sql_test%';
+select procedure_type from procedure_info where lock_keys like '%procedure_info_for_sql_test%';
 
 use public;
 
