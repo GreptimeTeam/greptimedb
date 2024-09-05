@@ -1951,6 +1951,8 @@ dependencies = [
  "common-version",
  "datafusion",
  "datatypes",
+ "geohash",
+ "h3o",
  "num",
  "num-traits",
  "once_cell",
@@ -3816,6 +3818,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "float_eq"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28a80e3145d8ad11ba0995949bbcf48b9df2be62772b3d351ef017dff6ecb853"
+
+[[package]]
 name = "flow"
 version = "0.9.2"
 dependencies = [
@@ -4214,6 +4222,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "geo-types"
+version = "0.7.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ff16065e5720f376fbced200a5ae0f47ace85fd70b7e54269790281353b6d61"
+dependencies = [
+ "approx",
+ "num-traits",
+ "serde",
+]
+
+[[package]]
+name = "geohash"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fb94b1a65401d6cbf22958a9040aa364812c26674f841bee538b12c135db1e6"
+dependencies = [
+ "geo-types",
+ "libm",
+]
+
+[[package]]
 name = "gethostname"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4302,6 +4331,25 @@ dependencies = [
  "tokio-util",
  "tracing",
 ]
+
+[[package]]
+name = "h3o"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0de3592e1f699692aa0525c42ff7879ec3ee7e36329af20967bc910a1cdc39c7"
+dependencies = [
+ "ahash 0.8.11",
+ "either",
+ "float_eq",
+ "h3o-bit",
+ "libm",
+]
+
+[[package]]
+name = "h3o-bit"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fb45e8060378c0353781abf67e1917b545a6b710d0342d85b70c125af7ef320"
 
 [[package]]
 name = "half"
@@ -4719,7 +4767,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.4.10",
+ "socket2 0.5.7",
  "tokio",
  "tower-service",
  "tracing",
@@ -8514,7 +8562,7 @@ dependencies = [
  "indoc",
  "libc",
  "memoffset 0.9.1",
- "parking_lot 0.11.2",
+ "parking_lot 0.12.3",
  "portable-atomic",
  "pyo3-build-config",
  "pyo3-ffi",

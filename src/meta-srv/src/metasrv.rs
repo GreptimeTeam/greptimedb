@@ -25,6 +25,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
+use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
@@ -212,6 +213,7 @@ pub struct Context {
     pub election: Option<ElectionRef>,
     pub is_infancy: bool,
     pub table_metadata_manager: TableMetadataManagerRef,
+    pub cache_invalidator: CacheInvalidatorRef,
 }
 
 impl Context {
@@ -376,6 +378,7 @@ pub struct Metasrv {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
+    cache_invalidator: CacheInvalidatorRef,
 
     plugins: Plugins,
 }
@@ -617,6 +620,7 @@ impl Metasrv {
         let mailbox = self.mailbox.clone();
         let election = self.election.clone();
         let table_metadata_manager = self.table_metadata_manager.clone();
+        let cache_invalidator = self.cache_invalidator.clone();
 
         Context {
             server_addr,
@@ -628,6 +632,7 @@ impl Metasrv {
             election,
             is_infancy: false,
             table_metadata_manager,
+            cache_invalidator,
         }
     }
 }
