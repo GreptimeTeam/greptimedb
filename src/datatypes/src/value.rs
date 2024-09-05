@@ -268,7 +268,7 @@ impl Value {
         }
     }
 
-    /// Cast Value to f32. Return None if it's not castable;
+    /// Cast Value to f64. Return None if it's not castable;
     pub fn as_f64_lossy(&self) -> Option<f64> {
         match self {
             Value::Float32(v) => Some(v.0 as _),
