@@ -13,18 +13,14 @@
 // limitations under the License.
 
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow_flight::FlightData;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
-use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing::{info_span, Instrument};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::warn;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::vectors::{BinaryVector, Vector, VectorRef};
 use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
 use futures::{SinkExt, Stream, StreamExt};
@@ -45,15 +41,10 @@ pub struct FlightRecordBatchStream {
 }
 
 impl FlightRecordBatchStream {
-    pub fn new(
-        recordbatches: SendableRecordBatchStream,
-        tracing_context: TracingContext,
-        // If its needed to serialize jsons to strings
-        serialize_json: bool,
-    ) -> Self {
+    pub fn new(recordbatches: SendableRecordBatchStream, tracing_context: TracingContext) -> Self {
         let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
         let join_handle = common_runtime::spawn_global(async move {
-            Self::flight_data_stream(recordbatches, tx, serialize_json)
+            Self::flight_data_stream(recordbatches, tx)
                 .trace(tracing_context.attach(info_span!("flight_data_stream")))
                 .await
         });
@@ -68,22 +59,9 @@ impl FlightRecordBatchStream {
     async fn flight_data_stream(
         mut recordbatches: SendableRecordBatchStream,
         mut tx: Sender<TonicResult<FlightMessage>>,
-        change_json: bool,
     ) {
         let schema = recordbatches.schema();
-        let schema_contains_json = schema
-            .column_schemas()
-            .iter()
-            .any(|x| x.data_type.is_json());
-        let schema_without_json = if schema_contains_json && change_json {
-            Arc::new(change_json_column_to_string_in_schema(schema.clone()))
-        } else {
-            schema.clone()
-        };
-        if let Err(e) = tx
-            .send(Ok(FlightMessage::Schema(schema_without_json.clone())))
-            .await
-        {
+        if let Err(e) = tx.send(Ok(FlightMessage::Schema(schema))).await {
             warn!(e; "stop sending Flight data");
             return;
         }
@@ -91,12 +69,6 @@ impl FlightRecordBatchStream {
         while let Some(batch_or_err) = recordbatches.next().in_current_span().await {
             match batch_or_err {
                 Ok(recordbatch) => {
-                    // If the schema contains json, we need to serialize the data before sending it
-                    let recordbatch = if schema_contains_json && change_json {
-                        serialize_json_column(schema.clone(), &recordbatch)
-                    } else {
-                        recordbatch
-                    };
                     if let Err(e) = tx.send(Ok(FlightMessage::Recordbatch(recordbatch))).await {
                         warn!(e; "stop sending Flight data");
                         return;
@@ -156,55 +128,6 @@ impl Stream for FlightRecordBatchStream {
         }
     }
 }
-
-/// Column of json type in record batches needs to be serialized before sending
-/// to the client. This function changes the json column in schema to string column.
-fn change_json_column_to_string_in_schema(schema: Arc<Schema>) -> Schema {
-    let column_schemas = schema
-        .column_schemas()
-        .iter()
-        .map(|column| {
-            if column.data_type.is_json() {
-                ColumnSchema::new(
-                    column.name.clone(),
-                    ConcreteDataType::string_datatype(),
-                    column.is_nullable(),
-                )
-            } else {
-                column.clone()
-            }
-        })
-        .collect();
-    Schema::new(column_schemas)
-}
-
-/// Column of json type in record batches needs to be serialized before sending
-/// to the client. This function serializes the binary data of json type to string.
-fn serialize_json_column(schema: Arc<Schema>, recordbatch: &RecordBatch) -> RecordBatch {
-    let mut column_schemas = Vec::with_capacity(schema.column_schemas().len());
-    let mut vectors: Vec<Arc<dyn Vector>> = Vec::with_capacity(schema.column_schemas().len());
-    for (i, column) in schema.column_schemas().iter().enumerate() {
-        let vector = recordbatch.column(i);
-        if column.data_type.is_json() {
-            // Safety: json column with binary vector
-            let vector = vector.as_any().downcast_ref::<BinaryVector>().unwrap();
-            let vector = vector.from_json_vector_to_string_vector();
-            vectors.push(Arc::new(vector) as VectorRef);
-            column_schemas.push(ColumnSchema::new(
-                column.name.clone(),
-                ConcreteDataType::string_datatype(),
-                column.is_nullable(),
-            ));
-        } else {
-            vectors.push(vector.clone());
-            column_schemas.push(column.clone());
-        }
-    }
-
-    // Safety: only changed a column type from binary to string
-    RecordBatch::new(Arc::new(Schema::new(column_schemas)), vectors).unwrap()
-}
-
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
@@ -232,8 +155,7 @@ mod test {
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()])
             .unwrap()
             .as_stream();
-        let mut stream =
-            FlightRecordBatchStream::new(recordbatches, TracingContext::default(), true);
+        let mut stream = FlightRecordBatchStream::new(recordbatches, TracingContext::default());
 
         let mut raw_data = Vec::with_capacity(2);
         raw_data.push(stream.next().await.unwrap().unwrap());

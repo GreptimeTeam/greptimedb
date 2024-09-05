@@ -183,11 +183,11 @@ fn to_flight_data_stream(
 ) -> TonicStream<FlightData> {
     match output.data {
         OutputData::Stream(stream) => {
-            let stream = FlightRecordBatchStream::new(stream, tracing_context, true);
+            let stream = FlightRecordBatchStream::new(stream, tracing_context);
             Box::pin(stream) as _
         }
         OutputData::RecordBatches(x) => {
-            let stream = FlightRecordBatchStream::new(x.as_stream(), tracing_context, true);
+            let stream = FlightRecordBatchStream::new(x.as_stream(), tracing_context);
             Box::pin(stream) as _
         }
         OutputData::AffectedRows(rows) => {

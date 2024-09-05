@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod aggregate;
-pub(crate) mod date;
-pub mod expression;
-pub mod json;
-pub mod matches;
-pub mod math;
-pub mod numpy;
+use std::sync::Arc;
+mod to_json;
+mod to_string;
 
-#[cfg(test)]
-pub(crate) mod test;
-pub(crate) mod timestamp;
-pub mod udf;
+use to_json::ToJsonFunction;
+use to_string::ToStringFunction;
+
+use crate::function_registry::FunctionRegistry;
+
+pub(crate) struct JsonFunction;
+
+impl JsonFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(ToStringFunction));
+        registry.register(Arc::new(ToJsonFunction));
+    }
+}
