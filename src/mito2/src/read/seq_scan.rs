@@ -23,7 +23,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
-use common_telemetry::debug;
+use common_telemetry::{debug, tracing};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use smallvec::smallvec;
@@ -248,6 +248,7 @@ impl SeqScan {
         maybe_reader
     }
 
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn build_reader_from_sources(
         stream_ctx: &StreamContext,
         mut sources: Vec<Source>,
