@@ -40,6 +40,12 @@ pub struct NodeAddressValue {
     pub peer: Peer,
 }
 
+impl NodeAddressValue {
+    pub fn new(peer: Peer) -> Self {
+        Self { peer }
+    }
+}
+
 impl<'a> MetadataKey<'a, NodeAddressKey> for NodeAddressKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
