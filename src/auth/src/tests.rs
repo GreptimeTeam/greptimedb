@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use common_base::secrets::ExposeSecret;
+use common_error::ext::BoxedError;
+use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    AccessDeniedSnafu, Result, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu,
+    AccessDeniedSnafu, AuthBackendSnafu, Result, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu,
     UserPasswordMismatchSnafu,
 };
 use crate::user_info::DefaultUserInfo;
@@ -48,6 +50,19 @@ impl MockUserProvider {
         info.catalog.clone_into(&mut self.catalog);
         info.schema.clone_into(&mut self.schema);
         info.username.clone_into(&mut self.username);
+    }
+
+    // this is a delibrate function to ref AuthBackendSnafu
+    // so that it won't get deleted in the future
+    pub fn ref_auth_backend_snafu(&self) -> Result<()> {
+        let none_option = None;
+
+        none_option
+            .context(UserNotFoundSnafu {
+                username: "no_user".to_string(),
+            })
+            .map_err(BoxedError::new)
+            .context(AuthBackendSnafu)
     }
 }
 
