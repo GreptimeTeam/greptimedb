@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use api::v1::meta::HeartbeatRequest;
+use api::v1::meta::{HeartbeatRequest, RequestHeader};
 use common_meta::ClusterId;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,6 @@ use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::error::{Error, InvalidHeartbeatRequestSnafu};
 use crate::key::DatanodeStatKey;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -98,10 +97,10 @@ impl Stat {
     }
 }
 
-impl TryFrom<HeartbeatRequest> for Stat {
-    type Error = Error;
+impl TryFrom<&HeartbeatRequest> for Stat {
+    type Error = Option<RequestHeader>;
 
-    fn try_from(value: HeartbeatRequest) -> Result<Self, Self::Error> {
+    fn try_from(value: &HeartbeatRequest) -> Result<Self, Self::Error> {
         let HeartbeatRequest {
             header,
             peer,
@@ -113,9 +112,9 @@ impl TryFrom<HeartbeatRequest> for Stat {
         match (header, peer) {
             (Some(header), Some(peer)) => {
                 let region_stats = region_stats
-                    .into_iter()
-                    .map(RegionStat::try_from)
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .iter()
+                    .map(RegionStat::from)
+                    .collect::<Vec<_>>();
 
                 Ok(Self {
                     timestamp_millis: time_util::current_time_millis(),
@@ -123,35 +122,30 @@ impl TryFrom<HeartbeatRequest> for Stat {
                     // datanode id
                     id: peer.id,
                     // datanode address
-                    addr: peer.addr,
+                    addr: peer.addr.clone(),
                     rcus: region_stats.iter().map(|s| s.rcus).sum(),
                     wcus: region_stats.iter().map(|s| s.wcus).sum(),
                     region_num: region_stats.len() as u64,
                     region_stats,
-                    node_epoch,
+                    node_epoch: *node_epoch,
                 })
             }
-            _ => InvalidHeartbeatRequestSnafu {
-                err_msg: "missing header or peer",
-            }
-            .fail(),
+            (header, _) => Err(header.clone()),
         }
     }
 }
 
-impl TryFrom<api::v1::meta::RegionStat> for RegionStat {
-    type Error = Error;
-
-    fn try_from(value: api::v1::meta::RegionStat) -> Result<Self, Self::Error> {
-        Ok(Self {
+impl From<&api::v1::meta::RegionStat> for RegionStat {
+    fn from(value: &api::v1::meta::RegionStat) -> Self {
+        Self {
             id: RegionId::from_u64(value.region_id),
             rcus: value.rcus,
             wcus: value.wcus,
             approximate_bytes: value.approximate_bytes,
             engine: value.engine.to_string(),
             role: RegionRole::from(value.role()),
-            extensions: value.extensions,
-        })
+            extensions: value.extensions.clone(),
+        }
     }
 }
 
