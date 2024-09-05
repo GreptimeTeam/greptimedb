@@ -58,9 +58,7 @@ impl Function for VersionFunction {
             Channel::Postgres => {
                 format!("16.3-greptimedb-{}", env!("CARGO_PKG_VERSION"))
             }
-            _ => {
-                format!("{}", env!("CARGO_PKG_VERSION"))
-            }
+            _ => env!("CARGO_PKG_VERSION").to_string(),
         };
         let result = StringVector::from(vec![version]);
         Ok(Arc::new(result))
