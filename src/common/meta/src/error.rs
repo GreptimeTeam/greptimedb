@@ -21,7 +21,7 @@ use common_macro::stack_trace_debug;
 use common_wal::options::WalOptions;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionId;
 use table::metadata::TableId;
 
 use crate::peer::Peer;
@@ -47,20 +47,6 @@ pub enum Error {
         location: Location,
         peer_id: DatanodeId,
         region_id: RegionId,
-    },
-
-    #[snafu(display("Invalid result with a txn response: {}", err_msg))]
-    InvalidTxnResult {
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Invalid engine type: {}", engine_type))]
-    InvalidEngineType {
-        engine_type: String,
-        #[snafu(implicit)]
-        location: Location,
     },
 
     #[snafu(display("Failed to connect to Etcd"))]
@@ -91,15 +77,6 @@ pub enum Error {
     #[snafu(display("Failed to get sequence: {}", err_msg))]
     NextSequence {
         err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Sequence out of range: {}, start={}, step={}", name, start, step))]
-    SequenceOutOfRange {
-        name: String,
-        start: u64,
-        step: u64,
         #[snafu(implicit)]
         location: Location,
     },
@@ -327,13 +304,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Catalog already exists, catalog: {}", catalog))]
-    CatalogAlreadyExists {
-        catalog: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Schema already exists, catalog:{}, schema: {}", catalog, schema))]
     SchemaAlreadyExists {
         catalog: String,
@@ -385,15 +355,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to rename table, reason: {}", reason))]
-    RenameTable {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Invalid table metadata, err: {}", err_msg))]
-    InvalidTableMetadata {
+    #[snafu(display("Invalid metadata, err: {}", err_msg))]
+    InvalidMetadata {
         err_msg: String,
         #[snafu(implicit)]
         location: Location,
@@ -419,27 +382,6 @@ pub enum Error {
     #[snafu(display("Etcd txn error: {err_msg}"))]
     EtcdTxnOpResponse {
         err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display(
-        "Failed to move region {} in table {}, err: {}",
-        region,
-        table_id,
-        err_msg
-    ))]
-    MoveRegion {
-        table_id: TableId,
-        region: RegionNumber,
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Invalid catalog value"))]
-    InvalidCatalogValue {
-        source: common_catalog::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -612,13 +554,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Delimiter not found, key: {}", key))]
-    DelimiterNotFound {
-        key: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid prefix: {}, key: {}", prefix, key))]
     MismatchPrefix {
         prefix: String,
@@ -702,15 +637,12 @@ impl ErrorExt for Error {
             | ParseOption { .. }
             | RouteInfoCorrupted { .. }
             | InvalidProtoMsg { .. }
-            | InvalidTableMetadata { .. }
-            | MoveRegion { .. }
+            | InvalidMetadata { .. }
             | Unexpected { .. }
             | TableInfoNotFound { .. }
             | NextSequence { .. }
-            | SequenceOutOfRange { .. }
             | UnexpectedSequenceValue { .. }
             | InvalidHeartbeatResponse { .. }
-            | InvalidTxnResult { .. }
             | EncodeJson { .. }
             | DecodeJson { .. }
             | PayloadNotExist { .. }
@@ -734,22 +666,17 @@ impl ErrorExt for Error {
             | MetadataCorruption { .. }
             | StrFromUtf8 { .. } => StatusCode::Unexpected,
 
-            SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } | RenameTable { .. } => {
-                StatusCode::Internal
-            }
+            SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 
             SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
 
             ProcedureNotFound { .. }
             | InvalidViewInfo { .. }
             | PrimaryKeyNotFound { .. }
-            | CatalogAlreadyExists { .. }
             | EmptyKey { .. }
-            | InvalidEngineType { .. }
             | AlterLogicalTablesInvalidArguments { .. }
             | CreateLogicalTablesInvalidArguments { .. }
             | MismatchPrefix { .. }
-            | DelimiterNotFound { .. }
             | TlsConfig { .. } => StatusCode::InvalidArguments,
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
@@ -767,7 +694,6 @@ impl ErrorExt for Error {
             OperateDatanode { source, .. } => source.status_code(),
             Table { source, .. } => source.status_code(),
             RetryLater { source, .. } => source.status_code(),
-            InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
 
             ParseProcedureId { .. }

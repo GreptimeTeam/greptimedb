@@ -24,7 +24,7 @@ use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
 use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::table_info::TableInfoKey;
-use common_meta::key::MetaKey;
+use common_meta::key::MetadataKey;
 use partition::manager::TableRouteCacheInvalidator;
 use table::metadata::TableId;
 use tokio::sync::mpsc;

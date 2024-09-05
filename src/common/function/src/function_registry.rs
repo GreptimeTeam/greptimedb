@@ -120,6 +120,10 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     // Json related functions
     JsonFunction::register(&function_registry);
 
+    // Geo functions
+    #[cfg(feature = "geo")]
+    crate::scalars::geo::GeoFunctions::register(&function_registry);
+
     Arc::new(function_registry)
 });
 

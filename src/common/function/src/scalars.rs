@@ -15,6 +15,8 @@
 pub mod aggregate;
 pub(crate) mod date;
 pub mod expression;
+#[cfg(feature = "geo")]
+pub mod geo;
 pub mod json;
 pub mod matches;
 pub mod math;

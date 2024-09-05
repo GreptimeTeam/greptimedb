@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 /// Function signature
+///
+/// TODO(discord9): use `common_query::signature::Signature` crate
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub struct Signature {
     /// the input types, usually not great than two input arg

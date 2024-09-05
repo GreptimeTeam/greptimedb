@@ -21,6 +21,8 @@ mod export;
 mod helper;
 
 // Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
+mod database;
+mod import;
 #[allow(unused)]
 mod repl;
 
@@ -32,6 +34,7 @@ pub use repl::Repl;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use self::export::ExportCommand;
+use crate::cli::import::ImportCommand;
 use crate::error::Result;
 use crate::options::GlobalOptions;
 use crate::App;
@@ -114,6 +117,7 @@ enum SubCommand {
     // Attach(AttachCommand),
     Bench(BenchTableMetadataCommand),
     Export(ExportCommand),
+    Import(ImportCommand),
 }
 
 impl SubCommand {
@@ -122,6 +126,7 @@ impl SubCommand {
             // SubCommand::Attach(cmd) => cmd.build().await,
             SubCommand::Bench(cmd) => cmd.build(guard).await,
             SubCommand::Export(cmd) => cmd.build(guard).await,
+            SubCommand::Import(cmd) => cmd.build(guard).await,
         }
     }
 }

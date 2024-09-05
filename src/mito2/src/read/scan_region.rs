@@ -20,12 +20,12 @@ use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{debug, error, warn};
+use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datafusion::physical_plan::DisplayFormatType;
 use smallvec::SmallVec;
-use store_api::region_engine::RegionScannerRef;
+use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
 use tokio::sync::{mpsc, Mutex, Semaphore};
@@ -62,6 +62,7 @@ pub(crate) enum Scanner {
 
 impl Scanner {
     /// Returns a [SendableRecordBatchStream] to retrieve scan results from all partitions.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.build_stream(),
@@ -70,6 +71,7 @@ impl Scanner {
     }
 
     /// Returns a [RegionScanner] to scan the region.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
         match self {
             Scanner::Seq(seq_scan) => Ok(Box::new(seq_scan)),
@@ -284,9 +286,10 @@ impl ScanRegion {
             .collect();
 
         debug!(
-            "Scan region {}, request: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
+            "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
             self.version.metadata.region_id,
             self.request,
+            time_range,
             memtables.len(),
             files.len(),
             self.version.options.append_mode,
@@ -704,6 +707,37 @@ impl ScanInput {
         let rows_in_files: usize = self.files.iter().map(|f| f.num_rows()).sum();
         let rows_in_memtables: usize = self.memtables.iter().map(|m| m.stats().num_rows()).sum();
         rows_in_files + rows_in_memtables
+    }
+
+    /// Retrieves [`PartitionRange`] from memtable and files
+    pub(crate) fn partition_ranges(&self) -> Vec<PartitionRange> {
+        let mut id = 0;
+        let mut container = Vec::with_capacity(self.memtables.len() + self.files.len());
+
+        for memtable in &self.memtables {
+            let range = PartitionRange {
+                // TODO(ruihang): filter out empty memtables in the future.
+                start: memtable.stats().time_range().unwrap().0,
+                end: memtable.stats().time_range().unwrap().1,
+                num_rows: memtable.stats().num_rows(),
+                identifier: id,
+            };
+            id += 1;
+            container.push(range);
+        }
+
+        for file in &self.files {
+            let range = PartitionRange {
+                start: file.meta_ref().time_range.0,
+                end: file.meta_ref().time_range.1,
+                num_rows: file.meta_ref().num_rows as usize,
+                identifier: id,
+            };
+            id += 1;
+            container.push(range);
+        }
+
+        container
     }
 }
 

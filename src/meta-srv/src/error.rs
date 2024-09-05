@@ -16,7 +16,6 @@ use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::JoinError;
 use rand::distributions::WeightedError;
@@ -116,14 +115,6 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to operate region on peer:{}", peer))]
-    OperateRegion {
-        #[snafu(implicit)]
-        location: Location,
-        peer: Peer,
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to list catalogs"))]
     ListCatalogs {
         #[snafu(implicit)]
@@ -156,25 +147,6 @@ pub enum Error {
         error: JoinError,
     },
 
-    #[snafu(display("Failed to execute transaction: {}", msg))]
-    Txn {
-        #[snafu(implicit)]
-        location: Location,
-        msg: String,
-    },
-
-    #[snafu(display(
-        "Unexpected table_id changed, expected: {}, found: {}",
-        expected,
-        found,
-    ))]
-    TableIdChanged {
-        #[snafu(implicit)]
-        location: Location,
-        expected: u64,
-        found: u64,
-    },
-
     #[snafu(display(
         "Failed to request {}, required: {}, but only {} available",
         select_target,
@@ -187,14 +159,6 @@ pub enum Error {
         required: usize,
         available: usize,
         select_target: SelectTarget,
-    },
-
-    #[snafu(display("Failed to request Datanode {}", peer))]
-    RequestDatanode {
-        #[snafu(implicit)]
-        location: Location,
-        peer: Peer,
-        source: client::Error,
     },
 
     #[snafu(display("Failed to send shutdown signal"))]
@@ -255,34 +219,26 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Failed to start http server"))]
     StartHttp {
         #[snafu(implicit)]
         location: Location,
         source: servers::error::Error,
     },
+
     #[snafu(display("Failed to init export metrics task"))]
     InitExportMetricsTask {
         #[snafu(implicit)]
         location: Location,
         source: servers::error::Error,
     },
-    #[snafu(display("Failed to parse duration {}", duration))]
-    ParseDuration {
-        duration: String,
-        #[snafu(source)]
-        error: humantime::DurationError,
-    },
+
     #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
         addr: String,
         #[snafu(source)]
         error: std::net::AddrParseError,
-    },
-    #[snafu(display("Empty table name"))]
-    EmptyTableName {
-        #[snafu(implicit)]
-        location: Location,
     },
 
     #[snafu(display("Invalid lease key: {}", key))]
@@ -389,28 +345,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Cannot parse catalog value"))]
-    InvalidCatalogValue {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_catalog::error::Error,
-    },
-
-    #[snafu(display("Cannot parse full table name"))]
-    InvalidFullTableName {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_catalog::error::Error,
-    },
-
-    #[snafu(display("Failed to decode table route"))]
-    DecodeTableRoute {
-        #[snafu(source)]
-        error: prost::DecodeError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to find table route for {table_id}"))]
     TableRouteNotFound {
         table_id: TableId,
@@ -440,14 +374,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table route corrupted, key: {}, reason: {}", key, reason))]
-    CorruptedTableRoute {
-        key: String,
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Metasrv has no leader at this moment"))]
     NoLeader {
         #[snafu(implicit)]
@@ -457,16 +383,6 @@ pub enum Error {
     #[snafu(display("Table {} not found", name))]
     TableNotFound {
         name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display(
-        "Failed to move the value of {} because other clients caused a race condition",
-        key
-    ))]
-    MoveValue {
-        key: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -561,12 +477,6 @@ pub enum Error {
     LeaseGrant {
         #[snafu(source)]
         error: etcd_client::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Distributed lock is not configured"))]
-    LockNotConfig {
         #[snafu(implicit)]
         location: Location,
     },
@@ -688,13 +598,6 @@ pub enum Error {
         source: common_procedure::error::Error,
     },
 
-    #[snafu(display("Failed to find failover candidates for region: {}", failed_region))]
-    RegionFailoverCandidatesNotFound {
-        failed_region: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Received unexpected instruction reply, mailbox message: {}, reason: {}",
         mailbox_message,
@@ -722,20 +625,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to update table metadata, err_msg: {}", err_msg))]
-    UpdateTableMetadata {
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to convert table route"))]
-    TableRouteConversion {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_meta::error::Error,
-    },
-
     #[snafu(display("Failed to convert proto data"))]
     ConvertProtoData {
         #[snafu(implicit)]
@@ -761,20 +650,6 @@ pub enum Error {
 
     #[snafu(display("Keyvalue backend error"))]
     KvBackend {
-        source: common_meta::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to update table route"))]
-    UpdateTableRoute {
-        source: common_meta::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to get table info error"))]
-    GetFullTableInfo {
         source: common_meta::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -852,20 +727,6 @@ pub enum Error {
         source: Box<common_config::error::Error>,
     },
 
-    #[snafu(display("Failed to setup plugin"))]
-    SetupPlugin {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to start plugin"))]
-    StartPlugin {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
     #[cfg(feature = "pg_kvbackend")]
     #[snafu(display("Failed to execute via postgres"))]
     PostgresExecution {
@@ -904,7 +765,6 @@ impl ErrorExt for Error {
             | Error::TcpIncoming { .. }
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
-            | Error::DecodeTableRoute { .. }
             | Error::NoLeader { .. }
             | Error::CreateChannel { .. }
             | Error::BatchGet { .. }
@@ -915,7 +775,6 @@ impl ErrorExt for Error {
             | Error::Lock { .. }
             | Error::Unlock { .. }
             | Error::LeaseGrant { .. }
-            | Error::LockNotConfig { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
             | Error::PusherNotFound { .. }
@@ -926,15 +785,12 @@ impl ErrorExt for Error {
             | Error::RetryLater { .. }
             | Error::RetryLaterWithSource { .. }
             | Error::StartGrpc { .. }
-            | Error::UpdateTableMetadata { .. }
             | Error::NoEnoughAvailableNode { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
             | Error::WeightArray { .. }
             | Error::NotSetWeightArray { .. }
-            | Error::PeerUnavailable { .. }
-            | Error::SetupPlugin { .. }
-            | Error::StartPlugin { .. } => StatusCode::Internal,
+            | Error::PeerUnavailable { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -944,14 +800,12 @@ impl ErrorExt for Error {
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
             | Error::MissingRequestHeader { .. }
-            | Error::EmptyTableName { .. }
             | Error::InvalidLeaseKey { .. }
             | Error::InvalidStatKey { .. }
             | Error::InvalidInactiveRegionKey { .. }
             | Error::ParseNum { .. }
             | Error::ParseBool { .. }
             | Error::ParseAddr { .. }
-            | Error::ParseDuration { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
             | Error::InitExportMetricsTask { .. }
@@ -967,13 +821,9 @@ impl ErrorExt for Error {
             | Error::TableRouteNotFound { .. }
             | Error::TableInfoNotFound { .. }
             | Error::DatanodeTableNotFound { .. }
-            | Error::CorruptedTableRoute { .. }
-            | Error::MoveValue { .. }
             | Error::InvalidUtf8Value { .. }
             | Error::UnexpectedInstructionReply { .. }
             | Error::Unexpected { .. }
-            | Error::Txn { .. }
-            | Error::TableIdChanged { .. }
             | Error::RegionOpeningRace { .. }
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
@@ -982,9 +832,6 @@ impl ErrorExt for Error {
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
-            Error::RequestDatanode { source, .. } => source.status_code(),
-            Error::InvalidCatalogValue { source, .. }
-            | Error::InvalidFullTableName { source, .. } => source.status_code(),
             Error::SubmitProcedure { source, .. }
             | Error::WaitProcedure { source, .. }
             | Error::QueryProcedure { source, .. } => source.status_code(),
@@ -999,18 +846,13 @@ impl ErrorExt for Error {
             | Error::ListTables { source, .. } => source.status_code(),
             Error::StartTelemetryTask { source, .. } => source.status_code(),
 
-            Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
             Error::NextSequence { source, .. } => source.status_code(),
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
-            Error::OperateRegion { source, .. } => source.status_code(),
             Error::SubmitDdlTask { source, .. } => source.status_code(),
-            Error::TableRouteConversion { source, .. }
-            | Error::ConvertProtoData { source, .. }
+            Error::ConvertProtoData { source, .. }
             | Error::TableMetadataManager { source, .. }
             | Error::KvBackend { source, .. }
-            | Error::UpdateTableRoute { source, .. }
-            | Error::GetFullTableInfo { source, .. }
             | Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {

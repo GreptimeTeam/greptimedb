@@ -16,8 +16,7 @@
 
 use std::sync::Arc;
 
-use api::v1::region::compact_request;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
@@ -242,23 +241,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.handle_stalled_requests().await;
 
         // Schedules compaction.
-        if let Err(e) = self
-            .compaction_scheduler
-            .schedule_compaction(
-                region.region_id,
-                compact_request::Options::Regular(Default::default()),
-                &region.version_control,
-                &region.access_layer,
-                OptionOutputTx::none(),
-                &region.manifest_ctx,
-            )
-            .await
-        {
-            warn!(
-                "Failed to schedule compaction after flush, region: {}, err: {}",
-                region.region_id, e
-            );
-        }
+        self.schedule_compaction(&region).await;
 
         self.listener.on_flush_success(region_id);
     }

@@ -23,7 +23,7 @@ use table::metadata::TableId;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
-use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetaKey, TableMetaValue};
+use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::peer::Peer;
@@ -56,7 +56,7 @@ struct TableFlowKeyInner {
 #[derive(Debug, PartialEq)]
 pub struct TableFlowKey(FlowScoped<TableFlowKeyInner>);
 
-impl<'a> MetaKey<'a, TableFlowKey> for TableFlowKey {
+impl<'a> MetadataKey<'a, TableFlowKey> for TableFlowKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
@@ -129,7 +129,7 @@ impl TableFlowKeyInner {
     }
 }
 
-impl<'a> MetaKey<'a, TableFlowKeyInner> for TableFlowKeyInner {
+impl<'a> MetadataKey<'a, TableFlowKeyInner> for TableFlowKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!(
             "{TABLE_FLOW_KEY_PREFIX}/{}/{}/{}/{}",
@@ -140,7 +140,7 @@ impl<'a> MetaKey<'a, TableFlowKeyInner> for TableFlowKeyInner {
 
     fn from_bytes(bytes: &'a [u8]) -> Result<TableFlowKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
-            error::InvalidTableMetadataSnafu {
+            error::InvalidMetadataSnafu {
                 err_msg: format!(
                     "TableFlowKeyInner '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
@@ -151,7 +151,7 @@ impl<'a> MetaKey<'a, TableFlowKeyInner> for TableFlowKeyInner {
         let captures =
             TABLE_FLOW_KEY_PATTERN
                 .captures(key)
-                .context(error::InvalidTableMetadataSnafu {
+                .context(error::InvalidMetadataSnafu {
                     err_msg: format!("Invalid TableFlowKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above

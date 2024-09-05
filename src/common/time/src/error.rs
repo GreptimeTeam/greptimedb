@@ -46,13 +46,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse a string into Interval, raw string: {}", raw))]
-    ParseInterval {
-        raw: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Current timestamp overflow"))]
     TimestampOverflow {
         #[snafu(source)]
@@ -115,7 +108,6 @@ impl ErrorExt for Error {
             Error::InvalidDateStr { .. } | Error::ArithmeticOverflow { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::ParseInterval { .. } => StatusCode::InvalidArguments,
         }
     }
 

@@ -32,6 +32,7 @@ use tokio::time::{Duration, Instant};
 use crate::error;
 use crate::error::Result;
 use crate::frontend::FrontendOptions;
+use crate::metrics::{HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
 
 pub mod handler;
 
@@ -94,10 +95,16 @@ impl HeartbeatTask {
                         let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), resp);
                         if let Err(e) = capture_self.handle_response(ctx).await {
                             error!(e; "Error while handling heartbeat response");
+                            HEARTBEAT_RECV_COUNT
+                                .with_label_values(&["processing_error"])
+                                .inc();
+                        } else {
+                            HEARTBEAT_RECV_COUNT.with_label_values(&["success"]).inc();
                         }
                     }
                     Ok(None) => break,
                     Err(e) => {
+                        HEARTBEAT_RECV_COUNT.with_label_values(&["error"]).inc();
                         error!(e; "Occur error while reading heartbeat response");
                         capture_self
                             .start_with_retry(Duration::from_millis(retry_interval))
@@ -180,6 +187,7 @@ impl HeartbeatTask {
                         error!(e; "Failed to send heartbeat to metasrv");
                         break;
                     } else {
+                        HEARTBEAT_SENT_COUNT.inc();
                         debug!("Send a heartbeat request to metasrv, content: {:?}", req);
                     }
                 }

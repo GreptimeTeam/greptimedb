@@ -97,13 +97,6 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("System catalog is not valid: {}", msg))]
-    SystemCatalog {
-        msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Cannot find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
@@ -184,13 +177,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: common_query::error::Error,
-    },
-
-    #[snafu(display("Failed to perform metasrv operation"))]
-    Metasrv {
-        #[snafu(implicit)]
-        location: Location,
-        source: meta_client::error::Error,
     },
 
     #[snafu(display("Invalid table info in catalog"))]
@@ -288,8 +274,6 @@ impl ErrorExt for Error {
 
             Error::FlowInfoNotFound { .. } => StatusCode::FlowNotFound,
 
-            Error::SystemCatalog { .. } => StatusCode::StorageUnavailable,
-
             Error::UpgradeWeakCatalogManagerRef { .. } => StatusCode::Internal,
 
             Error::CreateRecordBatch { source, .. } => source.status_code(),
@@ -303,7 +287,6 @@ impl ErrorExt for Error {
 
             Error::CreateTable { source, .. } => source.status_code(),
 
-            Error::Metasrv { source, .. } => source.status_code(),
             Error::DecodePlan { source, .. } => source.status_code(),
             Error::InvalidTableInfoInCatalog { source, .. } => source.status_code(),
 
@@ -337,27 +320,6 @@ mod tests {
     use snafu::GenerateImplicitData;
 
     use super::*;
-
-    #[test]
-    pub fn test_error_status_code() {
-        assert_eq!(
-            StatusCode::TableAlreadyExists,
-            Error::TableExists {
-                table: "some_table".to_string(),
-                location: Location::generate(),
-            }
-            .status_code()
-        );
-
-        assert_eq!(
-            StatusCode::StorageUnavailable,
-            Error::SystemCatalog {
-                msg: String::default(),
-                location: Location::generate(),
-            }
-            .status_code()
-        );
-    }
 
     #[test]
     pub fn test_errors_to_datafusion_error() {

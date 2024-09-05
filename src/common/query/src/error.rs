@@ -127,12 +127,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Not expected to run ExecutionPlan more than once"))]
-    ExecuteRepeatedly {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("General DataFusion error"))]
     GeneralDataFusion {
         #[snafu(source)]
@@ -191,12 +185,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
-    },
-
-    #[snafu(display("Failed to join thread"))]
-    ThreadJoin {
-        #[snafu(implicit)]
-        location: Location,
     },
 
     #[snafu(display("Failed to decode logical plan: {source}"))]
@@ -289,9 +277,7 @@ impl ErrorExt for Error {
 
             Error::MissingTableMutationHandler { .. }
             | Error::MissingProcedureServiceHandler { .. }
-            | Error::MissingFlowServiceHandler { .. }
-            | Error::ExecuteRepeatedly { .. }
-            | Error::ThreadJoin { .. } => StatusCode::Unexpected,
+            | Error::MissingFlowServiceHandler { .. } => StatusCode::Unexpected,
 
             Error::UnsupportedInputDataType { .. }
             | Error::TypeCast { .. }
@@ -327,7 +313,6 @@ pub fn datafusion_status_code<T: ErrorExt + 'static>(
     match e {
         DataFusionError::Internal(_) => StatusCode::Internal,
         DataFusionError::NotImplemented(_) => StatusCode::Unsupported,
-        DataFusionError::ResourcesExhausted(_) => StatusCode::RuntimeResourcesExhausted,
         DataFusionError::Plan(_) => StatusCode::PlanQuery,
         DataFusionError::External(e) => {
             if let Some(ext) = (*e).downcast_ref::<T>() {

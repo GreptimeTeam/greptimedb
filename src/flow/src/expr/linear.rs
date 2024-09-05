@@ -16,13 +16,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use arrow::array::BooleanArray;
+use arrow::compute::FilterBuilder;
 use common_telemetry::debug;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
-use snafu::ensure;
+use datatypes::vectors::{BooleanVector, Helper};
+use itertools::Itertools;
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{Error, InvalidQuerySnafu};
-use crate::expr::error::{EvalError, InternalSnafu};
-use crate::expr::{InvalidArgumentSnafu, ScalarExpr};
+use crate::expr::error::{ArrowSnafu, DataTypeSnafu, EvalError, InternalSnafu, TypeMismatchSnafu};
+use crate::expr::{Batch, InvalidArgumentSnafu, ScalarExpr};
 use crate::repr::{self, value_to_internal_ts, Diff, Row};
 
 /// A compound operator that can be applied row-by-row.
@@ -473,6 +478,85 @@ impl SafeMfpPlan {
         self.mfp.permute(map, new_arity)
     }
 
+    /// similar to [`MapFilterProject::evaluate_into`], just in batch, and rows that don't pass the predicates are not included in the output.
+    ///
+    /// so it's not guaranteed that the output will have the same number of rows as the input.
+    pub fn eval_batch_into(&self, batch: &mut Batch) -> Result<Batch, EvalError> {
+        ensure!(
+            batch.column_count() == self.mfp.input_arity,
+            InvalidArgumentSnafu {
+                reason: format!(
+                    "batch column length {} is not equal to input_arity {}",
+                    batch.column_count(),
+                    self.mfp.input_arity
+                ),
+            }
+        );
+
+        let passed_predicates = self.eval_batch_inner(batch)?;
+        let filter = FilterBuilder::new(passed_predicates.as_boolean_array());
+        let pred = filter.build();
+        let mut result = vec![];
+        for col in batch.batch() {
+            let filtered = pred
+                .filter(col.to_arrow_array().as_ref())
+                .context(ArrowSnafu {
+                    context: format!("failed to filter column for mfp operator {:?}", self),
+                })?;
+            result.push(Helper::try_into_vector(filtered).context(DataTypeSnafu {
+                msg: "Failed to convert arrow array to vector",
+            })?);
+        }
+        let projected = self
+            .mfp
+            .projection
+            .iter()
+            .map(|c| result[*c].clone())
+            .collect_vec();
+        let row_count = pred.count();
+
+        Batch::try_new(projected, row_count)
+    }
+
+    /// similar to [`MapFilterProject::evaluate_into`], just in batch.
+    pub fn eval_batch_inner(&self, batch: &mut Batch) -> Result<BooleanVector, EvalError> {
+        // mark the columns that have been evaluated and appended to the `batch`
+        let mut expression = 0;
+        // preds default to true and will be updated as we evaluate each predicate
+        let mut all_preds = BooleanVector::from(vec![Some(true); batch.row_count()]);
+
+        // to compute predicate, need to first compute all expressions used in predicates
+        for (support, predicate) in self.mfp.predicates.iter() {
+            while self.mfp.input_arity + expression < *support {
+                let expr_eval = self.mfp.expressions[expression].eval_batch(batch)?;
+                batch.batch_mut().push(expr_eval);
+                expression += 1;
+            }
+            let pred_vec = predicate.eval_batch(batch)?;
+            let pred_arr = pred_vec.to_arrow_array();
+            let pred_arr = pred_arr.as_any().downcast_ref::<BooleanArray>().context({
+                TypeMismatchSnafu {
+                    expected: ConcreteDataType::boolean_datatype(),
+                    actual: pred_vec.data_type(),
+                }
+            })?;
+            let all_arr = all_preds.as_boolean_array();
+            let res_arr = arrow::compute::and(all_arr, pred_arr).context(ArrowSnafu {
+                context: format!("failed to compute predicate for mfp operator {:?}", self),
+            })?;
+            all_preds = BooleanVector::from(res_arr);
+        }
+
+        // while evaluated expressions are less than total expressions, keep evaluating
+        while expression < self.mfp.expressions.len() {
+            let expr_eval = self.mfp.expressions[expression].eval_batch(batch)?;
+            batch.batch_mut().push(expr_eval);
+            expression += 1;
+        }
+
+        Ok(all_preds)
+    }
+
     /// Evaluates the linear operator on a supplied list of datums.
     ///
     /// The arguments are the initial datums associated with the row,
@@ -735,10 +819,15 @@ impl MfpPlan {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use datatypes::data_type::ConcreteDataType;
+    use datatypes::vectors::{Int32Vector, Int64Vector};
+    use pretty_assertions::assert_eq;
 
     use super::*;
     use crate::expr::{BinaryFunc, UnaryFunc, UnmaterializableFunc};
+
     #[test]
     fn test_mfp_with_time() {
         use crate::expr::func::BinaryFunc;
@@ -844,6 +933,21 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(ret, Row::pack(vec![Value::from(false), Value::from(true)]));
+
+        // batch mode
+        let mut batch = Batch::try_from_rows(vec![Row::from(vec![
+            Value::from(4),
+            Value::from(2),
+            Value::from(3),
+        ])])
+        .unwrap();
+        let ret = safe_mfp.eval_batch_into(&mut batch).unwrap();
+
+        assert_eq!(
+            ret,
+            Batch::try_from_rows(vec![Row::from(vec![Value::from(false), Value::from(true)])])
+                .unwrap()
+        );
     }
 
     #[test]
@@ -865,7 +969,7 @@ mod test {
                 BinaryFunc::Gt,
             )])
             .unwrap();
-        let mut input1 = vec![
+        let input1 = vec![
             Value::from(4),
             Value::from(2),
             Value::from(3),
@@ -873,19 +977,34 @@ mod test {
         ];
         let safe_mfp = SafeMfpPlan { mfp };
         let ret = safe_mfp
-            .evaluate_into(&mut input1, &mut Row::empty())
+            .evaluate_into(&mut input1.clone(), &mut Row::empty())
             .unwrap();
         assert_eq!(ret, None);
-        let mut input2 = vec![
+
+        let mut input1_batch = Batch::try_from_rows(vec![Row::new(input1)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input1_batch).unwrap();
+        assert_eq!(
+            ret_batch,
+            Batch::try_new(vec![Arc::new(Int32Vector::from_vec(vec![]))], 0).unwrap()
+        );
+
+        let input2 = vec![
             Value::from(5),
             Value::from(2),
             Value::from(4),
             Value::from("abc"),
         ];
         let ret = safe_mfp
-            .evaluate_into(&mut input2, &mut Row::empty())
+            .evaluate_into(&mut input2.clone(), &mut Row::empty())
             .unwrap();
         assert_eq!(ret, Some(Row::pack(vec![Value::from(11)])));
+
+        let mut input2_batch = Batch::try_from_rows(vec![Row::new(input2)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input2_batch).unwrap();
+        assert_eq!(
+            ret_batch,
+            Batch::try_new(vec![Arc::new(Int32Vector::from_vec(vec![11]))], 1).unwrap()
+        );
     }
 
     #[test]
@@ -923,27 +1042,50 @@ mod test {
             .unwrap()
             .project([0, 1, 2])
             .unwrap();
-        let mut input1 = vec![
+        let input1 = vec![
             Value::from(4i64),
             Value::from(2),
             Value::from(3),
             Value::from(53),
         ];
         let safe_mfp = SafeMfpPlan { mfp };
-        let ret = safe_mfp.evaluate_into(&mut input1, &mut Row::empty());
+        let ret = safe_mfp.evaluate_into(&mut input1.clone(), &mut Row::empty());
         assert!(matches!(ret, Err(EvalError::InvalidArgument { .. })));
+
+        let mut input1_batch = Batch::try_from_rows(vec![Row::new(input1)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input1_batch);
+        assert!(matches!(ret_batch, Err(EvalError::InvalidArgument { .. })));
 
         let input2 = vec![Value::from(4i64), Value::from(2), Value::from(3)];
         let ret = safe_mfp
             .evaluate_into(&mut input2.clone(), &mut Row::empty())
             .unwrap();
-        assert_eq!(ret, Some(Row::new(input2)));
+        assert_eq!(ret, Some(Row::new(input2.clone())));
 
-        let mut input3 = vec![Value::from(4i64), Value::from(5), Value::from(2)];
+        let input2_batch = Batch::try_from_rows(vec![Row::new(input2)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input2_batch.clone()).unwrap();
+        assert_eq!(ret_batch, input2_batch);
+
+        let input3 = vec![Value::from(4i64), Value::from(5), Value::from(2)];
         let ret = safe_mfp
-            .evaluate_into(&mut input3, &mut Row::empty())
+            .evaluate_into(&mut input3.clone(), &mut Row::empty())
             .unwrap();
         assert_eq!(ret, None);
+
+        let input3_batch = Batch::try_from_rows(vec![Row::new(input3)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input3_batch.clone()).unwrap();
+        assert_eq!(
+            ret_batch,
+            Batch::try_new(
+                vec![
+                    Arc::new(Int64Vector::from_vec(Default::default())),
+                    Arc::new(Int32Vector::from_vec(Default::default())),
+                    Arc::new(Int32Vector::from_vec(Default::default()))
+                ],
+                0
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -961,10 +1103,18 @@ mod test {
             .unwrap()
             .project(vec![3])
             .unwrap();
-        let mut input1 = vec![Value::from(2), Value::from(3), Value::from(4)];
+        let input1 = vec![Value::from(2), Value::from(3), Value::from(4)];
         let safe_mfp = SafeMfpPlan { mfp };
-        let ret = safe_mfp.evaluate_into(&mut input1, &mut Row::empty());
+        let ret = safe_mfp.evaluate_into(&mut input1.clone(), &mut Row::empty());
         assert_eq!(ret.unwrap(), Some(Row::new(vec![Value::from(false)])));
+
+        let mut input1_batch = Batch::try_from_rows(vec![Row::new(input1)]).unwrap();
+        let ret_batch = safe_mfp.eval_batch_into(&mut input1_batch).unwrap();
+
+        assert_eq!(
+            ret_batch,
+            Batch::try_new(vec![Arc::new(BooleanVector::from(vec![false]))], 1).unwrap()
+        );
     }
     #[test]
     fn test_mfp_chore() {

@@ -136,12 +136,6 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to found client"))]
-    ClientNotFount {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to resolve Kafka broker endpoint."))]
     ResolveKafkaEndpoint { source: common_wal::error::Error },
 
@@ -159,18 +153,6 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to get a Kafka topic client, topic: {}, source: {}",
-        topic,
-        error
-    ))]
-    GetClient {
-        topic: String,
-        #[snafu(implicit)]
-        location: Location,
-        error: String,
-    },
-
     #[snafu(display("Missing required key in a record"))]
     MissingKey {
         #[snafu(implicit)]
@@ -179,12 +161,6 @@ pub enum Error {
 
     #[snafu(display("Missing required value in a record"))]
     MissingValue {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Cannot build a record from empty entries"))]
-    EmptyEntries {
         #[snafu(implicit)]
         location: Location,
     },

@@ -122,6 +122,11 @@ pub struct MitoConfig {
 
     /// Memtable config
     pub memtable: MemtableConfig,
+
+    /// Minimum time interval between two compactions.
+    /// To align with the old behavior, the default value is 0 (no restrictions).
+    #[serde(with = "humantime_serde")]
+    pub min_compaction_interval: Duration,
 }
 
 impl Default for MitoConfig {
@@ -152,6 +157,7 @@ impl Default for MitoConfig {
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),
             memtable: MemtableConfig::default(),
+            min_compaction_interval: Duration::from_secs(0),
         };
 
         // Adjust buffer and cache size according to system memory if we can.

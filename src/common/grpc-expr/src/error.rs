@@ -64,12 +64,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid column proto: {}", err_msg))]
-    InvalidColumnProto {
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
     #[snafu(display("Failed to create vector"))]
     CreateVector {
         #[snafu(implicit)]
@@ -137,7 +131,6 @@ impl ErrorExt for Error {
             Error::DuplicatedTimestampColumn { .. }
             | Error::DuplicatedColumnName { .. }
             | Error::MissingTimestampColumn { .. } => StatusCode::InvalidArguments,
-            Error::InvalidColumnProto { .. } => StatusCode::InvalidArguments,
             Error::CreateVector { .. } => StatusCode::InvalidArguments,
             Error::MissingField { .. } => StatusCode::InvalidArguments,
             Error::InvalidColumnDef { source, .. } => source.status_code(),

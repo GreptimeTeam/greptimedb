@@ -24,12 +24,13 @@ use futures::StreamExt;
 use opensrv_mysql::{
     plain_run_with_options, secure_run_with_options, AsyncMysqlIntermediary, IntermediaryOptions,
 };
+use snafu::ensure;
 use tokio;
 use tokio::io::BufWriter;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::ServerConfig;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, TlsRequiredSnafu};
 use crate::mysql::handler::MysqlInstanceShim;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
@@ -191,11 +192,12 @@ impl MysqlServer {
             AsyncMysqlIntermediary::init_before_ssl(&mut shim, &mut r, &mut w, &spawn_config.tls())
                 .await?;
 
-        if spawn_config.force_tls && !client_tls {
-            return Err(Error::TlsRequired {
-                server: "mysql".to_owned(),
-            });
-        }
+        ensure!(
+            !spawn_config.force_tls || client_tls,
+            TlsRequiredSnafu {
+                server: "mysql".to_owned()
+            }
+        );
 
         match spawn_config.tls() {
             Some(tls_conf) if client_tls => {

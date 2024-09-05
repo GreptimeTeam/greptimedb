@@ -49,7 +49,7 @@ use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
-use crate::time_provider::{StdTimeProvider, TimeProviderRef};
+use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
 
@@ -66,13 +66,15 @@ pub(crate) struct RegionOpener {
     skip_wal_replay: bool,
     puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
-    time_provider: Option<TimeProviderRef>,
+    time_provider: TimeProviderRef,
     stats: ManifestStats,
     wal_entry_reader: Option<Box<dyn WalEntryReader>>,
 }
 
 impl RegionOpener {
     /// Returns a new opener.
+    // TODO(LFC): Reduce the number of arguments.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         region_id: RegionId,
         region_dir: &str,
@@ -81,6 +83,7 @@ impl RegionOpener {
         purge_scheduler: SchedulerRef,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
+        time_provider: TimeProviderRef,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
@@ -94,7 +97,7 @@ impl RegionOpener {
             skip_wal_replay: false,
             puffin_manager_factory,
             intermediate_manager,
-            time_provider: None,
+            time_provider,
             stats: Default::default(),
             wal_entry_reader: None,
         }
@@ -223,9 +226,7 @@ impl RegionOpener {
             self.puffin_manager_factory,
             self.intermediate_manager,
         ));
-        let time_provider = self
-            .time_provider
-            .unwrap_or_else(|| Arc::new(StdTimeProvider));
+        let now = self.time_provider.current_time_millis();
 
         Ok(MitoRegion {
             region_id,
@@ -242,8 +243,9 @@ impl RegionOpener {
                 self.cache_manager,
             )),
             provider,
-            last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
-            time_provider,
+            last_flush_millis: AtomicI64::new(now),
+            last_compaction_millis: AtomicI64::new(now),
+            time_provider: self.time_provider.clone(),
             memtable_builder,
             stats: self.stats,
         })
@@ -377,10 +379,7 @@ impl RegionOpener {
         } else {
             info!("Skip the WAL replay for region: {}", region_id);
         }
-        let time_provider = self
-            .time_provider
-            .clone()
-            .unwrap_or_else(|| Arc::new(StdTimeProvider));
+        let now = self.time_provider.current_time_millis();
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -393,8 +392,9 @@ impl RegionOpener {
             )),
             file_purger,
             provider: provider.clone(),
-            last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
-            time_provider,
+            last_flush_millis: AtomicI64::new(now),
+            last_compaction_millis: AtomicI64::new(now),
+            time_provider: self.time_provider.clone(),
             memtable_builder,
             stats: self.stats.clone(),
         };

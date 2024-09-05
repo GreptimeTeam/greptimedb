@@ -14,23 +14,247 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::DataType;
 use datatypes::value::{ListValue, Value};
+use datatypes::vectors::NullVector;
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::compute::render::{Context, SubgraphArg};
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
-use crate::error::{Error, PlanSnafu};
+use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
 use crate::expr::error::{DataAlreadyExpiredSnafu, DataTypeSnafu, InternalSnafu};
-use crate::expr::{EvalError, ScalarExpr};
+use crate::expr::{Batch, EvalError, ScalarExpr};
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, KeyExpiryManager};
 
 impl<'referred, 'df> Context<'referred, 'df> {
+    const REDUCE_BATCH: &'static str = "reduce_batch";
+    /// Like `render_reduce`, but for batch mode, and only barebone implementation
+    /// no support for distinct aggregation for now
+    // There is a false positive in using `Vec<ScalarExpr>` as key due to `Value` have `bytes` variant
+    #[allow(clippy::mutable_key_type)]
+    pub fn render_reduce_batch(
+        &mut self,
+        input: Box<TypedPlan>,
+        key_val_plan: &KeyValPlan,
+        reduce_plan: &ReducePlan,
+        output_type: &RelationType,
+    ) -> Result<CollectionBundle<Batch>, Error> {
+        let accum_plan = if let ReducePlan::Accumulable(accum_plan) = reduce_plan {
+            if !accum_plan.distinct_aggrs.is_empty() {
+                NotImplementedSnafu {
+                    reason: "Distinct aggregation is not supported in batch mode",
+                }
+                .fail()?
+            }
+            accum_plan.clone()
+        } else {
+            NotImplementedSnafu {
+                reason: "Only accumulable reduce plan is supported in batch mode",
+            }
+            .fail()?
+        };
+
+        let input = self.render_plan_batch(*input)?;
+
+        // first assembly key&val to separate key and val columns(since this is batch mode)
+        // Then stream kvs through a reduce operator
+
+        // the output is concat from key and val
+        let output_key_arity = key_val_plan.key_plan.output_arity();
+
+        // TODO(discord9): config global expire time from self
+        let arrange_handler = self.compute_state.new_arrange(None);
+
+        if let (Some(time_index), Some(expire_after)) =
+            (output_type.time_index, self.compute_state.expire_after())
+        {
+            let expire_man =
+                KeyExpiryManager::new(Some(expire_after), Some(ScalarExpr::Column(time_index)));
+            arrange_handler.write().set_expire_state(expire_man);
+        }
+
+        // reduce need full arrangement to be able to query all keys
+        let arrange_handler_inner = arrange_handler.clone_full_arrange().context(PlanSnafu {
+            reason: "No write is expected at this point",
+        })?;
+        let key_val_plan = key_val_plan.clone();
+
+        let now = self.compute_state.current_time_ref();
+
+        let err_collector = self.err_collector.clone();
+
+        // TODO(discord9): better way to schedule future run
+        let scheduler = self.compute_state.get_scheduler();
+
+        let (out_send_port, out_recv_port) =
+            self.df.make_edge::<_, Toff<Batch>>(Self::REDUCE_BATCH);
+
+        let subgraph =
+            self.df.add_subgraph_in_out(
+                Self::REDUCE_BATCH,
+                input.collection.into_inner(),
+                out_send_port,
+                move |_ctx, recv, send| {
+                    let now = *(now.borrow());
+                    let arrange = arrange_handler_inner.clone();
+                    // mfp only need to passively receive updates from recvs
+                    let src_data = recv
+                        .take_inner()
+                        .into_iter()
+                        .flat_map(|v| v.into_iter())
+                        .collect_vec();
+
+                    let mut key_to_many_vals = BTreeMap::<Row, Batch>::new();
+                    for batch in src_data {
+                        err_collector.run(|| {
+                            let (key_batch, val_batch) =
+                                batch_split_by_key_val(&batch, &key_val_plan, &err_collector);
+                            ensure!(
+                                key_batch.row_count() == val_batch.row_count(),
+                                InternalSnafu {
+                                    reason: format!(
+                                        "Key and val batch should have the same row count, found {} and {}", 
+                                        key_batch.row_count(),
+                                        val_batch.row_count()
+                                    )
+                                }
+                            );
+
+                            for row_idx in 0..key_batch.row_count() {
+                                let key_row = key_batch.get_row(row_idx).unwrap();
+                                let val_row = val_batch.slice(row_idx, 1)?;
+                                let val_batch =
+                                    key_to_many_vals.entry(Row::new(key_row)).or_default();
+                                val_batch.append_batch(val_row)?;
+                            }
+
+                            Ok(())
+                        });
+                    }
+
+                    // write lock the arrange for the rest of the function body
+                    // to prevent wired race condition
+                    let mut arrange = arrange.write();
+                    let mut all_arrange_updates = Vec::with_capacity(key_to_many_vals.len());
+                    let mut all_output_rows = Vec::with_capacity(key_to_many_vals.len());
+
+                    for (key, val_batch) in key_to_many_vals {
+                        err_collector.run(|| -> Result<(), _> {
+                            let (accums, _, _) = arrange.get(now, &key).unwrap_or_default();
+                            let accum_list = from_accum_values_to_live_accums(
+                                accums.unpack(),
+                                accum_plan.simple_aggrs.len(),
+                            )?;
+
+                            let mut accum_output = AccumOutput::new();
+                            for AggrWithIndex {
+                                expr,
+                                input_idx,
+                                output_idx,
+                            } in accum_plan.simple_aggrs.iter()
+                            {
+                                let cur_old_accum = accum_list.get(*output_idx).cloned().unwrap_or_default();
+                                // if batch is empty, input null instead
+                                let cur_input = val_batch.batch().get(*input_idx).cloned().unwrap_or_else(||Arc::new(NullVector::new(val_batch.row_count())));
+
+                                let (output, new_accum) =
+                                    expr.func.eval_batch(cur_old_accum, cur_input, None)?;
+
+                                accum_output.insert_accum(*output_idx, new_accum);
+                                accum_output.insert_output(*output_idx, output);
+                            }
+
+                            let (new_accums, res_val_row) = accum_output.into_accum_output()?;
+
+                            let arrange_update = ((key.clone(), Row::new(new_accums)), now, 1);
+                            all_arrange_updates.push(arrange_update);
+
+                            let mut key_val = key;
+                            key_val.extend(res_val_row);
+                            all_output_rows.push((key_val, now, 1));
+
+                            Ok(())
+                        });
+                    }
+
+                    err_collector.run(|| {
+                        arrange.apply_updates(now, all_arrange_updates)?;
+                        arrange.compact_to(now)
+                    });
+
+                    // this output part is not supposed to be resource intensive
+                    // (because for every batch there wouldn't usually be as many output row?), 
+                    // so we can do some costly operation here
+                    let output_types = all_output_rows.first().map(|(row, _, _)| {
+                        row.iter()
+                            .map(|v| v.data_type())
+                            .collect::<Vec<ConcreteDataType>>()
+                    });
+
+                    if let Some(output_types) = output_types {
+                        err_collector.run(|| {
+                            let column_cnt = output_types.len();
+                            let row_cnt = all_output_rows.len();
+
+                            let mut output_builder = output_types
+                                .into_iter()
+                                .map(|t| t.create_mutable_vector(row_cnt))
+                                .collect_vec();
+
+                            for (row, _, _) in all_output_rows {
+                                for (i, v) in row.into_iter().enumerate() {
+                                    output_builder
+                                    .get_mut(i)
+                                    .context(InternalSnafu{
+                                        reason: format!(
+                                            "Output builder should have the same length as the row, expected at most {} but got {}", 
+                                            column_cnt-1,
+                                            i
+                                        )
+                                    })?
+                                    .try_push_value_ref(v.as_value_ref())
+                                    .context(DataTypeSnafu {
+                                        msg: "Failed to push value",
+                                    })?;
+                                }
+                            }
+
+                            let output_columns = output_builder
+                                .into_iter()
+                                .map(|mut b| b.to_vector())
+                                .collect_vec();
+
+                            let output_batch = Batch::try_new(output_columns, row_cnt)?;
+                            send.give(vec![output_batch]);
+
+                            Ok(())
+                        });
+                    }
+                },
+            );
+
+        scheduler.set_cur_subgraph(subgraph);
+
+        // by default the key of output arrange
+        let arranged = BTreeMap::from([(
+            (0..output_key_arity).map(ScalarExpr::Column).collect_vec(),
+            Arranged::new(arrange_handler),
+        )]);
+
+        let bundle = CollectionBundle {
+            collection: Collection::from_port(out_recv_port),
+            arranged,
+        };
+        Ok(bundle)
+    }
+
     const REDUCE: &'static str = "reduce";
     /// render `Plan::Reduce` into executable dataflow
     // There is a false positive in using `Vec<ScalarExpr>` as key due to `Value` have `bytes` variant
@@ -151,6 +375,18 @@ impl<'referred, 'df> Context<'referred, 'df> {
     }
 }
 
+fn from_accum_values_to_live_accums(
+    accums: Vec<Value>,
+    len: usize,
+) -> Result<Vec<Vec<Value>>, EvalError> {
+    let accum_ranges = from_val_to_slice_idx(accums.first().cloned(), len)?;
+    let mut accum_list = vec![];
+    for range in accum_ranges.iter() {
+        accum_list.push(accums.get(range.clone()).unwrap_or_default().to_vec());
+    }
+    Ok(accum_list)
+}
+
 /// All arrange(aka state) used in reduce operator
 pub struct ReduceArrange {
     /// The output arrange of reduce operator
@@ -160,33 +396,40 @@ pub struct ReduceArrange {
     distinct_input: Option<Vec<ArrangeHandler>>,
 }
 
-/// split a row into key and val by evaluate the key and val plan
-fn split_row_to_key_val(
-    row: Row,
-    sys_time: repr::Timestamp,
-    diff: repr::Diff,
+fn batch_split_by_key_val(
+    batch: &Batch,
     key_val_plan: &KeyValPlan,
-    row_buf: &mut Row,
-) -> Result<Option<KeyValDiffRow>, EvalError> {
-    if let Some(key) = key_val_plan
-        .key_plan
-        .evaluate_into(&mut row.inner.clone(), row_buf)?
-    {
-        // val_plan is not supported to carry any filter predicate,
-        let val = key_val_plan
-            .val_plan
-            .evaluate_into(&mut row.inner.clone(), row_buf)?
-            .context(InternalSnafu {
-                reason: "val_plan should not contain any filter predicate",
-            })?;
-        Ok(Some(((key, val), sys_time, diff)))
-    } else {
-        Ok(None)
+    err_collector: &ErrCollector,
+) -> (Batch, Batch) {
+    let row_count = batch.row_count();
+    let mut key_batch = Batch::empty();
+    let mut val_batch = Batch::empty();
+
+    err_collector.run(|| {
+        if key_val_plan.key_plan.output_arity() != 0 {
+            key_batch = key_val_plan.key_plan.eval_batch_into(&mut batch.clone())?;
+        }
+
+        if key_val_plan.val_plan.output_arity() != 0 {
+            val_batch = key_val_plan.val_plan.eval_batch_into(&mut batch.clone())?;
+        }
+        Ok(())
+    });
+
+    // deal with empty key or val
+    if key_batch.row_count() == 0 && key_batch.column_count() == 0 {
+        key_batch.set_row_count(row_count);
     }
+
+    if val_batch.row_count() == 0 && val_batch.column_count() == 0 {
+        val_batch.set_row_count(row_count);
+    }
+
+    (key_batch, val_batch)
 }
 
 /// split a row into key and val by evaluate the key and val plan
-fn batch_split_rows_to_key_val(
+fn split_rows_to_key_val(
     rows: impl IntoIterator<Item = DiffRow>,
     key_val_plan: KeyValPlan,
     err_collector: ErrCollector,
@@ -235,7 +478,7 @@ fn reduce_subgraph(
         send,
     }: SubgraphArg,
 ) {
-    let key_val = batch_split_rows_to_key_val(data, key_val_plan.clone(), err_collector.clone());
+    let key_val = split_rows_to_key_val(data, key_val_plan.clone(), err_collector.clone());
     // from here for distinct reduce and accum reduce, things are drastically different
     // for distinct reduce the arrange store the output,
     // but for accum reduce the arrange store the accum state, and output is
@@ -1125,6 +1368,105 @@ mod test {
             ],
         )]);
         run_and_check(&mut state, &mut df, 6..7, expected, output);
+    }
+
+    /// Batch Mode Reduce Evaluation
+    /// SELECT SUM(col) FROM table
+    ///
+    /// table schema:
+    /// | name | type  |
+    /// |------|-------|
+    /// | col  | Int64 |
+    #[test]
+    fn test_basic_batch_reduce_accum() {
+        let mut df = Hydroflow::new();
+        let mut state = DataflowState::default();
+        let now = state.current_time_ref();
+        let mut ctx = harness_test_ctx(&mut df, &mut state);
+
+        let rows = vec![
+            (Row::new(vec![1i64.into()]), 1, 1),
+            (Row::new(vec![2i64.into()]), 2, 1),
+            (Row::new(vec![3i64.into()]), 3, 1),
+            (Row::new(vec![1i64.into()]), 4, 1),
+            (Row::new(vec![2i64.into()]), 5, 1),
+            (Row::new(vec![3i64.into()]), 6, 1),
+        ];
+        let input_plan = Plan::Constant { rows: rows.clone() };
+
+        let typ = RelationType::new(vec![ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
+        let key_val_plan = KeyValPlan {
+            key_plan: MapFilterProject::new(1).project([]).unwrap().into_safe(),
+            val_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
+        };
+
+        let simple_aggrs = vec![AggrWithIndex::new(
+            AggregateExpr {
+                func: AggregateFunc::SumInt64,
+                expr: ScalarExpr::Column(0),
+                distinct: false,
+            },
+            0,
+            0,
+        )];
+        let accum_plan = AccumulablePlan {
+            full_aggrs: vec![AggregateExpr {
+                func: AggregateFunc::SumInt64,
+                expr: ScalarExpr::Column(0),
+                distinct: false,
+            }],
+            simple_aggrs,
+            distinct_aggrs: vec![],
+        };
+
+        let reduce_plan = ReducePlan::Accumulable(accum_plan);
+        let bundle = ctx
+            .render_reduce_batch(
+                Box::new(input_plan.with_types(typ.into_unnamed())),
+                &key_val_plan,
+                &reduce_plan,
+                &RelationType::empty(),
+            )
+            .unwrap();
+
+        {
+            let now_inner = now.clone();
+            let expected = BTreeMap::<i64, Vec<i64>>::from([
+                (1, vec![1i64]),
+                (2, vec![3i64]),
+                (3, vec![6i64]),
+                (4, vec![7i64]),
+                (5, vec![9i64]),
+                (6, vec![12i64]),
+            ]);
+            let collection = bundle.collection;
+            ctx.df
+                .add_subgraph_sink("test_sink", collection.into_inner(), move |_ctx, recv| {
+                    let now = *now_inner.borrow();
+                    let data = recv.take_inner();
+                    let res = data.into_iter().flat_map(|v| v.into_iter()).collect_vec();
+
+                    if let Some(expected) = expected.get(&now) {
+                        let batch = expected.iter().map(|v| Value::from(*v)).collect_vec();
+                        let batch = Batch::try_from_rows(vec![batch.into()]).unwrap();
+                        assert_eq!(res.first(), Some(&batch));
+                    }
+                });
+            drop(ctx);
+
+            for now in 1..7 {
+                state.set_current_ts(now);
+                state.run_available_with_schedule(&mut df);
+                if !state.get_err_collector().is_empty() {
+                    panic!(
+                        "Errors occur: {:?}",
+                        state.get_err_collector().get_all_blocking()
+                    )
+                }
+            }
+        }
     }
 
     /// SELECT SUM(col) FROM table

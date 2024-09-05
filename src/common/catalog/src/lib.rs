@@ -15,7 +15,6 @@
 use consts::DEFAULT_CATALOG_NAME;
 
 pub mod consts;
-pub mod error;
 
 #[inline]
 pub fn format_schema_name(catalog: &str, schema: &str) -> String {

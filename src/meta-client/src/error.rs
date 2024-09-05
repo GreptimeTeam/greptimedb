@@ -33,12 +33,6 @@ pub enum Error {
     #[snafu(display("{}", msg))]
     MetaServer { code: StatusCode, msg: String },
 
-    #[snafu(display("Failed to ask leader from all endpoints"))]
-    AskLeader {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("No leader, should ask leader first"))]
     NoLeader {
         #[snafu(implicit)]
@@ -116,7 +110,6 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::IllegalGrpcClientState { .. }
-            | Error::AskLeader { .. }
             | Error::NoLeader { .. }
             | Error::AskLeaderTimeout { .. }
             | Error::NotStarted { .. }

@@ -106,7 +106,7 @@ pub enum Error {
     },
 
     #[snafu(display("Error while walking directory"))]
-    WalkDirError {
+    WalkDir {
         #[snafu(source)]
         error: async_walkdir::Error,
         #[snafu(implicit)]
@@ -286,7 +286,7 @@ impl ErrorExt for Error {
             | BlobNotFound { .. }
             | BlobIndexOutOfBound { .. }
             | FileKeyNotMatch { .. }
-            | WalkDirError { .. } => StatusCode::Unexpected,
+            | WalkDir { .. } => StatusCode::Unexpected,
 
             UnsupportedCompression { .. } | UnsupportedDecompression { .. } => {
                 StatusCode::Unsupported
