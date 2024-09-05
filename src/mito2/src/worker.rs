@@ -958,6 +958,13 @@ impl WorkerListener {
             listener.on_file_cache_filled(_file_id);
         }
     }
+
+    pub(crate) fn on_compaction_scheduled(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_scheduled(_region_id);
+        }
+    }
 }
 
 #[cfg(test)]

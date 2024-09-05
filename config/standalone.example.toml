@@ -493,6 +493,10 @@ parallel_scan_channel_size = 32
 ## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
 
+## Minimum time interval between two compactions.
+## To align with the old behavior, the default value is 0 (no restrictions).
+min_compaction_interval = "0m"
+
 ## The options for index in Mito engine.
 [region_engine.mito.index]
 
@@ -589,7 +593,7 @@ fork_dictionary_bytes = "1GiB"
 
 ## The logging options.
 [logging]
-## The directory to store the log files.
+## The directory to store the log files. If set to empty, logs will not be written to files.
 dir = "/tmp/greptimedb/logs"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
@@ -604,6 +608,9 @@ otlp_endpoint = "http://localhost:4317"
 
 ## Whether to append logs to stdout.
 append_stdout = true
+
+## The log format. Can be `text`/`json`.
+log_format = "text"
 
 ## The percentage of tracing will be sampled and exported.
 ## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.

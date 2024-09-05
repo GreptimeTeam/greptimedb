@@ -129,6 +129,7 @@
 | `region_engine.mito.scan_parallelism` | Integer | `0` | Parallelism to scan a region (default: 1/4 of cpu cores).<br/>- `0`: using the default value (1/4 of cpu cores).<br/>- `1`: scan in current thread.<br/>- `n`: scan in parallelism n. |
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
+| `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
 | `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
@@ -152,11 +153,12 @@
 | `region_engine.mito.memtable.fork_dictionary_bytes` | String | `1GiB` | Max dictionary bytes.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
+| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
@@ -237,11 +239,12 @@
 | `datanode.client.connect_timeout` | String | `10s` | -- |
 | `datanode.client.tcp_nodelay` | Bool | `true` | -- |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
+| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
@@ -301,11 +304,12 @@
 | `wal.backoff_base` | Integer | `2` | Exponential backoff rate, i.e. next backoff = base * current backoff. |
 | `wal.backoff_deadline` | String | `5mins` | Stop reconnecting if the total wait time reaches the deadline. If this config is missing, the reconnecting won't terminate. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
+| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
@@ -428,6 +432,7 @@
 | `region_engine.mito.scan_parallelism` | Integer | `0` | Parallelism to scan a region (default: 1/4 of cpu cores).<br/>- `0`: using the default value (1/4 of cpu cores).<br/>- `1`: scan in current thread.<br/>- `n`: scan in parallelism n. |
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
+| `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
 | `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
@@ -449,11 +454,12 @@
 | `region_engine.mito.memtable.fork_dictionary_bytes` | String | `1GiB` | Max dictionary bytes.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
+| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
@@ -494,11 +500,12 @@
 | `heartbeat.interval` | String | `3s` | Interval for sending heartbeat messages to the metasrv. |
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
+| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |

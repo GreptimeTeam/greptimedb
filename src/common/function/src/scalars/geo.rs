@@ -12,16 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(let_chains)]
+use std::sync::Arc;
+mod geohash;
+mod h3;
 
-pub mod logging;
-mod macros;
-pub mod metric;
-mod panic_hook;
-pub mod tracing_context;
-mod tracing_sampler;
+use geohash::GeohashFunction;
+use h3::H3Function;
 
-pub use logging::{init_default_ut_logging, init_global_logging, RELOAD_HANDLE};
-pub use metric::dump_metrics;
-pub use panic_hook::set_panic_hook;
-pub use {common_error, tracing, tracing_subscriber};
+use crate::function_registry::FunctionRegistry;
+
+pub(crate) struct GeoFunctions;
+
+impl GeoFunctions {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(GeohashFunction));
+        registry.register(Arc::new(H3Function));
+    }
+}

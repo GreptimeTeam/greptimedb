@@ -62,6 +62,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.purge_scheduler.clone(),
             self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
+            self.time_provider.clone(),
         )
         .metadata(metadata)
         .parse_options(request.options)?

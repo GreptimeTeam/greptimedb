@@ -172,11 +172,12 @@ impl ErrorExt for Error {
 
             Error::DataTypes { .. }
             | Error::CreateRecordBatches { .. }
-            | Error::PollStream { .. }
             | Error::Format { .. }
             | Error::ToArrowScalar { .. }
             | Error::ProjectArrowRecordBatch { .. }
             | Error::PhysicalExpr { .. } => StatusCode::Internal,
+
+            Error::PollStream { .. } => StatusCode::EngineExecuteQuery,
 
             Error::ArrowCompute { .. } => StatusCode::IllegalState,
 

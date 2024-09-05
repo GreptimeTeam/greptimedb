@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{debug, error, warn};
+use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datafusion::physical_plan::DisplayFormatType;
@@ -62,6 +62,7 @@ pub(crate) enum Scanner {
 
 impl Scanner {
     /// Returns a [SendableRecordBatchStream] to retrieve scan results from all partitions.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.build_stream(),
@@ -70,6 +71,7 @@ impl Scanner {
     }
 
     /// Returns a [RegionScanner] to scan the region.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
         match self {
             Scanner::Seq(seq_scan) => Ok(Box::new(seq_scan)),
@@ -284,9 +286,10 @@ impl ScanRegion {
             .collect();
 
         debug!(
-            "Scan region {}, request: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
+            "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
             self.version.metadata.region_id,
             self.request,
+            time_range,
             memtables.len(),
             files.len(),
             self.version.options.append_mode,

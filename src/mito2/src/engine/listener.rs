@@ -66,6 +66,9 @@ pub trait EventListener: Send + Sync {
 
     /// Notifies the listener that the file cache is filled when, for example, editing region.
     fn on_file_cache_filled(&self, _file_id: FileId) {}
+
+    /// Notifies the listener that the compaction is scheduled.
+    fn on_compaction_scheduled(&self, _region_id: RegionId) {}
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
