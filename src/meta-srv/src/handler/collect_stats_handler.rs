@@ -181,7 +181,7 @@ async fn rewrite_node_address(ctx: &mut Context, stat: &Stat) {
                     .invalidate(&Default::default(), &cache_idents)
                     .await
                 {
-                    error!(e; "Failed to invalidate cache: {:?}", cache_idents);
+                    error!(e; "Failed to invalidate {} `NodeAddressKey` cache, peer: {:?}", cache_idents.len(), peer);
                 }
             }
             Err(e) => {
