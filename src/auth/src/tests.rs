@@ -52,7 +52,7 @@ impl MockUserProvider {
         info.username.clone_into(&mut self.username);
     }
 
-    // this is a delibrate function to ref AuthBackendSnafu
+    // this is a deliberate function to ref AuthBackendSnafu
     // so that it won't get deleted in the future
     pub fn ref_auth_backend_snafu(&self) -> Result<()> {
         let none_option = None;
