@@ -131,9 +131,9 @@ impl Runner {
 
         // Execute the procedure. We need to release the lock whenever the execution
         // is successful or fail.
+        self.meta.set_start_time_ms();
         self.execute_procedure_in_loop().await;
-        self.meta
-            .set_end_time_ms(common_time::util::current_time_millis() as u64);
+        self.meta.set_end_time_ms();
 
         // We can't remove the metadata of the procedure now as users and its parent might
         // need to query its state.

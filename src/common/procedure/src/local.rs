@@ -16,7 +16,7 @@ mod runner;
 mod rwlock;
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -72,9 +72,9 @@ pub(crate) struct ProcedureMeta {
     /// Id of child procedures.
     children: Mutex<Vec<ProcedureId>>,
     /// Start execution time of this procedure.
-    start_time_ms: u64,
+    start_time_ms: AtomicI64,
     /// End execution time of this procedure.
-    end_time_ms: Mutex<u64>,
+    end_time_ms: AtomicI64,
 }
 
 impl ProcedureMeta {
@@ -94,8 +94,8 @@ impl ProcedureMeta {
             state_sender,
             state_receiver,
             children: Mutex::new(Vec::new()),
-            start_time_ms: common_time::util::current_time_millis() as u64,
-            end_time_ms: Mutex::new(0),
+            start_time_ms: AtomicI64::new(0),
+            end_time_ms: AtomicI64::new(0),
             type_name: type_name.to_string(),
         }
     }
@@ -128,14 +128,16 @@ impl ProcedureMeta {
         self.children.lock().unwrap().len()
     }
 
-    /// Returns the end time of the procedure.
-    fn end_time_ms(&self) -> u64 {
-        *self.end_time_ms.lock().unwrap()
+    /// update the start time of the procedure.
+    fn set_start_time_ms(&self) {
+        self.start_time_ms
+            .store(common_time::util::current_time_millis(), Ordering::Relaxed);
     }
 
     /// update the end time of the procedure.
-    fn set_end_time_ms(&self, end_time_ms: u64) {
-        *self.end_time_ms.lock().unwrap() = end_time_ms;
+    fn set_end_time_ms(&self) {
+        self.end_time_ms
+            .store(common_time::util::current_time_millis(), Ordering::Relaxed);
     }
 }
 
@@ -238,8 +240,8 @@ impl ManagerContext {
             .map(|meta| ProcedureInfo {
                 id: meta.id,
                 type_name: meta.type_name.clone(),
-                start_time_ms: meta.start_time_ms,
-                end_time_ms: meta.end_time_ms(),
+                start_time_ms: meta.start_time_ms.load(Ordering::Relaxed),
+                end_time_ms: meta.end_time_ms.load(Ordering::Relaxed),
                 state: meta.state(),
                 lock_keys: meta.lock_key.get_keys(),
             })

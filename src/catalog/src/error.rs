@@ -82,11 +82,24 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to get procedure client in {mode} mode"))]
+    GetProcedureClient {
+        mode: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to list procedures"))]
     ListProcedures {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
+    },
+
+    #[snafu(display("Procedure id not found"))]
+    ProcedureIdNotFound {
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("convert proto data error"))]
@@ -280,7 +293,9 @@ impl ErrorExt for Error {
             | Error::FindRegionRoutes { .. }
             | Error::CacheNotFound { .. }
             | Error::CastManager { .. }
-            | Error::Json { .. } => StatusCode::Unexpected,
+            | Error::Json { .. }
+            | Error::GetProcedureClient { .. }
+            | Error::ProcedureIdNotFound { .. } => StatusCode::Unexpected,
 
             Error::ViewPlanColumnsChanged { .. } => StatusCode::InvalidArguments,
 

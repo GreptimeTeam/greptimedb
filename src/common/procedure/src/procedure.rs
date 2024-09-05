@@ -440,9 +440,9 @@ pub struct ProcedureInfo {
     /// Type of this procedure.
     pub type_name: String,
     /// Start execution time of this procedure.
-    pub start_time_ms: u64,
+    pub start_time_ms: i64,
     /// End execution time of this procedure.
-    pub end_time_ms: u64,
+    pub end_time_ms: i64,
     /// status of this procedure.
     pub state: ProcedureState,
     /// Lock keys of this procedure.

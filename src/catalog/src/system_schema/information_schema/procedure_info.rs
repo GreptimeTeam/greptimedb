@@ -23,7 +23,6 @@ use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::rpc::procedure;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
-use common_telemetry::warn;
 use common_time::timestamp::Timestamp;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
@@ -38,7 +37,10 @@ use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
 use super::PROCEDURE_INFO;
-use crate::error::{CreateRecordBatchSnafu, InternalSnafu, ListProceduresSnafu, Result};
+use crate::error::{
+    ConvertProtoDataSnafu, CreateRecordBatchSnafu, GetProcedureClientSnafu, InternalSnafu,
+    ListProceduresSnafu, ProcedureIdNotFoundSnafu, Result,
+};
 use crate::system_schema::information_schema::{InformationTable, Predicates};
 use crate::system_schema::utils;
 use crate::CatalogManager;
@@ -175,10 +177,10 @@ impl InformationSchemaProcedureInfoBuilder {
                         .context(ListProceduresSnafu)?;
                     let procedures = procedure::procedure_details_to_pb_response(procedures);
                     for procedure in procedures.procedures {
-                        self.add_procedure_info(&predicates, procedure);
+                        self.add_procedure_info(&predicates, procedure)?;
                     }
                 } else {
-                    warn!("Procedure manager is not available");
+                    return GetProcedureClientSnafu { mode: "standalone" }.fail();
                 }
             }
             Mode::Distributed => {
@@ -189,10 +191,13 @@ impl InformationSchemaProcedureInfoBuilder {
                         .map_err(BoxedError::new)
                         .context(ListProceduresSnafu)?;
                     for procedure in procedures.procedures {
-                        self.add_procedure_info(&predicates, procedure);
+                        self.add_procedure_info(&predicates, procedure)?;
                     }
                 } else {
-                    warn!("Meta client is not available");
+                    return GetProcedureClientSnafu {
+                        mode: "distributed",
+                    }
+                    .fail();
                 }
             }
         };
@@ -200,24 +205,30 @@ impl InformationSchemaProcedureInfoBuilder {
         self.finish()
     }
 
-    fn add_procedure_info(&mut self, predicates: &Predicates, procedure: ProcedureMeta) {
-        let Some(procedure_id) = procedure.id else {
-            return;
-        };
-        let Ok(pid) = procedure::pb_pid_to_pid(&procedure_id) else {
-            return;
+    fn add_procedure_info(
+        &mut self,
+        predicates: &Predicates,
+        procedure: ProcedureMeta,
+    ) -> Result<()> {
+        let pid = match procedure.id {
+            Some(pid) => pid,
+            None => return ProcedureIdNotFoundSnafu {}.fail(),
         };
 
+        let pid = procedure::pb_pid_to_pid(&pid)
+            .map_err(BoxedError::new)
+            .context(ConvertProtoDataSnafu)?
+            .to_string();
+
         let start_time_ms =
-            TimestampMillisecond(Timestamp::new_millisecond(procedure.start_time_ms as i64));
-        let end_time_ms =
-            TimestampMillisecond(Timestamp::new_millisecond(procedure.end_time_ms as i64));
+            TimestampMillisecond(Timestamp::new_millisecond(procedure.start_time_ms));
+        let end_time_ms = TimestampMillisecond(Timestamp::new_millisecond(procedure.end_time_ms));
         let status = ProcedureStatus::try_from(procedure.status)
             .map(|v| v.as_str_name())
             .unwrap_or("Unknown");
 
         let row = [
-            (PROCEDURE_ID, &Value::from(pid.to_string())),
+            (PROCEDURE_ID, &Value::from(pid.clone())),
             (PROCEDURE_TYPE, &Value::from(procedure.type_name.clone())),
             (START_TIME, &Value::from(start_time_ms)),
             (END_TIME, &Value::from(end_time_ms)),
@@ -225,15 +236,16 @@ impl InformationSchemaProcedureInfoBuilder {
             (LOCK_KEYS, &Value::from(procedure.lock_keys.join(","))),
         ];
         if !predicates.eval(&row) {
-            return;
+            return Ok(());
         }
 
-        self.procedure_ids.push(Some(&pid.to_string()));
+        self.procedure_ids.push(Some(&pid));
         self.procedure_types.push(Some(&procedure.type_name));
         self.start_times.push(Some(start_time_ms));
         self.end_times.push(Some(end_time_ms));
         self.statuses.push(Some(status));
         self.lock_keys.push(Some(&procedure.lock_keys.join(",")));
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {

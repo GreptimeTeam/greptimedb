@@ -81,6 +81,5 @@ pub fn procedure_manager(
     Ok(catalog_manager
         .as_any()
         .downcast_ref::<KvBackendCatalogManager>()
-        .map(|manager| manager.procedure_manager().clone())
-        .expect("Just used in standalone mode"))
+        .and_then(|manager| manager.procedure_manager()))
 }
