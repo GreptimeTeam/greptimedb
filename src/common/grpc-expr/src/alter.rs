@@ -16,8 +16,8 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_expr::Kind;
 use api::v1::{
-    column_def, AddColumnLocation as Location, AlterExpr, ChangeColumnTypes, CreateTableExpr,
-    DropColumns, RenameTable, SemanticType,
+    column_def, AddColumnLocation as Location, ChangeFulltext, AlterExpr, ChangeColumnTypes,
+    CreateTableExpr, DropColumns, RenameTable, SemanticType,
 };
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -92,7 +92,13 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
         Kind::RenameTable(RenameTable { new_table_name }) => {
             AlterKind::RenameTable { new_table_name }
         }
-        Kind::AddFulltext(_) => { todo!() },
+        Kind::ChangeFulltext(ChangeFulltext {
+            column_name,
+            options,
+        }) => AlterKind::ChangeFulltext {
+            column_name,
+            options,
+        },
     };
 
     let request = AlterTableRequest {

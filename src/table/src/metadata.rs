@@ -21,7 +21,7 @@ use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{
-    ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder, SchemaRef,
+    ColumnSchema, FulltextAnalyzer, FulltextOptions, RawSchema, Schema, SchemaBuilder, SchemaRef,
 };
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,9 @@ use crate::requests::{AddColumnRequest, AlterKind, ChangeColumnTypeRequest, Tabl
 
 pub type TableId = u32;
 pub type TableVersion = u64;
+
+const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
+const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
 
 /// Indicates whether and how a filter expression can be handled by a
 /// Table for table scans.
@@ -210,7 +213,7 @@ impl TableMeta {
                     .next_column_id(self.next_column_id);
                 Ok(meta_builder)
             }
-            AlterKind::AddFulltexts {
+            AlterKind::ChangeFulltext {
                 column_name,
                 options,
             } => self.change_column_fulltext(table_name, column_name, options.clone()),
@@ -600,6 +603,7 @@ impl TableMeta {
         column_name: &String,
         options: HashMap<String, String>,
     ) -> Result<TableMetaBuilder> {
+        println!("{:?}", options);
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
 
@@ -609,20 +613,76 @@ impl TableMeta {
                 column_name,
                 table_name,
             })?;
-        let mut column = &table_schema.column_schemas()[index];
+        let column = &table_schema.column_schemas()[index];
 
-        let fulltext_options = column
-            .fulltext_options()
-            .context(error::FulltextOptionsSnafu { column_name })?;
-
-        let mut fulltext_options = match fulltext_options {
-            Some(fulltext_options) => fulltext_options,
-            None => FulltextOptions::default(),
+        let mut fulltext = if let Ok(Some(f)) = column.fulltext_options() {
+            f
+        } else {
+            FulltextOptions::default()
         };
 
-        let new_column = column.clone()
-            .with_fulltext_options(fulltext_options)
-            .context(error::FulltextOptionsSnafu { column_name })?;
+        if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
+            match analyzer.to_ascii_lowercase().as_str() {
+                "english" => {
+                    fulltext.enable = true;
+                    fulltext.analyzer = FulltextAnalyzer::English;
+                }
+                "chinese" => {
+                    fulltext.enable = true;
+                    fulltext.analyzer = FulltextAnalyzer::Chinese;
+                }
+                _ => {
+                    return error::InvalidFulltextOptionsSnafu { column_name }.fail()?;
+                }
+            }
+        }
+        if let Some(case_sensitive) = options.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
+            match case_sensitive.to_ascii_lowercase().as_str() {
+                "true" => {
+                    fulltext.enable = true;
+                    fulltext.case_sensitive = true;
+                }
+                "false" => {
+                    fulltext.enable = true;
+                    fulltext.case_sensitive = false;
+                }
+                _ => {
+                    return error::InvalidFulltextOptionsSnafu { column_name }.fail()?;
+                }
+            }
+        }
+
+        let columns: Vec<_> = table_schema
+            .column_schemas()
+            .iter()
+            .cloned()
+            .map(|mut column| {
+                if column.name == *column_name {
+                    column = column
+                        .clone()
+                        .with_fulltext_options(fulltext.clone())
+                        .unwrap();
+                }
+                column
+            })
+            .collect();
+
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            .version(table_schema.version() + 1);
+
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!("Table {table_name} cannot change datatype with columns {column_name}"),
+        })?;
+
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
 
         Ok(meta_builder)
     }

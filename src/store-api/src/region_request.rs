@@ -30,11 +30,14 @@ use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
-    RegionMetadata, Result,
+    ColumnMetadata, InvalidFulltextOptionsSnafu, InvalidRawRegionRequestSnafu,
+    InvalidRegionRequestSnafu, MetadataError, RegionMetadata, Result,
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
+
+const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
+const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
 
 #[derive(Debug, IntoStaticStr)]
 pub enum RegionRequest {
@@ -389,6 +392,13 @@ pub enum AlterKind {
         /// Columns to change.
         columns: Vec<ChangeColumnType>,
     },
+    /// Change columns fulltext from the region, only fields are allowed to change.
+    ChangeColumnFulltext {
+        /// Name of column to change.
+        column_name: String,
+        /// Fulltext options.
+        options: HashMap<String, String>,
+    },
 }
 
 impl AlterKind {
@@ -412,6 +422,10 @@ impl AlterKind {
                     col_to_change.validate(metadata)?;
                 }
             }
+            AlterKind::ChangeColumnFulltext {
+                column_name,
+                options,
+            } => Self::validate_column_fulltext_to_alter(metadata, column_name, options)?,
         }
         Ok(())
     }
@@ -429,6 +443,9 @@ impl AlterKind {
             AlterKind::ChangeColumnTypes { columns } => columns
                 .iter()
                 .any(|col_to_change| col_to_change.need_alter(metadata)),
+            AlterKind::ChangeColumnFulltext { column_name, .. } => {
+                metadata.column_by_name(column_name).is_some()
+            }
         }
     }
 
@@ -444,6 +461,39 @@ impl AlterKind {
                 err: format!("column {} is not a field and could not be dropped", name),
             }
         );
+        Ok(())
+    }
+
+    pub fn validate_column_fulltext_to_alter(
+        metadata: &RegionMetadata,
+        column_name: &str,
+        options: &HashMap<String, String>,
+    ) -> Result<()> {
+        let _ =
+            metadata
+                .column_by_name(column_name)
+                .with_context(|| InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!("column {} not found", column_name),
+                })?;
+
+        for (k, v) in options {
+            if k.to_ascii_lowercase().eq(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
+                if v.to_ascii_lowercase().ne("english") && v.to_ascii_lowercase().ne("chinese") {
+                    return InvalidFulltextOptionsSnafu { column_name }.fail();
+                }
+            } else if k
+                .to_ascii_lowercase()
+                .eq(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE)
+            {
+                if v.to_ascii_lowercase().ne("true") && v.to_ascii_lowercase().ne("false") {
+                    return InvalidFulltextOptionsSnafu { column_name }.fail();
+                }
+            } else {
+                return InvalidFulltextOptionsSnafu { column_name }.fail();
+            }
+        }
+
         Ok(())
     }
 }
@@ -473,6 +523,10 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
             }
+            alter_request::Kind::ChangeFulltex(x) => AlterKind::ChangeColumnFulltext {
+                column_name: x.column_name,
+                options: x.options,
+            },
         };
 
         Ok(alter_kind)

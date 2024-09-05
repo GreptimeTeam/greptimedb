@@ -211,10 +211,10 @@ pub enum AlterKind {
     RenameTable {
         new_table_name: String,
     },
-    AddFulltexts {
+    ChangeFulltext {
         column_name: String,
         options: HashMap<String, String>,
-    }
+    },
 }
 
 #[derive(Debug)]

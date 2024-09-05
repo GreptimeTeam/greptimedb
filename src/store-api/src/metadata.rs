@@ -28,7 +28,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions, Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -38,6 +38,9 @@ use crate::storage::consts::is_internal_column;
 use crate::storage::{ColumnId, RegionId};
 
 pub type Result<T> = std::result::Result<T, MetadataError>;
+
+const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
+const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
 
 /// Metadata of a column.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -523,6 +526,10 @@ impl RegionMetadataBuilder {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ChangeColumnTypes { columns } => self.change_column_types(columns),
+            AlterKind::ChangeColumnFulltext {
+                column_name,
+                options,
+            } => self.change_column_fulltext(column_name, options),
         }
         Ok(self)
     }
@@ -620,6 +627,49 @@ impl RegionMetadataBuilder {
             if let Some(target_type) = change_type_map.remove(&column_meta.column_schema.name) {
                 column_meta.column_schema.data_type = target_type;
             }
+        }
+    }
+
+    /// Changes column fulltext option.
+    fn change_column_fulltext(&mut self, column_name: String, options: HashMap<String, String>) {
+        println!("fulltext_options: {:?}", options);
+
+        for column_meta in self.column_metadatas.iter_mut() {
+            let mut fulltext = if let Ok(Some(f)) = column_meta.column_schema.fulltext_options() {
+                f
+            } else {
+                FulltextOptions::default()
+            };
+
+            if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
+                match analyzer.to_ascii_lowercase().as_str() {
+                    "english" => {
+                        fulltext.enable = true;
+                        fulltext.analyzer = FulltextAnalyzer::English;
+                    }
+                    "chinese" => {
+                        fulltext.enable = true;
+                        fulltext.analyzer = FulltextAnalyzer::Chinese;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(case_sensitive) = options.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
+                match case_sensitive.to_ascii_lowercase().as_str() {
+                    "true" => {
+                        fulltext.enable = true;
+                        fulltext.case_sensitive = true;
+                    }
+                    "false" => {
+                        fulltext.enable = true;
+                        fulltext.case_sensitive = false;
+                    }
+                    _ => {}
+                }
+            }
+            println!("column_meta.column_schema1: {:?}", column_meta.column_schema);
+            column_meta.column_schema.set_fulltext_options(fulltext).expect("set fulltext");
+            println!("column_meta.column_schema2: {:?}", column_meta.column_schema);
         }
     }
 }
@@ -737,6 +787,13 @@ pub enum MetadataError {
         source: api::error::Error,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Invalid fulltext options"))]
+    InvalidFulltextOptions {
+        #[snafu(implicit)]
+        location: Location,
+        column_name: String,
     },
 }
 

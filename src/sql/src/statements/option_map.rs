@@ -25,7 +25,7 @@ const REDACTED_OPTIONS: [&str; 2] = ["access_key_id", "secret_access_key"];
 pub struct OptionMap {
     options: BTreeMap<String, String>,
     secrets: BTreeMap<String, SecretString>,
-    pub hash_options: HashMap<String, String>,  // TODO(renjj): move into a new struct
+    pub hash_options: HashMap<String, String>, // TODO(renjj): move into a new struct
 }
 
 impl OptionMap {

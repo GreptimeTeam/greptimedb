@@ -138,11 +138,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to retrieve fulltext options from column metadata"))]
-    FulltextOptions {
+    #[snafu(display("Invalid fulltext options"))]
+    InvalidFulltextOptions {
         #[snafu(implicit)]
         location: Location,
-        source: datatypes::error::Error,
         column_name: String,
     },
 }
@@ -163,7 +162,7 @@ impl ErrorExt for Error {
             Error::TableOperation { source } => source.status_code(),
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::Unsupported { .. } => StatusCode::Unsupported,
-            Error::ParseTableOption { .. } | Error::FulltextOptions { .. } => {
+            Error::ParseTableOption { .. } | Error::InvalidFulltextOptions { .. } => {
                 StatusCode::InvalidArguments
             }
             Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,

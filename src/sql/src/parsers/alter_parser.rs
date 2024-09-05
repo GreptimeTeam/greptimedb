@@ -103,7 +103,7 @@ impl<'a> ParserContext<'a> {
 
             let _ = self.parser.parse_keyword(Keyword::FULLTEXT);
 
-            let options= self
+            let options = self
                 .parser
                 .parse_options(Keyword::WITH)?
                 .into_iter()
@@ -122,7 +122,12 @@ impl<'a> ParserContext<'a> {
                 .collect::<Result<HashMap<String, String>>>()
                 .unwrap();
 
-            AlterTableOperation::AlterColumnFulltext { column_name, options: options.into() }
+            println!("options:{:?}", options);
+
+            AlterTableOperation::AlterColumnFulltext {
+                column_name,
+                options: options.into(),
+            }
         } else {
             return Err(ParserError::ParserError(format!(
                 "expect keyword ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found {}",

@@ -119,7 +119,7 @@ etcd-client = { version = "0.13" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/irenjj/greptime-proto.git", rev = "ca5920ee9263650c37556edad4bc877a674af444" }
+greptime-proto = { git = "https://github.com/irenjj/greptime-proto.git", rev = "d942e6bc84beaf48a59b00ce9064eafb16539336" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"

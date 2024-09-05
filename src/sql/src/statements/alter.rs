@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, fmt::{Debug, Display}, ops::ControlFlow};
+use std::collections::HashMap;
+use std::fmt::{Debug, Display};
+use std::ops::ControlFlow;
 
 use common_query::AddColumnLocation;
-use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
+use sqlparser::ast::{
+    ColumnDef, DataType, Ident, ObjectName, TableConstraint, Visit, VisitMut, Visitor, VisitorMut,
+};
 use sqlparser_derive::{Visit, VisitMut};
-use sqlparser::ast::{Visit, VisitMut, Visitor, VisitorMut};
 
 use super::OptionMap;
 
@@ -109,7 +112,11 @@ impl Display for AlterTableOperation {
                 column_name,
                 options,
             } => {
-                write!(f, r#"SET COLUMN {column_name} FULLTEXT WITH {:?}"#, options.hash_options)
+                write!(
+                    f,
+                    r#"SET COLUMN {column_name} FULLTEXT WITH {:?}"#,
+                    options.hash_options
+                )
             }
         }
     }
