@@ -182,6 +182,8 @@ impl Categorizer {
                 let transformer = Arc::new(move |plan: &LogicalPlan| {
                     if let LogicalPlan::Aggregate(aggr) = plan {
                         let mut new_plan = aggr.clone();
+
+                        // transform aggr exprs
                         for (expr, transformer) in
                             new_plan.aggr_expr.iter_mut().zip(&expr_transformer)
                         {
@@ -190,6 +192,17 @@ impl Categorizer {
                                 *expr = new_expr;
                             }
                         }
+
+                        // transform group exprs
+                        for expr in new_plan.group_expr.iter_mut() {
+                            // if let Some(transformer) = transformer {
+                            //     let new_expr = transformer(expr)?;
+                            //     *expr = new_expr;
+                            // }
+                            let expr_name = expr.name_for_alias().expect("not a sort expr");
+                            *expr = Expr::Column(expr_name.into());
+                        }
+
                         common_telemetry::info!(
                             "[DEBUG] new plan aggr expr: {:?}, group expr: {:?}",
                             new_plan.aggr_expr,

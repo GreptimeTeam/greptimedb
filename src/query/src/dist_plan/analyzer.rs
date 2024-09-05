@@ -298,6 +298,10 @@ impl TreeNodeRewriter for PlanRewriter {
             // TODO(ruihang): does this work for nodes with multiple children?
             // replace the current node with expanded one
             let mut node = MergeScanLogicalPlan::new(node, false).into_logical_plan();
+
+            let merge_scan_schema = node.schema();
+            common_telemetry::info!("[DEBUG] merge scan schema: {:?}", merge_scan_schema);
+
             // expand stages
             for new_stage in self.stage.drain(..) {
                 node = new_stage.with_new_exprs(new_stage.expressions(), vec![node.clone()])?
