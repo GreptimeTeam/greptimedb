@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod aggregate;
-pub(crate) mod date;
-pub mod expression;
-#[cfg(feature = "geo")]
-pub mod geo;
-pub mod matches;
-pub mod math;
-pub mod numpy;
-#[cfg(test)]
-pub(crate) mod test;
-pub(crate) mod timestamp;
-pub mod udf;
+use std::sync::Arc;
+mod geohash;
+mod h3;
+
+use geohash::GeohashFunction;
+use h3::H3Function;
+
+use crate::function_registry::FunctionRegistry;
+
+pub(crate) struct GeoFunctions;
+
+impl GeoFunctions {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(GeohashFunction));
+        registry.register(Arc::new(H3Function));
+    }
+}

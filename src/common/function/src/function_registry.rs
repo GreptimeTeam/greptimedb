@@ -116,6 +116,10 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     SystemFunction::register(&function_registry);
     TableFunction::register(&function_registry);
 
+    // Geo functions
+    #[cfg(feature = "geo")]
+    crate::scalars::geo::GeoFunctions::register(&function_registry);
+
     Arc::new(function_registry)
 });
 

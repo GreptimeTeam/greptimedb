@@ -268,6 +268,23 @@ impl Value {
         }
     }
 
+    /// Cast Value to f64. Return None if it's not castable;
+    pub fn as_f64_lossy(&self) -> Option<f64> {
+        match self {
+            Value::Float32(v) => Some(v.0 as _),
+            Value::Float64(v) => Some(v.0),
+            Value::Int8(v) => Some(*v as _),
+            Value::Int16(v) => Some(*v as _),
+            Value::Int32(v) => Some(*v as _),
+            Value::Int64(v) => Some(*v as _),
+            Value::UInt8(v) => Some(*v as _),
+            Value::UInt16(v) => Some(*v as _),
+            Value::UInt32(v) => Some(*v as _),
+            Value::UInt64(v) => Some(*v as _),
+            _ => None,
+        }
+    }
+
     /// Returns the logical type of the value.
     pub fn logical_type_id(&self) -> LogicalTypeId {
         match self {
