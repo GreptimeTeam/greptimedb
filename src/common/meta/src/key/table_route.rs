@@ -750,7 +750,9 @@ mod tests {
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::kv_backend::TxnService;
+    use crate::kv_backend::{KvBackend, TxnService};
+    use crate::peer::Peer;
+    use crate::rpc::store::PutRequest;
 
     #[test]
     fn test_table_route_compatibility() {
@@ -853,5 +855,62 @@ mod tests {
         assert_eq!(results[1].as_ref().unwrap(), &routes[1].1);
         assert!(results[2].is_none());
         assert_eq!(results[3].as_ref().unwrap(), &routes[0].1);
+    }
+
+    #[tokio::test]
+    async fn remap_route_address_updates_addresses() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let table_route_storage = TableRouteStorage::new(kv.clone());
+        let mut table_route = TableRouteValue::Physical(PhysicalTableRouteValue {
+            region_routes: vec![RegionRoute {
+                leader_peer: Some(Peer {
+                    id: 1,
+                    ..Default::default()
+                }),
+                follower_peers: vec![Peer {
+                    id: 2,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            version: 0,
+        });
+
+        kv.put(PutRequest {
+            key: NodeAddressKey::new(1).to_bytes(),
+            value: NodeAddressValue {
+                peer: Peer {
+                    addr: "addr1".to_string(),
+                    ..Default::default()
+                },
+            }
+            .try_as_raw_value()
+            .unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        table_route_storage
+            .remap_route_address(&mut table_route)
+            .await
+            .unwrap();
+
+        if let TableRouteValue::Physical(physical_table_route) = table_route {
+            assert_eq!(
+                physical_table_route.region_routes[0]
+                    .leader_peer
+                    .as_ref()
+                    .unwrap()
+                    .addr,
+                "addr1"
+            );
+            assert_eq!(
+                physical_table_route.region_routes[0].follower_peers[0].addr,
+                ""
+            );
+        } else {
+            panic!("Expected PhysicalTableRouteValue");
+        }
     }
 }
