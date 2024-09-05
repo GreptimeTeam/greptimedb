@@ -15,8 +15,10 @@
 use std::cmp::Ordering;
 
 use api::v1::meta::{HeartbeatRequest, Role};
+use common_meta::instruction::CacheIdent;
 use common_meta::key::node_address::{NodeAddressKey, NodeAddressValue};
 use common_meta::key::{MetadataKey, MetadataValue};
+use common_meta::peer::Peer;
 use common_meta::rpc::store::PutRequest;
 use common_telemetry::{error, warn};
 use dashmap::DashMap;
@@ -81,7 +83,7 @@ impl HeartbeatHandler for CollectStatsHandler {
 
     async fn handle(
         &self,
-        req: &HeartbeatRequest,
+        _req: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
@@ -124,28 +126,9 @@ impl HeartbeatHandler for CollectStatsHandler {
 
         // Need to refresh the [datanode -> address] mapping
         if refresh {
-            if let Some(peer) = &req.peer {
-                let key = NodeAddressKey::new(peer.id).to_bytes();
-                if let Ok(value) = NodeAddressValue::new(peer.into()).try_as_raw_value() {
-                    let put = PutRequest {
-                        key,
-                        value,
-                        prev_kv: false,
-                    };
-
-                    match ctx.leader_cached_kv_backend.put(put).await {
-                        Ok(_) => {
-                            // broadcast invalidating cache
-                            todo!("broadcast invalidating cache");
-                        }
-                        Err(e) => {
-                            error!(e; "Failed to update NodeAddressValue: {:?}", peer);
-                        }
-                    }
-                } else {
-                    warn!("Failed to serialize NodeAddressValue: {:?}", peer);
-                }
-            }
+            // Safety: `epoch_stats.stats` is not empty
+            let last = epoch_stats.stats.last().unwrap();
+            rewrite_node_address(ctx, last).await;
         }
 
         if !refresh && epoch_stats.len() < MAX_CACHED_STATS_PER_KEY {
@@ -169,6 +152,44 @@ impl HeartbeatHandler for CollectStatsHandler {
             .context(error::KvBackendSnafu)?;
 
         Ok(HandleControl::Continue)
+    }
+}
+
+async fn rewrite_node_address(ctx: &mut Context, stat: &Stat) {
+    let peer = Peer {
+        id: stat.id,
+        addr: stat.addr.clone(),
+    };
+    let key = NodeAddressKey::new(peer.id).to_bytes();
+    if let Ok(value) = NodeAddressValue::new(peer.clone()).try_as_raw_value() {
+        let put = PutRequest {
+            key,
+            value,
+            prev_kv: false,
+        };
+
+        match ctx.leader_cached_kv_backend.put(put).await {
+            Ok(_) => {
+                // broadcast invalidating cache
+                let cache_idents = stat
+                    .table_ids()
+                    .into_iter()
+                    .map(CacheIdent::TableId)
+                    .collect::<Vec<_>>();
+                if let Err(e) = ctx
+                    .cache_invalidator
+                    .invalidate(&Default::default(), &cache_idents)
+                    .await
+                {
+                    error!(e; "Failed to invalidate cache: {:?}", cache_idents);
+                }
+            }
+            Err(e) => {
+                error!(e; "Failed to update NodeAddressValue: {:?}", peer);
+            }
+        }
+    } else {
+        warn!("Failed to serialize NodeAddressValue: {:?}", peer);
     }
 }
 

@@ -20,6 +20,7 @@ use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
 use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
+use table::metadata::TableId;
 
 use crate::error::{Error, InvalidHeartbeatRequestSnafu};
 use crate::key::DatanodeStatKey;
@@ -77,6 +78,11 @@ impl Stat {
     /// Returns a tuple array containing [RegionId] and [RegionRole].
     pub fn regions(&self) -> Vec<(RegionId, RegionRole)> {
         self.region_stats.iter().map(|s| (s.id, s.role)).collect()
+    }
+
+    /// Returns all table ids in the region stats.
+    pub fn table_ids(&self) -> HashSet<TableId> {
+        self.region_stats.iter().map(|s| s.id.table_id()).collect()
     }
 
     pub fn retain_active_region_stats(&mut self, inactive_region_ids: &HashSet<RegionId>) {
