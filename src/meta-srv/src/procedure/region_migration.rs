@@ -27,10 +27,10 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::time::Duration;
 
-use api::v1::meta::MailboxMessage;
 use common_error::ext::BoxedError;
+use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::RegionFailureDetectorControllerRef;
-use common_meta::instruction::{CacheIdent, Instruction};
+use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
@@ -52,7 +52,7 @@ use tokio::time::Instant;
 
 use self::migration_start::RegionMigrationStart;
 use crate::error::{self, Result};
-use crate::service::mailbox::{BroadcastChannel, MailboxRef};
+use crate::service::mailbox::MailboxRef;
 
 /// It's shared in each step and available even after recovering.
 ///
@@ -158,6 +158,7 @@ pub struct DefaultContextFactory {
     region_failure_detector_controller: RegionFailureDetectorControllerRef,
     mailbox: MailboxRef,
     server_addr: String,
+    cache_invalidator: CacheInvalidatorRef,
 }
 
 impl DefaultContextFactory {
@@ -168,6 +169,7 @@ impl DefaultContextFactory {
         region_failure_detector_controller: RegionFailureDetectorControllerRef,
         mailbox: MailboxRef,
         server_addr: String,
+        cache_invalidator: CacheInvalidatorRef,
     ) -> Self {
         Self {
             volatile_ctx: VolatileContext::default(),
@@ -176,6 +178,7 @@ impl DefaultContextFactory {
             region_failure_detector_controller,
             mailbox,
             server_addr,
+            cache_invalidator,
         }
     }
 }
@@ -190,6 +193,7 @@ impl ContextFactory for DefaultContextFactory {
             region_failure_detector_controller: self.region_failure_detector_controller,
             mailbox: self.mailbox,
             server_addr: self.server_addr,
+            cache_invalidator: self.cache_invalidator,
         }
     }
 }
@@ -203,6 +207,7 @@ pub struct Context {
     region_failure_detector_controller: RegionFailureDetectorControllerRef,
     mailbox: MailboxRef,
     server_addr: String,
+    cache_invalidator: CacheInvalidatorRef,
 }
 
 impl Context {
@@ -356,22 +361,13 @@ impl Context {
     /// Broadcasts the invalidate table cache message.
     pub async fn invalidate_table_cache(&self) -> Result<()> {
         let table_id = self.region_id().table_id();
-        let instruction = Instruction::InvalidateCaches(vec![CacheIdent::TableId(table_id)]);
-
-        let msg = &MailboxMessage::json_message(
-            "Invalidate Table Cache",
-            &format!("Metasrv@{}", self.server_addr()),
-            "Frontend broadcast",
-            common_time::util::current_time_millis(),
-            &instruction,
-        )
-        .with_context(|_| error::SerializeToJsonSnafu {
-            input: instruction.to_string(),
-        })?;
-
-        self.mailbox
-            .broadcast(&BroadcastChannel::Frontend, msg)
-            .await
+        // ignore the result
+        let ctx = common_meta::cache_invalidator::Context::default();
+        let _ = self
+            .cache_invalidator
+            .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
+            .await;
+        Ok(())
     }
 }
 
@@ -497,6 +493,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_meta::distributed_time_constants::REGION_LEASE_SECS;
+    use common_meta::instruction::Instruction;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::rpc::router::{Region, RegionRoute};
 
