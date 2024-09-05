@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use std::sync::Arc;
+mod json_to_string;
 mod to_json;
-mod to_string;
 
+use json_to_string::JsonToStringFunction;
 use to_json::ToJsonFunction;
-use to_string::ToStringFunction;
 
 use crate::function_registry::FunctionRegistry;
 
@@ -25,7 +25,7 @@ pub(crate) struct JsonFunction;
 
 impl JsonFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(ToStringFunction));
+        registry.register(Arc::new(JsonToStringFunction));
         registry.register(Arc::new(ToJsonFunction));
     }
 }

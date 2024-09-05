@@ -26,11 +26,11 @@ use snafu::ensure;
 use crate::function::{Function, FunctionContext};
 
 #[derive(Clone, Debug, Default)]
-pub struct ToStringFunction;
+pub struct JsonToStringFunction;
 
-const NAME: &str = "to_string";
+const NAME: &str = "json_to_string";
 
-impl Function for ToStringFunction {
+impl Function for JsonToStringFunction {
     fn name(&self) -> &str {
         NAME
     }
@@ -101,9 +101,9 @@ impl Function for ToStringFunction {
     }
 }
 
-impl Display for ToStringFunction {
+impl Display for JsonToStringFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "TO_STRING")
+        write!(f, "JSON_TO_STRING")
     }
 }
 
@@ -119,17 +119,17 @@ mod tests {
 
     #[test]
     fn test_get_by_path_function() {
-        let to_string = ToStringFunction;
+        let json_to_string = JsonToStringFunction;
 
-        assert_eq!("to_string", to_string.name());
+        assert_eq!("json_to_string", json_to_string.name());
         assert_eq!(
             ConcreteDataType::string_datatype(),
-            to_string
+            json_to_string
                 .return_type(&[ConcreteDataType::json_datatype()])
                 .unwrap()
         );
 
-        assert!(matches!(to_string.signature(),
+        assert!(matches!(json_to_string.signature(),
                          Signature {
                              type_signature: TypeSignature::Exact(valid_types),
                              volatility: Volatility::Immutable
@@ -152,7 +152,9 @@ mod tests {
 
         let json_vector = BinaryVector::from_vec(jsonbs);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector)];
-        let vector = to_string.eval(FunctionContext::default(), &args).unwrap();
+        let vector = json_to_string
+            .eval(FunctionContext::default(), &args)
+            .unwrap();
 
         assert_eq!(3, vector.len());
         for (i, gt) in json_strings.iter().enumerate() {
@@ -165,7 +167,7 @@ mod tests {
         let invalid_jsonb = vec![b"invalid json"];
         let invalid_json_vector = BinaryVector::from_vec(invalid_jsonb);
         let args: Vec<VectorRef> = vec![Arc::new(invalid_json_vector)];
-        let vector = to_string.eval(FunctionContext::default(), &args);
+        let vector = json_to_string.eval(FunctionContext::default(), &args);
         assert!(vector.is_err());
     }
 }

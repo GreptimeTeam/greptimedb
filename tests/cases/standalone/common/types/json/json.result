@@ -7,10 +7,10 @@ INSERT INTO jsons VALUES(to_json('{"a":1, "b":2, "c":3}'), 1), (to_json('{"a":1,
 
 Affected Rows: 3
 
-SELECT to_string(j), t FROM jsons;
+SELECT json_to_string(j), t FROM jsons;
 
 +---------------------------------+-------------------------+
-| to_string(jsons.j)              | t                       |
+| json_to_string(jsons.j)         | t                       |
 +---------------------------------+-------------------------+
 | {"a":1,"b":2,"c":3}             | 1970-01-01T00:00:00.001 |
 | {"a":1,"b":2,"c":3,"d":4}       | 1970-01-01T00:00:00.002 |
@@ -30,7 +30,7 @@ INSERT INTO jsons VALUES(to_json('Morning my friends, have a nice day :)'), 5);
 
 Error: 3001(EngineExecuteQuery), DataFusion error: Invalid function args: Cannot convert the string to json, have: Morning my friends, have a nice day :)
 
-SELECT to_string(j), t FROM jsons;
+SELECT json_to_string(j), t FROM jsons;
 
 ++
 ++
@@ -43,13 +43,13 @@ INSERT INTO json_empty VALUES(NULL, 2);
 
 Affected Rows: 1
 
-SELECT to_json(j), t FROM json_empty;
+SELECT json_to_string(j), t FROM json_empty;
 
-+-----------------------+-------------------------+
-| to_json(json_empty.j) | t                       |
-+-----------------------+-------------------------+
-|                       | 1970-01-01T00:00:00.002 |
-+-----------------------+-------------------------+
++------------------------------+-------------------------+
+| json_to_string(json_empty.j) | t                       |
++------------------------------+-------------------------+
+|                              | 1970-01-01T00:00:00.002 |
++------------------------------+-------------------------+
 
 drop table jsons;
 
