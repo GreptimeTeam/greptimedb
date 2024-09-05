@@ -319,6 +319,7 @@ impl MetasrvBuilder {
                 region_failure_detector_controller.clone(),
                 mailbox.clone(),
                 options.server_addr.clone(),
+                cache_invalidator.clone(),
             ),
         ));
         region_migration_manager.try_start()?;
@@ -346,7 +347,7 @@ impl MetasrvBuilder {
             DdlManager::try_new(
                 DdlContext {
                     node_manager,
-                    cache_invalidator,
+                    cache_invalidator: cache_invalidator.clone(),
                     memory_region_keeper: memory_region_keeper.clone(),
                     table_metadata_manager: table_metadata_manager.clone(),
                     table_metadata_allocator: table_metadata_allocator.clone(),
@@ -434,6 +435,7 @@ impl MetasrvBuilder {
             memory_region_keeper,
             region_migration_manager,
             region_supervisor_ticker,
+            cache_invalidator,
         })
     }
 }

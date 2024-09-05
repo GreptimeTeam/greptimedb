@@ -49,6 +49,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::meta::{HeartbeatResponse, RequestHeader};
+    use common_meta::cache_invalidator::DummyCacheInvalidator;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::SequenceBuilder;
@@ -85,6 +86,7 @@ mod tests {
             election: None,
             is_infancy: false,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
+            cache_invalidator: Arc::new(DummyCacheInvalidator),
         };
 
         let req = HeartbeatRequest {
