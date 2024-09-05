@@ -25,6 +25,7 @@ use snafu::ensure;
 
 use crate::function::{Function, FunctionContext};
 
+/// Parses the `String` into `JSONB`.
 #[derive(Clone, Debug, Default)]
 pub struct ToJsonFunction;
 

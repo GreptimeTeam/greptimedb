@@ -25,6 +25,7 @@ use snafu::ensure;
 
 use crate::function::{Function, FunctionContext};
 
+/// Converts the `JSONB` into `String`. It's useful for displaying JSONB content.
 #[derive(Clone, Debug, Default)]
 pub struct JsonToStringFunction;
 
