@@ -544,9 +544,7 @@ pub(super) fn parameters_to_scalar_values(
                     ConcreteDataType::String(_) => {
                         ScalarValue::Utf8(data.map(|d| String::from_utf8_lossy(&d).to_string()))
                     }
-                    ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => {
-                        ScalarValue::Binary(data)
-                    }
+                    ConcreteDataType::Binary(_) => ScalarValue::Binary(data),
                     _ => {
                         return Err(invalid_parameter_error(
                             "invalid_parameter_type",
