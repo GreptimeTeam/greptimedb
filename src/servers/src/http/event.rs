@@ -232,7 +232,7 @@ fn transform_ndjson_array_factory(
 }
 
 #[axum_macros::debug_handler]
-pub async fn test_pipeline(
+pub async fn pipeline_dryrun(
     State(log_state): State<LogState>,
     Query(query_params): Query<LogIngesterQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,

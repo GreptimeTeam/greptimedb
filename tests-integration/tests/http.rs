@@ -1213,7 +1213,7 @@ transform:
         ]
         "#;
     let res = client
-        .post("/v1/events/test_pipelines?pipeline_name=test")
+        .post("/v1/events/pipelines/dryrun?pipeline_name=test")
         .header("Content-Type", "application/json")
         .body(data_body)
         .send()
