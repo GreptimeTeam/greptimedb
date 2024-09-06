@@ -74,7 +74,7 @@ Our core developers have been building time-series data platforms for years. Bas
 
 * **Compatible with InfluxDB, Prometheus and more protocols**
 
-  Widely adopted database protocols and APIs, including MySQL, PostgreSQL, and Prometheus Remote Storage, etc. [Read more](https://docs.greptime.com/user-guide/clients/overview).
+  Widely adopted database protocols and APIs, including MySQL, PostgreSQL, and Prometheus Remote Storage, etc. [Read more](https://docs.greptime.com/user-guide/protocols/overview).
 
 ## Try GreptimeDB
 
