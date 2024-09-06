@@ -709,6 +709,10 @@ impl ScanInput {
         rows_in_files + rows_in_memtables
     }
 
+    pub(crate) fn predicate(&self) -> Option<Predicate> {
+        self.predicate.clone()
+    }
+
     /// Retrieves [`PartitionRange`] from memtable and files
     pub(crate) fn partition_ranges(&self) -> Vec<PartitionRange> {
         let mut id = 0;

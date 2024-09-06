@@ -233,6 +233,9 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// # Panics
     /// Panics if the `partition` is out of bound.
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError>;
+
+    /// Check if there is any predicate that may be executed in this scanner.
+    fn has_predicate(&self) -> bool;
 }
 
 pub type RegionScannerRef = Box<dyn RegionScanner>;
@@ -366,6 +369,10 @@ impl RegionScanner for SinglePartitionScanner {
                 StatusCode::Unexpected,
             ))
         })
+    }
+
+    fn has_predicate(&self) -> bool {
+        false
     }
 }
 
