@@ -16,6 +16,7 @@ use std::collections::{hash_map, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_stream::stream;
 use common_runtime::{RepeatedTask, TaskFunction};
@@ -40,7 +41,9 @@ use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl};
 const NAMESPACE_PREFIX: &str = "$sys/";
 
 pub struct RaftEngineLogStore {
-    config: RaftEngineConfig,
+    sync_write: bool,
+    sync_period: Option<Duration>,
+    read_batch_size: usize,
     engine: Arc<Engine>,
     gc_task: RepeatedTask<Error>,
     last_sync_time: AtomicI64,
@@ -76,7 +79,7 @@ impl TaskFunction<Error> for PurgeExpiredFilesFunction {
 }
 
 impl RaftEngineLogStore {
-    pub async fn try_new(dir: String, config: RaftEngineConfig) -> Result<Self> {
+    pub async fn try_new(dir: String, config: &RaftEngineConfig) -> Result<Self> {
         let raft_engine_config = Config {
             dir,
             purge_threshold: ReadableSize(config.purge_threshold.0),
@@ -96,7 +99,9 @@ impl RaftEngineLogStore {
         );
 
         let log_store = Self {
-            config,
+            sync_write: config.sync_write,
+            sync_period: config.sync_period,
+            read_batch_size: config.read_batch_size,
             engine,
             gc_task,
             last_sync_time: AtomicI64::new(0),
@@ -196,7 +201,9 @@ impl RaftEngineLogStore {
 impl Debug for RaftEngineLogStore {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RaftEngineLogsStore")
-            .field("config", &self.config)
+            .field("sync_write", &self.sync_write)
+            .field("sync_period", &self.sync_period)
+            .field("read_batch_size", &self.read_batch_size)
             .field("started", &self.gc_task.started())
             .finish()
     }
@@ -228,9 +235,9 @@ impl LogStore for RaftEngineLogStore {
 
         let (mut batch, last_entry_ids) = self.entries_to_batch(entries)?;
 
-        let mut sync = self.config.sync_write;
+        let mut sync = self.sync_write;
 
-        if let Some(sync_period) = &self.config.sync_period {
+        if let Some(sync_period) = &self.sync_period {
             let now = common_time::util::current_time_millis();
             if now - self.last_sync_time.load(Ordering::Relaxed) >= sync_period.as_millis() as i64 {
                 self.last_sync_time.store(now, Ordering::Relaxed);
@@ -276,7 +283,7 @@ impl LogStore for RaftEngineLogStore {
             entry_id,
             self.span(ns)
         );
-        let max_batch_size = self.config.read_batch_size;
+        let max_batch_size = self.read_batch_size;
         let (tx, mut rx) = tokio::sync::mpsc::channel(max_batch_size);
         let _handle = common_runtime::spawn_global(async move {
             while start_index <= last_index {
@@ -489,7 +496,7 @@ mod tests {
         let dir = create_temp_dir("raft-engine-logstore-test");
         let logstore = RaftEngineLogStore::try_new(
             dir.path().to_str().unwrap().to_string(),
-            RaftEngineConfig::default(),
+            &RaftEngineConfig::default(),
         )
         .await
         .unwrap();
@@ -502,7 +509,7 @@ mod tests {
         let dir = create_temp_dir("raft-engine-logstore-test");
         let logstore = RaftEngineLogStore::try_new(
             dir.path().to_str().unwrap().to_string(),
-            RaftEngineConfig::default(),
+            &RaftEngineConfig::default(),
         )
         .await
         .unwrap();
@@ -528,7 +535,7 @@ mod tests {
         let dir = create_temp_dir("raft-engine-logstore-test");
         let logstore = RaftEngineLogStore::try_new(
             dir.path().to_str().unwrap().to_string(),
-            RaftEngineConfig::default(),
+            &RaftEngineConfig::default(),
         )
         .await
         .unwrap();
@@ -570,7 +577,7 @@ mod tests {
         {
             let logstore = RaftEngineLogStore::try_new(
                 dir.path().to_str().unwrap().to_string(),
-                RaftEngineConfig::default(),
+                &RaftEngineConfig::default(),
             )
             .await
             .unwrap();
@@ -590,7 +597,7 @@ mod tests {
 
         let logstore = RaftEngineLogStore::try_new(
             dir.path().to_str().unwrap().to_string(),
-            RaftEngineConfig::default(),
+            &RaftEngineConfig::default(),
         )
         .await
         .unwrap();
@@ -634,7 +641,7 @@ mod tests {
             ..Default::default()
         };
 
-        RaftEngineLogStore::try_new(path, config).await.unwrap()
+        RaftEngineLogStore::try_new(path, &config).await.unwrap()
     }
 
     #[tokio::test]
