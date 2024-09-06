@@ -88,6 +88,7 @@ impl RaftEngineLogStore {
             target_file_size: ReadableSize(config.file_size.0),
             enable_log_recycle: config.enable_log_recycle,
             prefill_for_recycle: config.prefill_log_files,
+            recovery_threads: config.recovery_parallelism,
             ..Default::default()
         };
         let engine = Arc::new(Engine::open(raft_engine_config).context(RaftEngineSnafu)?);
