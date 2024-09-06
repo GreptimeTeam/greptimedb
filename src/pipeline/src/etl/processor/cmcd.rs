@@ -12,14 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use ahash::HashSet;
 use urlencoding::decode;
 
-use crate::etl::field::{Field, Fields};
+use crate::etl::field::{Field, Fields, InputFieldInfo, OneInputMultiOutputField};
+use crate::etl::find_key_index;
 use crate::etl::processor::{
-    yaml_bool, yaml_field, yaml_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, Processor, ProcessorBuilder, ProcessorKind,
+    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
-use crate::etl::value::{Map, Value};
+use crate::etl::value::Value;
 
 pub(crate) const PROCESSOR_CMCD: &str = "cmcd";
 
@@ -63,6 +67,178 @@ const CMCD_KEYS: [&str; 18] = [
     CMCD_KEY_V,
 ];
 
+/// CmcdProcessorBuilder is a builder for CmcdProcessor
+/// parse from raw yaml
+#[derive(Debug, Default)]
+pub struct CmcdProcessorBuilder {
+    fields: Fields,
+    output_keys: HashSet<String>,
+    ignore_missing: bool,
+}
+
+impl CmcdProcessorBuilder {
+    /// build_cmcd_outputs build cmcd output info
+    /// generate index and function for each output
+    pub(super) fn build_cmcd_outputs(
+        field: &Field,
+        intermediate_keys: &[String],
+    ) -> Result<(BTreeMap<String, usize>, Vec<CmcdOutputInfo>), String> {
+        let mut output_index = BTreeMap::new();
+        let mut cmcd_field_outputs = Vec::with_capacity(CMCD_KEYS.len());
+        for cmcd in CMCD_KEYS {
+            let final_key = generate_key(field.target_or_input_field(), cmcd);
+            let index = find_key_index(intermediate_keys, &final_key, "cmcd")?;
+            output_index.insert(final_key.clone(), index);
+            match cmcd {
+                CMCD_KEY_BS | CMCD_KEY_SU => {
+                    let output_info = CmcdOutputInfo::new(final_key, cmcd, index, bs_su);
+                    cmcd_field_outputs.push(output_info);
+                }
+                CMCD_KEY_BR | CMCD_KEY_BL | CMCD_KEY_D | CMCD_KEY_DL | CMCD_KEY_MTP
+                | CMCD_KEY_RTP | CMCD_KEY_TB => {
+                    let output_info = CmcdOutputInfo::new(final_key, cmcd, index, br_tb);
+                    cmcd_field_outputs.push(output_info);
+                }
+                CMCD_KEY_CID | CMCD_KEY_NRR | CMCD_KEY_OT | CMCD_KEY_SF | CMCD_KEY_SID
+                | CMCD_KEY_ST | CMCD_KEY_V => {
+                    let output_info = CmcdOutputInfo::new(final_key, cmcd, index, cid_v);
+                    cmcd_field_outputs.push(output_info);
+                }
+                CMCD_KEY_NOR => {
+                    let output_info = CmcdOutputInfo::new(final_key, cmcd, index, nor);
+                    cmcd_field_outputs.push(output_info);
+                }
+                CMCD_KEY_PR => {
+                    let output_info = CmcdOutputInfo::new(final_key, cmcd, index, pr);
+                    cmcd_field_outputs.push(output_info);
+                }
+                _ => {}
+            }
+        }
+        Ok((output_index, cmcd_field_outputs))
+    }
+
+    /// build CmcdProcessor from CmcdProcessorBuilder
+    pub fn build(self, intermediate_keys: &[String]) -> Result<CmcdProcessor, String> {
+        let mut real_fields = vec![];
+        let mut cmcd_outputs = Vec::with_capacity(CMCD_KEYS.len());
+        for field in self.fields.into_iter() {
+            let input_index = find_key_index(intermediate_keys, field.input_field(), "cmcd")?;
+
+            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+
+            let (_, cmcd_field_outputs) = Self::build_cmcd_outputs(&field, intermediate_keys)?;
+
+            cmcd_outputs.push(cmcd_field_outputs);
+
+            let real_field = OneInputMultiOutputField::new(input_field_info, field.target_field);
+            real_fields.push(real_field);
+        }
+        Ok(CmcdProcessor {
+            fields: real_fields,
+            cmcd_outputs,
+            ignore_missing: self.ignore_missing,
+        })
+    }
+}
+
+impl ProcessorBuilder for CmcdProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        self.output_keys.iter().map(|s| s.as_str()).collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.fields.iter().map(|f| f.input_field()).collect()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+        self.build(intermediate_keys).map(ProcessorKind::Cmcd)
+    }
+}
+
+fn generate_key(prefix: &str, key: &str) -> String {
+    format!("{}_{}", prefix, key)
+}
+
+/// CmcdOutputInfo is a struct to store output info
+#[derive(Debug)]
+pub(super) struct CmcdOutputInfo {
+    /// {input_field}_{cmcd_key}
+    final_key: String,
+    /// cmcd key
+    key: &'static str,
+    /// index in intermediate_keys
+    index: usize,
+    /// function to resolve value
+    f: fn(&str, &str, Option<&str>) -> Result<Value, String>,
+}
+
+impl CmcdOutputInfo {
+    fn new(
+        final_key: String,
+        key: &'static str,
+        index: usize,
+        f: fn(&str, &str, Option<&str>) -> Result<Value, String>,
+    ) -> Self {
+        Self {
+            final_key,
+            key,
+            index,
+            f,
+        }
+    }
+}
+
+impl Default for CmcdOutputInfo {
+    fn default() -> Self {
+        Self {
+            final_key: String::default(),
+            key: "",
+            index: 0,
+            f: |_, _, _| Ok(Value::Null),
+        }
+    }
+}
+
+/// function to resolve CMCD_KEY_BS | CMCD_KEY_SU
+fn bs_su(_: &str, _: &str, _: Option<&str>) -> Result<Value, String> {
+    Ok(Value::Boolean(true))
+}
+
+/// function to resolve CMCD_KEY_BR | CMCD_KEY_BL | CMCD_KEY_D | CMCD_KEY_DL | CMCD_KEY_MTP | CMCD_KEY_RTP | CMCD_KEY_TB
+fn br_tb(s: &str, k: &str, v: Option<&str>) -> Result<Value, String> {
+    let v = v.ok_or(format!("{k} missing value in {s}"))?;
+    let val: i64 = v
+        .parse()
+        .map_err(|_| format!("failed to parse {v} as i64"))?;
+    Ok(Value::Int64(val))
+}
+
+/// function to resolve CMCD_KEY_CID | CMCD_KEY_NRR | CMCD_KEY_OT | CMCD_KEY_SF | CMCD_KEY_SID | CMCD_KEY_V
+fn cid_v(s: &str, k: &str, v: Option<&str>) -> Result<Value, String> {
+    let v = v.ok_or(format!("{k} missing value in {s}"))?;
+    Ok(Value::String(v.to_string()))
+}
+
+/// function to resolve CMCD_KEY_NOR
+fn nor(s: &str, k: &str, v: Option<&str>) -> Result<Value, String> {
+    let v = v.ok_or(format!("{k} missing value in {s}"))?;
+    let val = match decode(v) {
+        Ok(val) => val.to_string(),
+        Err(_) => v.to_string(),
+    };
+    Ok(Value::String(val))
+}
+
+/// function to resolve CMCD_KEY_PR
+fn pr(s: &str, k: &str, v: Option<&str>) -> Result<Value, String> {
+    let v = v.ok_or(format!("{k} missing value in {s}"))?;
+    let val: f64 = v
+        .parse()
+        .map_err(|_| format!("failed to parse {v} as f64"))?;
+    Ok(Value::Float64(val))
+}
+
 /// Common Media Client Data Specification:
 /// https://cdn.cta.tech/cta/media/media/resources/standards/pdfs/cta-5004-final.pdf
 ///
@@ -100,98 +276,43 @@ const CMCD_KEYS: [&str; 18] = [
 /// 12. Transport Layer Security SHOULD be used to protect all transmission of CMCD data.
 #[derive(Debug, Default)]
 pub struct CmcdProcessor {
-    fields: Fields,
+    fields: Vec<OneInputMultiOutputField>,
+    cmcd_outputs: Vec<Vec<CmcdOutputInfo>>,
 
     ignore_missing: bool,
 }
 
 impl CmcdProcessor {
-    fn with_fields(&mut self, mut fields: Fields) {
-        Self::update_output_keys(&mut fields);
-        self.fields = fields;
-    }
-
-    fn with_ignore_missing(&mut self, ignore_missing: bool) {
-        self.ignore_missing = ignore_missing;
-    }
-
     fn generate_key(prefix: &str, key: &str) -> String {
         format!("{}_{}", prefix, key)
     }
 
-    fn parse(prefix: &str, s: &str) -> Result<Map, String> {
-        let mut map = Map::default();
+    fn parse(&self, field_index: usize, s: &str) -> Result<Vec<(usize, Value)>, String> {
         let parts = s.split(',');
+        let mut result = Vec::new();
         for part in parts {
             let mut kv = part.split('=');
             let k = kv.next().ok_or(format!("{part} missing key in {s}"))?;
             let v = kv.next();
 
-            let key = Self::generate_key(prefix, k);
-            match k {
-                CMCD_KEY_BS | CMCD_KEY_SU => {
-                    map.insert(key, Value::Boolean(true));
+            for cmcd_key in self.cmcd_outputs[field_index].iter() {
+                if cmcd_key.key == k {
+                    let val = (cmcd_key.f)(s, k, v)?;
+                    result.push((cmcd_key.index, val));
                 }
-                CMCD_KEY_BR | CMCD_KEY_BL | CMCD_KEY_D | CMCD_KEY_DL | CMCD_KEY_MTP
-                | CMCD_KEY_RTP | CMCD_KEY_TB => {
-                    let v = v.ok_or(format!("{k} missing value in {s}"))?;
-                    let val: i64 = v
-                        .parse()
-                        .map_err(|_| format!("failed to parse {v} as i64"))?;
-                    map.insert(key, Value::Int64(val));
-                }
-                CMCD_KEY_CID | CMCD_KEY_NRR | CMCD_KEY_OT | CMCD_KEY_SF | CMCD_KEY_SID
-                | CMCD_KEY_ST | CMCD_KEY_V => {
-                    let v = v.ok_or(format!("{k} missing value in {s}"))?;
-                    map.insert(key, Value::String(v.to_string()));
-                }
-                CMCD_KEY_NOR => {
-                    let v = v.ok_or(format!("{k} missing value in {s}"))?;
-                    let val = match decode(v) {
-                        Ok(val) => val.to_string(),
-                        Err(_) => v.to_string(),
-                    };
-                    map.insert(key, Value::String(val));
-                }
-                CMCD_KEY_PR => {
-                    let v = v.ok_or(format!("{k} missing value in {s}"))?;
-                    let val: f64 = v
-                        .parse()
-                        .map_err(|_| format!("failed to parse {v} as f64"))?;
-                    map.insert(key, Value::Float64(val));
-                }
-                _ => match v {
-                    Some(v) => map.insert(key, Value::String(v.to_string())),
-                    None => map.insert(k, Value::Boolean(true)),
-                },
             }
         }
 
-        Ok(map)
-    }
-
-    fn process_field(&self, val: &str, field: &Field) -> Result<Map, String> {
-        let prefix = field.get_target_field();
-
-        Self::parse(prefix, val)
-    }
-
-    fn update_output_keys(fields: &mut Fields) {
-        for field in fields.iter_mut() {
-            for key in CMCD_KEYS.iter() {
-                field
-                    .output_fields_index_mapping
-                    .insert(Self::generate_key(field.get_target_field(), key), 0);
-            }
-        }
+        Ok(result)
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = CmcdProcessor::default();
+        let mut fields = Fields::default();
+        let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
             let key = k
@@ -199,25 +320,40 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessor {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?));
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
+                    fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
 
                 IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?);
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
 
                 _ => {}
             }
         }
 
-        Ok(processor)
+        let output_keys = fields
+            .iter()
+            .flat_map(|f| {
+                CMCD_KEYS
+                    .iter()
+                    .map(|cmcd_key| generate_key(f.target_or_input_field(), cmcd_key))
+            })
+            .collect();
+
+        let builder = CmcdProcessorBuilder {
+            fields,
+            output_keys,
+            ignore_missing,
+        };
+
+        Ok(builder)
     }
 }
 
-impl crate::etl::processor::Processor for CmcdProcessor {
+impl Processor for CmcdProcessor {
     fn kind(&self) -> &str {
         PROCESSOR_CMCD
     }
@@ -226,51 +362,14 @@ impl crate::etl::processor::Processor for CmcdProcessor {
         self.ignore_missing
     }
 
-    fn fields(&self) -> &Fields {
-        &self.fields
-    }
-
-    fn fields_mut(&mut self) -> &mut Fields {
-        &mut self.fields
-    }
-
-    fn output_keys(&self) -> HashSet<String> {
-        self.fields
-            .iter()
-            .map(|field| {
-                field
-                    .target_field
-                    .clone()
-                    .unwrap_or_else(|| field.get_field_name().to_string())
-            })
-            .flat_map(|keys| {
-                CMCD_KEYS
-                    .iter()
-                    .map(move |key| format!("{}_{}", keys, *key))
-            })
-            .collect()
-    }
-
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        match val {
-            Value::String(val) => self.process_field(val, field),
-            _ => Err(format!(
-                "{} processor: expect string value, but got {val:?}",
-                self.kind()
-            )),
-        }
-    }
-
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.fields.iter() {
-            match val.get(field.input_field.index) {
+        for (field_index, field) in self.fields.iter().enumerate() {
+            let field_value_index = field.input_index();
+            match val.get(field_value_index) {
                 Some(Value::String(v)) => {
-                    // TODO(qtang): Let this method use the intermediate state collection directly.
-                    let map = self.process_field(v, field)?;
-                    for (k, v) in map.values.into_iter() {
-                        if let Some(index) = field.output_fields_index_mapping.get(&k) {
-                            val[*index] = v;
-                        }
+                    let result_list = self.parse(field_index, v)?;
+                    for (output_index, v) in result_list {
+                        val[output_index] = v;
                     }
                 }
                 Some(Value::Null) | None => {
@@ -278,7 +377,7 @@ impl crate::etl::processor::Processor for CmcdProcessor {
                         return Err(format!(
                             "{} processor: missing field: {}",
                             self.kind(),
-                            field.get_field_name()
+                            field.input_name()
                         ));
                     }
                 }
@@ -299,7 +398,8 @@ mod tests {
     use ahash::HashMap;
     use urlencoding::decode;
 
-    use super::CmcdProcessor;
+    use super::{CmcdProcessorBuilder, CMCD_KEYS};
+    use crate::etl::field::{Field, Fields};
     use crate::etl::value::{Map, Value};
 
     #[test]
@@ -329,6 +429,7 @@ mod tests {
                 ],
             ),
             (
+                // we not resolve `b` key
                 "b%2Crtp%3D15000%2Csid%3D%226e2fb550-c457-11e9-bb97-0800200c9a66%22",
                 vec![
                     (
@@ -336,7 +437,6 @@ mod tests {
                         Value::String("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"".into()),
                     ),
                     ("prefix_rtp", Value::Int64(15000)),
-                    ("b", Value::Boolean(true)),
                 ],
             ),
             (
@@ -347,16 +447,17 @@ mod tests {
                 ],
             ),
             (
+                // we not resolve custom key
                 "d%3D4004%2Ccom.example-myNumericKey%3D500%2Ccom.examplemyStringKey%3D%22myStringValue%22",
                 vec![
-                    (
-                        "prefix_com.example-myNumericKey",
-                        Value::String("500".into()),
-                    ),
-                    (
-                        "prefix_com.examplemyStringKey",
-                        Value::String("\"myStringValue\"".into()),
-                    ),
+                    // (
+                    //     "prefix_com.example-myNumericKey",
+                    //     Value::String("500".into()),
+                    // ),
+                    // (
+                    //     "prefix_com.examplemyStringKey",
+                    //     Value::String("\"myStringValue\"".into()),
+                    // ),
                     ("prefix_d", Value::Int64(4004)),
                 ],
             ),
@@ -431,6 +532,24 @@ mod tests {
             ),
         ];
 
+        let field = Field::new("prefix", None);
+
+        let output_keys = CMCD_KEYS
+            .iter()
+            .map(|k| format!("prefix_{}", k))
+            .collect::<Vec<String>>();
+
+        let mut intermediate_keys = vec!["prefix".to_string()];
+        intermediate_keys.append(&mut (output_keys.clone()));
+
+        let builder = CmcdProcessorBuilder {
+            fields: Fields::new(vec![field]),
+            output_keys: output_keys.iter().map(|s| s.to_string()).collect(),
+            ignore_missing: false,
+        };
+
+        let processor = builder.build(&intermediate_keys).unwrap();
+
         for (s, vec) in ss.into_iter() {
             let decoded = decode(s).unwrap().to_string();
 
@@ -440,7 +559,12 @@ mod tests {
                 .collect::<HashMap<String, Value>>();
             let expected = Map { values };
 
-            let actual = CmcdProcessor::parse("prefix", &decoded).unwrap();
+            let actual = processor.parse(0, &decoded).unwrap();
+            let actual = actual
+                .into_iter()
+                .map(|(index, value)| (intermediate_keys[index].clone(), value))
+                .collect::<HashMap<String, Value>>();
+            let actual = Map { values: actual };
             assert_eq!(actual, expected);
         }
     }

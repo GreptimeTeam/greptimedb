@@ -13,20 +13,45 @@
 // limitations under the License.
 
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Value};
+use pipeline::{parse, Content, GreptimeTransformer, Pipeline};
 
 /// test util function to parse and execute pipeline
 pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
-    let input_value: Value = serde_json::from_str::<serde_json::Value>(input_str)
-        .expect("failed to parse into json")
-        .try_into()
-        .expect("failed to convert into value");
+    let input_value = serde_json::from_str::<serde_json::Value>(input_str).unwrap();
 
     let yaml_content = Content::Yaml(pipeline_yaml.into());
     let pipeline: Pipeline<GreptimeTransformer> =
         parse(&yaml_content).expect("failed to parse pipeline");
+    let mut result = pipeline.init_intermediate_state();
 
-    pipeline.exec(input_value).expect("failed to exec pipeline")
+    let schema = pipeline.schemas().clone();
+
+    let mut rows = Vec::new();
+
+    match input_value {
+        serde_json::Value::Array(array) => {
+            for value in array {
+                pipeline.prepare(value, &mut result).unwrap();
+                let row = pipeline
+                    .exec_mut(&mut result)
+                    .expect("failed to exec pipeline");
+                rows.push(row);
+                pipeline.reset_intermediate_state(&mut result);
+            }
+        }
+        serde_json::Value::Object(_) => {
+            pipeline.prepare(input_value, &mut result).unwrap();
+            let row = pipeline
+                .exec_mut(&mut result)
+                .expect("failed to exec pipeline");
+            rows.push(row);
+        }
+        _ => {
+            panic!("invalid input value");
+        }
+    }
+
+    Rows { schema, rows }
 }
 
 /// test util function to create column schema
