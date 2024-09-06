@@ -107,4 +107,9 @@ impl Provider {
         }
         None
     }
+
+    /// Returns true if it's remote WAL.
+    pub fn is_remote_wal(&self) -> bool {
+        matches!(self, Provider::Kafka(_))
+    }
 }

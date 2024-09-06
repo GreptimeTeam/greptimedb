@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use common_telemetry::{debug, info};
 use snafu::ResultExt;
+use store_api::logstore::LogStore;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::region_request::RegionAlterRequest;
 use store_api::storage::RegionId;
@@ -30,7 +31,7 @@ use crate::manifest::action::RegionChange;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_alter_request(
         &mut self,
         region_id: RegionId,

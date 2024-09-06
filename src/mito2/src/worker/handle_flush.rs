@@ -201,6 +201,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
+        if let Err(e) = self
+            .notify_manifest_change(&region, request.manifest_version)
+            .await
+        {
+            error!(e; "Failed to notify manifest change, region: {}, version: {}", region_id, request.manifest_version);
+        }
+
         region.version_control.apply_edit(
             request.edit.clone(),
             &request.memtables_to_remove,

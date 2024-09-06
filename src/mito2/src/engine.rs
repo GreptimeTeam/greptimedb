@@ -74,6 +74,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse,
@@ -184,7 +185,11 @@ impl MitoEngine {
     /// Now we only allow adding files to region (the [RegionEdit] struct can only contain a non-empty "files_to_add" field).
     /// Other region editing intention will result in an "invalid request" error.
     /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
-    pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+    pub async fn edit_region(
+        &self,
+        region_id: RegionId,
+        edit: RegionEdit,
+    ) -> Result<ManifestVersion> {
         let _timer = HANDLE_REQUEST_ELAPSED
             .with_label_values(&["edit_region"])
             .start_timer();

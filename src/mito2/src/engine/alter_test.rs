@@ -23,6 +23,12 @@ use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use futures::TryStreamExt;
+use log_store::kafka::log_store::KafkaLogStore;
+use rstest::rstest;
+use rstest_reuse::{self, apply};
+use store_api::logstore::provider::Provider;
+use store_api::logstore::LogStore;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
@@ -34,9 +40,12 @@ use crate::config::MitoConfig;
 use crate::engine::listener::AlterFlushListener;
 use crate::engine::MitoEngine;
 use crate::test_util::{
-    build_rows, build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder,
-    TestEnv,
+    build_rows, build_rows_for_key, flush_region, kafka_log_store_factory,
+    prepare_test_for_kafka_log_store, put_rows, rows_schema, single_kafka_log_store_factory,
+    CreateRequestBuilder, LogStoreFactory, TestEnv,
 };
+use crate::wal::entry_reader::decode_stream;
+use crate::wal::raw_entry_reader::flatten_stream;
 
 async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expected: &str) {
     let request = ScanRequest::default();
@@ -66,6 +75,52 @@ fn add_tag1() -> RegionAlterRequest {
             }],
         },
     }
+}
+
+#[apply(single_kafka_log_store_factory)]
+async fn test_alter_region_notification(factory: Option<LogStoreFactory>) {
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env =
+        TestEnv::with_prefix("alter-notification").with_log_store_factory(factory.clone());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 3, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    let request = add_tag1();
+    engine
+        .handle_request(region_id, RegionRequest::Alter(request))
+        .await
+        .unwrap();
+
+    let topic = topic.unwrap();
+    let log_store = env.log_store().unwrap().into_kafka_log_store();
+    let provider = Provider::kafka_provider(topic);
+    let stream = log_store.read(&provider, 0, None).await.unwrap();
+    let entries = decode_stream(flatten_stream::<KafkaLogStore>(stream, provider.clone()))
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    // Flush sst notification
+    assert_eq!(entries[1].1.mutations[0].op_type(), api::v1::OpType::Notify);
+    // Modify table metadata notification
+    assert_eq!(entries[2].1.mutations[0].op_type(), api::v1::OpType::Notify);
 }
 
 #[tokio::test]

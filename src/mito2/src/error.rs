@@ -491,6 +491,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} is readonly", region_id))]
+    ReadonlyRegion {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid options"))]
     JsonOptions {
         #[snafu(source)]
@@ -955,6 +962,7 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } => StatusCode::RegionNotReady,
+            ReadonlyRegion { .. } => StatusCode::Unexpected,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
