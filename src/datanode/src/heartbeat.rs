@@ -324,10 +324,12 @@ impl HeartbeatTask {
                 region_id: stat.region_id.as_u64(),
                 engine: stat.engine,
                 role: RegionRole::from(stat.role).into(),
-                // TODO(jeremy): w/rcus
+                // TODO(weny): w/rcus
                 rcus: 0,
                 wcus: 0,
                 approximate_bytes: region_server.region_disk_usage(stat.region_id).unwrap_or(0),
+                // TODO(weny): add extensions
+                extensions: Default::default(),
             })
             .collect()
     }
