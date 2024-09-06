@@ -1268,21 +1268,39 @@ transform:
         &json!([
             [
                 {
+                    "data_type": "INT32",
+                    "key": "id1",
+                    "semantic_type": "FIELD",
                     "value": 2436
                 },
                 {
+                    "data_type": "INT32",
+                    "key": "id2",
+                    "semantic_type": "FIELD",
                     "value": 2528
                 },
                 {
+                    "data_type": "STRING",
+                    "key": "type",
+                    "semantic_type": "FIELD",
                     "value": "I"
                 },
                 {
+                    "data_type": "STRING",
+                    "key": "log",
+                    "semantic_type": "FIELD",
                     "value": "ClusterAdapter:enter sendTextDataToCluster\\n"
                 },
                 {
+                    "data_type": "STRING",
+                    "key": "logger",
+                    "semantic_type": "FIELD",
                     "value": "INTERACT.MANAGER"
                 },
                 {
+                    "data_type": "TIMESTAMP_NANOSECOND",
+                    "key": "time",
+                    "semantic_type": "TIMESTAMP",
                     "value": "2024-05-25 20:16:37.217+0000"
                 }
             ]
