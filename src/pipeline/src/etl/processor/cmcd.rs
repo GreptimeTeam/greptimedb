@@ -18,9 +18,10 @@ use ahash::HashSet;
 use urlencoding::decode;
 
 use crate::etl::field::{Field, Fields, InputFieldInfo, OneInputMultiOutputField};
+use crate::etl::find_key_index;
 use crate::etl::processor::{
-    find_key_index, yaml_bool, yaml_new_field, yaml_new_fields, Processor, ProcessorBuilder,
-    ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, Processor, ProcessorBuilder, ProcessorKind,
+    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
 

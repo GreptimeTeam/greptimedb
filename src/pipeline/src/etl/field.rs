@@ -15,7 +15,7 @@
 use std::ops::Deref;
 use std::str::FromStr;
 
-use super::processor::find_key_index;
+use crate::etl::find_key_index;
 
 /// Information about the input field including the name and index in intermediate keys.
 #[derive(Debug, Default, Clone)]

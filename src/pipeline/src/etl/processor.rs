@@ -319,18 +319,3 @@ pub(crate) fn yaml_new_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields
 pub(crate) fn yaml_new_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field, String> {
     yaml_parse_string(v, field)
 }
-
-pub(crate) fn generate_find_key_index_error_msg(kind: &str, key: &str) -> String {
-    format!("{} processor.{} not found in intermediate keys", kind, key)
-}
-
-pub(crate) fn find_key_index(
-    intermediate_keys: &[String],
-    key: &str,
-    kind: &str,
-) -> Result<usize, String> {
-    intermediate_keys
-        .iter()
-        .position(|k| k == key)
-        .ok_or(generate_find_key_index_error_msg(kind, key))
-}

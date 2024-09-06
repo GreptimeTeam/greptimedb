@@ -23,10 +23,10 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
+use crate::etl::find_key_index;
 use crate::etl::processor::{
-    find_key_index, yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings,
-    Processor, ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
-    PATTERN_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
+    ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
 

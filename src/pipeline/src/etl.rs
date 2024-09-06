@@ -269,6 +269,20 @@ where
     }
 }
 
+pub(crate) fn find_key_index(
+    intermediate_keys: &[String],
+    key: &str,
+    kind: &str,
+) -> Result<usize, String> {
+    intermediate_keys
+        .iter()
+        .position(|k| k == key)
+        .ok_or(format!(
+            "{} processor.{} not found in intermediate keys",
+            kind, key
+        ))
+}
+
 #[cfg(test)]
 mod tests {
 

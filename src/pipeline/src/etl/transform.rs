@@ -17,6 +17,7 @@ pub mod transformer;
 
 use itertools::Itertools;
 
+use crate::etl::find_key_index;
 use crate::etl::processor::yaml_string;
 use crate::etl::transform::index::Index;
 use crate::etl::value::Value;
@@ -31,7 +32,7 @@ const TRANSFORM_ON_FAILURE: &str = "on_failure";
 pub use transformer::greptime::GreptimeTransformer;
 
 use super::field::{Fields, InputFieldInfo, OneInputOneOutputField};
-use super::processor::{find_key_index, yaml_new_field, yaml_new_fields};
+use super::processor::{yaml_new_field, yaml_new_fields};
 
 pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     type Output;
