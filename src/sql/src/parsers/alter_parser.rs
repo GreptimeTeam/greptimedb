@@ -1,5 +1,3 @@
-// Copyright 2023 Greptime Team
-//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -12,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use common_query::AddColumnLocation;
 use snafu::ResultExt;
@@ -25,10 +23,12 @@ use crate::error::{self, Result};
 use crate::parser::ParserContext;
 use crate::statements::alter::{AlterTable, AlterTableOperation};
 use crate::statements::statement::Statement;
+use crate::statements::OptionMap;
 
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
         let alter_table = self.parse_alter_table().context(error::SyntaxSnafu)?;
+        println!("{:?}", alter_table);
         Ok(Statement::Alter(alter_table))
     }
 
@@ -103,7 +103,7 @@ impl<'a> ParserContext<'a> {
 
             let _ = self.parser.parse_keyword(Keyword::FULLTEXT);
 
-            let options = self
+            let fulltext_options = self
                 .parser
                 .parse_options(Keyword::WITH)?
                 .into_iter()
@@ -122,11 +122,12 @@ impl<'a> ParserContext<'a> {
                 .collect::<Result<HashMap<String, String>>>()
                 .unwrap();
 
-            println!("options:{:?}", options);
+            let mut options = <OptionMap as std::default::Default>::default();
+            options.hash_options = fulltext_options;
 
             AlterTableOperation::AlterColumnFulltext {
                 column_name,
-                options: options.into(),
+                options,
             }
         } else {
             return Err(ParserError::ParserError(format!(
