@@ -77,11 +77,40 @@ impl<'a> ParserContext<'a> {
         } else if self.consume_token("MODIFY") {
             let _ = self.parser.parse_keyword(Keyword::COLUMN);
             let column_name = Self::canonicalize_identifier(self.parser.parse_identifier(false)?);
-            let target_type = self.parser.parse_data_type()?;
 
-            AlterTableOperation::ChangeColumnType {
-                column_name,
-                target_type,
+            if self.parser.parse_keyword(Keyword::SET) {
+                let _ = self.parser.parse_keyword(Keyword::FULLTEXT);
+
+                let options = self
+                    .parser
+                    .parse_options(Keyword::WITH)?
+                    .into_iter()
+                    .map(|option: SqlOption| -> Result<(String, String)> {
+                        let (key, value) = (option.name, option.value);
+                        let v = match value {
+                            Expr::Value(sqlparser::ast::Value::SingleQuotedString(v))
+                            | Expr::Value(sqlparser::ast::Value::DoubleQuotedString(v)) => v,
+                            Expr::Identifier(v) => v.value,
+                            Expr::Value(sqlparser::ast::Value::Number(v, _)) => v.to_string(),
+                            _ => return error::InvalidTableOptionValueSnafu { key, value }.fail(),
+                        };
+                        let k = key.value.to_lowercase();
+                        Ok((k, v))
+                    })
+                    .collect::<Result<HashMap<String, String>>>()
+                    .unwrap();
+
+                AlterTableOperation::AlterColumnFulltext {
+                    column_name,
+                    options: options.into(),
+                }
+            } else {
+                let target_type = self.parser.parse_data_type()?;
+
+                AlterTableOperation::ChangeColumnType {
+                    column_name,
+                    target_type,
+                }
             }
         } else if self.parser.parse_keyword(Keyword::RENAME) {
             let new_table_name_obj_raw = self.parse_object_name()?;
@@ -95,35 +124,6 @@ impl<'a> ParserContext<'a> {
                 }
             };
             AlterTableOperation::RenameTable { new_table_name }
-        } else if self.parser.parse_keyword(Keyword::SET) {
-            let _ = self.parser.parse_keyword(Keyword::COLUMN);
-            let column_name = Self::canonicalize_identifier(self.parser.parse_identifier(false)?);
-
-            let _ = self.parser.parse_keyword(Keyword::FULLTEXT);
-
-            let options = self
-                .parser
-                .parse_options(Keyword::WITH)?
-                .into_iter()
-                .map(|option: SqlOption| -> Result<(String, String)> {
-                    let (key, value) = (option.name, option.value);
-                    let v = match value {
-                        Expr::Value(sqlparser::ast::Value::SingleQuotedString(v))
-                        | Expr::Value(sqlparser::ast::Value::DoubleQuotedString(v)) => v,
-                        Expr::Identifier(v) => v.value,
-                        Expr::Value(sqlparser::ast::Value::Number(v, _)) => v.to_string(),
-                        _ => return error::InvalidTableOptionValueSnafu { key, value }.fail(),
-                    };
-                    let k = key.value.to_lowercase();
-                    Ok((k, v))
-                })
-                .collect::<Result<HashMap<String, String>>>()
-                .unwrap();
-
-            AlterTableOperation::AlterColumnFulltext {
-                column_name,
-                options: options.into(),
-            }
         } else {
             return Err(ParserError::ParserError(format!(
                 "expect keyword ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found {}",
