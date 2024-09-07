@@ -1,0 +1,198 @@
+CREATE TABLE `test` (
+  `message` STRING FULLTEXT,
+  `time` TIMESTAMP TIME INDEX,
+) WITH (
+  append_mode = 'true'
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+----------------------------------------------------------------------------------------+
+| Table | Create Table                                                                           |
++-------+----------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                    |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'false'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                        |
+|       |   TIME INDEX ("time")                                                                  |
+|       | )                                                                                      |
+|       |                                                                                        |
+|       | ENGINE=mito                                                                            |
+|       | WITH(                                                                                  |
+|       |   append_mode = 'true'                                                                 |
+|       | )                                                                                      |
++-------+----------------------------------------------------------------------------------------+
+
+ALTER TABLE test SET COLUMN message WITH(analyzer = 'Chinese', case_sensitive = 'true');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+---------------------------------------------------------------------------------------+
+| Table | Create Table                                                                          |
++-------+---------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                   |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                       |
+|       |   TIME INDEX ("time")                                                                 |
+|       | )                                                                                     |
+|       |                                                                                       |
+|       | ENGINE=mito                                                                           |
+|       | WITH(                                                                                 |
+|       |   append_mode = 'true'                                                                |
+|       | )                                                                                     |
++-------+---------------------------------------------------------------------------------------+
+
+ALTER TABLE test SET COLUMN message WITH(analyzer = 'Chinese', case_sensitive = 'false');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+----------------------------------------------------------------------------------------+
+| Table | Create Table                                                                           |
++-------+----------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                    |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                        |
+|       |   TIME INDEX ("time")                                                                  |
+|       | )                                                                                      |
+|       |                                                                                        |
+|       | ENGINE=mito                                                                            |
+|       | WITH(                                                                                  |
+|       |   append_mode = 'true'                                                                 |
+|       | )                                                                                      |
++-------+----------------------------------------------------------------------------------------+
+
+ALTER TABLE test SET COLUMN message WITH(analyzer = 'English', case_sensitive = 'true');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+---------------------------------------------------------------------------------------+
+| Table | Create Table                                                                          |
++-------+---------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                   |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                       |
+|       |   TIME INDEX ("time")                                                                 |
+|       | )                                                                                     |
+|       |                                                                                       |
+|       | ENGINE=mito                                                                           |
+|       | WITH(                                                                                 |
+|       |   append_mode = 'true'                                                                |
+|       | )                                                                                     |
++-------+---------------------------------------------------------------------------------------+
+
+ALTER TABLE test SET COLUMN message WITH(analyzer = 'English', case_sensitive = 'false');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+----------------------------------------------------------------------------------------+
+| Table | Create Table                                                                           |
++-------+----------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                    |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'false'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                        |
+|       |   TIME INDEX ("time")                                                                  |
+|       | )                                                                                      |
+|       |                                                                                        |
+|       | ENGINE=mito                                                                            |
+|       | WITH(                                                                                  |
+|       |   append_mode = 'true'                                                                 |
+|       | )                                                                                      |
++-------+----------------------------------------------------------------------------------------+
+
+ALTER TABLE test SET COLUMN message WITH(analyzer = 'English', case_sensitive = 'yes');
+
+Error: 1004(InvalidArguments), Invalid fulltext options
+
+SHOW CREATE TABLE test;
+
++-------+----------------------------------------------------------------------------------------+
+| Table | Create Table                                                                           |
++-------+----------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                    |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'false'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                        |
+|       |   TIME INDEX ("time")                                                                  |
+|       | )                                                                                      |
+|       |                                                                                        |
+|       | ENGINE=mito                                                                            |
+|       | WITH(                                                                                  |
+|       |   append_mode = 'true'                                                                 |
+|       | )                                                                                      |
++-------+----------------------------------------------------------------------------------------+
+
+ALTER TABLE test SET COLUMN message WITH(analyzer = 'Chinglish', case_sensitive = 'false');
+
+Error: 1004(InvalidArguments), Invalid fulltext options
+
+SHOW CREATE TABLE test;
+
++-------+----------------------------------------------------------------------------------------+
+| Table | Create Table                                                                           |
++-------+----------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                    |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'false'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                        |
+|       |   TIME INDEX ("time")                                                                  |
+|       | )                                                                                      |
+|       |                                                                                        |
+|       | ENGINE=mito                                                                            |
+|       | WITH(                                                                                  |
+|       |   append_mode = 'true'                                                                 |
+|       | )                                                                                      |
++-------+----------------------------------------------------------------------------------------+
+
+ALTER TABLE test SET COLUMN time WITH(analyzer = 'Chinese', case_sensitive = 'false');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-----------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                  |
++-------+-----------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                           |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'false'),        |
+|       |   "time" TIMESTAMP(3) NOT NULL FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false'), |
+|       |   TIME INDEX ("time")                                                                         |
+|       | )                                                                                             |
+|       |                                                                                               |
+|       | ENGINE=mito                                                                                   |
+|       | WITH(                                                                                         |
+|       |   append_mode = 'true'                                                                        |
+|       | )                                                                                             |
++-------+-----------------------------------------------------------------------------------------------+
+
+ALTER TABLE test SET COLUMN time WITH(analyzer = 'Chinese', case_sensitive = 'no');
+
+Error: 1004(InvalidArguments), Invalid fulltext options
+
+SHOW CREATE TABLE test;
+
++-------+-----------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                  |
++-------+-----------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                           |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'false'),        |
+|       |   "time" TIMESTAMP(3) NOT NULL FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false'), |
+|       |   TIME INDEX ("time")                                                                         |
+|       | )                                                                                             |
+|       |                                                                                               |
+|       | ENGINE=mito                                                                                   |
+|       | WITH(                                                                                         |
+|       |   append_mode = 'true'                                                                        |
+|       | )                                                                                             |
++-------+-----------------------------------------------------------------------------------------------+
+
+DROP TABLE test;
+
+Affected Rows: 0
+

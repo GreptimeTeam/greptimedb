@@ -488,7 +488,7 @@ pub(crate) fn to_alter_expr(
             options,
         } => Kind::ChangeFulltext(ChangeFulltext {
             column_name: column_name.value.to_string(),
-            options: options.hash_options.clone(),
+            options: options.clone().into_map(),
         }),
     };
 

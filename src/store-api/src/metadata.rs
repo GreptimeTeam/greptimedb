@@ -527,9 +527,9 @@ impl RegionMetadataBuilder {
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ChangeColumnTypes { columns } => self.change_column_types(columns),
             AlterKind::ChangeColumnFulltext {
-                column_name,
+                column_name: _,
                 options,
-            } => self.change_column_fulltext(column_name, options),
+            } => self.change_column_fulltext(options),
         }
         Ok(self)
     }
@@ -631,9 +631,7 @@ impl RegionMetadataBuilder {
     }
 
     /// Changes column fulltext option.
-    fn change_column_fulltext(&mut self, column_name: String, options: HashMap<String, String>) {
-        println!("fulltext_options: {:?}", options);
-
+    fn change_column_fulltext(&mut self, options: HashMap<String, String>) {
         for column_meta in self.column_metadatas.iter_mut() {
             let mut fulltext = if let Ok(Some(f)) = column_meta.column_schema.fulltext_options() {
                 f
@@ -667,9 +665,7 @@ impl RegionMetadataBuilder {
                     _ => {}
                 }
             }
-            println!("column_meta.column_schema1: {:?}", column_meta.column_schema);
             column_meta.column_schema.set_fulltext_options(fulltext).expect("set fulltext");
-            println!("column_meta.column_schema2: {:?}", column_meta.column_schema);
         }
     }
 }

@@ -603,7 +603,6 @@ impl TableMeta {
         column_name: &String,
         options: HashMap<String, String>,
     ) -> Result<TableMetaBuilder> {
-        println!("{:?}", options);
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
 

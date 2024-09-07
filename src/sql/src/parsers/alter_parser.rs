@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use common_query::AddColumnLocation;
 use snafu::ResultExt;
@@ -23,12 +23,10 @@ use crate::error::{self, Result};
 use crate::parser::ParserContext;
 use crate::statements::alter::{AlterTable, AlterTableOperation};
 use crate::statements::statement::Statement;
-use crate::statements::OptionMap;
 
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
         let alter_table = self.parse_alter_table().context(error::SyntaxSnafu)?;
-        println!("{:?}", alter_table);
         Ok(Statement::Alter(alter_table))
     }
 
@@ -103,7 +101,7 @@ impl<'a> ParserContext<'a> {
 
             let _ = self.parser.parse_keyword(Keyword::FULLTEXT);
 
-            let fulltext_options = self
+            let options = self
                 .parser
                 .parse_options(Keyword::WITH)?
                 .into_iter()
@@ -122,12 +120,9 @@ impl<'a> ParserContext<'a> {
                 .collect::<Result<HashMap<String, String>>>()
                 .unwrap();
 
-            let mut options = <OptionMap as std::default::Default>::default();
-            options.hash_options = fulltext_options;
-
             AlterTableOperation::AlterColumnFulltext {
                 column_name,
-                options,
+                options: options.into(),
             }
         } else {
             return Err(ParserError::ParserError(format!(
