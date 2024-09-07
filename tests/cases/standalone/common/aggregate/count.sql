@@ -35,3 +35,9 @@ values  ('a', '2024-09-06T06:00:01Z', 1),
         ('b', '2024-09-06T06:00:05Z', 5);
 
 select count(1) from count_where_bug where tag = 'b';
+
+select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
+
+select count(1) from count_where_bug where num != 3;
+
+drop table count_where_bug;

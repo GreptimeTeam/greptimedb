@@ -81,3 +81,23 @@ select count(1) from count_where_bug where tag = 'b';
 | 2               |
 +-----------------+
 
+select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
+
++-----------------+
+| COUNT(Int64(1)) |
++-----------------+
+| 1               |
++-----------------+
+
+select count(1) from count_where_bug where num != 3;
+
++-----------------+
+| COUNT(Int64(1)) |
++-----------------+
+| 4               |
++-----------------+
+
+drop table count_where_bug;
+
+Affected Rows: 0
+
