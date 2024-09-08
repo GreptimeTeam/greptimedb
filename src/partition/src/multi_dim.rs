@@ -274,7 +274,7 @@ impl<'a> RuleChecker<'a> {
     fn check_axis(&self) -> Result<()> {
         for (col_index, axis) in self.axis.iter().enumerate() {
             for (val, split_point) in axis {
-                if split_point.less_than_counter != 0 || !split_point.is_equal {
+                if !split_point.is_equal {
                     UnclosedValueSnafu {
                         value: format!("{val:?}"),
                         column: self.rule.partition_columns[col_index].clone(),
@@ -410,6 +410,7 @@ mod tests {
     ///      b <= h     b >= s            
     /// ```
     #[test]
+    #[ignore = "don't check unmatched `>` and `<` for now"]
     fn empty_expr_case_1() {
         // PARTITION ON COLUMNS (b) (
         //     b <= 'h',
@@ -451,6 +452,7 @@ mod tests {
     ///              10          20      
     /// ```
     #[test]
+    #[ignore = "don't check unmatched `>` and `<` for now"]
     fn empty_expr_case_2() {
         // PARTITION ON COLUMNS (b) (
         //     a >= 100 AND b <= 10  OR  a > 100 AND a <= 200 AND b <= 10  OR  a >= 200 AND b > 10 AND b <= 20  OR  a > 200 AND b <= 20
@@ -580,6 +582,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "don't check unmatched `>` and `<` for now"]
     fn duplicate_expr_case_1() {
         // PARTITION ON COLUMNS (a) (
         //     a <= 20,
