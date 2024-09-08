@@ -131,7 +131,7 @@ impl AlterLogicalTablesProcedure {
         let phy_raw_schemas = future::join_all(alter_region_tasks)
             .await
             .into_iter()
-            .map(|res| res.map(|mut res| res.extension.remove(ALTER_PHYSICAL_EXTENSION_KEY)))
+            .map(|res| res.map(|mut res| res.extensions.remove(ALTER_PHYSICAL_EXTENSION_KEY)))
             .collect::<Result<Vec<_>>>()?;
 
         if phy_raw_schemas.is_empty() {

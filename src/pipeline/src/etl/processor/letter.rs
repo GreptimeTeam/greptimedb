@@ -14,12 +14,12 @@
 
 use ahash::HashSet;
 
-use crate::etl::field::{Field, Fields};
+use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
-    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
-    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, METHOD_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
+    ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, METHOD_NAME,
 };
-use crate::etl::value::{Map, Value};
+use crate::etl::value::Value;
 
 pub(crate) const PROCESSOR_LETTER: &str = "letter";
 
@@ -54,29 +54,61 @@ impl std::str::FromStr for Method {
     }
 }
 
-/// only support string value
 #[derive(Debug, Default)]
-pub struct LetterProcessor {
+pub struct LetterProcessorBuilder {
     fields: Fields,
     method: Method,
     ignore_missing: bool,
 }
 
+impl ProcessorBuilder for LetterProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        self.fields
+            .iter()
+            .map(|f| f.target_or_input_field())
+            .collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.fields.iter().map(|f| f.input_field()).collect()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+        self.build(intermediate_keys).map(ProcessorKind::Letter)
+    }
+}
+
+impl LetterProcessorBuilder {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<LetterProcessor, String> {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input = OneInputOneOutputField::build(
+                "letter",
+                intermediate_keys,
+                field.input_field(),
+                field.target_or_input_field(),
+            )?;
+            real_fields.push(input);
+        }
+
+        Ok(LetterProcessor {
+            fields: real_fields,
+            method: self.method,
+            ignore_missing: self.ignore_missing,
+        })
+    }
+}
+
+/// only support string value
+#[derive(Debug, Default)]
+pub struct LetterProcessor {
+    fields: Vec<OneInputOneOutputField>,
+    method: Method,
+    ignore_missing: bool,
+}
+
 impl LetterProcessor {
-    fn with_fields(&mut self, mut fields: Fields) {
-        update_one_one_output_keys(&mut fields);
-        self.fields = fields;
-    }
-
-    fn with_method(&mut self, method: Method) {
-        self.method = method;
-    }
-
-    fn with_ignore_missing(&mut self, ignore_missing: bool) {
-        self.ignore_missing = ignore_missing;
-    }
-
-    fn process_field(&self, val: &str, field: &Field) -> Result<Map, String> {
+    fn process_field(&self, val: &str) -> Result<Value, String> {
         let processed = match self.method {
             Method::Upper => val.to_uppercase(),
             Method::Lower => val.to_lowercase(),
@@ -84,17 +116,17 @@ impl LetterProcessor {
         };
         let val = Value::String(processed);
 
-        let key = field.get_target_field();
-
-        Ok(Map::one(key, val))
+        Ok(val)
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for LetterProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for LetterProcessorBuilder {
     type Error = String;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = LetterProcessor::default();
+        let mut fields = Fields::default();
+        let mut method = Method::Lower;
+        let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
             let key = k
@@ -102,23 +134,26 @@ impl TryFrom<&yaml_rust::yaml::Hash> for LetterProcessor {
                 .ok_or(format!("key must be a string, but got {k:?}"))?;
             match key {
                 FIELD_NAME => {
-                    processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?));
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
+                    fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
                 METHOD_NAME => {
-                    let method = yaml_string(v, METHOD_NAME)?;
-                    processor.with_method(method.parse()?);
+                    method = yaml_string(v, METHOD_NAME)?.parse()?;
                 }
                 IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?);
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
                 _ => {}
             }
         }
 
-        Ok(processor)
+        Ok(LetterProcessorBuilder {
+            fields,
+            method,
+            ignore_missing,
+        })
     }
 }
 
@@ -131,53 +166,21 @@ impl Processor for LetterProcessor {
         self.ignore_missing
     }
 
-    fn fields(&self) -> &Fields {
-        &self.fields
-    }
-
-    fn fields_mut(&mut self) -> &mut Fields {
-        &mut self.fields
-    }
-
-    fn output_keys(&self) -> HashSet<String> {
-        self.fields
-            .iter()
-            .map(|f| f.get_target_field().to_string())
-            .collect()
-    }
-
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        match val {
-            Value::String(val) => self.process_field(val, field),
-            _ => Err(format!(
-                "{} processor: expect string value, but got {val:?}",
-                self.kind()
-            )),
-        }
-    }
-
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
         for field in self.fields.iter() {
-            let index = field.input_field.index;
+            let index = field.input_index();
             match val.get(index) {
                 Some(Value::String(s)) => {
-                    // TODO(qtang): Let this method use the intermediate state collection directly.
-                    let mut processed = self.process_field(s, field)?;
-                    field
-                        .output_fields_index_mapping
-                        .iter()
-                        .for_each(|(k, output_index)| {
-                            if let Some(v) = processed.remove(k) {
-                                val[*output_index] = v;
-                            }
-                        });
+                    let result = self.process_field(s)?;
+                    let (_, output_index) = field.output();
+                    val[*output_index] = result;
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return Err(format!(
                             "{} processor: missing field: {}",
                             self.kind(),
-                            field.get_field_name()
+                            &field.input().name
                         ));
                     }
                 }
@@ -204,33 +207,36 @@ fn capitalize(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::etl::field::Fields;
     use crate::etl::processor::letter::{LetterProcessor, Method};
-    use crate::etl::value::{Map, Value};
+    use crate::etl::value::Value;
 
     #[test]
     fn test_process() {
-        let field = "letter";
-        let ff: crate::etl::processor::Field = field.parse().unwrap();
-        let mut processor = LetterProcessor::default();
-        processor.with_fields(Fields::one(ff.clone()));
-
         {
-            processor.with_method(Method::Upper);
-            let processed = processor.process_field("pipeline", &ff).unwrap();
-            assert_eq!(Map::one(field, Value::String("PIPELINE".into())), processed)
+            let processor = LetterProcessor {
+                method: Method::Upper,
+                ..Default::default()
+            };
+            let processed = processor.process_field("pipeline").unwrap();
+            assert_eq!(Value::String("PIPELINE".into()), processed)
         }
 
         {
-            processor.with_method(Method::Lower);
-            let processed = processor.process_field("Pipeline", &ff).unwrap();
-            assert_eq!(Map::one(field, Value::String("pipeline".into())), processed)
+            let processor = LetterProcessor {
+                method: Method::Lower,
+                ..Default::default()
+            };
+            let processed = processor.process_field("Pipeline").unwrap();
+            assert_eq!(Value::String("pipeline".into()), processed)
         }
 
         {
-            processor.with_method(Method::Capital);
-            let processed = processor.process_field("pipeline", &ff).unwrap();
-            assert_eq!(Map::one(field, Value::String("Pipeline".into())), processed)
+            let processor = LetterProcessor {
+                method: Method::Capital,
+                ..Default::default()
+            };
+            let processed = processor.process_field("pipeline").unwrap();
+            assert_eq!(Value::String("Pipeline".into()), processed)
         }
     }
 }

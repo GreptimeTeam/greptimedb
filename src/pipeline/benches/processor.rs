@@ -13,27 +13,13 @@
 // limitations under the License.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use pipeline::{parse, Array, Content, GreptimeTransformer, Pipeline, Value as PipelineValue};
+use pipeline::{parse, Content, GreptimeTransformer, Pipeline};
 use serde_json::{Deserializer, Value};
-
-fn processor_map(
-    pipeline: &Pipeline<GreptimeTransformer>,
-    input_values: Vec<Value>,
-) -> impl IntoIterator<Item = greptime_proto::v1::Rows> {
-    let pipeline_data = input_values
-        .into_iter()
-        .map(|v| PipelineValue::try_from(v).unwrap())
-        .collect::<Vec<_>>();
-
-    pipeline.exec(PipelineValue::Array(Array {
-        values: pipeline_data,
-    }))
-}
 
 fn processor_mut(
     pipeline: &Pipeline<GreptimeTransformer>,
     input_values: Vec<Value>,
-) -> impl IntoIterator<Item = Vec<greptime_proto::v1::Row>> {
+) -> Result<Vec<greptime_proto::v1::Row>, String> {
     let mut payload = pipeline.init_intermediate_state();
     let mut result = Vec::with_capacity(input_values.len());
 
@@ -249,11 +235,10 @@ fn criterion_benchmark(c: &mut Criterion) {
     let pipeline = prepare_pipeline();
     let mut group = c.benchmark_group("pipeline");
     group.sample_size(50);
-    group.bench_function("processor map", |b| {
-        b.iter(|| processor_map(black_box(&pipeline), black_box(input_value.clone())))
-    });
     group.bench_function("processor mut", |b| {
-        b.iter(|| processor_mut(black_box(&pipeline), black_box(input_value.clone())))
+        b.iter(|| {
+            processor_mut(black_box(&pipeline), black_box(input_value.clone())).unwrap();
+        })
     });
     group.finish();
 }
