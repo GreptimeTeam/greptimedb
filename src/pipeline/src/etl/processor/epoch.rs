@@ -14,17 +14,17 @@
 
 use ahash::HashSet;
 
-use crate::etl::field::{Field, Fields};
+use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
-    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
-    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
+    ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::time::{
     MICROSECOND_RESOLUTION, MICRO_RESOLUTION, MILLISECOND_RESOLUTION, MILLI_RESOLUTION,
     MS_RESOLUTION, NANOSECOND_RESOLUTION, NANO_RESOLUTION, NS_RESOLUTION, SECOND_RESOLUTION,
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
-use crate::etl::value::{Map, Timestamp, Value};
+use crate::etl::value::{Timestamp, Value};
 
 pub(crate) const PROCESSOR_EPOCH: &str = "epoch";
 const RESOLUTION_NAME: &str = "resolution";
@@ -52,12 +52,56 @@ impl TryFrom<&str> for Resolution {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct EpochProcessorBuilder {
+    fields: Fields,
+    resolution: Resolution,
+    ignore_missing: bool,
+}
+
+impl ProcessorBuilder for EpochProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        self.fields
+            .iter()
+            .map(|f| f.target_or_input_field())
+            .collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.fields.iter().map(|f| f.input_field()).collect()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+        self.build(intermediate_keys).map(ProcessorKind::Epoch)
+    }
+}
+
+impl EpochProcessorBuilder {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<EpochProcessor, String> {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input = OneInputOneOutputField::build(
+                "epoch",
+                intermediate_keys,
+                field.input_field(),
+                field.target_or_input_field(),
+            )?;
+            real_fields.push(input);
+        }
+        Ok(EpochProcessor {
+            fields: real_fields,
+            resolution: self.resolution,
+            ignore_missing: self.ignore_missing,
+        })
+    }
+}
+
 /// support string, integer, float, time, epoch
 /// deprecated it should be removed in the future
 /// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct EpochProcessor {
-    fields: Fields,
+    fields: Vec<OneInputOneOutputField>,
     resolution: Resolution,
     ignore_missing: bool,
     // description
@@ -68,19 +112,6 @@ pub struct EpochProcessor {
 }
 
 impl EpochProcessor {
-    fn with_fields(&mut self, mut fields: Fields) {
-        update_one_one_output_keys(&mut fields);
-        self.fields = fields
-    }
-
-    fn with_resolution(&mut self, resolution: Resolution) {
-        self.resolution = resolution;
-    }
-
-    fn with_ignore_missing(&mut self, ignore_missing: bool) {
-        self.ignore_missing = ignore_missing;
-    }
-
     fn parse(&self, val: &Value) -> Result<Timestamp, String> {
         let t: i64 = match val {
             Value::String(s) => s
@@ -117,19 +148,15 @@ impl EpochProcessor {
             Resolution::Nano => Ok(Timestamp::Nanosecond(t)),
         }
     }
-
-    fn process_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        let key = field.get_target_field();
-
-        Ok(Map::one(key, Value::Timestamp(self.parse(val)?)))
-    }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessorBuilder {
     type Error = String;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = EpochProcessor::default();
+        let mut fields = Fields::default();
+        let mut resolution = Resolution::default();
+        let mut ignore_missing = false;
 
         for (k, v) in hash {
             let key = k
@@ -138,24 +165,29 @@ impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessor {
 
             match key {
                 FIELD_NAME => {
-                    processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?));
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
+                    fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
                 RESOLUTION_NAME => {
                     let s = yaml_string(v, RESOLUTION_NAME)?.as_str().try_into()?;
-                    processor.with_resolution(s);
+                    resolution = s;
                 }
                 IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?);
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
 
                 _ => {}
             }
         }
+        let builder = EpochProcessorBuilder {
+            fields,
+            resolution,
+            ignore_missing,
+        };
 
-        Ok(processor)
+        Ok(builder)
     }
 }
 
@@ -168,49 +200,23 @@ impl Processor for EpochProcessor {
         self.ignore_missing
     }
 
-    fn fields(&self) -> &Fields {
-        &self.fields
-    }
-
-    fn fields_mut(&mut self) -> &mut Fields {
-        &mut self.fields
-    }
-
-    fn output_keys(&self) -> HashSet<String> {
-        self.fields
-            .iter()
-            .map(|f| f.get_target_field().to_string())
-            .collect()
-    }
-
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        self.process_field(val, field)
-    }
-
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
         for field in self.fields.iter() {
-            let index = field.input_field.index;
+            let index = field.input_index();
             match val.get(index) {
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return Err(format!(
                             "{} processor: missing field: {}",
                             self.kind(),
-                            field.get_field_name()
+                            field.input_name()
                         ));
                     }
                 }
                 Some(v) => {
-                    // TODO(qtang): Let this method use the intermediate state collection directly.
-                    let mut map = self.process_field(v, field)?;
-                    field
-                        .output_fields_index_mapping
-                        .iter()
-                        .for_each(|(k, output_index)| {
-                            if let Some(v) = map.remove(k) {
-                                val[*output_index] = v;
-                            }
-                        });
+                    let timestamp = self.parse(v)?;
+                    let output_index = field.output_index();
+                    val[output_index] = Value::Timestamp(timestamp);
                 }
             }
         }
@@ -225,8 +231,10 @@ mod tests {
 
     #[test]
     fn test_parse_epoch() {
-        let mut processor = EpochProcessor::default();
-        processor.with_resolution(super::Resolution::Second);
+        let processor = EpochProcessor {
+            resolution: super::Resolution::Second,
+            ..Default::default()
+        };
 
         let values = [
             Value::String("1573840000".into()),

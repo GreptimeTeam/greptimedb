@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use arrow_array::{Array, ListArray};
+use base64::engine::general_purpose::URL_SAFE;
+use base64::Engine as _;
 use common_base::bytes::{Bytes, StringBytes};
 use common_decimal::Decimal128;
 use common_telemetry::error;
@@ -28,8 +30,10 @@ use common_time::time::Time;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use common_time::{Duration, Interval, Timezone};
 use datafusion_common::ScalarValue;
+use greptime_proto::v1::value::ValueData;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize, Serializer};
+use serde_json::{Number, Value as JsonValue};
 use snafu::{ensure, ResultExt};
 
 use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Error, Result, TryFromValueSnafu};
@@ -1364,14 +1368,178 @@ impl<'a> ValueRef<'a> {
     }
 }
 
+pub fn column_data_to_json(data: ValueData) -> JsonValue {
+    match data {
+        ValueData::BinaryValue(b) => JsonValue::String(URL_SAFE.encode(b)),
+        ValueData::BoolValue(b) => JsonValue::Bool(b),
+        ValueData::U8Value(i) => JsonValue::Number(i.into()),
+        ValueData::U16Value(i) => JsonValue::Number(i.into()),
+        ValueData::U32Value(i) => JsonValue::Number(i.into()),
+        ValueData::U64Value(i) => JsonValue::Number(i.into()),
+        ValueData::I8Value(i) => JsonValue::Number(i.into()),
+        ValueData::I16Value(i) => JsonValue::Number(i.into()),
+        ValueData::I32Value(i) => JsonValue::Number(i.into()),
+        ValueData::I64Value(i) => JsonValue::Number(i.into()),
+        ValueData::F32Value(f) => Number::from_f64(f as f64)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        ValueData::F64Value(f) => Number::from_f64(f)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        ValueData::StringValue(s) => JsonValue::String(s),
+        ValueData::DateValue(d) => JsonValue::String(Date::from(d).to_string()),
+        ValueData::DatetimeValue(d) => JsonValue::String(DateTime::from(d).to_string()),
+        ValueData::TimeSecondValue(d) => JsonValue::String(Time::new_second(d).to_iso8601_string()),
+        ValueData::TimeMillisecondValue(d) => {
+            JsonValue::String(Time::new_millisecond(d).to_iso8601_string())
+        }
+        ValueData::TimeMicrosecondValue(d) => {
+            JsonValue::String(Time::new_microsecond(d).to_iso8601_string())
+        }
+        ValueData::TimeNanosecondValue(d) => {
+            JsonValue::String(Time::new_nanosecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampMicrosecondValue(d) => {
+            JsonValue::String(Timestamp::new_microsecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampMillisecondValue(d) => {
+            JsonValue::String(Timestamp::new_millisecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampNanosecondValue(d) => {
+            JsonValue::String(Timestamp::new_nanosecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampSecondValue(d) => {
+            JsonValue::String(Timestamp::new_second(d).to_iso8601_string())
+        }
+        ValueData::IntervalYearMonthValue(d) => JsonValue::String(format!("interval year [{}]", d)),
+        ValueData::IntervalMonthDayNanoValue(d) => JsonValue::String(format!(
+            "interval month [{}][{}][{}]",
+            d.months, d.days, d.nanoseconds
+        )),
+        ValueData::IntervalDayTimeValue(d) => JsonValue::String(format!("interval day [{}]", d)),
+        ValueData::Decimal128Value(d) => {
+            JsonValue::String(format!("decimal128 [{}][{}]", d.hi, d.lo))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType as ArrowDataType;
     use common_time::timezone::set_default_timezone;
+    use greptime_proto::v1::{Decimal128 as ProtoDecimal128, IntervalMonthDayNano};
     use num_traits::Float;
 
     use super::*;
     use crate::vectors::ListVectorBuilder;
+
+    #[test]
+    fn test_column_data_to_json() {
+        assert_eq!(
+            column_data_to_json(ValueData::BinaryValue(b"hello".to_vec())),
+            JsonValue::String("aGVsbG8=".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::BoolValue(true)),
+            JsonValue::Bool(true)
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::U8Value(1)),
+            JsonValue::Number(1.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::U16Value(2)),
+            JsonValue::Number(2.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::U32Value(3)),
+            JsonValue::Number(3.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::U64Value(4)),
+            JsonValue::Number(4.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::I8Value(5)),
+            JsonValue::Number(5.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::I16Value(6)),
+            JsonValue::Number(6.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::I32Value(7)),
+            JsonValue::Number(7.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::I64Value(8)),
+            JsonValue::Number(8.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::F32Value(9.0)),
+            JsonValue::Number(Number::from_f64(9.0_f64).unwrap())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::F64Value(10.0)),
+            JsonValue::Number(Number::from_f64(10.0_f64).unwrap())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::StringValue("hello".to_string())),
+            JsonValue::String("hello".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::DateValue(123)),
+            JsonValue::String("1970-05-04".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::DatetimeValue(456)),
+            JsonValue::String("1970-01-01 00:00:00.456+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimeSecondValue(789)),
+            JsonValue::String("00:13:09+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimeMillisecondValue(789)),
+            JsonValue::String("00:00:00.789+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimeMicrosecondValue(789)),
+            JsonValue::String("00:00:00.000789+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimestampMillisecondValue(1234567890)),
+            JsonValue::String("1970-01-15 06:56:07.890+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimestampNanosecondValue(1234567890123456789)),
+            JsonValue::String("2009-02-13 23:31:30.123456789+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimestampSecondValue(1234567890)),
+            JsonValue::String("2009-02-13 23:31:30+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::IntervalYearMonthValue(12)),
+            JsonValue::String("interval year [12]".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::IntervalMonthDayNanoValue(IntervalMonthDayNano {
+                months: 1,
+                days: 2,
+                nanoseconds: 3,
+            })),
+            JsonValue::String("interval month [1][2][3]".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::IntervalDayTimeValue(4)),
+            JsonValue::String("interval day [4]".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::Decimal128Value(ProtoDecimal128 { hi: 5, lo: 6 })),
+            JsonValue::String("decimal128 [5][6]".to_string())
+        );
+    }
 
     #[test]
     fn test_try_from_scalar_value() {

@@ -199,6 +199,7 @@ mod tests {
                 approximate_bytes: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
+                extensions: Default::default(),
             }],
             ..Default::default()
         }
@@ -215,6 +216,7 @@ mod tests {
                 approximate_bytes: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
+                extensions: Default::default(),
             }],
             ..Default::default()
         }
@@ -231,6 +233,7 @@ mod tests {
                 approximate_bytes: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
+                extensions: Default::default(),
             }],
             ..Default::default()
         }

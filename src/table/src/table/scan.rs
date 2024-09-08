@@ -180,7 +180,7 @@ impl ExecutionPlan for RegionScanExec {
     }
 
     fn statistics(&self) -> DfResult<Statistics> {
-        let statistics = if self.append_mode {
+        let statistics = if self.append_mode && !self.scanner.lock().unwrap().has_predicate() {
             let column_statistics = self
                 .arrow_schema
                 .fields

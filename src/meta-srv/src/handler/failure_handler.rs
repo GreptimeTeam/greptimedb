@@ -93,6 +93,7 @@ mod tests {
                 approximate_bytes: 0,
                 engine: default_engine().to_string(),
                 role: RegionRole::Follower,
+                extensions: Default::default(),
             }
         }
         acc.stat = Some(Stat {
