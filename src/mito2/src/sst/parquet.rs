@@ -224,15 +224,6 @@ mod tests {
             column_idx: 0,
         };
         assert!(cache.as_ref().unwrap().get_pages(&page_key).is_none());
-        // Doesn't have single page cached.
-        let page_key = PageKey::Single {
-            region_id: metadata.region_id,
-            file_id: handle.file_id(),
-            row_group_idx: 0,
-            column_idx: 0,
-            page_idx: 0,
-        };
-        assert!(cache.as_ref().unwrap().get_pages(&page_key).is_none());
 
         // Cache 4 row groups.
         for i in 0..4 {

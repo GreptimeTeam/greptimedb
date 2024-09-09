@@ -15,16 +15,9 @@
 //! Parquet page reader.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 
 use parquet::column::page::{Page, PageMetadata, PageReader};
 use parquet::errors::Result;
-use parquet::file::reader::SerializedPageReader;
-use store_api::storage::RegionId;
-
-use crate::cache::{CacheManagerRef, PageKey, PageValue};
-use crate::sst::file::FileId;
-use crate::sst::parquet::row_group::ColumnChunkData;
 
 /// A reader that reads all pages from a cache.
 pub(crate) struct RowGroupCachedReader {
@@ -64,109 +57,6 @@ impl PageReader for RowGroupCachedReader {
 
 impl Iterator for RowGroupCachedReader {
     type Item = Result<Page>;
-    fn next(&mut self) -> Option<Self::Item> {
-        self.get_next_page().transpose()
-    }
-}
-
-/// A reader that can cache pages on demand.
-pub(crate) struct OnDemandCachedReader {
-    /// Page cache.
-    cache: CacheManagerRef,
-    /// Reader to fall back. `None` indicates the reader is exhausted.
-    reader: Option<SerializedPageReader<ColumnChunkData>>,
-    region_id: RegionId,
-    file_id: FileId,
-    row_group_idx: usize,
-    column_idx: usize,
-    /// Current page index.
-    current_page_idx: usize,
-}
-
-impl OnDemandCachedReader {
-    /// Returns a new reader from a cache and a reader.
-    pub(crate) fn new(
-        cache: CacheManagerRef,
-        reader: SerializedPageReader<ColumnChunkData>,
-        region_id: RegionId,
-        file_id: FileId,
-        row_group_idx: usize,
-        column_idx: usize,
-    ) -> Self {
-        Self {
-            cache,
-            reader: Some(reader),
-            region_id,
-            file_id,
-            row_group_idx,
-            column_idx,
-            current_page_idx: 0,
-        }
-    }
-}
-
-impl PageReader for OnDemandCachedReader {
-    fn get_next_page(&mut self) -> Result<Option<Page>> {
-        let Some(reader) = self.reader.as_mut() else {
-            // The reader is exhausted.
-            return Ok(None);
-        };
-
-        // Tries to get it from the cache first.
-        let key = PageKey::Single {
-            region_id: self.region_id,
-            file_id: self.file_id,
-            row_group_idx: self.row_group_idx,
-            column_idx: self.column_idx,
-            page_idx: self.current_page_idx,
-        };
-        if let Some(page) = self.cache.get_pages(&key) {
-            // Cache hit.
-            // Bumps the page index.
-            self.current_page_idx += 1;
-            // The reader skips this page.
-            reader.skip_next_page()?;
-            debug_assert!(page.single.is_some());
-            return Ok(page.single.clone());
-        }
-
-        // Cache miss, load the page from the reader.
-        let Some(page) = reader.get_next_page()? else {
-            // The reader is exhausted.
-            self.reader = None;
-            return Ok(None);
-        };
-        // Puts the page into the cache.
-        self.cache
-            .put_pages(key, Arc::new(PageValue::new_single(page.clone())));
-        // Bumps the page index.
-        self.current_page_idx += 1;
-
-        Ok(Some(page))
-    }
-
-    fn peek_next_page(&mut self) -> Result<Option<PageMetadata>> {
-        // The reader is exhausted.
-        let Some(reader) = self.reader.as_mut() else {
-            return Ok(None);
-        };
-        // It only decodes the page header so we don't query the cache.
-        reader.peek_next_page()
-    }
-
-    fn skip_next_page(&mut self) -> Result<()> {
-        // The reader is exhausted.
-        let Some(reader) = self.reader.as_mut() else {
-            return Ok(());
-        };
-        self.current_page_idx += 1;
-        reader.skip_next_page()
-    }
-}
-
-impl Iterator for OnDemandCachedReader {
-    type Item = Result<Page>;
-
     fn next(&mut self) -> Option<Self::Item> {
         self.get_next_page().transpose()
     }

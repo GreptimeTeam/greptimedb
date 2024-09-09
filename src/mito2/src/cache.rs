@@ -408,20 +408,7 @@ pub enum PageKey {
         /// Index of the column in the row group.
         column_idx: usize,
     },
-    /// Cache key for one uncompressed page.
-    Single {
-        /// Region id of the SST file to cache.
-        region_id: RegionId,
-        /// Id of the SST file to cache.
-        file_id: FileId,
-        /// Index of the row group.
-        row_group_idx: usize,
-        /// Index of the column in the row group.
-        column_idx: usize,
-        /// Index of the page.
-        page_idx: usize,
-    },
-    /// Cache key for all uncompressed page in a row group.
+    /// Cache key for all uncompressed pages in a row group.
     RowGroup {
         /// Region id of the SST file to cache.
         region_id: RegionId,
@@ -447,9 +434,6 @@ impl PageKey {
 pub struct PageValue {
     /// Compressed page of the column in the row group.
     pub compressed: Bytes,
-    /// Uncompressed page of the column in the row group. It's always
-    /// `Some` if the key is for uncompressed page except in tests.
-    pub single: Option<Page>,
     /// All pages of the column in the row group.
     pub row_group: Vec<Page>,
 }
@@ -459,16 +443,6 @@ impl PageValue {
     pub fn new_compressed(bytes: Bytes) -> PageValue {
         PageValue {
             compressed: bytes,
-            single: None,
-            row_group: vec![],
-        }
-    }
-
-    /// Creates a new value from an uncompressed page.
-    pub fn new_single(page: Page) -> PageValue {
-        PageValue {
-            compressed: Bytes::new(),
-            single: Some(page),
             row_group: vec![],
         }
     }
@@ -477,7 +451,6 @@ impl PageValue {
     pub fn new_row_group(pages: Vec<Page>) -> PageValue {
         PageValue {
             compressed: Bytes::new(),
-            single: None,
             row_group: pages,
         }
     }
@@ -486,7 +459,6 @@ impl PageValue {
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
             + self.compressed.len()
-            + self.single.as_ref().map_or(0, |page| page.buffer().len())
             + self
                 .row_group
                 .iter()
@@ -570,12 +542,11 @@ mod tests {
             .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
             .is_none());
 
-        let key = PageKey::Single {
+        let key = PageKey::RowGroup {
             region_id,
             file_id,
             row_group_idx: 0,
             column_idx: 0,
-            page_idx: 0,
         };
         let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);
