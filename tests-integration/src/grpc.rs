@@ -181,7 +181,8 @@ mod test {
             .table(
                 "greptime",
                 "database_created_through_grpc",
-                "table_created_through_grpc"
+                "table_created_through_grpc",
+                None,
             )
             .await
             .unwrap()
@@ -510,7 +511,7 @@ CREATE TABLE {table_name} (
         let table = instance
             .frontend()
             .catalog_manager()
-            .table("greptime", "public", table_name)
+            .table("greptime", "public", table_name, None)
             .await
             .unwrap()
             .unwrap();

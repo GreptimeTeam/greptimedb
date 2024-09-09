@@ -286,7 +286,7 @@ impl StatementExecutor {
 
                 let table_ref = self
                     .catalog_manager
-                    .table(&catalog, &schema, &table)
+                    .table(&catalog, &schema, &table, Some(&query_ctx))
                     .await
                     .context(CatalogSnafu)?
                     .context(TableNotFoundSnafu { table_name: &table })?;
@@ -313,7 +313,7 @@ impl StatementExecutor {
         let catalog = query_ctx.current_catalog();
         ensure!(
             self.catalog_manager
-                .schema_exists(catalog, db.as_ref())
+                .schema_exists(catalog, db.as_ref(), Some(&query_ctx))
                 .await
                 .context(CatalogSnafu)?,
             SchemaNotFoundSnafu { schema_info: &db }
@@ -382,7 +382,7 @@ impl StatementExecutor {
             table,
         } = table_ref;
         self.catalog_manager
-            .table(catalog, schema, table)
+            .table(catalog, schema, table, None)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

@@ -61,7 +61,7 @@ impl DfContextProviderAdapter {
         let mut table_provider = DfTableSourceProvider::new(
             engine_state.catalog_manager().clone(),
             engine_state.disallow_cross_catalog_query(),
-            query_ctx.as_ref(),
+            query_ctx.clone(),
             Arc::new(DefaultPlanDecoder::new(session_state.clone(), &query_ctx)?),
             session_state
                 .config_options()

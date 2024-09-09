@@ -68,7 +68,7 @@ impl DfLogicalPlanner {
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
-            query_ctx.as_ref(),
+            query_ctx.clone(),
             Arc::new(DefaultPlanDecoder::new(
                 self.session_state.clone(),
                 &query_ctx,
@@ -144,14 +144,15 @@ impl DfLogicalPlanner {
 
     #[tracing::instrument(skip_all)]
     async fn plan_pql(&self, stmt: EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+        let plan_decoder = Arc::new(DefaultPlanDecoder::new(
+            self.session_state.clone(),
+            &query_ctx,
+        )?);
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
-            query_ctx.as_ref(),
-            Arc::new(DefaultPlanDecoder::new(
-                self.session_state.clone(),
-                &query_ctx,
-            )?),
+            query_ctx,
+            plan_decoder,
             self.session_state
                 .config_options()
                 .sql_parser

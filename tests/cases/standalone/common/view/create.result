@@ -77,11 +77,7 @@ WHERE c.relkind IN ('v','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-+--------+-----------+------+-------+
-| Schema | Name      | Type | Owner |
-+--------+-----------+------+-------+
-| public | test_view | view |       |
-+--------+-----------+------+-------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
 
 -- SQLNESS REPLACE (\s\d+\s) ID
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
@@ -110,9 +106,6 @@ SELECT * FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME, TABLE_TYPE;
 |greptime|information_schema|optimizer_trace|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
 |greptime|information_schema|parameters|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
 |greptime|information_schema|partitions|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
-|greptime|pg_catalog|pg_class|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
-|greptime|pg_catalog|pg_namespace|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
-|greptime|pg_catalog|pg_type|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
 |greptime|information_schema|profiling|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
 |greptime|information_schema|referential_constraints|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
 |greptime|information_schema|region_peers|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
@@ -205,6 +198,5 @@ WHERE c.relkind IN ('v','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-++
-++
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
 
