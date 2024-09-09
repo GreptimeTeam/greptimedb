@@ -731,14 +731,28 @@ impl ScanInput {
         }
 
         for file in &self.files {
-            let range = PartitionRange {
-                start: file.meta_ref().time_range.0,
-                end: file.meta_ref().time_range.1,
-                num_rows: file.meta_ref().num_rows as usize,
-                identifier: id,
-            };
-            id += 1;
-            container.push(range);
+            if self.append_mode {
+                // For append mode, we can parallelize reading row groups.
+                for _ in 0..file.meta_ref().num_row_groups {
+                    let range = PartitionRange {
+                        start: file.time_range().0,
+                        end: file.time_range().1,
+                        num_rows: file.num_rows(),
+                        identifier: id,
+                    };
+                    id += 1;
+                    container.push(range);
+                }
+            } else {
+                let range = PartitionRange {
+                    start: file.meta_ref().time_range.0,
+                    end: file.meta_ref().time_range.1,
+                    num_rows: file.meta_ref().num_rows as usize,
+                    identifier: id,
+                };
+                id += 1;
+                container.push(range);
+            }
         }
 
         container
