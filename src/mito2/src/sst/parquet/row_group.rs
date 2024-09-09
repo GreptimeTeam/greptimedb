@@ -165,6 +165,8 @@ impl<'a> InMemoryRowGroup<'a> {
             // Now we only use cache in dense chunk data.
             self.fetch_pages_from_cache(projection);
 
+            // Release the CPU to avoid blocking the runtime. Since `fetch_pages_from_cache`
+            // is a synchronous, CPU-bound operation.
             yield_now().await;
 
             let fetch_ranges = self
