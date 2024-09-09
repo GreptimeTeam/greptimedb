@@ -61,7 +61,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `start_time`: the starting execution time of the procedure.
 /// - `end_time`: the ending execution time of the procedure.
 /// - `status`: the status of the procedure.
-/// - `extra`: the extra information of the procedure.
+/// - `lock_keys`: the lock keys of the procedure.
 ///
 pub(super) struct InformationSchemaProcedureInfo {
     schema: SchemaRef,

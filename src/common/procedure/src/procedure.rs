@@ -238,7 +238,7 @@ impl LockKey {
 
     /// Returns the keys to lock.
     pub fn get_keys(&self) -> Vec<String> {
-        self.0.iter().map(|key| key.clone().into_string()).collect()
+        self.0.iter().map(|key| format!("{:?}", key)).collect()
     }
 }
 
