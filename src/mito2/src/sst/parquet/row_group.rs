@@ -29,6 +29,7 @@ use parquet::file::reader::{ChunkReader, Length};
 use parquet::file::serialized_reader::SerializedPageReader;
 use parquet::format::PageLocation;
 use store_api::storage::RegionId;
+use tokio::task::yield_now;
 
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheManagerRef, PageKey, PageValue};
@@ -163,6 +164,8 @@ impl<'a> InMemoryRowGroup<'a> {
         } else {
             // Now we only use cache in dense chunk data.
             self.fetch_pages_from_cache(projection);
+
+            yield_now().await;
 
             let fetch_ranges = self
                 .column_chunks
