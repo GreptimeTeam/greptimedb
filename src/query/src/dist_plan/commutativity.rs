@@ -225,7 +225,8 @@ impl Categorizer {
 
                 // sort plan needs to consider column priority
                 // We can implement a merge-sort on partial ordered data
-                Commutativity::Unimplemented
+
+                Commutativity::PartialCommutative
             }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
             LogicalPlan::CrossJoin(_) => Commutativity::NonCommutative,
