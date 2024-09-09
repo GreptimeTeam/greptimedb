@@ -56,6 +56,7 @@ pub fn validate_table_option(key: &str) -> bool {
         TTL_KEY,
         STORAGE_KEY,
         COMMENT_KEY,
+        AUTO_CREATE_TABLE_KEY,
         // file engine keys:
         FILE_TABLE_LOCATION_KEY,
         FILE_TABLE_FORMAT_KEY,
@@ -83,6 +84,7 @@ pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
 pub const STORAGE_KEY: &str = "storage";
 pub const COMMENT_KEY: &str = "comment";
+pub const AUTO_CREATE_TABLE_KEY: &str = "auto_create_table";
 
 impl TableOptions {
     pub fn try_from_iter<T: ToString, U: IntoIterator<Item = (T, T)>>(
@@ -321,6 +323,7 @@ mod tests {
         assert!(validate_table_option(TTL_KEY));
         assert!(validate_table_option(WRITE_BUFFER_SIZE_KEY));
         assert!(validate_table_option(STORAGE_KEY));
+        assert!(validate_table_option(AUTO_CREATE_TABLE_KEY));
         assert!(!validate_table_option("foo"));
     }
 

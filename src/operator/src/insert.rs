@@ -45,7 +45,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
-use table::requests::{InsertRequest as TableInsertRequest, TTL_KEY};
+use table::requests::{InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TTL_KEY};
 use table::table_reference::TableReference;
 use table::TableRef;
 
@@ -517,25 +517,39 @@ impl Inserter {
             AutoCreateTableType::Physical
             | AutoCreateTableType::Log
             | AutoCreateTableType::LastNonNull => {
-                for req in create_tables {
-                    let table = self
-                        .create_non_logical_table(
-                            req,
-                            ctx,
-                            statement_executor,
-                            auto_create_table_type.clone(),
-                        )
-                        .await?;
-                    let table_info = table.table_info();
-                    table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
-                }
-                for alter_expr in alter_tables.into_iter() {
-                    statement_executor
-                        .alter_table_inner(alter_expr, ctx.clone())
-                        .await?;
+                let auto_create_table_hint = ctx
+                    .extension(AUTO_CREATE_TABLE_KEY)
+                    .map(|v| v.parse::<bool>())
+                    .transpose()
+                    .map_err(|_| {
+                        InvalidInsertRequestSnafu {
+                            reason: "`auto_create_table` hint must be a boolean",
+                        }
+                        .build()
+                    })?
+                    .unwrap_or(true);
+                if auto_create_table_hint {
+                    for req in create_tables {
+                        let table = self
+                            .create_non_logical_table(
+                                req,
+                                ctx,
+                                statement_executor,
+                                auto_create_table_type.clone(),
+                            )
+                            .await?;
+                        let table_info = table.table_info();
+                        table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                    }
+                    for alter_expr in alter_tables.into_iter() {
+                        statement_executor
+                            .alter_table_inner(alter_expr, ctx.clone())
+                            .await?;
+                    }
                 }
             }
         }
+
         Ok(table_name_to_ids)
     }
 
