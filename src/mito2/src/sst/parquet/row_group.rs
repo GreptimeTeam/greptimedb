@@ -32,7 +32,7 @@ use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheManagerRef, PageKey, PageValue};
-use crate::metrics::READ_STAGE_ELAPSED;
+use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::page_reader::RowGroupCachedReader;
@@ -231,6 +231,7 @@ impl<'a> InMemoryRowGroup<'a> {
     /// Fetches pages for columns if cache is enabled.
     /// If the page is in the cache, sets the column chunk or `column_uncompressed_pages` for the column.
     fn fetch_pages_from_cache(&mut self, projection: &ProjectionMask) {
+        let _timer = READ_STAGE_FETCH_PAGES.start_timer();
         self.column_chunks
             .iter_mut()
             .enumerate()
