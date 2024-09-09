@@ -17,7 +17,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use common_telemetry::trace;
 use session::context::QueryContext;
@@ -135,7 +134,7 @@ impl SourceSender {
     pub async fn send_rows(&self, rows: Vec<DiffRow>) -> Result<usize, Error> {
         METRIC_FLOW_INPUT_BUF_SIZE.add(rows.len() as _);
         while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
         // row count metrics is approx so relaxed order is ok
         self.send_buf_row_cnt

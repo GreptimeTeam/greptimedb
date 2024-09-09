@@ -413,7 +413,7 @@ fn reduce_batch_subgraph(
                     key_scalar_value
                 };
 
-                // first compute equal fro separate columns
+                // first compute equal from separate columns
                 let eq_results = key_scalar_value
                     .into_iter()
                     .zip(key_batch.batch().iter())
