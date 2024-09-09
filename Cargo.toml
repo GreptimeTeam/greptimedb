@@ -120,10 +120,11 @@ etcd-client = { version = "0.13" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/realtaobo/greptime-proto.git", rev = "d64d7f6359bf4a323e10d1d7acec77184c584505" }
+greptime-proto = { git = "https://github.com/realtaobo/greptime-proto.git", rev = "8671bd04ebca7a45880d10a3d4a1102f4fd5d8f1" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
+jsonb = { git = "https://github.com/CookiePieWw/jsonb.git", rev = "d0166c130fce903bf6c58643417a3173a6172d31", default-features = false }
 lazy_static = "1.4"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd" }
 mockall = "0.11.4"

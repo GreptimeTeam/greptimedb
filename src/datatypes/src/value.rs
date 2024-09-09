@@ -342,7 +342,8 @@ impl Value {
         let value_type_id = self.logical_type_id();
         let output_type_id = output_type.logical_type_id();
         ensure!(
-            output_type_id == value_type_id || self.is_null(),
+            // Json type leverage Value(Binary) for storage.
+            output_type_id == value_type_id || self.is_null() || (output_type_id == LogicalTypeId::Json && value_type_id == LogicalTypeId::Binary),
             error::ToScalarValueSnafu {
                 reason: format!(
                     "expect value to return output_type {output_type_id:?}, actual: {value_type_id:?}",
@@ -484,7 +485,7 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
         ConcreteDataType::UInt64(_) => ScalarValue::UInt64(None),
         ConcreteDataType::Float32(_) => ScalarValue::Float32(None),
         ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
-        ConcreteDataType::Binary(_) => ScalarValue::Binary(None),
+        ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => ScalarValue::Binary(None),
         ConcreteDataType::String(_) => ScalarValue::Utf8(None),
         ConcreteDataType::Date(_) => ScalarValue::Date32(None),
         ConcreteDataType::DateTime(_) => ScalarValue::Date64(None),
@@ -1994,6 +1995,10 @@ mod tests {
             &ConcreteDataType::duration_nanosecond_datatype(),
             &Value::Duration(Duration::new_nanosecond(1)),
         );
+        check_type_and_value(
+            &ConcreteDataType::decimal128_datatype(38, 10),
+            &Value::Decimal128(Decimal128::new(1, 38, 10)),
+        );
     }
 
     #[test]
@@ -2177,6 +2182,14 @@ mod tests {
         assert_eq!(
             ValueRef::List(ListValueRef::Ref { val: &list }),
             Value::List(list.clone()).as_value_ref()
+        );
+
+        let jsonb_value = jsonb::parse_value(r#"{"key": "value"}"#.as_bytes())
+            .unwrap()
+            .to_vec();
+        assert_eq!(
+            ValueRef::Binary(jsonb_value.clone().as_slice()),
+            Value::Binary(jsonb_value.into()).as_value_ref()
         );
     }
 
@@ -2391,6 +2404,16 @@ mod tests {
                 .try_to_scalar_value(&ConcreteDataType::binary_datatype())
                 .unwrap()
         );
+
+        let jsonb_value = jsonb::parse_value(r#"{"key": "value"}"#.as_bytes())
+            .unwrap()
+            .to_vec();
+        assert_eq!(
+            ScalarValue::Binary(Some(jsonb_value.clone())),
+            Value::Binary(jsonb_value.into())
+                .try_to_scalar_value(&ConcreteDataType::json_datatype())
+                .unwrap()
+        );
     }
 
     #[test]
@@ -2521,6 +2544,12 @@ mod tests {
             ScalarValue::DurationNanosecond(None),
             Value::Null
                 .try_to_scalar_value(&ConcreteDataType::duration_nanosecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Binary(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::json_datatype())
                 .unwrap()
         );
     }

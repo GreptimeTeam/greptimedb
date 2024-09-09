@@ -124,6 +124,16 @@ fn parse_string_to_value(
             }
         }
         ConcreteDataType::Binary(_) => Ok(Value::Binary(s.as_bytes().into())),
+        ConcreteDataType::Json(_) => {
+            if let Ok(json) = jsonb::parse_value(s.as_bytes()) {
+                Ok(Value::Binary(json.to_vec().into()))
+            } else {
+                ParseSqlValueSnafu {
+                    msg: format!("Failed to parse {s} to Json value"),
+                }
+                .fail()
+            }
+        }
         _ => {
             unreachable!()
         }
@@ -250,7 +260,19 @@ pub fn sql_value_to_value(
         SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
             parse_string_to_value(column_name, s.clone(), data_type, timezone)?
         }
-        SqlValue::HexStringLiteral(s) => parse_hex_string(s)?,
+        SqlValue::HexStringLiteral(s) => {
+            // Should not directly write binary into json column
+            ensure!(
+                !matches!(data_type, ConcreteDataType::Json(_)),
+                ColumnTypeMismatchSnafu {
+                    column_name,
+                    expect: ConcreteDataType::binary_datatype(),
+                    actual: ConcreteDataType::json_datatype(),
+                }
+            );
+
+            parse_hex_string(s)?
+        }
         SqlValue::Placeholder(s) => return InvalidSqlValueSnafu { value: s }.fail(),
 
         // TODO(dennis): supports binary string
@@ -571,6 +593,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
                 Ok(ConcreteDataType::decimal128_datatype(*p as u8, *s as i8))
             }
         },
+        SqlDataType::JSON => Ok(ConcreteDataType::json_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -607,6 +630,7 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::Decimal128(d) => Ok(SqlDataType::Decimal(
             ExactNumberInfo::PrecisionAndScale(d.precision() as u64, d.scale() as u64),
         )),
+        ConcreteDataType::Json(_) => Ok(SqlDataType::JSON),
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
@@ -872,6 +896,35 @@ mod tests {
         );
         assert!(v.is_err());
         assert!(format!("{v:?}").contains("invalid character"), "v is {v:?}",);
+
+        let sql_val = SqlValue::DoubleQuotedString("MorningMyFriends".to_string());
+        let v = sql_value_to_value(
+            "a",
+            &ConcreteDataType::json_datatype(),
+            &sql_val,
+            None,
+            None,
+        );
+        assert!(v.is_err());
+
+        let sql_val = SqlValue::DoubleQuotedString(r#"{"a":"b"}"#.to_string());
+        let v = sql_value_to_value(
+            "a",
+            &ConcreteDataType::json_datatype(),
+            &sql_val,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            Value::Binary(Bytes::from(
+                jsonb::parse_value(r#"{"a":"b"}"#.as_bytes())
+                    .unwrap()
+                    .to_vec()
+                    .as_slice()
+            )),
+            v
+        );
     }
 
     #[test]
@@ -1035,6 +1088,36 @@ mod tests {
                 unreachable!()
             }
         }
+    }
+
+    #[test]
+    fn test_parse_json_to_jsonb() {
+        match parse_string_to_value(
+            "json_col",
+            r#"{"a": "b"}"#.to_string(),
+            &ConcreteDataType::json_datatype(),
+            None,
+        ) {
+            Ok(Value::Binary(b)) => {
+                assert_eq!(
+                    b,
+                    jsonb::parse_value(r#"{"a": "b"}"#.as_bytes())
+                        .unwrap()
+                        .to_vec()
+                );
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        assert!(parse_string_to_value(
+            "json_col",
+            r#"Nicola Kovac is the best rifler in the world"#.to_string(),
+            &ConcreteDataType::json_datatype(),
+            None,
+        )
+        .is_err())
     }
 
     #[test]
