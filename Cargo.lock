@@ -2293,6 +2293,7 @@ dependencies = [
  "common-telemetry",
  "futures-util",
  "humantime-serde",
+ "num_cpus",
  "rskafka",
  "rustls 0.23.10",
  "rustls-native-certs",

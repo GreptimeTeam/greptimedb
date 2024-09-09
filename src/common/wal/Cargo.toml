@@ -17,6 +17,7 @@ common-macro.workspace = true
 common-telemetry.workspace = true
 futures-util.workspace = true
 humantime-serde.workspace = true
+num_cpus.workspace = true
 rskafka.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-native-certs = "0.7"
