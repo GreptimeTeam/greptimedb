@@ -41,6 +41,8 @@ pub struct RaftEngineConfig {
     /// Duration for fsyncing log files.
     #[serde(with = "humantime_serde")]
     pub sync_period: Option<Duration>,
+    /// Parallelism during log recovery.
+    pub recovery_parallelism: usize,
 }
 
 impl Default for RaftEngineConfig {
@@ -55,6 +57,7 @@ impl Default for RaftEngineConfig {
             enable_log_recycle: true,
             prefill_log_files: false,
             sync_period: None,
+            recovery_parallelism: num_cpus::get(),
         }
     }
 }

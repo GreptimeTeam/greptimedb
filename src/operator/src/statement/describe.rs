@@ -39,7 +39,7 @@ impl StatementExecutor {
 
         let table = self
             .catalog_manager
-            .table(&catalog, &schema, &table)
+            .table(&catalog, &schema, &table, Some(&query_ctx))
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

@@ -232,6 +232,7 @@ async fn query_from_information_schema_table(
             query_ctx.current_catalog(),
             INFORMATION_SCHEMA_NAME,
             table_name,
+            Some(&query_ctx),
         )
         .await
         .context(error::CatalogSnafu)?

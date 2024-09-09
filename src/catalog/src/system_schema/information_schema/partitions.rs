@@ -240,9 +240,9 @@ impl InformationSchemaPartitionsBuilder {
 
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager.schema_names(&catalog_name).await? {
+        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
             let table_info_stream = catalog_manager
-                .tables(&catalog_name, &schema_name)
+                .tables(&catalog_name, &schema_name, None)
                 .try_filter_map(|t| async move {
                     let table_info = t.table_info();
                     if table_info.table_type == TableType::Temporary {

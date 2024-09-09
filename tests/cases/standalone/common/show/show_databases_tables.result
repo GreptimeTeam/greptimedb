@@ -5,7 +5,6 @@ SHOW DATABASES;
 +--------------------+
 | greptime_private   |
 | information_schema |
-| pg_catalog         |
 | public             |
 +--------------------+
 
@@ -16,7 +15,6 @@ SHOW FULL DATABASES;
 +--------------------+---------+
 | greptime_private   |         |
 | information_schema |         |
-| pg_catalog         |         |
 | public             |         |
 +--------------------+---------+
 

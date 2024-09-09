@@ -106,7 +106,7 @@ impl StatementExecutor {
             .context(error::ExternalSnafu)?;
         let table_ref = self
             .catalog_manager
-            .table(&catalog, &schema, &table)
+            .table(&catalog, &schema, &table, Some(&ctx))
             .await
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu { table_name: &table })?;
@@ -207,6 +207,7 @@ impl StatementExecutor {
                 &create_table.catalog_name,
                 &create_table.schema_name,
                 &create_table.table_name,
+                Some(&query_ctx),
             )
             .await
             .context(CatalogSnafu)?
@@ -487,7 +488,12 @@ impl StatementExecutor {
         // if view or table exists.
         if let Some(table) = self
             .catalog_manager
-            .table(&expr.catalog_name, &expr.schema_name, &expr.view_name)
+            .table(
+                &expr.catalog_name,
+                &expr.schema_name,
+                &expr.view_name,
+                Some(&ctx),
+            )
             .await
             .context(CatalogSnafu)?
         {
@@ -656,7 +662,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let view_info = if let Some(view) = self
             .catalog_manager
-            .table(&catalog, &schema, &view)
+            .table(&catalog, &schema, &view, None)
             .await
             .context(CatalogSnafu)?
         {
@@ -766,6 +772,7 @@ impl StatementExecutor {
                     &table_name.catalog_name,
                     &table_name.schema_name,
                     &table_name.table_name,
+                    Some(&query_context),
                 )
                 .await
                 .context(CatalogSnafu)?
@@ -816,7 +823,7 @@ impl StatementExecutor {
 
         if self
             .catalog_manager
-            .schema_exists(&catalog, &schema)
+            .schema_exists(&catalog, &schema, None)
             .await
             .context(CatalogSnafu)?
         {
@@ -858,6 +865,7 @@ impl StatementExecutor {
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
+                Some(&query_context),
             )
             .await
             .context(CatalogSnafu)?
@@ -944,7 +952,12 @@ impl StatementExecutor {
 
         let table = self
             .catalog_manager
-            .table(&catalog_name, &schema_name, &table_name)
+            .table(
+                &catalog_name,
+                &schema_name,
+                &table_name,
+                Some(&query_context),
+            )
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
@@ -1167,9 +1180,10 @@ impl StatementExecutor {
 
         if !self
             .catalog_manager
-            .schema_exists(catalog, database)
+            .schema_exists(catalog, database, None)
             .await
             .context(CatalogSnafu)?
+            && !self.catalog_manager.is_reserved_schema_name(database)
         {
             self.create_database_procedure(
                 catalog.to_string(),

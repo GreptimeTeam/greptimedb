@@ -29,7 +29,7 @@ pub async fn create_tmp_local_file_log_store<P: AsRef<Path>>(path: P) -> RaftEng
         file_size: ReadableSize::kb(128),
         ..Default::default()
     };
-    RaftEngineLogStore::try_new(path, cfg).await.unwrap()
+    RaftEngineLogStore::try_new(path, &cfg).await.unwrap()
 }
 
 /// Create a [KafkaLogStore].

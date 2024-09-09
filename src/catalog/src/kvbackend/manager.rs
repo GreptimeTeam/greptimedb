@@ -37,6 +37,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use meta_client::client::MetaClient;
 use moka::sync::Cache;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
+use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 use table::dist_table::DistTable;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
@@ -160,7 +161,11 @@ impl CatalogManager for KvBackendCatalogManager {
         Ok(keys)
     }
 
-    async fn schema_names(&self, catalog: &str) -> Result<Vec<String>> {
+    async fn schema_names(
+        &self,
+        catalog: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<Vec<String>> {
         let stream = self
             .table_metadata_manager
             .schema_manager()
@@ -171,12 +176,17 @@ impl CatalogManager for KvBackendCatalogManager {
             .map_err(BoxedError::new)
             .context(ListSchemasSnafu { catalog })?;
 
-        keys.extend(self.system_catalog.schema_names());
+        keys.extend(self.system_catalog.schema_names(query_ctx));
 
         Ok(keys.into_iter().collect())
     }
 
-    async fn table_names(&self, catalog: &str, schema: &str) -> Result<Vec<String>> {
+    async fn table_names(
+        &self,
+        catalog: &str,
+        schema: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<Vec<String>> {
         let stream = self
             .table_metadata_manager
             .table_name_manager()
@@ -189,7 +199,7 @@ impl CatalogManager for KvBackendCatalogManager {
             .into_iter()
             .map(|(k, _)| k)
             .collect::<Vec<_>>();
-        tables.extend_from_slice(&self.system_catalog.table_names(schema));
+        tables.extend_from_slice(&self.system_catalog.table_names(schema, query_ctx));
 
         Ok(tables.into_iter().collect())
     }
@@ -202,8 +212,13 @@ impl CatalogManager for KvBackendCatalogManager {
             .context(TableMetadataManagerSnafu)
     }
 
-    async fn schema_exists(&self, catalog: &str, schema: &str) -> Result<bool> {
-        if self.system_catalog.schema_exists(schema) {
+    async fn schema_exists(
+        &self,
+        catalog: &str,
+        schema: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<bool> {
+        if self.system_catalog.schema_exists(schema, query_ctx) {
             return Ok(true);
         }
 
@@ -214,8 +229,14 @@ impl CatalogManager for KvBackendCatalogManager {
             .context(TableMetadataManagerSnafu)
     }
 
-    async fn table_exists(&self, catalog: &str, schema: &str, table: &str) -> Result<bool> {
-        if self.system_catalog.table_exists(schema, table) {
+    async fn table_exists(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<bool> {
+        if self.system_catalog.table_exists(schema, table, query_ctx) {
             return Ok(true);
         }
 
@@ -233,10 +254,12 @@ impl CatalogManager for KvBackendCatalogManager {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
+        query_ctx: Option<&QueryContext>,
     ) -> Result<Option<TableRef>> {
-        if let Some(table) = self
-            .system_catalog
-            .table(catalog_name, schema_name, table_name)
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
+        if let Some(table) =
+            self.system_catalog
+                .table(catalog_name, schema_name, table_name, query_ctx)
         {
             return Ok(Some(table));
         }
@@ -244,23 +267,45 @@ impl CatalogManager for KvBackendCatalogManager {
         let table_cache: TableCacheRef = self.cache_registry.get().context(CacheNotFoundSnafu {
             name: "table_cache",
         })?;
-
-        table_cache
+        if let Some(table) = table_cache
             .get_by_ref(&TableName {
                 catalog_name: catalog_name.to_string(),
                 schema_name: schema_name.to_string(),
                 table_name: table_name.to_string(),
             })
             .await
-            .context(GetTableCacheSnafu)
+            .context(GetTableCacheSnafu)?
+        {
+            return Ok(Some(table));
+        }
+
+        if channel == Channel::Postgres {
+            // falldown to pg_catalog
+            if let Some(table) =
+                self.system_catalog
+                    .table(catalog_name, PG_CATALOG_NAME, table_name, query_ctx)
+            {
+                return Ok(Some(table));
+            }
+        }
+
+        return Ok(None);
     }
 
-    fn tables<'a>(&'a self, catalog: &'a str, schema: &'a str) -> BoxStream<'a, Result<TableRef>> {
+    fn tables<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+        query_ctx: Option<&'a QueryContext>,
+    ) -> BoxStream<'a, Result<TableRef>> {
         let sys_tables = try_stream!({
             // System tables
-            let sys_table_names = self.system_catalog.table_names(schema);
+            let sys_table_names = self.system_catalog.table_names(schema, query_ctx);
             for table_name in sys_table_names {
-                if let Some(table) = self.system_catalog.table(catalog, schema, &table_name) {
+                if let Some(table) =
+                    self.system_catalog
+                        .table(catalog, schema, &table_name, query_ctx)
+                {
                     yield table;
                 }
             }
@@ -328,18 +373,27 @@ struct SystemCatalog {
 }
 
 impl SystemCatalog {
-    // TODO(j0hn50n133): remove the duplicated hard-coded table names logic
-    fn schema_names(&self) -> Vec<String> {
-        vec![
-            INFORMATION_SCHEMA_NAME.to_string(),
-            PG_CATALOG_NAME.to_string(),
-        ]
+    fn schema_names(&self, query_ctx: Option<&QueryContext>) -> Vec<String> {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
+        match channel {
+            // pg_catalog only visible under postgres protocol
+            Channel::Postgres => vec![
+                INFORMATION_SCHEMA_NAME.to_string(),
+                PG_CATALOG_NAME.to_string(),
+            ],
+            _ => {
+                vec![INFORMATION_SCHEMA_NAME.to_string()]
+            }
+        }
     }
 
-    fn table_names(&self, schema: &str) -> Vec<String> {
+    fn table_names(&self, schema: &str, query_ctx: Option<&QueryContext>) -> Vec<String> {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
         match schema {
             INFORMATION_SCHEMA_NAME => self.information_schema_provider.table_names(),
-            PG_CATALOG_NAME => self.pg_catalog_provider.table_names(),
+            PG_CATALOG_NAME if channel == Channel::Postgres => {
+                self.pg_catalog_provider.table_names()
+            }
             DEFAULT_SCHEMA_NAME => {
                 vec![NUMBERS_TABLE_NAME.to_string()]
             }
@@ -347,23 +401,35 @@ impl SystemCatalog {
         }
     }
 
-    fn schema_exists(&self, schema: &str) -> bool {
-        schema == INFORMATION_SCHEMA_NAME || schema == PG_CATALOG_NAME
+    fn schema_exists(&self, schema: &str, query_ctx: Option<&QueryContext>) -> bool {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
+        match channel {
+            Channel::Postgres => schema == PG_CATALOG_NAME || schema == INFORMATION_SCHEMA_NAME,
+            _ => schema == INFORMATION_SCHEMA_NAME,
+        }
     }
 
-    fn table_exists(&self, schema: &str, table: &str) -> bool {
+    fn table_exists(&self, schema: &str, table: &str, query_ctx: Option<&QueryContext>) -> bool {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
         if schema == INFORMATION_SCHEMA_NAME {
             self.information_schema_provider.table(table).is_some()
         } else if schema == DEFAULT_SCHEMA_NAME {
             table == NUMBERS_TABLE_NAME
-        } else if schema == PG_CATALOG_NAME {
+        } else if schema == PG_CATALOG_NAME && channel == Channel::Postgres {
             self.pg_catalog_provider.table(table).is_some()
         } else {
             false
         }
     }
 
-    fn table(&self, catalog: &str, schema: &str, table_name: &str) -> Option<TableRef> {
+    fn table(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table_name: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Option<TableRef> {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
         if schema == INFORMATION_SCHEMA_NAME {
             let information_schema_provider =
                 self.catalog_cache.get_with_by_ref(catalog, move || {
@@ -374,7 +440,7 @@ impl SystemCatalog {
                     ))
                 });
             information_schema_provider.table(table_name)
-        } else if schema == PG_CATALOG_NAME {
+        } else if schema == PG_CATALOG_NAME && channel == Channel::Postgres {
             if catalog == DEFAULT_CATALOG_NAME {
                 self.pg_catalog_provider.table(table_name)
             } else {

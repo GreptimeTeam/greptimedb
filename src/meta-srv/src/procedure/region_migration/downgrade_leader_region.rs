@@ -160,6 +160,11 @@ impl DowngradeLeaderRegion {
                         "Trying to downgrade the region {} on Datanode {}, but region doesn't exist!",
                         region_id, leader
                     );
+                } else {
+                    info!(
+                        "Region {} leader is downgraded, last_entry_id: {:?}",
+                        region_id, last_entry_id
+                    );
                 }
 
                 if let Some(last_entry_id) = last_entry_id {
