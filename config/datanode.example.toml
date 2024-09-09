@@ -19,6 +19,9 @@ enable_telemetry = true
 ## Parallelism of initializing regions.
 init_regions_parallelism = 16
 
+## The maximum current queries allowed to be executed. Zero means unlimited.
+max_concurrent_queries = 0
+
 ## Deprecated, use `grpc.addr` instead.
 ## @toml2docs:none-default
 rpc_addr = "127.0.0.1:3001"

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use api::region::RegionResponse;
 use api::v1::region::{region_request, RegionResponse as RegionResponseV1};
@@ -58,10 +59,13 @@ use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
+use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::time::timeout;
 use tonic::{Request, Response, Result as TonicResult};
 
 use crate::error::{
-    self, BuildRegionRequestsSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
+    self, BuildRegionRequestsSnafu, ConcurrentQueryLimiterClosedSnafu,
+    ConcurrentQueryLimiterTimeoutSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
     ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, HandleBatchOpenRequestSnafu,
     HandleRegionRequestSnafu, NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu,
     RegionNotReadySnafu, Result, StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
@@ -90,6 +94,8 @@ impl RegionServer {
             runtime,
             event_listener,
             Arc::new(DummyTableProviderFactory),
+            0,
+            Duration::from_millis(0),
         )
     }
 
@@ -98,6 +104,8 @@ impl RegionServer {
         runtime: Runtime,
         event_listener: RegionServerEventListenerRef,
         table_provider_factory: TableProviderFactoryRef,
+        max_concurrent_queries: usize,
+        concurrent_query_limiter_timeout: Duration,
     ) -> Self {
         Self {
             inner: Arc::new(RegionServerInner::new(
@@ -105,6 +113,10 @@ impl RegionServer {
                 runtime,
                 event_listener,
                 table_provider_factory,
+                RegionServerParallelism::from_opts(
+                    max_concurrent_queries,
+                    concurrent_query_limiter_timeout,
+                ),
             )),
         }
     }
@@ -167,6 +179,11 @@ impl RegionServer {
         &self,
         request: api::v1::region::QueryRequest,
     ) -> Result<SendableRecordBatchStream> {
+        let _permit = if let Some(p) = &self.inner.parallelism {
+            Some(p.acquire().await?)
+        } else {
+            None
+        };
         let region_id = RegionId::from_u64(request.region_id);
         let provider = self.table_provider(region_id).await?;
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(provider));
@@ -200,6 +217,11 @@ impl RegionServer {
 
     #[tracing::instrument(skip_all)]
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+        let _permit = if let Some(p) = &self.inner.parallelism {
+            Some(p.acquire().await?)
+        } else {
+            None
+        };
         let provider = self.table_provider(request.region_id).await?;
 
         struct RegionDataSourceInjector {
@@ -450,6 +472,36 @@ struct RegionServerInner {
     runtime: Runtime,
     event_listener: RegionServerEventListenerRef,
     table_provider_factory: TableProviderFactoryRef,
+    // The number of queries allowed to be executed at the same time.
+    // Act as last line of defense on datanode to prevent query overloading.
+    parallelism: Option<RegionServerParallelism>,
+}
+
+struct RegionServerParallelism {
+    semaphore: Semaphore,
+    timeout: Duration,
+}
+
+impl RegionServerParallelism {
+    pub fn from_opts(
+        max_concurrent_queries: usize,
+        concurrent_query_limiter_timeout: Duration,
+    ) -> Option<Self> {
+        if max_concurrent_queries == 0 {
+            return None;
+        }
+        Some(RegionServerParallelism {
+            semaphore: Semaphore::new(max_concurrent_queries),
+            timeout: concurrent_query_limiter_timeout,
+        })
+    }
+
+    pub async fn acquire(&self) -> Result<SemaphorePermit> {
+        timeout(self.timeout, self.semaphore.acquire())
+            .await
+            .context(ConcurrentQueryLimiterTimeoutSnafu)?
+            .context(ConcurrentQueryLimiterClosedSnafu)
+    }
 }
 
 enum CurrentEngine {
@@ -478,6 +530,7 @@ impl RegionServerInner {
         runtime: Runtime,
         event_listener: RegionServerEventListenerRef,
         table_provider_factory: TableProviderFactoryRef,
+        parallelism: Option<RegionServerParallelism>,
     ) -> Self {
         Self {
             engines: RwLock::new(HashMap::new()),
@@ -486,6 +539,7 @@ impl RegionServerInner {
             runtime,
             event_listener,
             table_provider_factory,
+            parallelism,
         }
     }
 
@@ -1283,5 +1337,24 @@ mod tests {
 
             assert(result);
         }
+    }
+
+    #[tokio::test]
+    async fn test_region_server_parallism() {
+        let p = RegionServerParallelism::from_opts(2, Duration::from_millis(1)).unwrap();
+        let first_query = p.acquire().await;
+        assert!(first_query.is_ok());
+        let second_query = p.acquire().await;
+        assert!(second_query.is_ok());
+        let third_query = p.acquire().await;
+        assert!(third_query.is_err());
+        let err = third_query.unwrap_err();
+        assert_eq!(
+            err.output_msg(),
+            "Failed to acquire permit under timeouts: deadline has elapsed".to_string()
+        );
+        drop(first_query);
+        let forth_query = p.acquire().await;
+        assert!(forth_query.is_ok());
     }
 }

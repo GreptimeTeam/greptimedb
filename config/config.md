@@ -17,6 +17,7 @@
 | `default_timezone` | String | Unset | The default timezone of the server. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
+| `max_concurrent_queries` | Integer | `0` | The maximum current queries allowed to be executed. Zero means unlimited. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
@@ -335,6 +336,7 @@
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
+| `max_concurrent_queries` | Integer | `0` | The maximum current queries allowed to be executed. Zero means unlimited. |
 | `rpc_addr` | String | Unset | Deprecated, use `grpc.addr` instead. |
 | `rpc_hostname` | String | Unset | Deprecated, use `grpc.hostname` instead. |
 | `rpc_runtime_size` | Integer | Unset | Deprecated, use `grpc.runtime_size` instead. |
