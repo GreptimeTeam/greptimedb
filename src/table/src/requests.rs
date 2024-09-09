@@ -56,7 +56,6 @@ pub fn validate_table_option(key: &str) -> bool {
         TTL_KEY,
         STORAGE_KEY,
         COMMENT_KEY,
-        AUTO_CREATE_TABLE_KEY,
         // file engine keys:
         FILE_TABLE_LOCATION_KEY,
         FILE_TABLE_FORMAT_KEY,
@@ -323,7 +322,6 @@ mod tests {
         assert!(validate_table_option(TTL_KEY));
         assert!(validate_table_option(WRITE_BUFFER_SIZE_KEY));
         assert!(validate_table_option(STORAGE_KEY));
-        assert!(validate_table_option(AUTO_CREATE_TABLE_KEY));
         assert!(!validate_table_option("foo"));
     }
 
