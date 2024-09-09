@@ -11,9 +11,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3.10 \
     python3.10-dev \
     python3-pip \
-    curl \
-    mysql-client \
-    postgresql-client
+    curl
 
 COPY $DOCKER_BUILD_ROOT/docker/python/requirements.txt /etc/greptime/requirements.txt
 

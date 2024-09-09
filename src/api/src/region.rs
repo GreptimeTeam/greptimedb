@@ -21,14 +21,14 @@ use greptime_proto::v1::region::RegionResponse as RegionResponseV1;
 #[derive(Debug)]
 pub struct RegionResponse {
     pub affected_rows: AffectedRows,
-    pub extension: HashMap<String, Vec<u8>>,
+    pub extensions: HashMap<String, Vec<u8>>,
 }
 
 impl RegionResponse {
     pub fn from_region_response(region_response: RegionResponseV1) -> Self {
         Self {
             affected_rows: region_response.affected_rows as _,
-            extension: region_response.extension,
+            extensions: region_response.extensions,
         }
     }
 
@@ -36,7 +36,7 @@ impl RegionResponse {
     pub fn new(affected_rows: AffectedRows) -> Self {
         Self {
             affected_rows,
-            extension: Default::default(),
+            extensions: Default::default(),
         }
     }
 }

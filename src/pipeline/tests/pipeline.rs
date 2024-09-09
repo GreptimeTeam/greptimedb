@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::Rows;
 use common_telemetry::tracing::info;
 use greptime_proto::v1::value::ValueData::{
     BoolValue, F64Value, StringValue, TimestampNanosecondValue, TimestampSecondValue, U32Value,
     U64Value, U8Value,
 };
 use greptime_proto::v1::Value as GreptimeValue;
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Value};
+use pipeline::{parse, Content, GreptimeTransformer, Pipeline};
 
 #[test]
 fn test_complex_data() {
     let input_value_str = r#"
-    [
       {
         "version": 1,
         "streamId": "12345",
@@ -73,12 +73,9 @@ fn test_complex_data() {
         "ewExecutionInfo": "c:4380:7:161:162:161:n:::12473:200|C:4380:3:0:4:0:n:::6967:200|R:4380:20:99:99:1:n:::35982:200",
         "customField": "any-custom-value"
       }
-    ]
 "#;
-    let input_value: Value = serde_json::from_str::<serde_json::Value>(input_value_str)
-        .expect("failed to parse input value")
-        .try_into()
-        .expect("failed to convert input value");
+    let input_value = serde_json::from_str::<serde_json::Value>(input_value_str)
+        .expect("failed to parse input value");
 
     let pipeline_yaml = r#"
 ---
@@ -422,7 +419,19 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml.into());
     let pipeline: Pipeline<GreptimeTransformer> =
         parse(&yaml_content).expect("failed to parse pipeline");
-    let output = pipeline.exec(input_value).expect("failed to exec pipeline");
+    let mut stats = pipeline.init_intermediate_state();
+    pipeline
+        .prepare(input_value, &mut stats)
+        .expect("failed to prepare pipeline");
+
+    let row = pipeline
+        .exec_mut(&mut stats)
+        .expect("failed to exec pipeline");
+
+    let output = Rows {
+        schema: pipeline.schemas().clone(),
+        rows: vec![row],
+    };
 
     assert_eq!(output.rows.len(), 1);
     let values = output.rows.first().unwrap().values.clone();
@@ -464,10 +473,7 @@ fn test_simple_data() {
     "line": "2024-05-25 20:16:37.217 hello world"
 }
 "#;
-    let input_value: Value = serde_json::from_str::<serde_json::Value>(input_value_str)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let input_value = serde_json::from_str::<serde_json::Value>(input_value_str).unwrap();
 
     let pipeline_yaml = r#"
 processors:
@@ -493,11 +499,13 @@ transform:
 
     let yaml_content = Content::Yaml(pipeline_yaml.into());
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
-    let output = pipeline.exec(input_value).unwrap();
-    let r = output
-        .rows
+
+    let mut status = pipeline.init_intermediate_state();
+    pipeline.prepare(input_value, &mut status).unwrap();
+    let row = pipeline.exec_mut(&mut status).unwrap();
+    let r = row
+        .values
         .into_iter()
-        .flat_map(|v| v.values)
         .map(|v| v.value_data.unwrap())
         .collect::<Vec<_>>();
 

@@ -57,7 +57,7 @@ impl StatementExecutor {
         );
         let table_names = self
             .catalog_manager
-            .table_names(&req.catalog_name, &req.schema_name)
+            .table_names(&req.catalog_name, &req.schema_name, Some(&ctx))
             .await
             .context(CatalogSnafu)?;
 

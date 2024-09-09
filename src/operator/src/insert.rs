@@ -608,7 +608,7 @@ impl Inserter {
         table: &str,
     ) -> Result<Option<TableRef>> {
         self.catalog_manager
-            .table(catalog, schema, table)
+            .table(catalog, schema, table, None)
             .await
             .context(CatalogSnafu)
     }

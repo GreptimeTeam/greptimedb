@@ -170,6 +170,9 @@ prefill_log_files = false
 ## **It's only used when the provider is `raft_engine`**.
 sync_period = "10s"
 
+## Parallelism during WAL recovery.
+recovery_parallelism = 2
+
 ## The Kafka broker endpoints.
 ## **It's only used when the provider is `kafka`**.
 broker_endpoints = ["127.0.0.1:9092"]

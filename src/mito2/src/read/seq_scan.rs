@@ -515,6 +515,11 @@ impl RegionScanner for SeqScan {
         self.properties.partitions = ranges;
         Ok(())
     }
+
+    fn has_predicate(&self) -> bool {
+        let predicate = self.stream_ctx.input.predicate();
+        predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
+    }
 }
 
 impl DisplayAs for SeqScan {

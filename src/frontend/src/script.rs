@@ -152,7 +152,12 @@ mod python {
 
             if let Some(table) = self
                 .catalog_manager
-                .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
+                .table(
+                    &expr.catalog_name,
+                    &expr.schema_name,
+                    &expr.table_name,
+                    None,
+                )
                 .await
                 .context(CatalogSnafu)?
             {
@@ -185,6 +190,7 @@ mod python {
                     &table_name.catalog_name,
                     &table_name.schema_name,
                     &table_name.table_name,
+                    None,
                 )
                 .await
                 .context(CatalogSnafu)?

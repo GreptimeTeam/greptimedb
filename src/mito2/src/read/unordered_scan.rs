@@ -228,6 +228,11 @@ impl RegionScanner for UnorderedScan {
 
         Ok(stream)
     }
+
+    fn has_predicate(&self) -> bool {
+        let predicate = self.stream_ctx.input.predicate();
+        predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
+    }
 }
 
 impl DisplayAs for UnorderedScan {
