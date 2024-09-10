@@ -243,7 +243,7 @@ pub struct CreatePhysicalTableExprGenerator<R: Rng + 'static> {
     name_generator: Box<dyn Random<Ident, R>>,
     #[builder(default = "false")]
     if_not_exists: bool,
-    #[builder(setter(into))]
+    #[builder(default, setter(into))]
     with_clause: HashMap<String, String>,
 }
 
