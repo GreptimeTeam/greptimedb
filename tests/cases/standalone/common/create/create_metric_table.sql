@@ -59,3 +59,30 @@ CREATE TABLE `auT`(
 DESC TABLE `auT`;
 
 DROP TABLE `auT`;
+
+-- append-only metric table
+CREATE TABLE
+  phy (ts timestamp time index, val double) engine = metric
+with
+(
+  "physical_metric_table" = "",
+  "append_mode" = "true"
+);
+
+CREATE TABLE t1(ts timestamp time index, val double, host string primary key) engine=metric with ("on_physical_table" = "phy");
+
+INSERT INTO t1 (ts, val, host) VALUES 
+  ('2022-01-01 00:00:00', 1.23, 'example.com'),
+  ('2022-01-02 00:00:00', 4.56, 'example.com'),
+  ('2022-01-03 00:00:00', 7.89, 'example.com'),
+  ('2022-01-01 00:00:00', 1.23, 'example.com'),
+  ('2022-01-02 00:00:00', 4.56, 'example.com'),
+  ('2022-01-03 00:00:00', 7.89, 'example.com');
+
+SELECT * FROM t1;
+
+DROP TABLE t1;
+
+DESC TABLE t1;
+
+DROP TABLE phy;
