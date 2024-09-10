@@ -2289,6 +2289,7 @@ dependencies = [
  "common-error",
  "console-subscriber",
  "greptime-proto",
+ "humantime-serde",
  "lazy_static",
  "once_cell",
  "opentelemetry 0.21.0",

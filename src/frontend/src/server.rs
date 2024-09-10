@@ -78,7 +78,15 @@ where
     }
 
     pub fn http_server_builder(&self, opts: &FrontendOptions) -> HttpServerBuilder {
-        let mut builder = HttpServerBuilder::new(opts.http.clone()).with_sql_handler(
+        let mut builder = HttpServerBuilder::new(opts.http.clone());
+
+        if opts.logging.enable_slow_query_log {
+            if let Some(threshold) = opts.logging.slow_query_threshold {
+                builder = builder.set_slow_query_threshold(threshold);
+            }
+        }
+
+        builder = builder.with_sql_handler(
             ServerSqlQueryHandlerAdapter::arc(self.instance.clone()),
             Some(self.instance.clone()),
         );

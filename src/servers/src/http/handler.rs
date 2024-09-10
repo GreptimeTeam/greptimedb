@@ -26,7 +26,7 @@ use common_error::status_code::StatusCode;
 use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
-use common_telemetry::tracing;
+use common_telemetry::{slow, tracing};
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -143,7 +143,19 @@ pub async fn sql(
     if let Some(limit) = query_params.limit {
         resp = resp.with_limit(limit);
     }
-    resp.with_execution_time(start.elapsed().as_millis() as u64)
+
+    let cost = start.elapsed();
+    if let Some(threshold) = state.slow_query_threshold {
+        if cost > threshold {
+            slow!(
+                cost = cost.as_millis() as u64,
+                threshold = threshold.as_millis() as u64,
+                sql = sql.unwrap()
+            );
+        }
+    }
+
+    resp.with_execution_time(cost.as_millis() as u64)
 }
 
 /// Create a response from query result

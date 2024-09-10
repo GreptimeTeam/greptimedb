@@ -464,6 +464,7 @@ async fn serve_docs() -> Html<String> {
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
     pub script_handler: Option<ScriptHandlerRef>,
+    pub slow_query_threshold: Option<Duration>,
 }
 
 #[derive(Clone)]
@@ -478,6 +479,7 @@ pub struct HttpServerBuilder {
     user_provider: Option<UserProviderRef>,
     api: OpenApi,
     router: Router,
+    slow_query_threshold: Option<Duration>,
 }
 
 impl HttpServerBuilder {
@@ -501,7 +503,13 @@ impl HttpServerBuilder {
             user_provider: None,
             api,
             router: Router::new(),
+            slow_query_threshold: None,
         }
+    }
+
+    pub fn set_slow_query_threshold(mut self, slow_query_threshold: Duration) -> Self {
+        self.slow_query_threshold = Some(slow_query_threshold);
+        self
     }
 
     pub fn with_sql_handler(
@@ -512,6 +520,7 @@ impl HttpServerBuilder {
         let sql_router = HttpServer::route_sql(ApiState {
             sql_handler,
             script_handler,
+            slow_query_threshold: self.slow_query_threshold,
         })
         .finish_api(&mut self.api)
         .layer(Extension(self.api.clone()));
