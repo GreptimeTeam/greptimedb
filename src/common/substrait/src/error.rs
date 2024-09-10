@@ -17,7 +17,6 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use datafusion::error::DataFusionError;
 use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
 
@@ -41,25 +40,11 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Internal error from DataFusion"))]
-    DFInternal {
-        #[snafu(source)]
-        error: DataFusionError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Internal error"))]
     Internal {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
-    },
-
-    #[snafu(display("Cannot convert plan doesn't belong to GreptimeDB"))]
-    UnknownPlan {
-        #[snafu(implicit)]
-        location: Location,
     },
 
     #[snafu(display("Failed to encode DataFusion plan"))]
@@ -84,10 +69,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::UnknownPlan { .. } | Error::EncodeRel { .. } | Error::DecodeRel { .. } => {
-                StatusCode::InvalidArguments
-            }
-            Error::DFInternal { .. } | Error::Internal { .. } => StatusCode::Internal,
+            Error::EncodeRel { .. } | Error::DecodeRel { .. } => StatusCode::InvalidArguments,
+            Error::Internal { .. } => StatusCode::Internal,
             Error::EncodeDfPlan { .. } | Error::DecodeDfPlan { .. } => StatusCode::Unexpected,
         }
     }

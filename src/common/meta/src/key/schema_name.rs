@@ -23,8 +23,8 @@ use humantime_serde::re::humantime;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, Error, InvalidTableMetadataSnafu, ParseOptionSnafu, Result};
-use crate::key::{MetaKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX};
+use crate::error::{self, Error, InvalidMetadataSnafu, ParseOptionSnafu, Result};
+use crate::key::{MetadataKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
@@ -89,6 +89,19 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
     }
 }
 
+impl From<SchemaNameValue> for HashMap<String, String> {
+    fn from(value: SchemaNameValue) -> Self {
+        let mut opts = HashMap::new();
+        if let Some(ttl) = value.ttl {
+            opts.insert(
+                OPT_KEY_TTL.to_string(),
+                format!("{}", humantime::format_duration(ttl)),
+            );
+        }
+        opts
+    }
+}
+
 impl<'a> SchemaNameKey<'a> {
     pub fn new(catalog: &'a str, schema: &'a str) -> Self {
         Self { catalog, schema }
@@ -109,14 +122,14 @@ impl Display for SchemaNameKey<'_> {
     }
 }
 
-impl<'a> MetaKey<'a, SchemaNameKey<'a>> for SchemaNameKey<'_> {
+impl<'a> MetadataKey<'a, SchemaNameKey<'a>> for SchemaNameKey<'_> {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
 
     fn from_bytes(bytes: &'a [u8]) -> Result<SchemaNameKey<'a>> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
-            InvalidTableMetadataSnafu {
+            InvalidMetadataSnafu {
                 err_msg: format!(
                     "SchemaNameKey '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
@@ -142,7 +155,7 @@ impl<'a> TryFrom<&'a str> for SchemaNameKey<'a> {
     fn try_from(s: &'a str) -> Result<Self> {
         let captures = SCHEMA_NAME_KEY_PATTERN
             .captures(s)
-            .context(InvalidTableMetadataSnafu {
+            .context(InvalidMetadataSnafu {
                 err_msg: format!("Illegal SchemaNameKey format: '{s}'"),
             })?;
 

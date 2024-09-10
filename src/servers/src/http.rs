@@ -74,6 +74,7 @@ use crate::query_handler::{
 use crate::server::Server;
 
 pub mod authorize;
+pub mod dyn_log;
 pub mod event;
 pub mod handler;
 pub mod header;
@@ -708,6 +709,15 @@ impl HttpServer {
                         authorize::check_http_auth,
                     )),
             )
+            .nest(
+                "/debug",
+                Router::new()
+                    // handler for changing log level dynamically
+                    .route(
+                        "/log_level",
+                        routing::get(dyn_log::dyn_log_handler).post(dyn_log::dyn_log_handler),
+                    ),
+            )
             // Handlers for debug, we don't expect a timeout.
             .nest(
                 &format!("/{HTTP_API_VERSION}/prof"),
@@ -743,6 +753,7 @@ impl HttpServer {
                 "/pipelines/:pipeline_name",
                 routing::delete(event::delete_pipeline),
             )
+            .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))

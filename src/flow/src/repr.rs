@@ -177,6 +177,12 @@ impl Row {
     }
 }
 
+impl From<Vec<Value>> for Row {
+    fn from(row: Vec<Value>) -> Self {
+        Row::new(row)
+    }
+}
+
 impl From<ProtoRow> for Row {
     fn from(row: ProtoRow) -> Self {
         Row::pack(

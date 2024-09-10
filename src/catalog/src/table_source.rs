@@ -23,7 +23,7 @@ use datafusion::datasource::view::ViewTable;
 use datafusion::datasource::{provider_as_source, TableProvider};
 use datafusion::logical_expr::TableSource;
 use itertools::Itertools;
-use session::context::QueryContext;
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -45,6 +45,7 @@ pub struct DfTableSourceProvider {
     disallow_cross_catalog_query: bool,
     default_catalog: String,
     default_schema: String,
+    query_ctx: QueryContextRef,
     plan_decoder: SubstraitPlanDecoderRef,
     enable_ident_normalization: bool,
 }
@@ -53,7 +54,7 @@ impl DfTableSourceProvider {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         disallow_cross_catalog_query: bool,
-        query_ctx: &QueryContext,
+        query_ctx: QueryContextRef,
         plan_decoder: SubstraitPlanDecoderRef,
         enable_ident_normalization: bool,
     ) -> Self {
@@ -63,6 +64,7 @@ impl DfTableSourceProvider {
             resolved_tables: HashMap::new(),
             default_catalog: query_ctx.current_catalog().to_owned(),
             default_schema: query_ctx.current_schema(),
+            query_ctx,
             plan_decoder,
             enable_ident_normalization,
         }
@@ -71,8 +73,7 @@ impl DfTableSourceProvider {
     pub fn resolve_table_ref(&self, table_ref: TableReference) -> Result<ResolvedTableReference> {
         if self.disallow_cross_catalog_query {
             match &table_ref {
-                TableReference::Bare { .. } => (),
-                TableReference::Partial { .. } => {}
+                TableReference::Bare { .. } | TableReference::Partial { .. } => {}
                 TableReference::Full {
                     catalog, schema, ..
                 } => {
@@ -107,7 +108,7 @@ impl DfTableSourceProvider {
 
         let table = self
             .catalog_manager
-            .table(catalog_name, schema_name, table_name)
+            .table(catalog_name, schema_name, table_name, Some(&self.query_ctx))
             .await?
             .with_context(|| TableNotExistSnafu {
                 table: format_full_table_name(catalog_name, schema_name, table_name),
@@ -210,12 +211,12 @@ mod tests {
 
     #[test]
     fn test_validate_table_ref() {
-        let query_ctx = &QueryContext::with("greptime", "public");
+        let query_ctx = Arc::new(QueryContext::with("greptime", "public"));
 
         let table_provider = DfTableSourceProvider::new(
             MemoryCatalogManager::with_default_setup(),
             true,
-            query_ctx,
+            query_ctx.clone(),
             DummyDecoder::arc(),
             true,
         );
@@ -308,7 +309,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_view() {
-        let query_ctx = &QueryContext::with("greptime", "public");
+        let query_ctx = Arc::new(QueryContext::with("greptime", "public"));
         let backend = Arc::new(MemoryKvBackend::default());
         let layered_cache_builder = LayeredCacheRegistryBuilder::default()
             .add_cache_registry(CacheRegistryBuilder::default().build());
@@ -344,8 +345,13 @@ mod tests {
             .await
             .unwrap();
 
-        let mut table_provider =
-            DfTableSourceProvider::new(catalog_manager, true, query_ctx, MockDecoder::arc(), true);
+        let mut table_provider = DfTableSourceProvider::new(
+            catalog_manager,
+            true,
+            query_ctx.clone(),
+            MockDecoder::arc(),
+            true,
+        );
 
         // View not found
         let table_ref = TableReference::bare("not_exists_view");

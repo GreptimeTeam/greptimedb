@@ -24,6 +24,8 @@ use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
+pub const JSON_TYPE_NAME: &str = "Json";
+
 /// JsonType is a data type for JSON data. It is stored as binary data of jsonb format.
 /// It utilizes current binary value and vector implementation.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -37,7 +39,7 @@ impl JsonType {
 
 impl DataType for JsonType {
     fn name(&self) -> String {
-        "Json".to_string()
+        JSON_TYPE_NAME.to_string()
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {

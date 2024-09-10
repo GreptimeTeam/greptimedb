@@ -383,26 +383,42 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         .await
         .unwrap();
 
-    sqlx::query("create table demo(i bigint, ts timestamp time index, d date, dt datetime)")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "create table demo(i bigint, ts timestamp time index, d date, dt datetime, b blob, j json)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     for i in 0..10 {
         let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         let dt = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+        let bytes = "hello".as_bytes();
+        let json = serde_json::json!({
+            "code": 200,
+            "success": true,
+            "payload": {
+                "features": [
+                    "serde",
+                    "json"
+                ],
+                "homepage": null
+            }
+        });
 
-        sqlx::query("insert into demo values($1, $2, $3, $4)")
+        sqlx::query("insert into demo values($1, $2, $3, $4, $5, $6)")
             .bind(i)
             .bind(i)
             .bind(d)
             .bind(dt)
+            .bind(bytes)
+            .bind(json)
             .execute(&pool)
             .await
             .unwrap();
     }
 
-    let rows = sqlx::query("select i,d,dt from demo")
+    let rows = sqlx::query("select i,d,dt,b,j from demo")
         .fetch_all(&pool)
         .await
         .unwrap();
@@ -412,6 +428,8 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         let ret: i64 = row.get("i");
         let d: NaiveDate = row.get("d");
         let dt: NaiveDateTime = row.get("dt");
+        let bytes: Vec<u8> = row.get("b");
+        let json: serde_json::Value = row.get("j");
 
         assert_eq!(ret, i as i64);
 
@@ -422,6 +440,20 @@ pub async fn test_postgres_crud(store_type: StorageType) {
             .and_then(|d| d.and_hms_opt(0, 0, 0))
             .unwrap();
         assert_eq!(expected_dt, dt);
+        assert_eq!("hello".as_bytes(), bytes);
+
+        let expected_j = serde_json::json!({
+            "code": 200,
+            "success": true,
+            "payload": {
+                "features": [
+                    "serde",
+                    "json"
+                ],
+                "homepage": null
+            }
+        });
+        assert_eq!(json.to_string(), expected_j.to_string());
     }
 
     let rows = sqlx::query("select i from demo where i=$1")

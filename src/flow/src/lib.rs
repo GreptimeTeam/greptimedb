@@ -20,9 +20,14 @@
 #![allow(dead_code)]
 #![warn(clippy::missing_docs_in_private_items)]
 #![warn(clippy::too_many_lines)]
+
+// TODO(discord9): enable this lint to handle out of bound access
+// #![cfg_attr(not(test), warn(clippy::indexing_slicing))]
+
 // allow unused for now because it should be use later
 mod adapter;
 mod compute;
+mod df_optimizer;
 pub mod error;
 mod expr;
 pub mod heartbeat;

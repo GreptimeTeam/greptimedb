@@ -157,7 +157,7 @@ transform:
 fn test_modifier() {
     let empty_str = r#"
 {
-    "str": "key1 key2 key3 key4 key5       key6 key7 key8"
+    "str": "key1 key2 key3 key4 key5       key6"
 }"#;
 
     let pipeline_yaml = r#"
@@ -165,7 +165,7 @@ processors:
   - dissect:
       field: str
       patterns: 
-        - "%{key1} %{key2} %{+key3} %{+key3/2} %{key5->} %{?key6} %{*key_7} %{&key_7}"
+        - "%{key1} %{key2} %{+key3} %{+key3/2} %{key5->} %{?key6}"
 
 transform:
   - fields:
@@ -173,7 +173,6 @@ transform:
         - key2
         - key3
         - key5
-        - key7
     type: string
 "#;
 
@@ -184,7 +183,6 @@ transform:
         make_string_column_schema("key2".to_string()),
         make_string_column_schema("key3".to_string()),
         make_string_column_schema("key5".to_string()),
-        make_string_column_schema("key7".to_string()),
         common::make_column_schema(
             "greptime_timestamp".to_string(),
             ColumnDataType::TimestampNanosecond,
@@ -208,10 +206,6 @@ transform:
     assert_eq!(
         output.rows[0].values[3].value_data,
         Some(StringValue("key5".to_string()))
-    );
-    assert_eq!(
-        output.rows[0].values[4].value_data,
-        Some(StringValue("key8".to_string()))
     );
 }
 

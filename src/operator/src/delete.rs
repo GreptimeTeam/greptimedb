@@ -232,7 +232,7 @@ impl Deleter {
 
     async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {
         self.catalog_manager
-            .table(catalog, schema, table)
+            .table(catalog, schema, table, None)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

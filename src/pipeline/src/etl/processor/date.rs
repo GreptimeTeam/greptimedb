@@ -19,12 +19,12 @@ use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
-use crate::etl::field::{Field, Fields};
+use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
-    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, yaml_strings,
-    Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
+    ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
-use crate::etl::value::{Map, Timestamp, Value};
+use crate::etl::value::{Timestamp, Value};
 
 pub(crate) const PROCESSOR_DATE: &str = "date";
 
@@ -57,8 +57,14 @@ lazy_static! {
                 .collect();
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Formats(Vec<Arc<String>>);
+
+impl Default for Formats {
+    fn default() -> Self {
+        Formats(DEFAULT_FORMATS.clone())
+    }
+}
 
 impl Formats {
     fn new(mut formats: Vec<Arc<String>>) -> Self {
@@ -76,16 +82,119 @@ impl std::ops::Deref for Formats {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct DateProcessorBuilder {
+    fields: Fields,
+    formats: Formats,
+    timezone: Option<Arc<String>>,
+    locale: Option<Arc<String>>,
+    ignore_missing: bool,
+}
+
+impl ProcessorBuilder for DateProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        self.fields
+            .iter()
+            .map(|f| f.target_or_input_field())
+            .collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.fields.iter().map(|f| f.input_field()).collect()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+        self.build(intermediate_keys).map(ProcessorKind::Date)
+    }
+}
+
+impl DateProcessorBuilder {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<DateProcessor, String> {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input = OneInputOneOutputField::build(
+                "date",
+                intermediate_keys,
+                field.input_field(),
+                field.target_or_input_field(),
+            )?;
+            real_fields.push(input);
+        }
+        Ok(DateProcessor {
+            fields: real_fields,
+            formats: self.formats,
+            timezone: self.timezone,
+            locale: self.locale,
+            ignore_missing: self.ignore_missing,
+        })
+    }
+}
+
+impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
+    type Error = String;
+
+    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
+        let mut fields = Fields::default();
+        let mut formats = Formats::default();
+        let mut timezone = None;
+        let mut locale = None;
+        let mut ignore_missing = false;
+
+        for (k, v) in hash {
+            let key = k
+                .as_str()
+                .ok_or(format!("key must be a string, but got {k:?}"))?;
+
+            match key {
+                FIELD_NAME => {
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
+                }
+                FIELDS_NAME => {
+                    fields = yaml_new_fields(v, FIELDS_NAME)?;
+                }
+
+                FORMATS_NAME => {
+                    let format_strs = yaml_strings(v, FORMATS_NAME)?;
+                    if format_strs.is_empty() {
+                        formats = Formats::new(DEFAULT_FORMATS.clone());
+                    } else {
+                        formats = Formats::new(format_strs.into_iter().map(Arc::new).collect());
+                    }
+                }
+                TIMEZONE_NAME => {
+                    timezone = Some(Arc::new(yaml_string(v, TIMEZONE_NAME)?));
+                }
+                LOCALE_NAME => {
+                    locale = Some(Arc::new(yaml_string(v, LOCALE_NAME)?));
+                }
+                IGNORE_MISSING_NAME => {
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
+                }
+
+                _ => {}
+            }
+        }
+
+        let builder = DateProcessorBuilder {
+            fields,
+            formats,
+            timezone,
+            locale,
+            ignore_missing,
+        };
+
+        Ok(builder)
+    }
+}
+
 /// deprecated it should be removed in the future
 /// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct DateProcessor {
-    fields: Fields,
-
+    fields: Vec<OneInputOneOutputField>,
     formats: Formats,
     timezone: Option<Arc<String>>,
     locale: Option<Arc<String>>, // to support locale
-    output_format: Option<Arc<String>>,
 
     ignore_missing: bool,
     // description
@@ -96,43 +205,6 @@ pub struct DateProcessor {
 }
 
 impl DateProcessor {
-    fn with_fields(&mut self, mut fields: Fields) {
-        update_one_one_output_keys(&mut fields);
-        self.fields = fields
-    }
-
-    fn with_formats(&mut self, v: Option<Vec<Arc<String>>>) {
-        let v = match v {
-            Some(v) if !v.is_empty() => v,
-            _ => DEFAULT_FORMATS.clone(),
-        };
-
-        let formats = Formats::new(v);
-        self.formats = formats;
-    }
-
-    fn with_timezone(&mut self, timezone: String) {
-        if !timezone.is_empty() {
-            self.timezone = Some(Arc::new(timezone));
-        }
-    }
-
-    fn with_locale(&mut self, locale: String) {
-        if !locale.is_empty() {
-            self.locale = Some(Arc::new(locale));
-        }
-    }
-
-    fn with_output_format(&mut self, output_format: String) {
-        if !output_format.is_empty() {
-            self.output_format = Some(Arc::new(output_format));
-        }
-    }
-
-    fn with_ignore_missing(&mut self, ignore_missing: bool) {
-        self.ignore_missing = ignore_missing;
-    }
-
     fn parse(&self, val: &str) -> Result<Timestamp, String> {
         let mut tz = Tz::UTC;
         if let Some(timezone) = &self.timezone {
@@ -147,61 +219,6 @@ impl DateProcessor {
 
         Err(format!("{} processor: failed to parse {val}", self.kind(),))
     }
-
-    fn process_field(&self, val: &str, field: &Field) -> Result<Map, String> {
-        let key = field.get_target_field();
-
-        Ok(Map::one(key, Value::Timestamp(self.parse(val)?)))
-    }
-}
-
-impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessor {
-    type Error = String;
-
-    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = DateProcessor::default();
-
-        let mut formats_opt = None;
-
-        for (k, v) in hash {
-            let key = k
-                .as_str()
-                .ok_or(format!("key must be a string, but got {k:?}"))?;
-
-            match key {
-                FIELD_NAME => {
-                    processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?));
-                }
-                FIELDS_NAME => {
-                    processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
-                }
-
-                FORMATS_NAME => {
-                    let formats = yaml_strings(v, FORMATS_NAME)?;
-                    formats_opt = Some(formats.into_iter().map(Arc::new).collect());
-                }
-                TIMEZONE_NAME => {
-                    processor.with_timezone(yaml_string(v, TIMEZONE_NAME)?);
-                }
-                LOCALE_NAME => {
-                    processor.with_locale(yaml_string(v, LOCALE_NAME)?);
-                }
-                OUTPUT_FORMAT_NAME => {
-                    processor.with_output_format(yaml_string(v, OUTPUT_FORMAT_NAME)?);
-                }
-
-                IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?);
-                }
-
-                _ => {}
-            }
-        }
-
-        processor.with_formats(formats_opt);
-
-        Ok(processor)
-    }
 }
 
 impl Processor for DateProcessor {
@@ -213,53 +230,21 @@ impl Processor for DateProcessor {
         self.ignore_missing
     }
 
-    fn fields(&self) -> &Fields {
-        &self.fields
-    }
-
-    fn fields_mut(&mut self) -> &mut Fields {
-        &mut self.fields
-    }
-
-    fn output_keys(&self) -> HashSet<String> {
-        self.fields
-            .iter()
-            .map(|f| f.get_target_field().to_string())
-            .collect()
-    }
-
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        match val {
-            Value::String(s) => self.process_field(s, field),
-            _ => Err(format!(
-                "{} processor: expect string value, but got {val:?}",
-                self.kind()
-            )),
-        }
-    }
-
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
-        for field in self.fields().iter() {
-            let index = field.input_field.index;
+        for field in self.fields.iter() {
+            let index = field.input_index();
             match val.get(index) {
                 Some(Value::String(s)) => {
-                    // TODO(qtang): Let this method use the intermediate state collection directly.
-                    let mut map = self.process_field(s, field)?;
-                    field
-                        .output_fields_index_mapping
-                        .iter()
-                        .for_each(|(k, output_index)| {
-                            if let Some(v) = map.remove(k) {
-                                val[*output_index] = v;
-                            }
-                        });
+                    let timestamp = self.parse(s)?;
+                    let output_index = field.output_index();
+                    val[output_index] = Value::Timestamp(timestamp);
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return Err(format!(
                             "{} processor: missing field: {}",
                             self.kind(),
-                            field.get_field_name()
+                            field.input_name()
                         ));
                     }
                 }
@@ -318,8 +303,7 @@ mod tests {
 
     #[test]
     fn test_parse() {
-        let mut processor = DateProcessor::default();
-        processor.with_formats(None);
+        let processor = DateProcessor::default();
 
         let values: Vec<&str> = vec![
             "2014-5-17T12:34:56",
@@ -340,7 +324,6 @@ mod tests {
 
     #[test]
     fn test_parse_with_formats() {
-        let mut processor = DateProcessor::default();
         let formats = vec![
             "%Y-%m-%dT%H:%M:%S%:z",
             "%Y-%m-%dT%H:%M:%S%.3f%:z",
@@ -349,8 +332,11 @@ mod tests {
         ]
         .into_iter()
         .map(|s| Arc::new(s.to_string()))
-        .collect();
-        processor.with_formats(Some(formats));
+        .collect::<Vec<_>>();
+        let processor = DateProcessor {
+            formats: super::Formats(formats),
+            ..Default::default()
+        };
 
         let values: Vec<&str> = vec![
             "2014-5-17T12:34:56",
@@ -371,9 +357,10 @@ mod tests {
 
     #[test]
     fn test_parse_with_timezone() {
-        let mut processor = DateProcessor::default();
-        processor.with_formats(None);
-        processor.with_timezone("Asia/Tokyo".to_string());
+        let processor = DateProcessor {
+            timezone: Some(Arc::new("Asia/Tokyo".to_string())),
+            ..Default::default()
+        };
 
         let values: Vec<&str> = vec![
             "2014-5-17T12:34:56",

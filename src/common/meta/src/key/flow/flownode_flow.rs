@@ -22,7 +22,7 @@ use snafu::OptionExt;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
-use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetaKey};
+use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetadataKey};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -44,7 +44,7 @@ const FLOWNODE_FLOW_KEY_PREFIX: &str = "flownode";
 /// The layout `__flow/flownode/{flownode_id}/{flow_id}/{partition_id}`
 pub struct FlownodeFlowKey(FlowScoped<FlownodeFlowKeyInner>);
 
-impl<'a> MetaKey<'a, FlownodeFlowKey> for FlownodeFlowKey {
+impl<'a> MetadataKey<'a, FlownodeFlowKey> for FlownodeFlowKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
@@ -113,7 +113,7 @@ impl FlownodeFlowKeyInner {
     }
 }
 
-impl<'a> MetaKey<'a, FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
+impl<'a> MetadataKey<'a, FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!(
             "{FLOWNODE_FLOW_KEY_PREFIX}/{}/{}/{}",
@@ -124,7 +124,7 @@ impl<'a> MetaKey<'a, FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
 
     fn from_bytes(bytes: &'a [u8]) -> Result<FlownodeFlowKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
-            error::InvalidTableMetadataSnafu {
+            error::InvalidMetadataSnafu {
                 err_msg: format!(
                     "FlownodeFlowKeyInner '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
@@ -135,7 +135,7 @@ impl<'a> MetaKey<'a, FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
         let captures =
             FLOWNODE_FLOW_KEY_PATTERN
                 .captures(key)
-                .context(error::InvalidTableMetadataSnafu {
+                .context(error::InvalidMetadataSnafu {
                     err_msg: format!("Invalid FlownodeFlowKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above
@@ -208,7 +208,7 @@ impl FlownodeFlowManager {
 #[cfg(test)]
 mod tests {
     use crate::key::flow::flownode_flow::FlownodeFlowKey;
-    use crate::key::MetaKey;
+    use crate::key::MetadataKey;
 
     #[test]
     fn test_key_serialization() {

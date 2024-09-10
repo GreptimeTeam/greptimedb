@@ -116,7 +116,7 @@ impl DatafusionQueryEngine {
         let default_catalog = &query_ctx.current_catalog().to_owned();
         let default_schema = &query_ctx.current_schema();
         let table_name = dml.table_name.resolve(default_catalog, default_schema);
-        let table = self.find_table(&table_name).await?;
+        let table = self.find_table(&table_name, &query_ctx).await?;
 
         let output = self
             .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()), query_ctx.clone())
@@ -241,14 +241,18 @@ impl DatafusionQueryEngine {
             .context(TableMutationSnafu)
     }
 
-    async fn find_table(&self, table_name: &ResolvedTableReference) -> Result<TableRef> {
+    async fn find_table(
+        &self,
+        table_name: &ResolvedTableReference,
+        query_context: &QueryContextRef,
+    ) -> Result<TableRef> {
         let catalog_name = table_name.catalog.as_ref();
         let schema_name = table_name.schema.as_ref();
         let table_name = table_name.table.as_ref();
 
         self.state
             .catalog_manager()
-            .table(catalog_name, schema_name, table_name)
+            .table(catalog_name, schema_name, table_name, Some(query_context))
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu { table: table_name })
@@ -529,7 +533,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Helper, UInt32Vector, UInt64Vector, VectorRef};
-    use session::context::QueryContext;
+    use session::context::{QueryContext, QueryContextBuilder};
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
@@ -618,12 +622,16 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
+        let query_ctx = Arc::new(QueryContextBuilder::default().build());
         let table = engine
-            .find_table(&ResolvedTableReference {
-                catalog: "greptime".into(),
-                schema: "public".into(),
-                table: "numbers".into(),
-            })
+            .find_table(
+                &ResolvedTableReference {
+                    catalog: "greptime".into(),
+                    schema: "public".into(),
+                    table: "numbers".into(),
+                },
+                &query_ctx,
+            )
             .await
             .unwrap();
 

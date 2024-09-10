@@ -8,12 +8,12 @@ SELECT build();
 
 ++|build()|++|branch:BRANCH|commit:COMMIT|commit_short:COMMIT_SHORT|clean:CLEAN|version:VERSION++
 
--- SQLNESS REPLACE greptimedb-[\d\.]+ greptimedb-VERSION
+-- SQLNESS REPLACE [\d\.]+ VERSION
 SELECT version();
 
-+-------------------------+
-| version()               |
-+-------------------------+
-| 5.7.20-greptimedb-VERSION |
-+-------------------------+
++-----------+
+| version() |
++-----------+
+| VERSION     |
++-----------+
 

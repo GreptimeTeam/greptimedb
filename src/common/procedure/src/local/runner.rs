@@ -19,10 +19,11 @@ use std::time::Duration;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::{debug, error, info};
 use rand::Rng;
+use snafu::ResultExt;
 use tokio::time;
 
 use super::rwlock::OwnedKeyRwLockGuard;
-use crate::error::{self, ProcedurePanicSnafu, Result};
+use crate::error::{self, ProcedurePanicSnafu, Result, RollbackTimesExceededSnafu};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::procedure::{Output, StringKey};
 use crate::store::{ProcedureMessage, ProcedureStore};
@@ -222,12 +223,12 @@ impl Runner {
                     if let Some(d) = rollback.next() {
                         self.wait_on_err(d, rollback_times).await;
                     } else {
-                        self.meta.set_state(ProcedureState::failed(Arc::new(
-                            Error::RollbackTimesExceeded {
-                                source: error.clone(),
+                        let err = Err::<(), Arc<Error>>(error)
+                            .context(RollbackTimesExceededSnafu {
                                 procedure_id: self.meta.id,
-                            },
-                        )));
+                            })
+                            .unwrap_err();
+                        self.meta.set_state(ProcedureState::failed(Arc::new(err)));
                         return;
                     }
                 }

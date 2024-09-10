@@ -156,6 +156,9 @@ impl MergeScanExec {
         query_ctx: QueryContextRef,
         target_partition: usize,
     ) -> Result<Self> {
+        // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
+        // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
+        // Reconsider if it's possible to remove it.
         let arrow_schema = Arc::new(arrow_schema.clone());
         let properties = PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),

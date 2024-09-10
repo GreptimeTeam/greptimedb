@@ -15,12 +15,12 @@
 use common_catalog::consts::METRIC_ENGINE;
 use common_error::ext::BoxedError;
 use common_procedure::error::Error as ProcedureError;
-use snafu::{ensure, location, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use table::metadata::TableId;
 
 use crate::ddl::DetectingRegion;
-use crate::error::{Error, Result, TableNotFoundSnafu, UnsupportedSnafu};
+use crate::error::{Error, OperateDatanodeSnafu, Result, TableNotFoundSnafu, UnsupportedSnafu};
 use crate::key::table_name::TableNameKey;
 use crate::key::TableMetadataManagerRef;
 use crate::peer::Peer;
@@ -32,11 +32,9 @@ use crate::ClusterId;
 pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error {
     move |err| {
         if !err.is_retry_later() {
-            return Error::OperateDatanode {
-                location: location!(),
-                peer: datanode,
-                source: BoxedError::new(err),
-            };
+            return Err::<(), BoxedError>(BoxedError::new(err))
+                .context(OperateDatanodeSnafu { peer: datanode })
+                .unwrap_err();
         }
         err
     }

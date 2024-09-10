@@ -37,7 +37,7 @@ use crate::alive_keeper::RegionAliveKeeper;
 use crate::config::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
 use crate::event_listener::RegionServerEventReceiver;
-use crate::metrics;
+use crate::metrics::{self, HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
 use crate::region_server::RegionServer;
 
 pub(crate) mod handler;
@@ -231,10 +231,12 @@ impl HeartbeatTask {
                                         mailbox_message: Some(message),
                                         ..Default::default()
                                     };
+                                    HEARTBEAT_RECV_COUNT.with_label_values(&["success"]).inc();
                                     Some(req)
                                 }
                                 Err(e) => {
                                     error!(e; "Failed to encode mailbox messages!");
+                                    HEARTBEAT_RECV_COUNT.with_label_values(&["error"]).inc();
                                     None
                                 }
                             }
@@ -304,6 +306,8 @@ impl HeartbeatTask {
                                 error!(e; "Failed to reconnect to metasrv!");
                             }
                         }
+                    } else {
+                        HEARTBEAT_SENT_COUNT.inc();
                     }
                 }
             }
@@ -320,10 +324,12 @@ impl HeartbeatTask {
                 region_id: stat.region_id.as_u64(),
                 engine: stat.engine,
                 role: RegionRole::from(stat.role).into(),
-                // TODO(jeremy): w/rcus
+                // TODO(weny): w/rcus
                 rcus: 0,
                 wcus: 0,
                 approximate_bytes: region_server.region_disk_usage(stat.region_id).unwrap_or(0),
+                // TODO(weny): add extensions
+                extensions: Default::default(),
             })
             .collect()
     }

@@ -64,7 +64,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.9.2"
+version = "0.9.3"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -120,7 +120,7 @@ etcd-client = { version = "0.13" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "f57e1ba8d2473e90b104c390601708be053f5f03" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "973f49cde88a582fb65755cc572ebcf6fb93ccf7" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"

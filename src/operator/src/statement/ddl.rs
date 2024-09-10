@@ -70,11 +70,11 @@ use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu,
-    ExtractTableNamesSnafu, FlowNotFoundSnafu, InvalidPartitionColumnsSnafu,
-    InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
-    InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu,
-    SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu,
-    TableNotFoundSnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    ExtractTableNamesSnafu, FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result,
+    SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
@@ -106,7 +106,7 @@ impl StatementExecutor {
             .context(error::ExternalSnafu)?;
         let table_ref = self
             .catalog_manager
-            .table(&catalog, &schema, &table)
+            .table(&catalog, &schema, &table, Some(&ctx))
             .await
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu { table_name: &table })?;
@@ -207,6 +207,7 @@ impl StatementExecutor {
                 &create_table.catalog_name,
                 &create_table.schema_name,
                 &create_table.table_name,
+                Some(&query_ctx),
             )
             .await
             .context(CatalogSnafu)?
@@ -239,7 +240,6 @@ impl StatementExecutor {
         );
 
         let (partitions, partition_cols) = parse_partitions(create_table, partitions, &query_ctx)?;
-        validate_partition_columns(create_table, &partition_cols)?;
         let mut table_info = create_table_info(create_table, partition_cols, schema_opts)?;
 
         let resp = self
@@ -488,7 +488,12 @@ impl StatementExecutor {
         // if view or table exists.
         if let Some(table) = self
             .catalog_manager
-            .table(&expr.catalog_name, &expr.schema_name, &expr.view_name)
+            .table(
+                &expr.catalog_name,
+                &expr.schema_name,
+                &expr.view_name,
+                Some(&ctx),
+            )
             .await
             .context(CatalogSnafu)?
         {
@@ -657,7 +662,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let view_info = if let Some(view) = self
             .catalog_manager
-            .table(&catalog, &schema, &view)
+            .table(&catalog, &schema, &view, None)
             .await
             .context(CatalogSnafu)?
         {
@@ -767,6 +772,7 @@ impl StatementExecutor {
                     &table_name.catalog_name,
                     &table_name.schema_name,
                     &table_name.table_name,
+                    Some(&query_context),
                 )
                 .await
                 .context(CatalogSnafu)?
@@ -817,7 +823,7 @@ impl StatementExecutor {
 
         if self
             .catalog_manager
-            .schema_exists(&catalog, &schema)
+            .schema_exists(&catalog, &schema, None)
             .await
             .context(CatalogSnafu)?
         {
@@ -859,6 +865,7 @@ impl StatementExecutor {
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
+                Some(&query_context),
             )
             .await
             .context(CatalogSnafu)?
@@ -945,7 +952,12 @@ impl StatementExecutor {
 
         let table = self
             .catalog_manager
-            .table(&catalog_name, &schema_name, &table_name)
+            .table(
+                &catalog_name,
+                &schema_name,
+                &table_name,
+                Some(&query_context),
+            )
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
@@ -1168,9 +1180,10 @@ impl StatementExecutor {
 
         if !self
             .catalog_manager
-            .schema_exists(catalog, database)
+            .schema_exists(catalog, database, None)
             .await
             .context(CatalogSnafu)?
+            && !self.catalog_manager.is_reserved_schema_name(database)
         {
             self.create_database_procedure(
                 catalog.to_string(),
@@ -1207,22 +1220,6 @@ impl StatementExecutor {
             .await
             .context(error::ExecuteDdlSnafu)
     }
-}
-
-fn validate_partition_columns(
-    create_table: &CreateTableExpr,
-    partition_cols: &[String],
-) -> Result<()> {
-    ensure!(
-        partition_cols
-            .iter()
-            .all(|col| &create_table.time_index == col || create_table.primary_keys.contains(col)),
-        InvalidPartitionColumnsSnafu {
-            table: &create_table.table_name,
-            reason: "partition column must belongs to primary keys or equals to time index"
-        }
-    );
-    Ok(())
 }
 
 /// Parse partition statement [Partitions] into [MetaPartition] and partition columns.
@@ -1517,31 +1514,6 @@ mod test {
         assert!(!NAME_PATTERN_REG.is_match("/adaf"));
         assert!(!NAME_PATTERN_REG.is_match("🈲"));
         assert!(NAME_PATTERN_REG.is_match("hello"));
-    }
-
-    #[test]
-    fn test_validate_partition_columns() {
-        let create_table = CreateTableExpr {
-            table_name: "my_table".to_string(),
-            time_index: "ts".to_string(),
-            primary_keys: vec!["a".to_string(), "b".to_string()],
-            ..Default::default()
-        };
-
-        assert!(validate_partition_columns(&create_table, &[]).is_ok());
-        assert!(validate_partition_columns(&create_table, &["ts".to_string()]).is_ok());
-        assert!(validate_partition_columns(&create_table, &["a".to_string()]).is_ok());
-        assert!(
-            validate_partition_columns(&create_table, &["b".to_string(), "a".to_string()]).is_ok()
-        );
-
-        assert_eq!(
-            validate_partition_columns(&create_table, &["a".to_string(), "c".to_string()])
-                .unwrap_err()
-                .to_string(),
-            "Invalid partition columns when creating table 'my_table', \
-             reason: partition column must belongs to primary keys or equals to time index",
-        );
     }
 
     #[tokio::test]

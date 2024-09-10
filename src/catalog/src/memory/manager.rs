@@ -26,6 +26,7 @@ use common_catalog::consts::{
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use futures_util::stream::BoxStream;
+use session::context::QueryContext;
 use snafu::OptionExt;
 use table::TableRef;
 
@@ -53,7 +54,11 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(self.catalogs.read().unwrap().keys().cloned().collect())
     }
 
-    async fn schema_names(&self, catalog: &str) -> Result<Vec<String>> {
+    async fn schema_names(
+        &self,
+        catalog: &str,
+        _query_ctx: Option<&QueryContext>,
+    ) -> Result<Vec<String>> {
         Ok(self
             .catalogs
             .read()
@@ -67,7 +72,12 @@ impl CatalogManager for MemoryCatalogManager {
             .collect())
     }
 
-    async fn table_names(&self, catalog: &str, schema: &str) -> Result<Vec<String>> {
+    async fn table_names(
+        &self,
+        catalog: &str,
+        schema: &str,
+        _query_ctx: Option<&QueryContext>,
+    ) -> Result<Vec<String>> {
         Ok(self
             .catalogs
             .read()
@@ -87,11 +97,22 @@ impl CatalogManager for MemoryCatalogManager {
         self.catalog_exist_sync(catalog)
     }
 
-    async fn schema_exists(&self, catalog: &str, schema: &str) -> Result<bool> {
+    async fn schema_exists(
+        &self,
+        catalog: &str,
+        schema: &str,
+        _query_ctx: Option<&QueryContext>,
+    ) -> Result<bool> {
         self.schema_exist_sync(catalog, schema)
     }
 
-    async fn table_exists(&self, catalog: &str, schema: &str, table: &str) -> Result<bool> {
+    async fn table_exists(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        _query_ctx: Option<&QueryContext>,
+    ) -> Result<bool> {
         let catalogs = self.catalogs.read().unwrap();
         Ok(catalogs
             .get(catalog)
@@ -108,6 +129,7 @@ impl CatalogManager for MemoryCatalogManager {
         catalog: &str,
         schema: &str,
         table_name: &str,
+        _query_ctx: Option<&QueryContext>,
     ) -> Result<Option<TableRef>> {
         let result = try {
             self.catalogs
@@ -121,7 +143,12 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(result)
     }
 
-    fn tables<'a>(&'a self, catalog: &'a str, schema: &'a str) -> BoxStream<'a, Result<TableRef>> {
+    fn tables<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+        _query_ctx: Option<&QueryContext>,
+    ) -> BoxStream<'a, Result<TableRef>> {
         let catalogs = self.catalogs.read().unwrap();
 
         let Some(schemas) = catalogs.get(catalog) else {
@@ -371,11 +398,12 @@ mod tests {
                 DEFAULT_CATALOG_NAME,
                 DEFAULT_SCHEMA_NAME,
                 NUMBERS_TABLE_NAME,
+                None,
             )
             .await
             .unwrap()
             .unwrap();
-        let stream = catalog_list.tables(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let stream = catalog_list.tables(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, None);
         let tables = stream.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(tables.len(), 1);
         assert_eq!(
@@ -384,7 +412,12 @@ mod tests {
         );
 
         assert!(catalog_list
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "not_exists")
+            .table(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "not_exists",
+                None
+            )
             .await
             .unwrap()
             .is_none());
@@ -411,7 +444,7 @@ mod tests {
         };
         catalog.register_table_sync(register_table_req).unwrap();
         assert!(catalog
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name, None)
             .await
             .unwrap()
             .is_some());
@@ -423,7 +456,7 @@ mod tests {
         };
         catalog.deregister_table_sync(deregister_table_req).unwrap();
         assert!(catalog
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name, None)
             .await
             .unwrap()
             .is_none());

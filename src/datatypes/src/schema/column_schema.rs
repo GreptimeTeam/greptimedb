@@ -23,6 +23,8 @@ use super::TYPE_KEY;
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error, Result};
 use crate::schema::constraint::ColumnDefaultConstraint;
+use crate::schema::TYPE_KEY;
+use crate::types::JSON_TYPE_NAME;
 use crate::value::Value;
 use crate::vectors::VectorRef;
 
@@ -273,7 +275,7 @@ impl TryFrom<&Field> for ColumnSchema {
         // Override the data type if it is specified in the metadata.
         if field.metadata().contains_key(TYPE_KEY) {
             data_type = match field.metadata().get(TYPE_KEY).unwrap().as_str() {
-                "Json" => ConcreteDataType::json_datatype(),
+                JSON_TYPE_NAME => ConcreteDataType::json_datatype(),
                 _ => data_type,
             };
         }

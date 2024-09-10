@@ -616,8 +616,8 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "check-rust-fmt"
-      - name: Run cargo fmt
-        run: cargo fmt --all -- --check
+      - name: Check format
+        run: make fmt-check
 
   clippy:
     name: Clippy

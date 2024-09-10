@@ -42,7 +42,8 @@ use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{
-    ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, QueryRequest, Row, SemanticType,
+    ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonTypeExtension, QueryRequest,
+    Row, SemanticType,
 };
 use paste::paste;
 use snafu::prelude::*;
@@ -288,8 +289,9 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             }
             ColumnDataType::Binary => {
                 if datatype == ConcreteDataType::json_datatype() {
+                    // Json is the same as  binary in proto. The extension marks the binary in proto is actually a json.
                     Some(ColumnDataTypeExtension {
-                        type_ext: Some(TypeExt::JsonType(true)),
+                        type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
                     })
                 } else {
                     None
@@ -855,6 +857,7 @@ pub fn is_column_type_value_eq(
         .map(|wrapper| {
             let datatype = ConcreteDataType::from(wrapper);
             (datatype == *expect_type)
+            // Json type leverage binary type in pb, so this is valid.
                 || (datatype == ConcreteDataType::binary_datatype()
                     && *expect_type == ConcreteDataType::json_datatype())
         })

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::string::FromUtf8Error;
 use std::sync::Arc;
 
 use common_error::ext::{BoxedError, ErrorExt};
@@ -141,12 +140,6 @@ pub enum Error {
         procedure_id: ProcedureId,
     },
 
-    #[snafu(display("Corrupted data, error: "))]
-    CorruptedData {
-        #[snafu(source)]
-        error: FromUtf8Error,
-    },
-
     #[snafu(display("Failed to start the remove_outdated_meta method, error"))]
     StartRemoveOutdatedMetaTask {
         source: common_runtime::error::Error,
@@ -157,14 +150,6 @@ pub enum Error {
     #[snafu(display("Failed to stop the remove_outdated_meta method, error"))]
     StopRemoveOutdatedMetaTask {
         source: common_runtime::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Subprocedure {} failed", subprocedure_id))]
-    SubprocedureFailed {
-        subprocedure_id: ProcedureId,
-        source: Arc<Error>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -218,14 +203,11 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             Error::ProcedurePanic { .. }
-            | Error::CorruptedData { .. }
             | Error::ParseSegmentKey { .. }
             | Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::ProcedureExec { source, .. } => source.status_code(),
             Error::StartRemoveOutdatedMetaTask { source, .. }
             | Error::StopRemoveOutdatedMetaTask { source, .. } => source.status_code(),
-
-            Error::SubprocedureFailed { source, .. } => source.status_code(),
         }
     }
 

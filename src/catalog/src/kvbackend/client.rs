@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::KvCacheInvalidator;
-use common_meta::error::Error::{CacheNotGet, GetKvCache};
-use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, Result};
+use common_meta::error::Error::CacheNotGet;
+use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, GetKvCacheSnafu, Result};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -282,8 +282,11 @@ impl KvBackend for CachedMetaKvBackend {
                 _ => Err(e),
             },
         }
-        .map_err(|e| GetKvCache {
-            err_msg: e.to_string(),
+        .map_err(|e| {
+            GetKvCacheSnafu {
+                err_msg: e.to_string(),
+            }
+            .build()
         });
 
         // "cache.invalidate_key" and "cache.try_get_with_by_ref" are not mutually exclusive. So we need

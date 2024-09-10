@@ -48,8 +48,10 @@ use super::manager::RegionMigrationProcedureTracker;
 use super::migration_abort::RegionMigrationAbort;
 use super::upgrade_candidate_region::UpgradeCandidateRegion;
 use super::{Context, ContextFactory, DefaultContextFactory, State, VolatileContext};
+use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::error::{self, Error, Result};
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
+use crate::metasrv::MetasrvInfo;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
 use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
@@ -152,6 +154,12 @@ impl TestingEnv {
             mailbox: self.mailbox_ctx.mailbox().clone(),
             server_addr: self.server_addr.to_string(),
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+            cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
+                self.mailbox_ctx.mailbox.clone(),
+                MetasrvInfo {
+                    server_addr: self.server_addr.to_string(),
+                },
+            )),
         }
     }
 

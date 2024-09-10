@@ -234,8 +234,8 @@ impl InformationSchemaTablesBuilder {
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
+        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, None);
 
             while let Some(table) = stream.try_next().await? {
                 let table_info = table.table_info();

@@ -462,14 +462,6 @@ pub enum Error {
         error: regex::Error,
     },
 
-    #[snafu(display("Failed to copy table: {}", table_name))]
-    CopyTable {
-        table_name: String,
-        #[snafu(implicit)]
-        location: Location,
-        source: table::error::Error,
-    },
-
     #[snafu(display("Failed to insert value into table: {}", table_name))]
     Insert {
         table_name: String,
@@ -676,18 +668,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Invalid partition columns when creating table '{}', reason: {}",
-        table,
-        reason
-    ))]
-    InvalidPartitionColumns {
-        table: String,
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to prepare file table"))]
     PrepareFileTable {
         #[snafu(implicit)]
@@ -784,6 +764,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to upgrade catalog manager reference"))]
+    UpgradeCatalogManagerRef {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -806,7 +792,6 @@ impl ErrorExt for Error {
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::ColumnNoneDefaultValue { .. }
-            | Error::InvalidPartitionColumns { .. }
             | Error::PrepareFileTable { .. }
             | Error::InferFileTableSchema { .. }
             | Error::SchemaIncompatible { .. }
@@ -842,9 +827,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            Error::Table { source, .. }
-            | Error::CopyTable { source, .. }
-            | Error::Insert { source, .. } => source.status_code(),
+            Error::Table { source, .. } | Error::Insert { source, .. } => source.status_code(),
 
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::CreateTableInfo { source, .. }
@@ -931,6 +914,8 @@ impl ErrorExt for Error {
 
             Error::ExecuteAdminFunction { source, .. } => source.status_code(),
             Error::BuildRecordBatch { source, .. } => source.status_code(),
+
+            Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
         }
     }
 

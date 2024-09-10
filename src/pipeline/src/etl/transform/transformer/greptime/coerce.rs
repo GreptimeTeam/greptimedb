@@ -66,8 +66,8 @@ impl TryFrom<Value> for ValueData {
 pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>, String> {
     let mut columns = Vec::new();
 
-    for field in transform.fields.iter() {
-        let column_name = field.get_target_field().to_string();
+    for field in transform.real_fields.iter() {
+        let column_name = field.output_name().to_string();
 
         let datatype = coerce_type(transform)? as i32;
 
@@ -134,7 +134,7 @@ fn coerce_type(transform: &Transform) -> Result<ColumnDataType, String> {
 
         Value::Null => Err(format!(
             "Null type not supported when to coerce '{}' type",
-            transform.fields
+            transform.type_.to_str_type()
         )),
     }
 }
@@ -144,15 +144,18 @@ pub(crate) fn coerce_value(
     transform: &Transform,
 ) -> Result<Option<ValueData>, String> {
     match val {
-        Value::Null => match transform.on_failure {
-            Some(OnFailure::Ignore) => Ok(None),
-            Some(OnFailure::Default) => transform
-                .get_default()
-                .map(|default| coerce_value(default, transform))
-                .unwrap_or_else(|| {
-                    coerce_value(transform.get_type_matched_default_val(), transform)
-                }),
-            None => Ok(None),
+        Value::Null => match &transform.default {
+            Some(default) => coerce_value(default, transform),
+            None => match transform.on_failure {
+                Some(OnFailure::Ignore) => Ok(None),
+                Some(OnFailure::Default) => transform
+                    .get_default()
+                    .map(|default| coerce_value(default, transform))
+                    .unwrap_or_else(|| {
+                        coerce_value(transform.get_type_matched_default_val(), transform)
+                    }),
+                None => Ok(None),
+            },
         },
 
         Value::Int8(n) => coerce_i64_value(*n as i64, transform),
@@ -427,12 +430,11 @@ fn coerce_nested_value(v: &Value, transform: &Transform) -> Result<Option<ValueD
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::etl::field::Fields;
 
     #[test]
     fn test_coerce_string_without_on_failure() {
         let transform = Transform {
-            fields: Fields::default(),
+            real_fields: vec![],
             type_: Value::Int32(0),
             default: None,
             index: None,
@@ -457,7 +459,7 @@ mod tests {
     #[test]
     fn test_coerce_string_with_on_failure_ignore() {
         let transform = Transform {
-            fields: Fields::default(),
+            real_fields: vec![],
             type_: Value::Int32(0),
             default: None,
             index: None,
@@ -472,7 +474,7 @@ mod tests {
     #[test]
     fn test_coerce_string_with_on_failure_default() {
         let mut transform = Transform {
-            fields: Fields::default(),
+            real_fields: vec![],
             type_: Value::Int32(0),
             default: None,
             index: None,

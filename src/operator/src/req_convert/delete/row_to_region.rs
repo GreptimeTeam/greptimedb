@@ -64,7 +64,7 @@ impl<'a> RowToRegion<'a> {
         let catalog_name = self.ctx.current_catalog();
         let schema_name = self.ctx.current_schema();
         self.catalog_manager
-            .table(catalog_name, &schema_name, table_name)
+            .table(catalog_name, &schema_name, table_name, None)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

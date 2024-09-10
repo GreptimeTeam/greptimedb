@@ -10,7 +10,6 @@ SHOW DATABASES;
 | greptime_private   |
 | information_schema |
 | mydb               |
-| pg_catalog         |
 | public             |
 +--------------------+
 
@@ -22,9 +21,19 @@ SHOW FULL DATABASES;
 | greptime_private   |          |
 | information_schema |          |
 | mydb               | ttl='1h' |
-| pg_catalog         |          |
 | public             |          |
 +--------------------+----------+
+
+SHOW CREATE DATABASE mydb;
+
++----------+------------------------------------+
+| Database | Create Database                    |
++----------+------------------------------------+
+| mydb     | CREATE DATABASE IF NOT EXISTS mydb |
+|          | WITH(                              |
+|          |   ttl = '1h'                       |
+|          | )                                  |
++----------+------------------------------------+
 
 USE mydb;
 
@@ -67,7 +76,6 @@ SHOW DATABASES;
 +--------------------+
 | greptime_private   |
 | information_schema |
-| pg_catalog         |
 | public             |
 +--------------------+
 

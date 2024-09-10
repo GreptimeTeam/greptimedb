@@ -149,9 +149,8 @@ pub struct PartitionRange {
     pub start: Timestamp,
     /// End time of time index column. Inclusive.
     pub end: Timestamp,
-    /// Estimate size of this range. Is used to balance ranges between partitions.
-    /// No base unit, just a number.
-    pub estimated_size: usize,
+    /// Number of rows in this range. Is used to balance ranges between partitions.
+    pub num_rows: usize,
     /// Identifier to this range. Assigned by storage engine.
     pub identifier: usize,
 }
@@ -234,6 +233,9 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// # Panics
     /// Panics if the `partition` is out of bound.
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError>;
+
+    /// Check if there is any predicate that may be executed in this scanner.
+    fn has_predicate(&self) -> bool;
 }
 
 pub type RegionScannerRef = Box<dyn RegionScanner>;
@@ -367,6 +369,10 @@ impl RegionScanner for SinglePartitionScanner {
                 StatusCode::Unexpected,
             ))
         })
+    }
+
+    fn has_predicate(&self) -> bool {
+        false
     }
 }
 

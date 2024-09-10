@@ -38,7 +38,7 @@ use crate::key::flow::flow_name::FlowNameManager;
 use crate::key::flow::flownode_flow::FlownodeFlowManager;
 pub use crate::key::flow::table_flow::{TableFlowManager, TableFlowManagerRef};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{FlowId, MetaKey};
+use crate::key::{FlowId, MetadataKey};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchDeleteRequest;
@@ -66,7 +66,7 @@ impl<T> FlowScoped<T> {
     }
 }
 
-impl<'a, T: MetaKey<'a, T>> MetaKey<'a, FlowScoped<T>> for FlowScoped<T> {
+impl<'a, T: MetadataKey<'a, T>> MetadataKey<'a, FlowScoped<T>> for FlowScoped<T> {
     fn to_bytes(&self) -> Vec<u8> {
         let prefix = FlowScoped::<T>::PREFIX.as_bytes();
         let inner = self.inner.to_bytes();
@@ -295,7 +295,7 @@ mod tests {
         inner: Vec<u8>,
     }
 
-    impl<'a> MetaKey<'a, MockKey> for MockKey {
+    impl<'a> MetadataKey<'a, MockKey> for MockKey {
         fn to_bytes(&self) -> Vec<u8> {
             self.inner.clone()
         }

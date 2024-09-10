@@ -38,8 +38,8 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio_stream::StreamExt;
 
 use crate::error::{
-    self, ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
-    MissingFieldSnafu, Result, ServerSnafu,
+    self, ConvertFlightDataSnafu, FlightGetSnafu, IllegalDatabaseResponseSnafu,
+    IllegalFlightMessagesSnafu, MissingFieldSnafu, Result, ServerSnafu,
 };
 use crate::{metrics, Client, Error};
 
@@ -103,11 +103,14 @@ impl RegionRequester {
                 let e: error::Error = e.into();
                 let code = e.status_code();
                 let msg = e.to_string();
-                let error = Error::FlightGet {
-                    tonic_code,
-                    addr: flight_client.addr().to_string(),
-                    source: BoxedError::new(ServerSnafu { code, msg }.build()),
-                };
+                let error = ServerSnafu { code, msg }
+                    .fail::<()>()
+                    .map_err(BoxedError::new)
+                    .with_context(|_| FlightGetSnafu {
+                        tonic_code,
+                        addr: flight_client.addr().to_string(),
+                    })
+                    .unwrap_err();
                 error!(
                     e; "Failed to do Flight get, addr: {}, code: {}",
                     flight_client.addr(),

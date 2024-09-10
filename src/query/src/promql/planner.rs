@@ -2379,7 +2379,7 @@ mod test {
         DfTableSourceProvider::new(
             catalog_list,
             false,
-            QueryContext::arc().as_ref(),
+            QueryContext::arc(),
             DummyDecoder::arc(),
             false,
         )
@@ -3219,7 +3219,7 @@ mod test {
             DfTableSourceProvider::new(
                 catalog_list.clone(),
                 false,
-                QueryContext::arc().as_ref(),
+                QueryContext::arc(),
                 DummyDecoder::arc(),
                 true,
             ),
@@ -3249,7 +3249,7 @@ mod test {
             DfTableSourceProvider::new(
                 catalog_list.clone(),
                 false,
-                QueryContext::arc().as_ref(),
+                QueryContext::arc(),
                 DummyDecoder::arc(),
                 true,
             ),

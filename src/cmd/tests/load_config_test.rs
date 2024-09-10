@@ -65,6 +65,7 @@ fn test_load_datanode_example_config() {
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some("/tmp/greptimedb/wal".to_string()),
                 sync_period: Some(Duration::from_secs(10)),
+                recovery_parallelism: 2,
                 ..Default::default()
             }),
             storage: StorageConfig {
@@ -81,6 +82,7 @@ fn test_load_datanode_example_config() {
                     sst_meta_cache_size: ReadableSize::mb(128),
                     vector_cache_size: ReadableSize::mb(512),
                     page_cache_size: ReadableSize::mb(512),
+                    selector_result_cache_size: ReadableSize::mb(512),
                     max_background_jobs: 4,
                     experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
@@ -206,6 +208,7 @@ fn test_load_standalone_example_config() {
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some("/tmp/greptimedb/wal".to_string()),
                 sync_period: Some(Duration::from_secs(10)),
+                recovery_parallelism: 2,
                 ..Default::default()
             }),
             region_engine: vec![

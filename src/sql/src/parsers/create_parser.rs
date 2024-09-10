@@ -380,7 +380,7 @@ impl<'a> ParserContext<'a> {
         Ok(options.into())
     }
 
-    /// "PARTITION BY ..." clause
+    /// "PARTITION ON COLUMNS (...)" clause
     fn parse_partitions(&mut self) -> Result<Option<Partitions>> {
         if !self.parser.parse_keyword(Keyword::PARTITION) {
             return Ok(None);

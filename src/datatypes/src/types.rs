@@ -43,7 +43,7 @@ pub use duration_type::{
 pub use interval_type::{
     IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType,
 };
-pub use json_type::JsonType;
+pub use json_type::{JsonType, JSON_TYPE_NAME};
 pub use list_type::ListType;
 pub use null_type::NullType;
 pub use primitive_type::{

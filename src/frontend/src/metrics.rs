@@ -51,9 +51,17 @@ lazy_static! {
         "frontend otlp traces rows"
     )
     .unwrap();
-pub static ref OTLP_LOGS_ROWS: IntCounter = register_int_counter!(
-    "greptime_frontend_otlp_logs_rows",
-    "frontend otlp logs rows"
-)
-.unwrap();
+    /// The number of heartbeats send by frontend node.
+    pub static ref HEARTBEAT_SENT_COUNT: IntCounter = register_int_counter!(
+        "greptime_frontend_heartbeat_send_count",
+        "frontend heartbeat sent",
+    )
+    .unwrap();
+    /// The number of heartbeats received by frontend node, labeled with result type.
+    pub static ref HEARTBEAT_RECV_COUNT: IntCounterVec = register_int_counter_vec!(
+        "greptime_frontend_heartbeat_recv_count",
+        "frontend heartbeat received",
+        &["result"]
+    )
+    .unwrap();
 }

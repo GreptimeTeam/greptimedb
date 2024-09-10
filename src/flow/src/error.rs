@@ -21,7 +21,6 @@ use common_error::ext::BoxedError;
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
-use datatypes::value::Value;
 use snafu::{Location, Snafu};
 
 use crate::adapter::FlowId;
@@ -69,13 +68,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table already exist: {name}"))]
-    TableAlreadyExist {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Flow not found, id={id}"))]
     FlowNotFound {
         id: FlowId,
@@ -106,23 +98,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid query: prost can't decode substrait plan: {inner}"))]
-    InvalidQueryProst {
-        inner: api::DecodeError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid query: {reason}"))]
     InvalidQuery {
         reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("No protobuf type for value: {value}"))]
-    NoProtoType {
-        value: Value,
         #[snafu(implicit)]
         location: Location,
     },
@@ -214,21 +192,18 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::Eval { .. } | &Self::JoinTask { .. } | &Self::Datafusion { .. } => {
+            Self::Eval { .. } | Self::JoinTask { .. } | Self::Datafusion { .. } => {
                 StatusCode::Internal
             }
-            &Self::TableAlreadyExist { .. } | Self::FlowAlreadyExist { .. } => {
-                StatusCode::TableAlreadyExists
-            }
+            Self::FlowAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. }
             | Self::TableNotFoundMeta { .. }
             | Self::FlowNotFound { .. }
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
-            Self::InvalidQueryProst { .. }
-            | &Self::InvalidQuery { .. }
-            | &Self::Plan { .. }
-            | &Self::Datatypes { .. } => StatusCode::PlanQuery,
-            Self::NoProtoType { .. } | Self::Unexpected { .. } => StatusCode::Unexpected,
+            Self::InvalidQuery { .. } | Self::Plan { .. } | Self::Datatypes { .. } => {
+                StatusCode::PlanQuery
+            }
+            Self::Unexpected { .. } => StatusCode::Unexpected,
             Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
             }

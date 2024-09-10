@@ -78,6 +78,7 @@ macro_rules! http_tests {
                 test_vm_proto_remote_write,
 
                 test_pipeline_api,
+                test_test_pipeline_api,
                 test_plain_text_ingestion,
             );
         )*
@@ -746,6 +747,8 @@ pub async fn test_config_api(store_type: StorageType) {
         r#"
 mode = "standalone"
 enable_telemetry = true
+init_regions_in_background = false
+init_regions_parallelism = 16
 
 [http]
 addr = "127.0.0.1:4000"
@@ -821,8 +824,8 @@ max_retry_times = 3
 retry_delay = "500ms"
 
 [logging]
-enable_otlp_tracing = false
 append_stdout = true
+enable_otlp_tracing = false
 
 [[region_engine]]
 
@@ -839,6 +842,7 @@ experimental_write_cache_size = "512MiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 allow_stale_entries = false
+min_compaction_interval = "0s"
 
 [region_engine.mito.index]
 aux_path = ""
@@ -881,6 +885,7 @@ write_interval = "30s"
 fn drop_lines_with_inconsistent_results(input: String) -> String {
     let inconsistent_results = [
         "dir =",
+        "log_format =",
         "data_home =",
         "bucket =",
         "root =",
@@ -900,6 +905,8 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "selector_result_cache_size =",
         "metadata_cache_size =",
         "content_cache_size =",
+        "name =",
+        "recovery_parallelism =",
     ];
 
     input
@@ -1138,6 +1145,171 @@ transform:
     // todo(shuiyisong): refactor http error handling
     assert_ne!(res.status(), StatusCode::OK);
 
+    guard.remove_all().await;
+}
+
+pub async fn test_test_pipeline_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
+
+    // handshake
+    let client = TestClient::new(app);
+
+    let body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+transform:
+  - fields:
+      - id1
+      - id2
+    type: int32
+  - fields:
+      - type
+      - log
+      - logger
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(body)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let content = res.text().await;
+
+    let content = serde_json::from_str(&content);
+    assert!(content.is_ok());
+    //  {"execution_time_ms":13,"pipelines":[{"name":"test","version":"2024-07-04 08:31:00.987136"}]}
+    let content: Value = content.unwrap();
+
+    let execution_time = content.get("execution_time_ms");
+    assert!(execution_time.unwrap().is_number());
+    let pipelines = content.get("pipelines");
+    let pipelines = pipelines.unwrap().as_array().unwrap();
+    assert_eq!(pipelines.len(), 1);
+    let pipeline = pipelines.first().unwrap();
+    assert_eq!(pipeline.get("name").unwrap(), "test");
+
+    // 2. write data
+    let data_body = r#"
+        [
+          {
+            "id1": "2436",
+            "id2": "2528",
+            "logger": "INTERACT.MANAGER",
+            "type": "I",
+            "time": "2024-05-25 20:16:37.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+          }
+        ]
+        "#;
+    let res = client
+        .post("/v1/events/pipelines/dryrun?pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = res.json().await;
+    let schema = &body["schema"];
+    let rows = &body["rows"];
+    assert_eq!(
+        schema,
+        &json!([
+            {
+                "colume_type": "FIELD",
+                "data_type": "INT32",
+                "fulltext": false,
+                "name": "id1"
+            },
+            {
+                "colume_type": "FIELD",
+                "data_type": "INT32",
+                "fulltext": false,
+                "name": "id2"
+            },
+            {
+                "colume_type": "FIELD",
+                "data_type": "STRING",
+                "fulltext": false,
+                "name": "type"
+            },
+            {
+                "colume_type": "FIELD",
+                "data_type": "STRING",
+                "fulltext": false,
+                "name": "log"
+            },
+            {
+                "colume_type": "FIELD",
+                "data_type": "STRING",
+                "fulltext": false,
+                "name": "logger"
+            },
+            {
+                "colume_type": "TIMESTAMP",
+                "data_type": "TIMESTAMP_NANOSECOND",
+                "fulltext": false,
+                "name": "time"
+            }
+        ])
+    );
+    assert_eq!(
+        rows,
+        &json!([
+            [
+                {
+                    "data_type": "INT32",
+                    "key": "id1",
+                    "semantic_type": "FIELD",
+                    "value": 2436
+                },
+                {
+                    "data_type": "INT32",
+                    "key": "id2",
+                    "semantic_type": "FIELD",
+                    "value": 2528
+                },
+                {
+                    "data_type": "STRING",
+                    "key": "type",
+                    "semantic_type": "FIELD",
+                    "value": "I"
+                },
+                {
+                    "data_type": "STRING",
+                    "key": "log",
+                    "semantic_type": "FIELD",
+                    "value": "ClusterAdapter:enter sendTextDataToCluster\\n"
+                },
+                {
+                    "data_type": "STRING",
+                    "key": "logger",
+                    "semantic_type": "FIELD",
+                    "value": "INTERACT.MANAGER"
+                },
+                {
+                    "data_type": "TIMESTAMP_NANOSECOND",
+                    "key": "time",
+                    "semantic_type": "TIMESTAMP",
+                    "value": "2024-05-25 20:16:37.217+0000"
+                }
+            ]
+        ])
+    );
     guard.remove_all().await;
 }
 

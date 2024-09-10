@@ -19,7 +19,6 @@ use std::string::FromUtf8Error;
 use axum::response::{IntoResponse, Response};
 use axum::{http, Json};
 use base64::DecodeError;
-use catalog;
 use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -197,29 +196,9 @@ pub enum Error {
         source: common_grpc::error::Error,
     },
 
-    #[snafu(display("Failed to write prometheus series"))]
-    PromSeriesWrite {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_grpc::error::Error,
-    },
-
-    #[snafu(display("Failed to write OTLP metrics"))]
-    OtlpMetricsWrite {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_grpc::error::Error,
-    },
-
     #[snafu(display("Failed to convert time precision, name: {}", name))]
     TimePrecision {
         name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Connection reset by peer"))]
-    ConnResetByPeer {
         #[snafu(implicit)]
         location: Location,
     },
@@ -373,16 +352,8 @@ pub enum Error {
     },
 
     #[snafu(display("Error accessing catalog"))]
-    CatalogError {
+    Catalog {
         source: catalog::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Cannot find requested database: {}.{}", catalog, schema))]
-    DatabaseNotFound {
-        catalog: String,
-        schema: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -407,21 +378,6 @@ pub enum Error {
     #[snafu(display("Invalid prepare statement: {}", err_msg))]
     InvalidPrepareStatement {
         err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Invalid flush argument: {}", err_msg))]
-    InvalidFlushArgument {
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to build gRPC reflection service"))]
-    GrpcReflectionService {
-        #[snafu(source)]
-        error: tonic_reflection::server::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -550,12 +506,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert to structured log"))]
-    ToStructuredLog {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Unsupported content type: {:?}", content_type))]
     UnsupportedContentType {
         content_type: ContentType,
@@ -580,14 +530,6 @@ pub enum Error {
 
     #[snafu(display("Missing query context"))]
     MissingQueryContext {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display(
-        "Invalid parameter, physical_table is not expected when metric engine is disabled"
-    ))]
-    UnexpectedPhysicalTable {
         #[snafu(implicit)]
         location: Location,
     },
@@ -621,7 +563,6 @@ impl ErrorExt for Error {
             | TcpBind { .. }
             | SendPromRemoteRequest { .. }
             | TcpIncoming { .. }
-            | GrpcReflectionService { .. }
             | BuildHttpResponse { .. }
             | Arrow { .. }
             | FileWatch { .. } => StatusCode::Internal,
@@ -629,8 +570,6 @@ impl ErrorExt for Error {
             AlreadyStarted { .. } | InvalidPromRemoteReadQueryResult { .. } => {
                 StatusCode::IllegalState
             }
-
-            CatalogError { source, .. } => source.status_code(),
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 
@@ -653,7 +592,6 @@ impl ErrorExt for Error {
             | InvalidParameter { .. }
             | InvalidQuery { .. }
             | InfluxdbLineProtocol { .. }
-            | ConnResetByPeer { .. }
             | InvalidOpentsdbJsonRequest { .. }
             | DecodePromRemoteRequest { .. }
             | DecodeOtlpRequest { .. }
@@ -671,15 +609,12 @@ impl ErrorExt for Error {
             | IncompatibleSchema { .. }
             | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
-            | UnexpectedPhysicalTable { .. }
             | ParseJson { .. }
-            | ToStructuredLog { .. }
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. } => StatusCode::InvalidArguments,
 
-            RowWriter { source, .. }
-            | PromSeriesWrite { source, .. }
-            | OtlpMetricsWrite { source, .. } => source.status_code(),
+            Catalog { source, .. } => source.status_code(),
+            RowWriter { source, .. } => source.status_code(),
 
             Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,
@@ -693,14 +628,12 @@ impl ErrorExt for Error {
             | InvalidBase64Value { .. }
             | InvalidAuthHeaderInvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
 
-            DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
-
             TableNotFound { .. } => StatusCode::TableNotFound,
 
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
 
-            InvalidUtf8Value { .. } | InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
+            InvalidUtf8Value { .. } => StatusCode::InvalidArguments,
 
             ReplacePreparedStmtParams { source, .. }
             | GetPreparedStmtParams { source, .. }

@@ -59,7 +59,7 @@ retry_interval = "3s"
 
 ## The logging options.
 [logging]
-## The directory to store the log files.
+## The directory to store the log files. If set to empty, logs will not be written to files.
 dir = "/tmp/greptimedb/logs"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
@@ -74,6 +74,9 @@ otlp_endpoint = "http://localhost:4317"
 
 ## Whether to append logs to stdout.
 append_stdout = true
+
+## The log format. Can be `text`/`json`.
+log_format = "text"
 
 ## The percentage of tracing will be sampled and exported.
 ## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.

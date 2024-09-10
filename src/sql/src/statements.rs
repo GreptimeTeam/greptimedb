@@ -906,6 +906,25 @@ mod tests {
             None,
         );
         assert!(v.is_err());
+
+        let sql_val = SqlValue::DoubleQuotedString(r#"{"a":"b"}"#.to_string());
+        let v = sql_value_to_value(
+            "a",
+            &ConcreteDataType::json_datatype(),
+            &sql_val,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            Value::Binary(Bytes::from(
+                jsonb::parse_value(r#"{"a":"b"}"#.as_bytes())
+                    .unwrap()
+                    .to_vec()
+                    .as_slice()
+            )),
+            v
+        );
     }
 
     #[test]

@@ -366,10 +366,10 @@ impl RegionServerHandler for RegionServer {
 
         // merge results by sum up affected rows and merge extensions.
         let mut affected_rows = 0;
-        let mut extension = HashMap::new();
+        let mut extensions = HashMap::new();
         for result in results {
             affected_rows += result.affected_rows;
-            extension.extend(result.extension);
+            extensions.extend(result.extensions);
         }
 
         Ok(RegionResponseV1 {
@@ -380,7 +380,7 @@ impl RegionServerHandler for RegionServer {
                 }),
             }),
             affected_rows: affected_rows as _,
-            extension,
+            extensions,
         })
     }
 }
@@ -708,7 +708,7 @@ impl RegionServerInner {
                     .await?;
                 Ok(RegionResponse {
                     affected_rows: result.affected_rows,
-                    extension: result.extension,
+                    extensions: result.extensions,
                 })
             }
             Err(err) => {
@@ -860,7 +860,7 @@ impl RegionServerInner {
         // complains "higher-ranked lifetime error". Rust can't prove some future is legit.
         // Possible related issue: https://github.com/rust-lang/rust/issues/102211
         //
-        // The walkaround is to put the async functions in the `common_runtime::spawn_global`. Or like
+        // The workaround is to put the async functions in the `common_runtime::spawn_global`. Or like
         // it here, collect the values first then use later separately.
 
         let regions = self

@@ -583,13 +583,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to read puffin metadata"))]
-    PuffinReadMetadata {
-        source: puffin::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to read puffin blob"))]
     PuffinReadBlob {
         source: puffin::error::Error,
@@ -640,6 +633,22 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Failed to download file, region_id: {}, file_id: {}, file_type: {:?}",
+        region_id,
+        file_id,
+        file_type,
+    ))]
+    Download {
+        region_id: RegionId,
+        file_id: FileId,
+        file_type: FileType,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Failed to upload file, region_id: {}, file_id: {}, file_type: {:?}",
         region_id,
         file_id,
@@ -662,8 +671,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("BiError, first: {first}, second: {second}"))]
-    BiError {
+    #[snafu(display("BiErrors, first: {first}, second: {second}"))]
+    BiErrors {
         first: Box<Error>,
         second: Box<Error>,
         #[snafu(implicit)]
@@ -913,7 +922,7 @@ impl ErrorExt for Error {
             | ConvertMetaData { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
-            | BiError { .. }
+            | BiErrors { .. }
             | StopScheduler { .. }
             | ComputeVector { .. }
             | SerializeField { .. }
@@ -954,8 +963,7 @@ impl ErrorExt for Error {
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
-            PuffinReadMetadata { source, .. }
-            | PuffinReadBlob { source, .. }
+            PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
             | PuffinBuildReader { source, .. } => source.status_code(),
@@ -965,7 +973,7 @@ impl ErrorExt for Error {
 
             FilterRecordBatch { source, .. } => source.status_code(),
 
-            Upload { .. } => StatusCode::StorageUnavailable,
+            Download { .. } | Upload { .. } => StatusCode::StorageUnavailable,
             ChecksumMismatch { .. } => StatusCode::Unexpected,
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,

@@ -12,69 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::ops::Deref;
+use std::str::FromStr;
 
-use ahash::{HashSet, HashSetExt};
-use itertools::Itertools;
+use crate::etl::find_key_index;
 
-#[derive(Debug, Default, Clone)]
-pub struct Fields(Vec<Field>);
-
-impl Fields {
-    pub(crate) fn new(fields: Vec<Field>) -> Result<Self, String> {
-        let ff = Fields(fields);
-        ff.check()
-    }
-
-    pub(crate) fn one(field: Field) -> Self {
-        Fields(vec![field])
-    }
-
-    pub(crate) fn get_target_fields(&self) -> Vec<&str> {
-        self.0.iter().map(|f| f.get_target_field()).collect()
-    }
-
-    fn check(self) -> Result<Self, String> {
-        if self.0.is_empty() {
-            return Err("fields must not be empty".to_string());
-        }
-
-        let mut set = HashSet::new();
-        for f in self.0.iter() {
-            if set.contains(&f.input_field.name) {
-                return Err(format!(
-                    "field name must be unique, but got duplicated: {}",
-                    f.input_field.name
-                ));
-            }
-            set.insert(&f.input_field.name);
-        }
-
-        Ok(self)
-    }
-}
-
-impl std::fmt::Display for Fields {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let s = self.0.iter().map(|f| f.to_string()).join(";");
-        write!(f, "{s}")
-    }
-}
-
-impl std::ops::Deref for Fields {
-    type Target = Vec<Field>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for Fields {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
+/// Information about the input field including the name and index in intermediate keys.
 #[derive(Debug, Default, Clone)]
 pub struct InputFieldInfo {
     pub(crate) name: String,
@@ -82,131 +25,201 @@ pub struct InputFieldInfo {
 }
 
 impl InputFieldInfo {
+    /// Create a new input field info with the given field name and index.
     pub(crate) fn new(field: impl Into<String>, index: usize) -> Self {
         InputFieldInfo {
             name: field.into(),
             index,
         }
     }
+}
 
-    pub(crate) fn name(field: impl Into<String>) -> Self {
-        InputFieldInfo {
-            name: field.into(),
-            index: 0,
+/// Information about a field that has one input and one output.
+#[derive(Debug, Default, Clone)]
+pub struct OneInputOneOutputField {
+    input: InputFieldInfo,
+    output: Option<(String, usize)>,
+}
+
+impl OneInputOneOutputField {
+    /// Create a new field with the given input and output.
+    pub(crate) fn new(input: InputFieldInfo, output: (String, usize)) -> Self {
+        OneInputOneOutputField {
+            input,
+            output: Some(output),
+        }
+    }
+
+    /// Build a new field with the given processor kind, intermediate keys, input field, and target field.
+    pub(crate) fn build(
+        processor_kind: &str,
+        intermediate_keys: &[String],
+        input_field: &str,
+        target_field: &str,
+    ) -> Result<Self, String> {
+        let input_index = find_key_index(intermediate_keys, input_field, processor_kind)?;
+
+        let input_field_info = InputFieldInfo::new(input_field, input_index);
+        let output_index = find_key_index(intermediate_keys, target_field, processor_kind)?;
+        Ok(OneInputOneOutputField::new(
+            input_field_info,
+            (target_field.to_string(), output_index),
+        ))
+    }
+
+    /// Get the input field information.
+    pub(crate) fn input(&self) -> &InputFieldInfo {
+        &self.input
+    }
+
+    /// Get the index of the input field.
+    pub(crate) fn input_index(&self) -> usize {
+        self.input.index
+    }
+
+    /// Get the name of the input field.
+    pub(crate) fn input_name(&self) -> &str {
+        &self.input.name
+    }
+
+    /// Get the index of the output field.
+    pub(crate) fn output_index(&self) -> usize {
+        *self.output().1
+    }
+
+    /// Get the name of the output field.
+    pub(crate) fn output_name(&self) -> &str {
+        self.output().0
+    }
+
+    /// Get the output field information.
+    pub(crate) fn output(&self) -> (&String, &usize) {
+        if let Some((name, index)) = &self.output {
+            (name, index)
+        } else {
+            (&self.input.name, &self.input.index)
         }
     }
 }
 
-/// Used to represent the input and output fields of a processor or transform.
+/// Information about a field that has one input and multiple outputs.
+#[derive(Debug, Default, Clone)]
+pub struct OneInputMultiOutputField {
+    input: InputFieldInfo,
+    /// Typically, processors that output multiple keys need to be distinguished by splicing the keys together.
+    prefix: Option<String>,
+}
+
+impl OneInputMultiOutputField {
+    /// Create a new field with the given input and prefix.
+    pub(crate) fn new(input: InputFieldInfo, prefix: Option<String>) -> Self {
+        OneInputMultiOutputField { input, prefix }
+    }
+
+    /// Get the input field information.
+    pub(crate) fn input(&self) -> &InputFieldInfo {
+        &self.input
+    }
+
+    /// Get the index of the input field.
+    pub(crate) fn input_index(&self) -> usize {
+        self.input.index
+    }
+
+    /// Get the name of the input field.
+    pub(crate) fn input_name(&self) -> &str {
+        &self.input.name
+    }
+
+    /// Get the prefix for the output fields.
+    pub(crate) fn target_prefix(&self) -> &str {
+        self.prefix.as_deref().unwrap_or(&self.input.name)
+    }
+}
+
+/// Raw processor-defined inputs and outputs
 #[derive(Debug, Default, Clone)]
 pub struct Field {
-    /// The input field name and index.
-    pub input_field: InputFieldInfo,
-
-    /// The output field name and index mapping.
-    pub output_fields_index_mapping: BTreeMap<String, usize>,
-
-    // rename
-    pub target_field: Option<String>,
-
-    // 1-to-many mapping
-    // processors:
-    //  - csv
-    pub target_fields: Option<Vec<String>>,
+    pub(crate) input_field: String,
+    pub(crate) target_field: Option<String>,
 }
 
-impl Field {
-    pub(crate) fn new(field: impl Into<String>) -> Self {
-        Field {
-            input_field: InputFieldInfo::name(field.into()),
-            output_fields_index_mapping: BTreeMap::new(),
-            target_field: None,
-            target_fields: None,
-        }
-    }
-
-    /// target column_name in processor or transform
-    /// if target_field is None, return input field name
-    pub(crate) fn get_target_field(&self) -> &str {
-        self.target_field
-            .as_deref()
-            .unwrap_or(&self.input_field.name)
-    }
-
-    /// input column_name in processor or transform
-    pub(crate) fn get_field_name(&self) -> &str {
-        &self.input_field.name
-    }
-
-    /// set input column index in processor or transform
-    pub(crate) fn set_input_index(&mut self, index: usize) {
-        self.input_field.index = index;
-    }
-
-    pub(crate) fn set_output_index(&mut self, key: &str, index: usize) {
-        if let Some(v) = self.output_fields_index_mapping.get_mut(key) {
-            *v = index;
-        }
-    }
-
-    pub(crate) fn insert_output_index(&mut self, key: String, index: usize) {
-        self.output_fields_index_mapping.insert(key, index);
-    }
-}
-
-impl std::str::FromStr for Field {
+impl FromStr for Field {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut parts = s.split(',');
-        let field = parts.next().ok_or("field is missing")?.trim().to_string();
+        let input_field = parts
+            .next()
+            .ok_or("input field is missing")?
+            .trim()
+            .to_string();
+        let target_field = parts.next().map(|x| x.trim().to_string());
 
-        if field.is_empty() {
-            return Err("field is empty".to_string());
+        if input_field.is_empty() {
+            return Err("input field is empty".to_string());
         }
 
-        let renamed_field = match parts.next() {
-            Some(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-            _ => None,
-        };
-
-        // TODO(qtang): ???? what's this?
-        // weird design? field: <field>,<target_field>,<target_fields>,<target_fields>....
-        // and only use in csv processor
-        let fields: Vec<_> = parts
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
-        let target_fields = if fields.is_empty() {
-            None
-        } else {
-            Some(fields)
-        };
-
         Ok(Field {
-            input_field: InputFieldInfo::name(field),
-            output_fields_index_mapping: BTreeMap::new(),
-            target_field: renamed_field,
-            target_fields,
+            input_field,
+            target_field,
         })
     }
 }
 
-impl std::fmt::Display for Field {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match (&self.target_field, &self.target_fields) {
-            (Some(target_field), None) => write!(f, "{}, {target_field}", self.input_field.name),
-            (None, Some(target_fields)) => {
-                write!(
-                    f,
-                    "{}, {}",
-                    self.input_field.name,
-                    target_fields.iter().join(",")
-                )
-            }
-            _ => write!(f, "{}", self.input_field.name),
+impl Field {
+    /// Create a new field with the given input and target fields.
+    pub(crate) fn new(input_field: impl Into<String>, target_field: Option<String>) -> Self {
+        Field {
+            input_field: input_field.into(),
+            target_field,
         }
+    }
+
+    /// Get the input field.
+    pub(crate) fn input_field(&self) -> &str {
+        &self.input_field
+    }
+
+    /// Get the target field.
+    pub(crate) fn target_field(&self) -> Option<&str> {
+        self.target_field.as_deref()
+    }
+
+    /// Get the target field or the input field if the target field is not set.
+    pub(crate) fn target_or_input_field(&self) -> &str {
+        self.target_field.as_deref().unwrap_or(&self.input_field)
+    }
+}
+
+/// A collection of fields.
+#[derive(Debug, Default, Clone)]
+pub struct Fields(Vec<Field>);
+
+impl Fields {
+    pub(crate) fn new(fields: Vec<Field>) -> Self {
+        Fields(fields)
+    }
+
+    pub(crate) fn one(field: Field) -> Self {
+        Fields(vec![field])
+    }
+}
+
+impl Deref for Fields {
+    type Target = Vec<Field>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl IntoIterator for Fields {
+    type Item = Field;
+    type IntoIter = std::vec::IntoIter<Field>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 
@@ -227,35 +240,14 @@ mod tests {
 
         let cases = [
             // ("field", "field", None, None),
-            (
-                "field, target_field",
-                "field",
-                Some("target_field".into()),
-                None,
-            ),
-            (
-                "field, target_field1, target_field2, target_field3",
-                "field",
-                Some("target_field1".into()),
-                Some(vec!["target_field2".into(), "target_field3".into()]),
-            ),
-            (
-                "field,, target_field1, target_field2, target_field3",
-                "field",
-                None,
-                Some(vec![
-                    "target_field1".into(),
-                    "target_field2".into(),
-                    "target_field3".into(),
-                ]),
-            ),
+            ("field, target_field", "field", Some("target_field")),
+            ("field", "field", None),
         ];
 
-        for (s, field, target_field, target_fields) in cases.into_iter() {
+        for (s, field, target_field) in cases.into_iter() {
             let f: Field = s.parse().unwrap();
-            assert_eq!(f.get_field_name(), field, "{s}");
-            assert_eq!(f.target_field, target_field, "{s}");
-            assert_eq!(f.target_fields, target_fields, "{s}");
+            assert_eq!(f.input_field(), field, "{s}");
+            assert_eq!(f.target_field(), target_field, "{s}");
         }
     }
 }

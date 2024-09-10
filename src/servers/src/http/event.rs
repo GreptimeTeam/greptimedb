@@ -23,15 +23,16 @@ use axum::headers::ContentType;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{async_trait, BoxError, Extension, TypedHeader};
+use axum::{async_trait, BoxError, Extension, Json, TypedHeader};
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
+use datatypes::value::column_data_to_json;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::PipelineVersion;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Deserializer, Value};
+use serde_json::{Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -228,6 +229,117 @@ fn transform_ndjson_array_factory(
                 Ok(acc_array)
             }
         })
+}
+
+#[axum_macros::debug_handler]
+pub async fn pipeline_dryrun(
+    State(log_state): State<LogState>,
+    Query(query_params): Query<LogIngesterQueryParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    TypedHeader(content_type): TypedHeader<ContentType>,
+    payload: String,
+) -> Result<Response> {
+    let handler = log_state.log_handler;
+    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
+        reason: "pipeline_name is required",
+    })?;
+
+    let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
+
+    let ignore_errors = query_params.ignore_errors.unwrap_or(false);
+
+    let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
+
+    if value.len() > 10 {
+        return Err(InvalidParameterSnafu {
+            reason: "too many rows for dryrun",
+        }
+        .build());
+    }
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
+
+    let pipeline = handler
+        .get_pipeline(&pipeline_name, version, query_ctx.clone())
+        .await?;
+
+    let mut intermediate_state = pipeline.init_intermediate_state();
+
+    let mut results = Vec::with_capacity(value.len());
+    for v in value {
+        pipeline
+            .prepare(v, &mut intermediate_state)
+            .map_err(|reason| PipelineTransformSnafu { reason }.build())
+            .context(PipelineSnafu)?;
+        let r = pipeline
+            .exec_mut(&mut intermediate_state)
+            .map_err(|reason| PipelineTransformSnafu { reason }.build())
+            .context(PipelineSnafu)?;
+        results.push(r);
+        pipeline.reset_intermediate_state(&mut intermediate_state);
+    }
+
+    let colume_type_key = "colume_type";
+    let data_type_key = "data_type";
+    let name_key = "name";
+
+    let schema = pipeline
+        .schemas()
+        .iter()
+        .map(|cs| {
+            let mut map = Map::new();
+            map.insert(name_key.to_string(), Value::String(cs.column_name.clone()));
+            map.insert(
+                data_type_key.to_string(),
+                Value::String(cs.datatype().as_str_name().to_string()),
+            );
+            map.insert(
+                colume_type_key.to_string(),
+                Value::String(cs.semantic_type().as_str_name().to_string()),
+            );
+            map.insert(
+                "fulltext".to_string(),
+                Value::Bool(
+                    cs.options
+                        .clone()
+                        .is_some_and(|x| x.options.contains_key("fulltext")),
+                ),
+            );
+            Value::Object(map)
+        })
+        .collect::<Vec<_>>();
+    let rows = results
+        .into_iter()
+        .map(|row| {
+            let row = row
+                .values
+                .into_iter()
+                .enumerate()
+                .map(|(idx, v)| {
+                    v.value_data
+                        .map(|d| {
+                            let mut map = Map::new();
+                            map.insert("value".to_string(), column_data_to_json(d));
+                            map.insert("key".to_string(), schema[idx][name_key].clone());
+                            map.insert(
+                                "semantic_type".to_string(),
+                                schema[idx][colume_type_key].clone(),
+                            );
+                            map.insert("data_type".to_string(), schema[idx][data_type_key].clone());
+                            Value::Object(map)
+                        })
+                        .unwrap_or(Value::Null)
+                })
+                .collect();
+            Value::Array(row)
+        })
+        .collect::<Vec<_>>();
+    let mut result = Map::new();
+    result.insert("schema".to_string(), Value::Array(schema));
+    result.insert("rows".to_string(), Value::Array(rows));
+    let result = Value::Object(result);
+    Ok(Json(result).into_response())
 }
 
 #[axum_macros::debug_handler]

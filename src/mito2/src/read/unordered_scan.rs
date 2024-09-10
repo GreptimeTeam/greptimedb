@@ -59,10 +59,11 @@ impl UnorderedScan {
     /// Creates a new [UnorderedScan].
     pub(crate) fn new(input: ScanInput) -> Self {
         let parallelism = input.parallelism.parallelism.max(1);
-        let properties = ScannerProperties::default()
+        let mut properties = ScannerProperties::default()
             .with_parallelism(parallelism)
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows());
+        properties.partitions = vec![input.partition_ranges()];
         let stream_ctx = Arc::new(StreamContext::new(input));
 
         Self {
@@ -148,12 +149,13 @@ impl RegionScanner for UnorderedScan {
             ..Default::default()
         };
         let stream_ctx = self.stream_ctx.clone();
+        let parallelism = self.properties.num_partitions();
         let stream = try_stream! {
             let first_poll = stream_ctx.query_start.elapsed();
 
             let part = {
                 let mut parts = stream_ctx.parts.lock().await;
-                maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics)
+                maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics, parallelism)
                     .await
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
@@ -226,6 +228,11 @@ impl RegionScanner for UnorderedScan {
 
         Ok(stream)
     }
+
+    fn has_predicate(&self) -> bool {
+        let predicate = self.stream_ctx.input.predicate();
+        predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
+    }
 }
 
 impl DisplayAs for UnorderedScan {
@@ -260,6 +267,7 @@ async fn maybe_init_parts(
     input: &ScanInput,
     part_list: &mut (ScanPartList, Duration),
     metrics: &mut ScannerMetrics,
+    parallelism: usize,
 ) -> Result<()> {
     if part_list.0.is_none() {
         let now = Instant::now();
@@ -270,9 +278,7 @@ async fn maybe_init_parts(
             Some(input.mapper.column_ids()),
             input.predicate.clone(),
         );
-        part_list
-            .0
-            .set_parts(distributor.build_parts(input.parallelism.parallelism));
+        part_list.0.set_parts(distributor.build_parts(parallelism));
         let build_part_cost = now.elapsed();
         part_list.1 = build_part_cost;
 

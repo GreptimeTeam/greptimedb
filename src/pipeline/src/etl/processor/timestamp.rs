@@ -19,18 +19,17 @@ use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
 
-use super::yaml_strings;
-use crate::etl::field::{Field, Fields};
+use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
-    update_one_one_output_keys, yaml_bool, yaml_field, yaml_fields, yaml_string, Processor,
-    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
+    ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::time::{
     MICROSECOND_RESOLUTION, MICRO_RESOLUTION, MILLISECOND_RESOLUTION, MILLI_RESOLUTION,
     MS_RESOLUTION, NANOSECOND_RESOLUTION, NANO_RESOLUTION, NS_RESOLUTION, SECOND_RESOLUTION,
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
-use crate::etl::value::{Map, Timestamp, Value};
+use crate::etl::value::{Timestamp, Value};
 
 pub(crate) const PROCESSOR_TIMESTAMP: &str = "timestamp";
 const RESOLUTION_NAME: &str = "resolution";
@@ -108,10 +107,56 @@ impl std::ops::Deref for Formats {
     }
 }
 
+#[derive(Debug)]
+pub struct TimestampProcessorBuilder {
+    fields: Fields,
+    formats: Formats,
+    resolution: Resolution,
+    ignore_missing: bool,
+}
+
+impl ProcessorBuilder for TimestampProcessorBuilder {
+    fn output_keys(&self) -> HashSet<&str> {
+        self.fields
+            .iter()
+            .map(|f| f.target_or_input_field())
+            .collect()
+    }
+
+    fn input_keys(&self) -> HashSet<&str> {
+        self.fields.iter().map(|f| f.input_field()).collect()
+    }
+
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+        self.build(intermediate_keys).map(ProcessorKind::Timestamp)
+    }
+}
+
+impl TimestampProcessorBuilder {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<TimestampProcessor, String> {
+        let mut real_fields = vec![];
+        for field in self.fields.into_iter() {
+            let input = OneInputOneOutputField::build(
+                "timestamp",
+                intermediate_keys,
+                field.input_field(),
+                field.target_or_input_field(),
+            )?;
+            real_fields.push(input);
+        }
+        Ok(TimestampProcessor {
+            fields: real_fields,
+            formats: self.formats,
+            resolution: self.resolution,
+            ignore_missing: self.ignore_missing,
+        })
+    }
+}
+
 /// support string, integer, float, time, epoch
 #[derive(Debug, Default)]
 pub struct TimestampProcessor {
-    fields: Fields,
+    fields: Vec<OneInputOneOutputField>,
     formats: Formats,
     resolution: Resolution,
     ignore_missing: bool,
@@ -123,29 +168,6 @@ pub struct TimestampProcessor {
 }
 
 impl TimestampProcessor {
-    fn with_fields(&mut self, mut fields: Fields) {
-        update_one_one_output_keys(&mut fields);
-        self.fields = fields
-    }
-
-    fn with_resolution(&mut self, resolution: Resolution) {
-        self.resolution = resolution;
-    }
-
-    fn with_formats(&mut self, v: Option<Vec<(Arc<String>, Tz)>>) {
-        let v = match v {
-            Some(v) if !v.is_empty() => v,
-            _ => DEFAULT_FORMATS.clone(),
-        };
-
-        let formats = Formats::new(v);
-        self.formats = formats;
-    }
-
-    fn with_ignore_missing(&mut self, ignore_missing: bool) {
-        self.ignore_missing = ignore_missing;
-    }
-
     /// try to parse val with timezone first, if failed, parse without timezone
     fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<i64, String> {
         if let Ok(dt) = DateTime::parse_from_str(val, fmt) {
@@ -212,12 +234,6 @@ impl TimestampProcessor {
             Resolution::Nano => Ok(Timestamp::Nanosecond(t)),
         }
     }
-
-    fn process_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        let key = field.get_target_field();
-
-        Ok(Map::one(key, Value::Timestamp(self.parse(val)?)))
-    }
 }
 
 fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>, String> {
@@ -250,11 +266,14 @@ fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>,
     };
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessorBuilder {
     type Error = String;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
-        let mut processor = TimestampProcessor::default();
+        let mut fields = Fields::default();
+        let mut formats = Formats::default();
+        let mut resolution = Resolution::default();
+        let mut ignore_missing = false;
 
         for (k, v) in hash {
             let key = k
@@ -263,28 +282,33 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessor {
 
             match key {
                 FIELD_NAME => {
-                    processor.with_fields(Fields::one(yaml_field(v, FIELD_NAME)?));
+                    fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
                 }
                 FIELDS_NAME => {
-                    processor.with_fields(yaml_fields(v, FIELDS_NAME)?);
+                    fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
                 FORMATS_NAME => {
-                    let formats = parse_formats(v)?;
-                    processor.with_formats(Some(formats));
+                    let formats_vec = parse_formats(v)?;
+                    formats = Formats::new(formats_vec);
                 }
                 RESOLUTION_NAME => {
-                    let s = yaml_string(v, RESOLUTION_NAME)?.as_str().try_into()?;
-                    processor.with_resolution(s);
+                    resolution = yaml_string(v, RESOLUTION_NAME)?.as_str().try_into()?;
                 }
                 IGNORE_MISSING_NAME => {
-                    processor.with_ignore_missing(yaml_bool(v, IGNORE_MISSING_NAME)?);
+                    ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
-
                 _ => {}
             }
         }
 
-        Ok(processor)
+        let processor_builder = TimestampProcessorBuilder {
+            fields,
+            formats,
+            resolution,
+            ignore_missing,
+        };
+
+        Ok(processor_builder)
     }
 }
 
@@ -297,49 +321,23 @@ impl Processor for TimestampProcessor {
         self.ignore_missing
     }
 
-    fn fields(&self) -> &Fields {
-        &self.fields
-    }
-
-    fn fields_mut(&mut self) -> &mut Fields {
-        &mut self.fields
-    }
-
-    fn output_keys(&self) -> HashSet<String> {
-        self.fields
-            .iter()
-            .map(|f| f.get_target_field().to_string())
-            .collect()
-    }
-
-    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
-        self.process_field(val, field)
-    }
-
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
         for field in self.fields.iter() {
-            let index = field.input_field.index;
+            let index = field.input().index;
             match val.get(index) {
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return Err(format!(
                             "{} processor: missing field: {}",
                             self.kind(),
-                            field.get_field_name()
+                            &field.input().name
                         ));
                     }
                 }
                 Some(v) => {
-                    // TODO(qtang): Let this method use the intermediate state collection directly.
-                    let mut map = self.process_field(v, field)?;
-                    field
-                        .output_fields_index_mapping
-                        .iter()
-                        .for_each(|(k, output_index)| {
-                            if let Some(v) = map.remove(k) {
-                                val[*output_index] = v;
-                            }
-                        });
+                    let result = self.parse(v)?;
+                    let (_, index) = field.output();
+                    val[*index] = Value::Timestamp(result);
                 }
             }
         }
@@ -351,8 +349,17 @@ impl Processor for TimestampProcessor {
 mod tests {
     use yaml_rust::YamlLoader;
 
-    use super::TimestampProcessor;
+    use super::{TimestampProcessor, TimestampProcessorBuilder};
     use crate::etl::value::{Timestamp, Value};
+
+    fn builder_to_native_processor(builder: TimestampProcessorBuilder) -> TimestampProcessor {
+        TimestampProcessor {
+            fields: vec![],
+            formats: builder.formats,
+            resolution: builder.resolution,
+            ignore_missing: builder.ignore_missing,
+        }
+    }
 
     #[test]
     fn test_parse_epoch() {
@@ -367,7 +374,9 @@ formats:
 "#;
         let yaml = &YamlLoader::load_from_str(processor_yaml_str).unwrap()[0];
         let timestamp_yaml = yaml.as_hash().unwrap();
-        let processor = TimestampProcessor::try_from(timestamp_yaml).unwrap();
+        let processor = builder_to_native_processor(
+            TimestampProcessorBuilder::try_from(timestamp_yaml).unwrap(),
+        );
 
         let values = [
             (
@@ -419,7 +428,9 @@ formats:
 "#;
         let yaml = &YamlLoader::load_from_str(processor_yaml_str).unwrap()[0];
         let timestamp_yaml = yaml.as_hash().unwrap();
-        let processor = TimestampProcessor::try_from(timestamp_yaml).unwrap();
+        let processor = builder_to_native_processor(
+            TimestampProcessorBuilder::try_from(timestamp_yaml).unwrap(),
+        );
 
         let values: Vec<&str> = vec![
             "2014-5-17T12:34:56",
