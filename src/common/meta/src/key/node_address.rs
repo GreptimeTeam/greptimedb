@@ -14,6 +14,7 @@
 
 use std::fmt::Display;
 
+use api::v1::meta::Role;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
@@ -23,15 +24,20 @@ use crate::peer::Peer;
 
 /// The key stores node address.
 ///
-/// The layout: `__node_address/{node_id}`
+/// The layout: `__node_address/{role}/{node_id}`
 #[derive(Debug, PartialEq)]
 pub struct NodeAddressKey {
+    pub role: Role,
     pub node_id: u64,
 }
 
 impl NodeAddressKey {
-    pub fn new(node_id: u64) -> Self {
-        Self { node_id }
+    pub fn new(role: Role, node_id: u64) -> Self {
+        Self { role, node_id }
+    }
+
+    pub fn with_datanode(node_id: u64) -> Self {
+        Self::new(Role::Datanode, node_id)
     }
 }
 
@@ -67,14 +73,25 @@ impl<'a> MetadataKey<'a, NodeAddressKey> for NodeAddressKey {
                 err_msg: format!("Invalid NodeAddressKey '{key}'"),
             })?;
         // Safety: pass the regex check above
+        let role = captures[1].parse::<i32>().unwrap();
+        let role = Role::try_from(role).map_err(|_| {
+            InvalidMetadataSnafu {
+                err_msg: format!("Invalid Role value: {role}"),
+            }
+            .build()
+        })?;
         let node_id = captures[1].parse::<u64>().unwrap();
-        Ok(NodeAddressKey::new(node_id))
+        Ok(NodeAddressKey::new(role, node_id))
     }
 }
 
 impl Display for NodeAddressKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", NODE_ADDRESS_PREFIX, self.node_id)
+        write!(
+            f,
+            "{}/{}/{}",
+            NODE_ADDRESS_PREFIX, self.role as i32, self.node_id
+        )
     }
 }
 
@@ -84,7 +101,7 @@ mod tests {
 
     #[test]
     fn test_node_address_key() {
-        let key = NodeAddressKey::new(1);
+        let key = NodeAddressKey::new(Role::Datanode, 1);
         let bytes = key.to_bytes();
         let key2 = NodeAddressKey::from_bytes(&bytes).unwrap();
         assert_eq!(key, key2);

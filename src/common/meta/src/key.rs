@@ -217,7 +217,7 @@ lazy_static! {
 
 lazy_static! {
     static ref NODE_ADDRESS_PATTERN: Regex =
-        Regex::new(&format!("^{NODE_ADDRESS_PREFIX}/([0-9]+)$")).unwrap();
+        Regex::new(&format!("^{NODE_ADDRESS_PREFIX}/([0-9]+)/([0-9]+)$")).unwrap();
 }
 
 /// The key of metadata.

@@ -733,12 +733,12 @@ fn extract_address_keys(table_route: &TableRouteValue) -> HashSet<Vec<u8>> {
             region_route
                 .follower_peers
                 .iter()
-                .map(|peer| NodeAddressKey::new(peer.id).to_bytes())
+                .map(|peer| NodeAddressKey::with_datanode(peer.id).to_bytes())
                 .chain(
                     region_route
                         .leader_peer
                         .as_ref()
-                        .map(|leader| NodeAddressKey::new(leader.id).to_bytes()),
+                        .map(|leader| NodeAddressKey::with_datanode(leader.id).to_bytes()),
                 )
         })
         .collect::<HashSet<_>>()
@@ -877,7 +877,7 @@ mod tests {
         });
 
         kv.put(PutRequest {
-            key: NodeAddressKey::new(1).to_bytes(),
+            key: NodeAddressKey::with_datanode(1).to_bytes(),
             value: NodeAddressValue {
                 peer: Peer {
                     addr: "addr1".to_string(),

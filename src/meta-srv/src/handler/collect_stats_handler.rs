@@ -160,7 +160,7 @@ async fn rewrite_node_address(ctx: &mut Context, stat: &Stat) {
         id: stat.id,
         addr: stat.addr.clone(),
     };
-    let key = NodeAddressKey::new(peer.id).to_bytes();
+    let key = NodeAddressKey::with_datanode(peer.id).to_bytes();
     if let Ok(value) = NodeAddressValue::new(peer.clone()).try_as_raw_value() {
         let put = PutRequest {
             key,
