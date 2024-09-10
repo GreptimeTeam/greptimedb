@@ -14,13 +14,14 @@
 
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
-use common_telemetry::{debug, error, tracing};
+use common_telemetry::{debug, error, slow, tracing};
 use datafusion_common::ParamValues;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
@@ -59,6 +60,7 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        let start = Instant::now();
         let query_ctx = self.session.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_POSTGRES_QUERY_TIMER
@@ -75,6 +77,17 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             Ok(resps)
         } else {
             let outputs = self.query_handler.do_query(query, query_ctx.clone()).await;
+
+            let elapsed = start.elapsed();
+            if let Some(threshold) = self.slow_query_threshold {
+                if elapsed > threshold {
+                    slow!(
+                        cost = elapsed.as_millis() as u64,
+                        threshold = threshold.as_millis() as u64,
+                        sql = query.to_string()
+                    );
+                }
+            }
 
             let mut results = Vec::with_capacity(outputs.len());
 

@@ -15,6 +15,7 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use auth::UserProviderRef;
@@ -73,6 +74,7 @@ pub struct MysqlSpawnConfig {
     tls: Arc<ReloadableTlsServerConfig>,
     // other shim config
     reject_no_database: bool,
+    slow_query_threshold: Option<Duration>,
 }
 
 impl MysqlSpawnConfig {
@@ -80,11 +82,13 @@ impl MysqlSpawnConfig {
         force_tls: bool,
         tls: Arc<ReloadableTlsServerConfig>,
         reject_no_database: bool,
+        slow_query_threshold: Option<Duration>,
     ) -> MysqlSpawnConfig {
         MysqlSpawnConfig {
             force_tls,
             tls,
             reject_no_database,
+            slow_query_threshold,
         }
     }
 
@@ -182,6 +186,7 @@ impl MysqlServer {
             spawn_ref.query_handler(),
             spawn_ref.user_provider(),
             stream.peer_addr()?,
+            spawn_config.slow_query_threshold,
         );
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);

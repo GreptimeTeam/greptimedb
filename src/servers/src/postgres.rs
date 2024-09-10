@@ -28,6 +28,7 @@ pub(crate) const METADATA_SCHEMA: &str = "schema";
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ::auth::UserProviderRef;
 use derive_builder::Builder;
@@ -77,6 +78,7 @@ pub struct PostgresServerHandlerInner {
 
     session: Arc<Session>,
     query_parser: Arc<DefaultQueryParser>,
+    slow_query_threshold: Option<Duration>,
 }
 
 #[derive(Builder)]
@@ -86,6 +88,7 @@ pub(crate) struct MakePostgresServerHandler {
     #[builder(default = "Arc::new(GreptimeDBStartupParameters::new())")]
     param_provider: Arc<GreptimeDBStartupParameters>,
     force_tls: bool,
+    slow_query_threshold: Option<Duration>,
 }
 
 pub(crate) struct PostgresServerHandler(Arc<PostgresServerHandlerInner>);
@@ -124,6 +127,7 @@ impl MakePostgresServerHandler {
 
             session: session.clone(),
             query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
+            slow_query_threshold: self.slow_query_threshold,
         };
         PostgresServerHandler(Arc::new(handler))
     }

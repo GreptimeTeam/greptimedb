@@ -573,6 +573,7 @@ pub async fn setup_mysql_server_with_user_provider(
                     .expect("Failed to load certificates and keys"),
             ),
             opts.reject_no_database.unwrap_or(false),
+            None,
         )),
     ));
 
@@ -626,6 +627,7 @@ pub async fn setup_pg_server_with_user_provider(
         tls_server_config,
         runtime,
         user_provider,
+        None,
     )) as Box<dyn Server>);
 
     let fe_pg_addr_clone = fe_pg_addr.clone();

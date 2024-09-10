@@ -66,9 +66,6 @@ pub struct LoggingOptions {
     /// The tracing sample ratio.
     pub tracing_sample_ratio: Option<TracingSampleOptions>,
 
-    /// Whether to log slow queries.
-    pub enable_slow_query_log: bool,
-
     /// The threshold of slow queries.
     #[serde(with = "humantime_serde")]
     pub slow_query_threshold: Option<Duration>,
@@ -104,7 +101,6 @@ impl Default for LoggingOptions {
             otlp_endpoint: None,
             tracing_sample_ratio: None,
             append_stdout: true,
-            enable_slow_query_log: false,
             slow_query_threshold: None,
         }
     }
@@ -245,41 +241,42 @@ pub fn init_global_logging(
             None
         };
 
-        let slow_query_logging_layer = if !opts.dir.is_empty() && opts.enable_slow_query_log {
-            let rolling_appender =
-                RollingFileAppender::new(Rotation::HOURLY, &opts.dir, "greptimedb-slow");
-            let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
-            guards.push(guard);
+        let slow_query_logging_layer =
+            if !opts.dir.is_empty() && opts.slow_query_threshold.is_some() {
+                let rolling_appender =
+                    RollingFileAppender::new(Rotation::HOURLY, &opts.dir, "greptimedb-slow");
+                let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
+                guards.push(guard);
 
-            // Only logs if the field contains "slow".
-            let slow_query_filter = FilterFn::new(|metadata| {
-                metadata
-                    .fields()
-                    .iter()
-                    .any(|field| field.name().contains("slow"))
-            });
+                // Only logs if the field contains "slow".
+                let slow_query_filter = FilterFn::new(|metadata| {
+                    metadata
+                        .fields()
+                        .iter()
+                        .any(|field| field.name().contains("slow"))
+                });
 
-            if opts.log_format == LogFormat::Json {
-                Some(
-                    Layer::new()
-                        .json()
-                        .with_writer(writer)
-                        .with_ansi(false)
-                        .with_filter(slow_query_filter)
-                        .boxed(),
-                )
+                if opts.log_format == LogFormat::Json {
+                    Some(
+                        Layer::new()
+                            .json()
+                            .with_writer(writer)
+                            .with_ansi(false)
+                            .with_filter(slow_query_filter)
+                            .boxed(),
+                    )
+                } else {
+                    Some(
+                        Layer::new()
+                            .with_writer(writer)
+                            .with_ansi(false)
+                            .with_filter(slow_query_filter)
+                            .boxed(),
+                    )
+                }
             } else {
-                Some(
-                    Layer::new()
-                        .with_writer(writer)
-                        .with_ansi(false)
-                        .with_filter(slow_query_filter)
-                        .boxed(),
-                )
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         // resolve log level settings from:
         // - options from command line or config files
