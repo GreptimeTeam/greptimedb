@@ -71,7 +71,7 @@ pub struct LoggingOptions {
 }
 
 /// The slow query log options.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct SlowQueryLoggingOptions {
     /// Whether to enable slow query log.
@@ -80,15 +80,6 @@ pub struct SlowQueryLoggingOptions {
     /// The threshold of slow queries.
     #[serde(with = "humantime_serde")]
     pub threshold: Option<Duration>,
-}
-
-impl Default for SlowQueryLoggingOptions {
-    fn default() -> Self {
-        Self {
-            enable: false,
-            threshold: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,7 +254,7 @@ pub fn init_global_logging(
 
         let slow_query_logging_layer = if !opts.dir.is_empty() && opts.slow_query.enable {
             let rolling_appender =
-                RollingFileAppender::new(Rotation::HOURLY, &opts.dir, "greptimedb-slow");
+                RollingFileAppender::new(Rotation::HOURLY, &opts.dir, "greptimedb-slow-queries");
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -341,6 +332,7 @@ pub fn init_global_logging(
                 .with(stdout_logging_layer)
                 .with(file_logging_layer)
                 .with(err_file_logging_layer)
+                .with(slow_query_logging_layer)
         };
 
         // consume the `tracing_opts` to avoid "unused" warnings.

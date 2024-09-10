@@ -45,6 +45,7 @@ async fn test_sql_not_provided() {
     let api_state = ApiState {
         sql_handler,
         script_handler: None,
+        slow_query_threshold: None,
     };
 
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
@@ -79,6 +80,7 @@ async fn test_sql_output_rows() {
     let api_state = ApiState {
         sql_handler,
         script_handler: None,
+        slow_query_threshold: None,
     };
 
     let query_sql = "select sum(uint32s) from numbers limit 20";
@@ -185,6 +187,7 @@ async fn test_dashboard_sql_limit() {
     let api_state = ApiState {
         sql_handler,
         script_handler: None,
+        slow_query_threshold: None,
     };
     for format in ["greptimedb_v1", "csv", "table"] {
         let query = create_query(format, "select * from numbers", Some(1000));
@@ -231,6 +234,7 @@ async fn test_sql_form() {
     let api_state = ApiState {
         sql_handler,
         script_handler: None,
+        slow_query_threshold: None,
     };
 
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
@@ -352,6 +356,7 @@ async fn insert_script(
         State(ApiState {
             sql_handler: sql_handler.clone(),
             script_handler: Some(script_handler.clone()),
+            slow_query_threshold: None,
         }),
         invalid_query,
         body,
@@ -369,6 +374,7 @@ async fn insert_script(
         State(ApiState {
             sql_handler: sql_handler.clone(),
             script_handler: Some(script_handler.clone()),
+            slow_query_threshold: None,
         }),
         exec,
         body,
@@ -400,6 +406,7 @@ def test(n) -> vector[i64]:
         State(ApiState {
             sql_handler,
             script_handler: Some(script_handler),
+            slow_query_threshold: None,
         }),
         exec,
     )
@@ -468,6 +475,7 @@ def test(n, **params)  -> vector[i64]:
         State(ApiState {
             sql_handler,
             script_handler: Some(script_handler),
+            slow_query_threshold: None,
         }),
         exec,
     )

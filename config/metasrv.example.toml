@@ -184,7 +184,7 @@ default_ratio = 1.0
 enable = false
 
 ## The threshold of slow query.
-## +toml2docs:none-default
+## @toml2docs:none-default
 threshold = "10s"
 
 ## The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.

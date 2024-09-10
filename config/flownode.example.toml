@@ -90,7 +90,7 @@ default_ratio = 1.0
 enable = false
 
 ## The threshold of slow query.
-## +toml2docs:none-default
+## @toml2docs:none-default
 threshold = "10s"
 
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
