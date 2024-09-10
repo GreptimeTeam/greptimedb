@@ -94,10 +94,10 @@ macro_rules! get_by_path {
                         ConcreteDataType::Binary(_) => {
                             for i in 0..size {
                                 let json = jsons.get_ref(i);
-                                let path = strings.get_ref(i);
+                                let path = paths.get_ref(i);
 
                                 let json = json.as_binary();
-                                let path = string.as_string();
+                                let path = path.as_string();
                                 let result = match (json, path) {
                                     (Ok(Some(json)), Ok(Some(path))) => {
                                         get_json_by_path(json, path)
@@ -186,7 +186,7 @@ impl Function for GetByPathString {
             }
         );
         let jsons = &columns[0];
-        let strings = &columns[1];
+        let paths = &columns[1];
 
         let size = jsons.len();
         let datatype = jsons.data_type();
@@ -197,13 +197,14 @@ impl Function for GetByPathString {
             ConcreteDataType::Binary(_) => {
                 for i in 0..size {
                     let json = jsons.get_ref(i);
-                    let path = strings.get_ref(i);
+                    let path = paths.get_ref(i);
 
                     let json = json.as_binary();
-                    let path = string.as_string();
+                    let path = path.as_string();
                     let result = match (json, path) {
-                        (Ok(Some(json)), Ok(Some(path))) => get_json_by_path(json, path)
-                            .and_then(|json| jsonb::to_str(&json).ok()),
+                        (Ok(Some(json)), Ok(Some(path))) => {
+                            get_json_by_path(json, path).and_then(|json| jsonb::to_str(&json).ok())
+                        }
                         _ => None,
                     };
 
