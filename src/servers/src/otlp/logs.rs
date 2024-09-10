@@ -71,7 +71,7 @@ pub fn to_grpc_insert_requests(
         }
         PipelineWay::Custom(p) => {
             let request = parse_export_logs_service_request(request);
-            let mut reslut = Vec::new();
+            let mut result = Vec::new();
             let mut intermediate_state = p.init_intermediate_state();
             for v in request {
                 p.prepare_pipeline_value(v, &mut intermediate_state)
@@ -79,12 +79,12 @@ pub fn to_grpc_insert_requests(
                 let r = p
                     .exec_mut(&mut intermediate_state)
                     .map_err(|e| OpenTelemetryLogSnafu { error: e }.build())?;
-                reslut.push(r);
+                result.push(r);
             }
-            let len = reslut.len();
+            let len = result.len();
             let rows = Rows {
                 schema: p.schemas().clone(),
-                rows: reslut,
+                rows: result,
             };
             let insert_request = RowInsertRequest {
                 rows: Some(rows),
