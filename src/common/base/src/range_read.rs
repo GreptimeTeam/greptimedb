@@ -16,10 +16,8 @@ use std::io;
 use std::ops::Range;
 
 use async_trait::async_trait;
+use bytes::{BufMut, Bytes};
 use futures::{AsyncReadExt, AsyncSeekExt};
-
-use crate::buffer::BufferMut;
-use crate::bytes::Bytes;
 
 /// `Metadata` contains the metadata of a source.
 pub struct Metadata {
@@ -41,24 +39,14 @@ pub trait RangeReader: Send + Unpin {
     /// Handles the buffer based on its capacity:
     /// - If the buffer is insufficient to hold the bytes, it will either:
     ///   - Allocate additional space (e.g., for `Vec<u8>`)
-    ///   - Return an error (e.g., for `&mut [u8]`)
+    ///   - Panic (e.g., for `&mut [u8]`)
     async fn read_into(
         &mut self,
         range: Range<u64>,
-        buf: &mut (impl BufferMut + Send),
+        buf: &mut (impl BufMut + Send),
     ) -> io::Result<()> {
         let bytes = self.read(range).await?;
-        let res = buf.write_from_slice(&bytes);
-
-        if let Err(err) = res {
-            let kind = match err {
-                crate::buffer::Error::Eof { .. } => io::ErrorKind::UnexpectedEof,
-                _ => io::ErrorKind::Other,
-            };
-
-            return Err(io::Error::new(kind, err));
-        }
-
+        buf.put_slice(&bytes);
         Ok(())
     }
 
