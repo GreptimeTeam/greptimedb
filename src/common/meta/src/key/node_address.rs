@@ -80,7 +80,7 @@ impl<'a> MetadataKey<'a, NodeAddressKey> for NodeAddressKey {
             }
             .build()
         })?;
-        let node_id = captures[1].parse::<u64>().unwrap();
+        let node_id = captures[2].parse::<u64>().unwrap();
         Ok(NodeAddressKey::new(role, node_id))
     }
 }
@@ -102,6 +102,11 @@ mod tests {
     #[test]
     fn test_node_address_key() {
         let key = NodeAddressKey::new(Role::Datanode, 1);
+        let bytes = key.to_bytes();
+        let key2 = NodeAddressKey::from_bytes(&bytes).unwrap();
+        assert_eq!(key, key2);
+
+        let key = NodeAddressKey::new(Role::Flownode, 3);
         let bytes = key.to_bytes();
         let key2 = NodeAddressKey::from_bytes(&bytes).unwrap();
         assert_eq!(key, key2);
