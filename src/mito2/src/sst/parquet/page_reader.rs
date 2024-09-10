@@ -26,7 +26,7 @@ pub(crate) struct RowGroupCachedReader {
 }
 
 impl RowGroupCachedReader {
-    /// Returns a new reader from a cache.
+    /// Returns a new reader from pages of a column in a row group.
     pub(crate) fn new(pages: &[Page]) -> Self {
         Self {
             pages: pages.iter().cloned().collect(),
