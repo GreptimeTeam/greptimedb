@@ -462,20 +462,52 @@ impl Inserter {
         auto_create_table_type: AutoCreateTableType,
         statement_executor: &StatementExecutor,
     ) -> Result<HashMap<String, TableId>> {
-        let mut table_name_to_ids = HashMap::with_capacity(requests.inserts.len());
-        let mut create_tables = vec![];
-        let mut alter_tables = vec![];
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
+
+        let catalog = ctx.current_catalog();
+        let schema = ctx.current_schema();
+        let mut table_name_to_ids = HashMap::with_capacity(requests.inserts.len());
+        // If `auto_create_table` hint is disabled, skip creating/altering tables.
+        let auto_create_table_hint = ctx
+            .extension(AUTO_CREATE_TABLE_KEY)
+            .map(|v| v.parse::<bool>())
+            .transpose()
+            .map_err(|_| {
+                InvalidInsertRequestSnafu {
+                    reason: "`auto_create_table` hint must be a boolean",
+                }
+                .build()
+            })?
+            .unwrap_or(true);
+        if !auto_create_table_hint {
+            for req in &requests.inserts {
+                let table = self
+                    .get_table(catalog, &schema, &req.table_name)
+                    .await?
+                    .context(InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "Table `{}` does not exist, and `auto_create_table` hint is disabled",
+                            req.table_name
+                        ),
+                    })?;
+                let table_info = table.table_info();
+                table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                // TODO(wenny): remove this check
+                validate_request_with_table(req, &table)?;
+            }
+            return Ok(table_name_to_ids);
+        }
+
+        let mut create_tables = vec![];
+        let mut alter_tables = vec![];
         for req in &requests.inserts {
-            let catalog = ctx.current_catalog();
-            let schema = ctx.current_schema();
-            let table = self.get_table(catalog, &schema, &req.table_name).await?;
-            match table {
+            match self.get_table(catalog, &schema, &req.table_name).await? {
                 Some(table) => {
                     let table_info = table.table_info();
                     table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                    // TODO(wenny): remove this check
                     validate_request_with_table(req, &table)?;
                     if let Some(alter_expr) =
                         self.get_alter_table_expr_on_demand(req, table, ctx)?
@@ -517,35 +549,22 @@ impl Inserter {
             AutoCreateTableType::Physical
             | AutoCreateTableType::Log
             | AutoCreateTableType::LastNonNull => {
-                let auto_create_table_hint = ctx
-                    .extension(AUTO_CREATE_TABLE_KEY)
-                    .map(|v| v.parse::<bool>())
-                    .transpose()
-                    .map_err(|_| {
-                        InvalidInsertRequestSnafu {
-                            reason: "`auto_create_table` hint must be a boolean",
-                        }
-                        .build()
-                    })?
-                    .unwrap_or(true);
-                if auto_create_table_hint {
-                    for req in create_tables {
-                        let table = self
-                            .create_non_logical_table(
-                                req,
-                                ctx,
-                                statement_executor,
-                                auto_create_table_type.clone(),
-                            )
-                            .await?;
-                        let table_info = table.table_info();
-                        table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
-                    }
-                    for alter_expr in alter_tables.into_iter() {
-                        statement_executor
-                            .alter_table_inner(alter_expr, ctx.clone())
-                            .await?;
-                    }
+                for req in create_tables {
+                    let table = self
+                        .create_non_logical_table(
+                            req,
+                            ctx,
+                            statement_executor,
+                            auto_create_table_type.clone(),
+                        )
+                        .await?;
+                    let table_info = table.table_info();
+                    table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                }
+                for alter_expr in alter_tables.into_iter() {
+                    statement_executor
+                        .alter_table_inner(alter_expr, ctx.clone())
+                        .await?;
                 }
             }
         }
