@@ -394,34 +394,59 @@ impl SstMetaKey {
     }
 }
 
+/// Path to column pages in the SST file.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ColumnPagePath {
+    /// Region id of the SST file to cache.
+    region_id: RegionId,
+    /// Id of the SST file to cache.
+    file_id: FileId,
+    /// Index of the row group.
+    row_group_idx: usize,
+    /// Index of the column in the row group.
+    column_idx: usize,
+}
+
 /// Cache key for pages of a SST row group.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PageKey {
-    /// Cache key for a compressed byte range in a row group.
-    Compressed {
-        /// Region id of the SST file to cache.
-        region_id: RegionId,
-        /// Id of the SST file to cache.
-        file_id: FileId,
-        /// Index of the row group.
-        row_group_idx: usize,
-        /// Index of the column in the row group.
-        column_idx: usize,
-    },
+    /// Cache key for a compressed page in a row group.
+    Compressed(ColumnPagePath),
     /// Cache key for all uncompressed pages in a row group.
-    RowGroup {
-        /// Region id of the SST file to cache.
-        region_id: RegionId,
-        /// Id of the SST file to cache.
-        file_id: FileId,
-        /// Index of the row group.
-        row_group_idx: usize,
-        /// Index of the column in the row group.
-        column_idx: usize,
-    },
+    Uncompressed(ColumnPagePath),
 }
 
 impl PageKey {
+    /// Creates a key for a compressed page.
+    pub fn new_compressed(
+        region_id: RegionId,
+        file_id: FileId,
+        row_group_idx: usize,
+        column_idx: usize,
+    ) -> PageKey {
+        PageKey::Compressed(ColumnPagePath {
+            region_id,
+            file_id,
+            row_group_idx,
+            column_idx,
+        })
+    }
+
+    /// Creates a key for all uncompressed pages in a row group.
+    pub fn new_uncompressed(
+        region_id: RegionId,
+        file_id: FileId,
+        row_group_idx: usize,
+        column_idx: usize,
+    ) -> PageKey {
+        PageKey::Uncompressed(ColumnPagePath {
+            region_id,
+            file_id,
+            row_group_idx,
+            column_idx,
+        })
+    }
+
     /// Returns memory used by the key (estimated).
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
@@ -542,12 +567,7 @@ mod tests {
             .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
             .is_none());
 
-        let key = PageKey::RowGroup {
-            region_id,
-            file_id,
-            row_group_idx: 0,
-            column_idx: 0,
-        };
+        let key = PageKey::new_uncompressed(region_id, file_id, 0, 0);
         let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);
         assert!(cache.get_pages(&key).is_none());
@@ -597,12 +617,7 @@ mod tests {
         let cache = CacheManager::builder().page_cache_size(1000).build();
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
-        let key = PageKey::Compressed {
-            region_id,
-            file_id,
-            row_group_idx: 0,
-            column_idx: 0,
-        };
+        let key = PageKey::new_compressed(region_id, file_id, 0, 0);
         assert!(cache.get_pages(&key).is_none());
         let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);

@@ -907,8 +907,7 @@ impl ScanPartList {
         self.0.as_ref().map_or(0, |parts| {
             parts
                 .iter()
-                .map(|part| part.file_ranges.iter())
-                .flatten()
+                .flat_map(|part| part.file_ranges.iter())
                 .map(|ranges| ranges.len())
                 .sum()
         })
