@@ -12,11 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod alter;
-pub mod delete;
-pub mod error;
-pub mod insert;
-pub mod util;
+use std::sync::Arc;
+mod json_to_string;
+mod to_json;
 
-pub use alter::{alter_expr_to_request, create_table_schema};
-pub use insert::build_create_expr_from_insertion;
+use json_to_string::JsonToStringFunction;
+use to_json::ToJsonFunction;
+
+use crate::function_registry::FunctionRegistry;
+
+pub(crate) struct JsonFunction;
+
+impl JsonFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(JsonToStringFunction));
+        registry.register(Arc::new(ToJsonFunction));
+    }
+}

@@ -32,7 +32,6 @@ use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
-use datatypes::schema::Schema;
 use futures_util::future;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
@@ -45,7 +44,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
-use table::requests::{InsertRequest as TableInsertRequest, TTL_KEY};
+use table::requests::{InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TTL_KEY};
 use table::table_reference::TableReference;
 use table::TableRef;
 
@@ -462,21 +461,49 @@ impl Inserter {
         auto_create_table_type: AutoCreateTableType,
         statement_executor: &StatementExecutor,
     ) -> Result<HashMap<String, TableId>> {
-        let mut table_name_to_ids = HashMap::with_capacity(requests.inserts.len());
-        let mut create_tables = vec![];
-        let mut alter_tables = vec![];
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
+
+        let catalog = ctx.current_catalog();
+        let schema = ctx.current_schema();
+        let mut table_name_to_ids = HashMap::with_capacity(requests.inserts.len());
+        // If `auto_create_table` hint is disabled, skip creating/altering tables.
+        let auto_create_table_hint = ctx
+            .extension(AUTO_CREATE_TABLE_KEY)
+            .map(|v| v.parse::<bool>())
+            .transpose()
+            .map_err(|_| {
+                InvalidInsertRequestSnafu {
+                    reason: "`auto_create_table` hint must be a boolean",
+                }
+                .build()
+            })?
+            .unwrap_or(true);
+        if !auto_create_table_hint {
+            for req in &requests.inserts {
+                let table = self
+                    .get_table(catalog, &schema, &req.table_name)
+                    .await?
+                    .context(InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "Table `{}` does not exist, and `auto_create_table` hint is disabled",
+                            req.table_name
+                        ),
+                    })?;
+                let table_info = table.table_info();
+                table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+            }
+            return Ok(table_name_to_ids);
+        }
+
+        let mut create_tables = vec![];
+        let mut alter_tables = vec![];
         for req in &requests.inserts {
-            let catalog = ctx.current_catalog();
-            let schema = ctx.current_schema();
-            let table = self.get_table(catalog, &schema, &req.table_name).await?;
-            match table {
+            match self.get_table(catalog, &schema, &req.table_name).await? {
                 Some(table) => {
                     let table_info = table.table_info();
                     table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
-                    validate_request_with_table(req, &table)?;
                     if let Some(alter_expr) =
                         self.get_alter_table_expr_on_demand(req, table, ctx)?
                     {
@@ -536,6 +563,7 @@ impl Inserter {
                 }
             }
         }
+
         Ok(table_name_to_ids)
     }
 
@@ -796,87 +824,9 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
     Ok(())
 }
 
-fn validate_request_with_table(req: &RowInsertRequest, table: &TableRef) -> Result<()> {
-    let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
-    let table_schema = table.schema();
-
-    validate_required_columns(request_schema, &table_schema)?;
-
-    Ok(())
-}
-
-fn validate_required_columns(request_schema: &[ColumnSchema], table_schema: &Schema) -> Result<()> {
-    for column_schema in table_schema.column_schemas() {
-        if column_schema.is_nullable() || column_schema.default_constraint().is_some() {
-            continue;
-        }
-        if !request_schema
-            .iter()
-            .any(|c| c.column_name == column_schema.name)
-        {
-            return InvalidInsertRequestSnafu {
-                reason: format!(
-                    "Expecting insert data to be presented on a not null or no default value column '{}'.",
-                    &column_schema.name
-                )
-            }.fail();
-        }
-    }
-    Ok(())
-}
-
 fn build_create_table_expr(
     table: &TableReference,
     request_schema: &[ColumnSchema],
 ) -> Result<CreateTableExpr> {
     CreateExprFactory.create_table_expr_by_column_schemas(table, request_schema, default_engine())
-}
-
-#[cfg(test)]
-mod tests {
-    use datatypes::prelude::{ConcreteDataType, Value as DtValue};
-    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema as DtColumnSchema};
-
-    use super::*;
-
-    #[test]
-    fn test_validate_required_columns() {
-        let schema = Schema::new(vec![
-            DtColumnSchema::new("a", ConcreteDataType::int32_datatype(), true)
-                .with_default_constraint(None)
-                .unwrap(),
-            DtColumnSchema::new("b", ConcreteDataType::int32_datatype(), true)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Value(DtValue::Int32(100))))
-                .unwrap(),
-        ]);
-        let request_schema = &[ColumnSchema {
-            column_name: "c".to_string(),
-            ..Default::default()
-        }];
-        // If nullable is true, it doesn't matter whether the insert request has the column.
-        validate_required_columns(request_schema, &schema).unwrap();
-
-        let schema = Schema::new(vec![
-            DtColumnSchema::new("a", ConcreteDataType::int32_datatype(), false)
-                .with_default_constraint(None)
-                .unwrap(),
-            DtColumnSchema::new("b", ConcreteDataType::int32_datatype(), false)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Value(DtValue::Int32(-100))))
-                .unwrap(),
-        ]);
-        let request_schema = &[ColumnSchema {
-            column_name: "a".to_string(),
-            ..Default::default()
-        }];
-        // If nullable is false, but the column is defined with default value,
-        // it also doesn't matter whether the insert request has the column.
-        validate_required_columns(request_schema, &schema).unwrap();
-
-        let request_schema = &[ColumnSchema {
-            column_name: "b".to_string(),
-            ..Default::default()
-        }];
-        // Neither of the above cases.
-        assert!(validate_required_columns(request_schema, &schema).is_err());
-    }
 }

@@ -441,11 +441,9 @@ async fn handle_alter_table_task(
         .table_metadata_manager()
         .table_route_manager()
         .table_route_storage()
-        .get_raw(table_id)
+        .get(table_id)
         .await?
-        .context(TableRouteNotFoundSnafu { table_id })?
-        .into_inner();
-
+        .context(TableRouteNotFoundSnafu { table_id })?;
     ensure!(
         table_route_value.is_physical(),
         UnexpectedLogicalRouteTableSnafu {

@@ -168,6 +168,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                                 &mut row_writer,
                                 &record_batch,
                                 query_context.clone(),
+                                &column_def,
                             )
                             .await?
                         }
@@ -191,9 +192,10 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         row_writer: &mut RowWriter<'_, W>,
         recordbatch: &RecordBatch,
         query_context: QueryContextRef,
+        column_def: &[Column],
     ) -> Result<()> {
         for row in recordbatch.rows() {
-            for value in row.into_iter() {
+            for (value, column) in row.into_iter().zip(column_def.iter()) {
                 match value {
                     Value::Null => row_writer.write_col(None::<u8>)?,
                     Value::Boolean(v) => row_writer.write_col(v as i8)?,
@@ -208,7 +210,14 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Float32(v) => row_writer.write_col(v.0)?,
                     Value::Float64(v) => row_writer.write_col(v.0)?,
                     Value::String(v) => row_writer.write_col(v.as_utf8())?,
-                    Value::Binary(v) => row_writer.write_col(v.deref())?,
+                    Value::Binary(v) => match column.coltype {
+                        ColumnType::MYSQL_TYPE_JSON => {
+                            row_writer.write_col(jsonb::to_string(&v))?;
+                        }
+                        _ => {
+                            row_writer.write_col(v.deref())?;
+                        }
+                    },
                     Value::Date(v) => row_writer.write_col(v.to_chrono_date())?,
                     // convert datetime and timestamp to timezone of current connection
                     Value::DateTime(v) => row_writer.write_col(
@@ -281,6 +290,7 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Interval(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
         ConcreteDataType::Duration(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Decimal128(_) => Ok(ColumnType::MYSQL_TYPE_DECIMAL),
+        ConcreteDataType::Json(_) => Ok(ColumnType::MYSQL_TYPE_JSON),
         _ => error::UnsupportedDataTypeSnafu {
             data_type,
             reason: "not implemented",

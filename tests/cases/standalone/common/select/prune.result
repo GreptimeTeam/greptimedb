@@ -89,7 +89,7 @@ explain analyze select * from demo where idc='idc1';
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
+| 1_| 0_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+

@@ -42,7 +42,8 @@ use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{
-    ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, QueryRequest, Row, SemanticType,
+    ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonTypeExtension, QueryRequest,
+    Row, SemanticType,
 };
 use paste::paste;
 use snafu::prelude::*;
@@ -103,7 +104,17 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::Uint64 => ConcreteDataType::uint64_datatype(),
             ColumnDataType::Float32 => ConcreteDataType::float32_datatype(),
             ColumnDataType::Float64 => ConcreteDataType::float64_datatype(),
-            ColumnDataType::Binary => ConcreteDataType::binary_datatype(),
+            ColumnDataType::Binary => {
+                if let Some(TypeExt::JsonType(_)) = datatype_wrapper
+                    .datatype_ext
+                    .as_ref()
+                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref())
+                {
+                    ConcreteDataType::json_datatype()
+                } else {
+                    ConcreteDataType::binary_datatype()
+                }
+            }
             ColumnDataType::String => ConcreteDataType::string_datatype(),
             ColumnDataType::Date => ConcreteDataType::date_datatype(),
             ColumnDataType::Datetime => ConcreteDataType::datetime_datatype(),
@@ -236,7 +247,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::UInt64(_) => ColumnDataType::Uint64,
             ConcreteDataType::Float32(_) => ColumnDataType::Float32,
             ConcreteDataType::Float64(_) => ColumnDataType::Float64,
-            ConcreteDataType::Binary(_) => ColumnDataType::Binary,
+            ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => ColumnDataType::Binary,
             ConcreteDataType::String(_) => ColumnDataType::String,
             ConcreteDataType::Date(_) => ColumnDataType::Date,
             ConcreteDataType::DateTime(_) => ColumnDataType::Datetime,
@@ -275,6 +286,16 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                             scale: decimal_type.scale() as i32,
                         })),
                     })
+            }
+            ColumnDataType::Binary => {
+                if datatype == ConcreteDataType::json_datatype() {
+                    // Json is the same as  binary in proto. The extension marks the binary in proto is actually a json.
+                    Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+                    })
+                } else {
+                    None
+                }
             }
             _ => None,
         };
@@ -649,7 +670,8 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
         ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
         | ConcreteDataType::Dictionary(_)
-        | ConcreteDataType::Duration(_) => {
+        | ConcreteDataType::Duration(_)
+        | ConcreteDataType::Json(_) => {
             unreachable!()
         }
     }
@@ -813,7 +835,8 @@ pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<
         ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
         | ConcreteDataType::Dictionary(_)
-        | ConcreteDataType::Duration(_) => {
+        | ConcreteDataType::Duration(_)
+        | ConcreteDataType::Json(_) => {
             unreachable!()
         }
     }
@@ -831,7 +854,13 @@ pub fn is_column_type_value_eq(
     expect_type: &ConcreteDataType,
 ) -> bool {
     ColumnDataTypeWrapper::try_new(type_value, type_extension)
-        .map(|wrapper| ConcreteDataType::from(wrapper) == *expect_type)
+        .map(|wrapper| {
+            let datatype = ConcreteDataType::from(wrapper);
+            (datatype == *expect_type)
+            // Json type leverage binary type in pb, so this is valid.
+                || (datatype == ConcreteDataType::binary_datatype()
+                    && *expect_type == ConcreteDataType::json_datatype())
+        })
         .unwrap_or(false)
 }
 

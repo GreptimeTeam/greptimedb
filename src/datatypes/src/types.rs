@@ -21,6 +21,7 @@ mod decimal_type;
 mod dictionary_type;
 mod duration_type;
 mod interval_type;
+mod json_type;
 mod list_type;
 mod null_type;
 mod primitive_type;
@@ -42,6 +43,7 @@ pub use duration_type::{
 pub use interval_type::{
     IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType,
 };
+pub use json_type::{JsonType, JSON_TYPE_NAME};
 pub use list_type::ListType;
 pub use null_type::NullType;
 pub use primitive_type::{
