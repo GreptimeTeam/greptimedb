@@ -84,6 +84,11 @@ impl Provider {
         Provider::Kafka(Arc::new(KafkaProvider { topic }))
     }
 
+    /// Returns true if it's remote WAL.
+    pub fn is_remote_wal(&self) -> bool {
+        matches!(self, Provider::Kafka(_))
+    }
+
     /// Returns the type name.
     pub fn type_name(&self) -> &'static str {
         match self {
