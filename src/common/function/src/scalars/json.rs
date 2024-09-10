@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::sync::Arc;
+mod get_by_path;
 mod json_to_string;
 mod to_json;
 
+use get_by_path::{GetByPathBool, GetByPathFloat, GetByPathInt, GetByPathString};
 use json_to_string::JsonToStringFunction;
 use to_json::ToJsonFunction;
 
@@ -27,5 +29,10 @@ impl JsonFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(JsonToStringFunction));
         registry.register(Arc::new(ToJsonFunction));
+
+        registry.register(Arc::new(GetByPathInt));
+        registry.register(Arc::new(GetByPathFloat));
+        registry.register(Arc::new(GetByPathString));
+        registry.register(Arc::new(GetByPathBool));
     }
 }
