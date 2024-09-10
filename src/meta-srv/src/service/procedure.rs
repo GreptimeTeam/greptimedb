@@ -112,7 +112,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
             from_peer,
             to_peer,
             replay_timeout_secs,
-            ..
+            flush_timeout_secs,
         } = request.into_inner();
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
@@ -127,6 +127,12 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .await?
             .context(error::PeerUnavailableSnafu { peer_id: to_peer })?;
 
+        let flush_timeout = if flush_timeout_secs == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(flush_timeout_secs.into()))
+        };
+
         let pid = self
             .region_migration_manager()
             .submit_procedure(RegionMigrationProcedureTask {
@@ -135,8 +141,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
                 from_peer,
                 to_peer,
                 replay_timeout: Duration::from_secs(replay_timeout_secs.into()),
-                // TODO(weny): setting `flush_timeout`
-                flush_timeout: None,
+                flush_timeout,
             })
             .await?
             .map(procedure::pid_to_pb_pid);
