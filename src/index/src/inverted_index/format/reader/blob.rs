@@ -55,7 +55,7 @@ impl<R: RangeReader> InvertedIndexReader for InvertedIndexBlobReader<R> {
             .read_into(0..metadata.content_length, dest)
             .await
             .context(CommonIoSnafu)?;
-        Ok(dest.len())
+        Ok(metadata.content_length as usize)
     }
 
     async fn seek_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
