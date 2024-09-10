@@ -32,7 +32,6 @@ use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
-use datatypes::schema::Schema;
 use futures_util::future;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
@@ -494,8 +493,6 @@ impl Inserter {
                     })?;
                 let table_info = table.table_info();
                 table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
-                // TODO(wenny): remove this check
-                validate_request_with_table(req, &table)?;
             }
             return Ok(table_name_to_ids);
         }
@@ -507,8 +504,6 @@ impl Inserter {
                 Some(table) => {
                     let table_info = table.table_info();
                     table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
-                    // TODO(wenny): remove this check
-                    validate_request_with_table(req, &table)?;
                     if let Some(alter_expr) =
                         self.get_alter_table_expr_on_demand(req, table, ctx)?
                     {
@@ -829,87 +824,9 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
     Ok(())
 }
 
-fn validate_request_with_table(req: &RowInsertRequest, table: &TableRef) -> Result<()> {
-    let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
-    let table_schema = table.schema();
-
-    validate_required_columns(request_schema, &table_schema)?;
-
-    Ok(())
-}
-
-fn validate_required_columns(request_schema: &[ColumnSchema], table_schema: &Schema) -> Result<()> {
-    for column_schema in table_schema.column_schemas() {
-        if column_schema.is_nullable() || column_schema.default_constraint().is_some() {
-            continue;
-        }
-        if !request_schema
-            .iter()
-            .any(|c| c.column_name == column_schema.name)
-        {
-            return InvalidInsertRequestSnafu {
-                reason: format!(
-                    "Expecting insert data to be presented on a not null or no default value column '{}'.",
-                    &column_schema.name
-                )
-            }.fail();
-        }
-    }
-    Ok(())
-}
-
 fn build_create_table_expr(
     table: &TableReference,
     request_schema: &[ColumnSchema],
 ) -> Result<CreateTableExpr> {
     CreateExprFactory.create_table_expr_by_column_schemas(table, request_schema, default_engine())
-}
-
-#[cfg(test)]
-mod tests {
-    use datatypes::prelude::{ConcreteDataType, Value as DtValue};
-    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema as DtColumnSchema};
-
-    use super::*;
-
-    #[test]
-    fn test_validate_required_columns() {
-        let schema = Schema::new(vec![
-            DtColumnSchema::new("a", ConcreteDataType::int32_datatype(), true)
-                .with_default_constraint(None)
-                .unwrap(),
-            DtColumnSchema::new("b", ConcreteDataType::int32_datatype(), true)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Value(DtValue::Int32(100))))
-                .unwrap(),
-        ]);
-        let request_schema = &[ColumnSchema {
-            column_name: "c".to_string(),
-            ..Default::default()
-        }];
-        // If nullable is true, it doesn't matter whether the insert request has the column.
-        validate_required_columns(request_schema, &schema).unwrap();
-
-        let schema = Schema::new(vec![
-            DtColumnSchema::new("a", ConcreteDataType::int32_datatype(), false)
-                .with_default_constraint(None)
-                .unwrap(),
-            DtColumnSchema::new("b", ConcreteDataType::int32_datatype(), false)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Value(DtValue::Int32(-100))))
-                .unwrap(),
-        ]);
-        let request_schema = &[ColumnSchema {
-            column_name: "a".to_string(),
-            ..Default::default()
-        }];
-        // If nullable is false, but the column is defined with default value,
-        // it also doesn't matter whether the insert request has the column.
-        validate_required_columns(request_schema, &schema).unwrap();
-
-        let request_schema = &[ColumnSchema {
-            column_name: "b".to_string(),
-            ..Default::default()
-        }];
-        // Neither of the above cases.
-        assert!(validate_required_columns(request_schema, &schema).is_err());
-    }
 }
