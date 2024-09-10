@@ -19,7 +19,6 @@ use arrow::datatypes::Field;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 
-use super::TYPE_KEY;
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error, Result};
 use crate::schema::constraint::ColumnDefaultConstraint;

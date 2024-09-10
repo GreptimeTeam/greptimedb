@@ -22,6 +22,7 @@ use crate::function::{AsyncFunctionRef, FunctionRef};
 use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
+use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::math::MathFunction;
 use crate::scalars::numpy::NumpyFunction;

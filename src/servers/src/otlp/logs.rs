@@ -18,8 +18,8 @@ use ahash::{HashMap, HashMapExt};
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnDataTypeExtension, ColumnOptions, ColumnSchema, Row, RowInsertRequest,
-    RowInsertRequests, Rows, SemanticType, Value as GreptimeValue,
+    ColumnDataType, ColumnDataTypeExtension, ColumnOptions, ColumnSchema, JsonTypeExtension, Row,
+    RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value as GreptimeValue,
 };
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -28,7 +28,7 @@ use opentelemetry_proto::tonic::logs::v1::LogRecord;
 use pipeline::{Array, Map, Value as PipelineValue};
 
 use super::trace::attributes::OtlpAnyValue;
-use crate::error::Result;
+use crate::error::{OpenTelemetryLogSnafu, Result};
 use crate::otlp::trace::span::bytes_to_hex_string;
 use crate::query_handler::PipelineWay;
 
@@ -70,13 +70,24 @@ pub fn to_grpc_insert_requests(
             ))
         }
         PipelineWay::Custom(p) => {
-            let result = parse_export_logs_service_request(request);
-            let transformed_data = p
-                .exec(PipelineValue::Array(Array { values: result }))
-                .unwrap();
-            let len = transformed_data.rows.len();
+            let request = parse_export_logs_service_request(request);
+            let mut reslut = Vec::new();
+            let mut intermediate_state = p.init_intermediate_state();
+            for v in request {
+                p.prepare_pipeline_value(v, &mut intermediate_state)
+                    .map_err(|e| OpenTelemetryLogSnafu { error: e }.build())?;
+                let r = p
+                    .exec_mut(&mut intermediate_state)
+                    .map_err(|e| OpenTelemetryLogSnafu { error: e }.build())?;
+                reslut.push(r);
+            }
+            let len = reslut.len();
+            let rows = Rows {
+                schema: p.schemas().clone(),
+                rows: reslut,
+            };
             let insert_request = RowInsertRequest {
-                rows: Some(transformed_data),
+                rows: Some(rows),
                 table_name,
             };
             let insert_requests = RowInsertRequests {
@@ -201,7 +212,7 @@ fn build_identity_schema() -> Vec<ColumnSchema> {
             ColumnDataType::Binary,
             SemanticType::Field,
             Some(ColumnDataTypeExtension {
-                type_ext: Some(TypeExt::JsonType(true)),
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
             }),
             None,
         ),
@@ -224,7 +235,7 @@ fn build_identity_schema() -> Vec<ColumnSchema> {
             ColumnDataType::Binary,
             SemanticType::Field,
             Some(ColumnDataTypeExtension {
-                type_ext: Some(TypeExt::JsonType(true)),
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
             }),
             None,
         ),
@@ -233,7 +244,7 @@ fn build_identity_schema() -> Vec<ColumnSchema> {
             ColumnDataType::Binary,
             SemanticType::Field,
             Some(ColumnDataTypeExtension {
-                type_ext: Some(TypeExt::JsonType(true)),
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
             }),
             None,
         ),
