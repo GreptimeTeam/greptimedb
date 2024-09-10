@@ -86,7 +86,7 @@ impl TableRouteValue {
                     debug_assert_eq!(region.region.id.table_id(), physical_table_id);
                     RegionId::new(table_id, region.region.id.region_number())
                 })
-                .collect::<Vec<_>>();
+                .collect();
             TableRouteValue::logical(physical_table_id, region_routes)
         }
     }
@@ -190,12 +190,12 @@ impl TableRouteValue {
                 .region_routes
                 .iter()
                 .map(|region_route| region_route.region.id.region_number())
-                .collect::<Vec<_>>(),
+                .collect(),
             TableRouteValue::Logical(x) => x
                 .region_ids()
                 .iter()
                 .map(|region_id| region_id.region_number())
-                .collect::<Vec<_>>(),
+                .collect(),
         }
     }
 }
@@ -633,7 +633,7 @@ impl TableRouteStorage {
                     Ok(None)
                 }
             })
-            .collect::<Result<Vec<_>>>()
+            .collect()
     }
 
     async fn remap_routes_addresses(
@@ -675,8 +675,7 @@ impl TableRouteStorage {
             return Ok(HashMap::default());
         }
 
-        let node_addrs = self
-            .kv_backend
+        self.kv_backend
             .batch_get(BatchGetRequest { keys })
             .await?
             .kvs
@@ -686,9 +685,7 @@ impl TableRouteStorage {
                 let node_addr = NodeAddressValue::try_from_raw_value(&kv.value)?;
                 Ok((node_id, node_addr))
             })
-            .collect::<Result<HashMap<_, _>>>()?;
-
-        Ok(node_addrs)
+            .collect()
     }
 }
 
@@ -736,7 +733,7 @@ fn extract_address_keys(table_route: &TableRouteValue) -> HashSet<Vec<u8>> {
                         .map(|leader| NodeAddressKey::with_datanode(leader.id).to_bytes()),
                 )
         })
-        .collect::<HashSet<_>>()
+        .collect()
 }
 
 #[cfg(test)]
