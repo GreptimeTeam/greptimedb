@@ -166,8 +166,8 @@ impl SeqScan {
                     reader_metrics.merge_from(reader.metrics());
                 }
                 debug!(
-                    "Seq scan region {}, file {}, {} ranges finished, metrics: {:?}",
-                    region_id, file_id, range_num, reader_metrics
+                    "Seq scan region {}, file {}, {} ranges finished, metrics: {:?}, compaction: {}",
+                    region_id, file_id, range_num, reader_metrics, compaction
                 );
                 // Reports metrics.
                 reader_metrics.observe_rows(read_type);
@@ -238,11 +238,12 @@ impl SeqScan {
         let maybe_reader = Self::build_reader_from_sources(stream_ctx, sources, semaphore).await;
         let build_reader_cost = build_start.elapsed();
         metrics.build_reader_cost += build_reader_cost;
-        common_telemetry::debug!(
-            "Build reader region: {}, range_id: {}, from sources, build_reader_cost: {:?}",
+        debug!(
+            "Build reader region: {}, range_id: {}, from sources, build_reader_cost: {:?}, compaction: {}",
             stream_ctx.input.mapper.metadata().region_id,
             range_id,
-            build_reader_cost
+            build_reader_cost,
+            compaction,
         );
 
         maybe_reader
@@ -354,11 +355,12 @@ impl SeqScan {
                 metrics.observe_metrics_on_finish();
 
                 debug!(
-                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}, first_poll: {:?}",
+                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}, first_poll: {:?}, compaction: {}",
                     stream_ctx.input.mapper.metadata().region_id,
                     partition,
                     metrics,
                     first_poll,
+                    compaction,
                 );
             }
         };
@@ -450,13 +452,14 @@ impl SeqScan {
                 metrics.total_cost = stream_ctx.query_start.elapsed();
                 metrics.observe_metrics_on_finish();
 
-                common_telemetry::debug!(
-                    "Seq scan finished, region_id: {}, partition: {}, id: {}, metrics: {:?}, first_poll: {:?}",
+                debug!(
+                    "Seq scan finished, region_id: {}, partition: {}, id: {}, metrics: {:?}, first_poll: {:?}, compaction: {}",
                     stream_ctx.input.mapper.metadata().region_id,
                     partition,
                     id,
                     metrics,
                     first_poll,
+                    compaction,
                 );
             }
         };

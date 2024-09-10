@@ -655,13 +655,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid heartbeat request: {}", err_msg))]
-    InvalidHeartbeatRequest {
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to publish message"))]
     PublishMessage {
         #[snafu(source)]
@@ -809,7 +802,6 @@ impl ErrorExt for Error {
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
             | Error::InitExportMetricsTask { .. }
-            | Error::InvalidHeartbeatRequest { .. }
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
             | Error::TomlFormat { .. } => StatusCode::InvalidArguments,

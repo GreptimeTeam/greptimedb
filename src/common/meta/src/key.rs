@@ -90,6 +90,7 @@
 pub mod catalog_name;
 pub mod datanode_table;
 pub mod flow;
+pub mod node_address;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
@@ -102,7 +103,7 @@ pub mod view_info;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -134,6 +135,7 @@ use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
 use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
+use crate::key::node_address::NodeAddressValue;
 use crate::key::table_route::TableRouteKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Txn, TxnOp};
@@ -152,12 +154,15 @@ pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
 pub const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
 pub const TABLE_ROUTE_PREFIX: &str = "__table_route";
+pub const NODE_ADDRESS_PREFIX: &str = "__node_address";
 
-pub const CACHE_KEY_PREFIXES: [&str; 4] = [
+/// The keys with these prefixes will be loaded into the cache when the leader starts.
+pub const CACHE_KEY_PREFIXES: [&str; 5] = [
     TABLE_NAME_KEY_PREFIX,
     CATALOG_NAME_KEY_PREFIX,
     SCHEMA_NAME_KEY_PREFIX,
     TABLE_ROUTE_PREFIX,
+    NODE_ADDRESS_PREFIX,
 ];
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
@@ -208,6 +213,11 @@ lazy_static! {
         "^{SCHEMA_NAME_KEY_PREFIX}/({NAME_PATTERN})/({NAME_PATTERN})$"
     ))
         .unwrap();
+}
+
+lazy_static! {
+    static ref NODE_ADDRESS_PATTERN: Regex =
+        Regex::new(&format!("^{NODE_ADDRESS_PREFIX}/([0-9]+)/([0-9]+)$")).unwrap();
 }
 
 /// The key of metadata.
@@ -303,6 +313,12 @@ impl<T: DeserializeOwned + Serialize> Deref for DeserializedValueWithBytes<T> {
 
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+impl<T: DeserializeOwned + Serialize> DerefMut for DeserializedValueWithBytes<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
@@ -1230,7 +1246,8 @@ impl_metadata_value! {
     FlowInfoValue,
     FlowNameValue,
     FlowRouteValue,
-    TableFlowValue
+    TableFlowValue,
+    NodeAddressValue
 }
 
 impl_optional_metadata_value! {
@@ -1952,7 +1969,7 @@ mod tests {
         let table_route_value = table_metadata_manager
             .table_route_manager
             .table_route_storage()
-            .get_raw(table_id)
+            .get_with_raw_bytes(table_id)
             .await
             .unwrap()
             .unwrap();
@@ -2005,7 +2022,7 @@ mod tests {
         let table_route_value = table_metadata_manager
             .table_route_manager
             .table_route_storage()
-            .get_raw(table_id)
+            .get_with_raw_bytes(table_id)
             .await
             .unwrap()
             .unwrap();
