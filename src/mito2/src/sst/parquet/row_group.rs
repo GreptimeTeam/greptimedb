@@ -23,33 +23,37 @@ use parquet::arrow::arrow_reader::{RowGroups, RowSelection};
 use parquet::arrow::ProjectionMask;
 use parquet::column::page::{PageIterator, PageReader};
 use parquet::errors::{ParquetError, Result};
-use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
+use parquet::file::metadata::{ColumnChunkMetaData, ParquetMetaData, RowGroupMetaData};
+use parquet::file::properties::DEFAULT_PAGE_SIZE;
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::file::serialized_reader::SerializedPageReader;
 use parquet::format::PageLocation;
 use store_api::storage::RegionId;
+use tokio::task::yield_now;
 
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheManagerRef, PageKey, PageValue};
-use crate::metrics::READ_STAGE_ELAPSED;
+use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
-use crate::sst::parquet::page_reader::CachedPageReader;
+use crate::sst::parquet::page_reader::RowGroupCachedReader;
 
 /// An in-memory collection of column chunks
 pub struct InMemoryRowGroup<'a> {
     metadata: &'a RowGroupMetaData,
     page_locations: Option<&'a [Vec<PageLocation>]>,
+    /// Compressed page of each column.
     column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
     row_count: usize,
     region_id: RegionId,
     file_id: FileId,
     row_group_idx: usize,
     cache_manager: Option<CacheManagerRef>,
-    /// Cached pages for each column.
+    /// Row group level cached pages for each column.
     ///
-    /// `column_cached_pages.len()` equals to `column_chunks.len()`.
-    column_cached_pages: Vec<Option<Arc<PageValue>>>,
+    /// These pages are uncompressed pages of a row group.
+    /// `column_uncompressed_pages.len()` equals to `column_chunks.len()`.
+    column_uncompressed_pages: Vec<Option<Arc<PageValue>>>,
     file_path: &'a str,
     /// Object store.
     object_store: ObjectStore,
@@ -86,7 +90,7 @@ impl<'a> InMemoryRowGroup<'a> {
             file_id,
             row_group_idx,
             cache_manager,
-            column_cached_pages: vec![None; metadata.columns().len()],
+            column_uncompressed_pages: vec![None; metadata.columns().len()],
             file_path,
             object_store,
         }
@@ -161,16 +165,20 @@ impl<'a> InMemoryRowGroup<'a> {
             // Now we only use cache in dense chunk data.
             self.fetch_pages_from_cache(projection);
 
+            // Release the CPU to avoid blocking the runtime. Since `fetch_pages_from_cache`
+            // is a synchronous, CPU-bound operation.
+            yield_now().await;
+
             let fetch_ranges = self
                 .column_chunks
                 .iter()
-                .zip(&self.column_cached_pages)
+                .zip(&self.column_uncompressed_pages)
                 .enumerate()
-                // Don't need to fetch column data if we already cache the column's pages.
-                .filter(|&(idx, (chunk, cached_pages))| {
-                    chunk.is_none() && projection.leaf_included(idx) && cached_pages.is_none()
+                .filter(|&(idx, (chunk, uncompressed_pages))| {
+                    // Don't need to fetch column data if we already cache the column's pages.
+                    chunk.is_none() && projection.leaf_included(idx) && uncompressed_pages.is_none()
                 })
-                .map(|(idx, (_chunk, _cached_pages))| {
+                .map(|(idx, (_chunk, _pages))| {
                     let column = self.metadata.column(idx);
                     let (start, length) = column.byte_range();
                     start..(start + length)
@@ -184,22 +192,41 @@ impl<'a> InMemoryRowGroup<'a> {
 
             let mut chunk_data = self.fetch_bytes(&fetch_ranges).await?.into_iter();
 
-            for (idx, (chunk, cached_pages)) in self
+            for (idx, (chunk, row_group_pages)) in self
                 .column_chunks
                 .iter_mut()
-                .zip(&self.column_cached_pages)
+                .zip(&self.column_uncompressed_pages)
                 .enumerate()
             {
-                if chunk.is_some() || !projection.leaf_included(idx) || cached_pages.is_some() {
+                if chunk.is_some() || !projection.leaf_included(idx) || row_group_pages.is_some() {
                     continue;
                 }
 
-                if let Some(data) = chunk_data.next() {
-                    *chunk = Some(Arc::new(ColumnChunkData::Dense {
-                        offset: self.metadata.column(idx).byte_range().0 as usize,
-                        data,
-                    }));
+                // Get the fetched page.
+                let Some(data) = chunk_data.next() else {
+                    continue;
+                };
+
+                let column = self.metadata.column(idx);
+                if let Some(cache) = &self.cache_manager {
+                    if !cache_uncompressed_pages(column) {
+                        // For columns that have multiple uncompressed pages, we only cache the compressed page
+                        // to save memory.
+                        let page_key = PageKey::new_compressed(
+                            self.region_id,
+                            self.file_id,
+                            self.row_group_idx,
+                            idx,
+                        );
+                        cache
+                            .put_pages(page_key, Arc::new(PageValue::new_compressed(data.clone())));
+                    }
                 }
+
+                *chunk = Some(Arc::new(ColumnChunkData::Dense {
+                    offset: column.byte_range().0 as usize,
+                    data,
+                }));
             }
         }
 
@@ -207,20 +234,42 @@ impl<'a> InMemoryRowGroup<'a> {
     }
 
     /// Fetches pages for columns if cache is enabled.
+    /// If the page is in the cache, sets the column chunk or `column_uncompressed_pages` for the column.
     fn fetch_pages_from_cache(&mut self, projection: &ProjectionMask) {
+        let _timer = READ_STAGE_FETCH_PAGES.start_timer();
         self.column_chunks
-            .iter()
+            .iter_mut()
             .enumerate()
-            .filter(|&(idx, chunk)| chunk.is_none() && projection.leaf_included(idx))
-            .for_each(|(idx, _chunk)| {
-                if let Some(cache) = &self.cache_manager {
-                    let page_key = PageKey {
-                        region_id: self.region_id,
-                        file_id: self.file_id,
-                        row_group_idx: self.row_group_idx,
-                        column_idx: idx,
-                    };
-                    self.column_cached_pages[idx] = cache.get_pages(&page_key);
+            .filter(|(idx, chunk)| chunk.is_none() && projection.leaf_included(*idx))
+            .for_each(|(idx, chunk)| {
+                let Some(cache) = &self.cache_manager else {
+                    return;
+                };
+                let column = self.metadata.column(idx);
+                if cache_uncompressed_pages(column) {
+                    // Fetches uncompressed pages for the row group.
+                    let page_key = PageKey::new_uncompressed(
+                        self.region_id,
+                        self.file_id,
+                        self.row_group_idx,
+                        idx,
+                    );
+                    self.column_uncompressed_pages[idx] = cache.get_pages(&page_key);
+                } else {
+                    // Fetches the compressed page from the cache.
+                    let page_key = PageKey::new_compressed(
+                        self.region_id,
+                        self.file_id,
+                        self.row_group_idx,
+                        idx,
+                    );
+
+                    *chunk = cache.get_pages(&page_key).map(|page_value| {
+                        Arc::new(ColumnChunkData::Dense {
+                            offset: column.byte_range().0 as usize,
+                            data: page_value.compressed.clone(),
+                        })
+                    });
                 }
             });
     }
@@ -259,12 +308,12 @@ impl<'a> InMemoryRowGroup<'a> {
 
     /// Creates a page reader to read column at `i`.
     fn column_page_reader(&self, i: usize) -> Result<Box<dyn PageReader>> {
-        if let Some(cached_pages) = &self.column_cached_pages[i] {
-            // Already in cache.
-            return Ok(Box::new(CachedPageReader::new(&cached_pages.pages)));
+        if let Some(cached_pages) = &self.column_uncompressed_pages[i] {
+            debug_assert!(!cached_pages.row_group.is_empty());
+            // Hits the row group level page cache.
+            return Ok(Box::new(RowGroupCachedReader::new(&cached_pages.row_group)));
         }
 
-        // Cache miss.
         let page_reader = match &self.column_chunks[i] {
             None => {
                 return Err(ParquetError::General(format!(
@@ -283,23 +332,32 @@ impl<'a> InMemoryRowGroup<'a> {
         };
 
         let Some(cache) = &self.cache_manager else {
-            // Cache is disabled.
             return Ok(Box::new(page_reader));
         };
 
-        // We collect all pages and put them into the cache.
-        let pages = page_reader.collect::<Result<Vec<_>>>()?;
-        let page_value = Arc::new(PageValue::new(pages));
-        let page_key = PageKey {
-            region_id: self.region_id,
-            file_id: self.file_id,
-            row_group_idx: self.row_group_idx,
-            column_idx: i,
-        };
-        cache.put_pages(page_key, page_value.clone());
+        let column = self.metadata.column(i);
+        if cache_uncompressed_pages(column) {
+            // This column use row group level page cache.
+            // We collect all pages and put them into the cache.
+            let pages = page_reader.collect::<Result<Vec<_>>>()?;
+            let page_value = Arc::new(PageValue::new_row_group(pages));
+            let page_key =
+                PageKey::new_uncompressed(self.region_id, self.file_id, self.row_group_idx, i);
+            cache.put_pages(page_key, page_value.clone());
 
-        Ok(Box::new(CachedPageReader::new(&page_value.pages)))
+            return Ok(Box::new(RowGroupCachedReader::new(&page_value.row_group)));
+        }
+
+        // This column don't cache uncompressed pages.
+        Ok(Box::new(page_reader))
     }
+}
+
+/// Returns whether we cache uncompressed pages for the column.
+fn cache_uncompressed_pages(column: &ColumnChunkMetaData) -> bool {
+    // If the row group only has a data page, cache the whole row group as
+    // it might be faster than caching a compressed page.
+    column.uncompressed_size() as usize <= DEFAULT_PAGE_SIZE
 }
 
 impl<'a> RowGroups for InMemoryRowGroup<'a> {
@@ -318,7 +376,7 @@ impl<'a> RowGroups for InMemoryRowGroup<'a> {
 
 /// An in-memory column chunk
 #[derive(Clone)]
-enum ColumnChunkData {
+pub(crate) enum ColumnChunkData {
     /// Column chunk data representing only a subset of data pages
     Sparse {
         /// Length of the full column chunk

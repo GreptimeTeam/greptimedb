@@ -152,7 +152,6 @@ impl RegionScanner for UnorderedScan {
         let parallelism = self.properties.num_partitions();
         let stream = try_stream! {
             let first_poll = stream_ctx.query_start.elapsed();
-
             let part = {
                 let mut parts = stream_ctx.parts.lock().await;
                 maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics, parallelism)
@@ -180,6 +179,7 @@ impl RegionScanner for UnorderedScan {
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
             metrics.build_reader_cost = build_reader_start.elapsed();
+
             let query_start = stream_ctx.query_start;
             let cache = stream_ctx.input.cache_manager.as_deref();
             // Scans memtables first.
@@ -217,8 +217,8 @@ impl RegionScanner for UnorderedScan {
             metrics.total_cost = query_start.elapsed();
             metrics.observe_metrics_on_finish();
             debug!(
-                "Unordered scan partition {} finished, region_id: {}, metrics: {:?}, reader_metrics: {:?}, first_poll: {:?}",
-                partition, mapper.metadata().region_id, metrics, reader_metrics, first_poll,
+                "Unordered scan partition {} finished, region_id: {}, metrics: {:?}, reader_metrics: {:?}, first_poll: {:?}, ranges: {}",
+                partition, mapper.metadata().region_id, metrics, reader_metrics, first_poll, part.file_ranges[0].len(),
             );
         };
         let stream = Box::pin(RecordBatchStreamWrapper::new(
@@ -343,14 +343,14 @@ impl UnorderedDistributor {
 
         let mems_per_part = ((self.mem_ranges.len() + parallelism - 1) / parallelism).max(1);
         let ranges_per_part = ((self.file_ranges.len() + parallelism - 1) / parallelism).max(1);
-        common_telemetry::debug!(
-                "Parallel scan is enabled, parallelism: {}, {} mem_ranges, {} file_ranges, mems_per_part: {}, ranges_per_part: {}",
-                parallelism,
-                self.mem_ranges.len(),
-                self.file_ranges.len(),
-                mems_per_part,
-                ranges_per_part
-            );
+        debug!(
+            "Parallel scan is enabled, parallelism: {}, {} mem_ranges, {} file_ranges, mems_per_part: {}, ranges_per_part: {}",
+            parallelism,
+            self.mem_ranges.len(),
+            self.file_ranges.len(),
+            mems_per_part,
+            ranges_per_part
+        );
         let mut scan_parts = self
             .mem_ranges
             .chunks(mems_per_part)

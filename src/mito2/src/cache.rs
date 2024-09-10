@@ -25,6 +25,7 @@ pub(crate) mod write_cache;
 use std::mem;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use moka::notification::RemovalCause;
@@ -393,20 +394,59 @@ impl SstMetaKey {
     }
 }
 
+/// Path to column pages in the SST file.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ColumnPagePath {
+    /// Region id of the SST file to cache.
+    region_id: RegionId,
+    /// Id of the SST file to cache.
+    file_id: FileId,
+    /// Index of the row group.
+    row_group_idx: usize,
+    /// Index of the column in the row group.
+    column_idx: usize,
+}
+
 /// Cache key for pages of a SST row group.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PageKey {
-    /// Region id of the SST file to cache.
-    pub region_id: RegionId,
-    /// Id of the SST file to cache.
-    pub file_id: FileId,
-    /// Index of the row group.
-    pub row_group_idx: usize,
-    /// Index of the column in the row group.
-    pub column_idx: usize,
+pub enum PageKey {
+    /// Cache key for a compressed page in a row group.
+    Compressed(ColumnPagePath),
+    /// Cache key for all uncompressed pages in a row group.
+    Uncompressed(ColumnPagePath),
 }
 
 impl PageKey {
+    /// Creates a key for a compressed page.
+    pub fn new_compressed(
+        region_id: RegionId,
+        file_id: FileId,
+        row_group_idx: usize,
+        column_idx: usize,
+    ) -> PageKey {
+        PageKey::Compressed(ColumnPagePath {
+            region_id,
+            file_id,
+            row_group_idx,
+            column_idx,
+        })
+    }
+
+    /// Creates a key for all uncompressed pages in a row group.
+    pub fn new_uncompressed(
+        region_id: RegionId,
+        file_id: FileId,
+        row_group_idx: usize,
+        column_idx: usize,
+    ) -> PageKey {
+        PageKey::Uncompressed(ColumnPagePath {
+            region_id,
+            file_id,
+            row_group_idx,
+            column_idx,
+        })
+    }
+
     /// Returns memory used by the key (estimated).
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
@@ -414,21 +454,41 @@ impl PageKey {
 }
 
 /// Cached row group pages for a column.
+// We don't use enum here to make it easier to mock and use the struct.
+#[derive(Default)]
 pub struct PageValue {
+    /// Compressed page of the column in the row group.
+    pub compressed: Bytes,
     /// All pages of the column in the row group.
-    pub pages: Vec<Page>,
+    pub row_group: Vec<Page>,
 }
 
 impl PageValue {
-    /// Creates a new page value.
-    pub fn new(pages: Vec<Page>) -> PageValue {
-        PageValue { pages }
+    /// Creates a new value from a compressed page.
+    pub fn new_compressed(bytes: Bytes) -> PageValue {
+        PageValue {
+            compressed: bytes,
+            row_group: vec![],
+        }
+    }
+
+    /// Creates a new value from all pages in a row group.
+    pub fn new_row_group(pages: Vec<Page>) -> PageValue {
+        PageValue {
+            compressed: Bytes::new(),
+            row_group: pages,
+        }
     }
 
     /// Returns memory used by the value (estimated).
     fn estimated_size(&self) -> usize {
-        // We only consider heap size of all pages.
-        self.pages.iter().map(|page| page.buffer().len()).sum()
+        mem::size_of::<Self>()
+            + self.compressed.len()
+            + self
+                .row_group
+                .iter()
+                .map(|page| page.buffer().len())
+                .sum::<usize>()
     }
 }
 
@@ -507,13 +567,8 @@ mod tests {
             .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
             .is_none());
 
-        let key = PageKey {
-            region_id,
-            file_id,
-            row_group_idx: 0,
-            column_idx: 0,
-        };
-        let pages = Arc::new(PageValue::new(Vec::new()));
+        let key = PageKey::new_uncompressed(region_id, file_id, 0, 0);
+        let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);
         assert!(cache.get_pages(&key).is_none());
 
@@ -562,14 +617,9 @@ mod tests {
         let cache = CacheManager::builder().page_cache_size(1000).build();
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
-        let key = PageKey {
-            region_id,
-            file_id,
-            row_group_idx: 0,
-            column_idx: 0,
-        };
+        let key = PageKey::new_compressed(region_id, file_id, 0, 0);
         assert!(cache.get_pages(&key).is_none());
-        let pages = Arc::new(PageValue::new(Vec::new()));
+        let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);
         assert!(cache.get_pages(&key).is_some());
     }

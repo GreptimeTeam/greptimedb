@@ -901,10 +901,21 @@ impl ScanPartList {
         })
     }
 
+    /// Returns the number of files.
+    pub(crate) fn num_files(&self) -> usize {
+        self.0.as_ref().map_or(0, |parts| {
+            parts.iter().map(|part| part.file_ranges.len()).sum()
+        })
+    }
+
     /// Returns the number of file ranges.
     pub(crate) fn num_file_ranges(&self) -> usize {
         self.0.as_ref().map_or(0, |parts| {
-            parts.iter().map(|part| part.file_ranges.len()).sum()
+            parts
+                .iter()
+                .flat_map(|part| part.file_ranges.iter())
+                .map(|ranges| ranges.len())
+                .sum()
         })
     }
 }
@@ -947,9 +958,10 @@ impl StreamContext {
             Ok(inner) => match t {
                 DisplayFormatType::Default => write!(
                     f,
-                    "partition_count={} ({} memtable ranges, {} file ranges)",
+                    "partition_count={} ({} memtable ranges, {} file {} ranges)",
                     inner.0.len(),
                     inner.0.num_mem_ranges(),
+                    inner.0.num_files(),
                     inner.0.num_file_ranges()
                 )?,
                 DisplayFormatType::Verbose => write!(f, "{:?}", inner.0)?,
