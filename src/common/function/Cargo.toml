@@ -27,6 +27,7 @@ common-time.workspace = true
 common-version.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true
+derive_more = { version = "1", default-features = false, features = ["display"] }
 geohash = { version = "0.13", optional = true }
 h3o = { version = "0.6", optional = true }
 num = "0.4"
