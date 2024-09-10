@@ -83,7 +83,7 @@ macro_rules! get_by_path {
                         }
                     );
                     let jsons = &columns[0];
-                    let strings = &columns[1];
+                    let paths = &columns[1];
 
                     let size = jsons.len();
                     let datatype = jsons.data_type();
@@ -94,13 +94,13 @@ macro_rules! get_by_path {
                         ConcreteDataType::Binary(_) => {
                             for i in 0..size {
                                 let json = jsons.get_ref(i);
-                                let string = strings.get_ref(i);
+                                let path = strings.get_ref(i);
 
                                 let json = json.as_binary();
-                                let string = string.as_string();
-                                let result = match (json, string) {
-                                    (Ok(Some(json)), Ok(Some(string))) => {
-                                        get_json_by_path(json, string)
+                                let path = string.as_string();
+                                let result = match (json, path) {
+                                    (Ok(Some(json)), Ok(Some(path))) => {
+                                        get_json_by_path(json, path)
                                             .and_then(|json| { jsonb::[<to_ $rust_type>](&json).ok() })
                                     }
                                     _ => None,
@@ -197,12 +197,12 @@ impl Function for GetByPathString {
             ConcreteDataType::Binary(_) => {
                 for i in 0..size {
                     let json = jsons.get_ref(i);
-                    let string = strings.get_ref(i);
+                    let path = strings.get_ref(i);
 
                     let json = json.as_binary();
-                    let string = string.as_string();
-                    let result = match (json, string) {
-                        (Ok(Some(json)), Ok(Some(string))) => get_json_by_path(json, string)
+                    let path = string.as_string();
+                    let result = match (json, path) {
+                        (Ok(Some(json)), Ok(Some(path))) => get_json_by_path(json, path)
                             .and_then(|json| jsonb::to_str(&json).ok()),
                         _ => None,
                     };
