@@ -21,7 +21,7 @@ pub mod value;
 
 use ahash::HashSet;
 use common_telemetry::debug;
-use itertools::{merge, Itertools};
+use itertools::Itertools;
 use processor::{Processor, ProcessorBuilder, Processors};
 use transform::{TransformBuilders, Transformer, Transforms};
 use value::Value;
@@ -91,13 +91,18 @@ where
             debug!("required_keys: {:?}", required_keys);
 
             // intermediate keys are the keys that all processor and transformer required
-            let ordered_intermediate_keys: Vec<String> =
-                merge(processors_required_keys, transforms_required_keys)
-                    .cloned()
-                    .collect::<HashSet<String>>()
-                    .into_iter()
-                    .sorted()
-                    .collect();
+            let ordered_intermediate_keys: Vec<String> = [
+                processors_required_keys,
+                transforms_required_keys,
+                processors_output_keys,
+            ]
+            .iter()
+            .flat_map(|l| l.iter())
+            .collect::<HashSet<&String>>()
+            .into_iter()
+            .sorted()
+            .cloned()
+            .collect_vec();
 
             let mut final_intermediate_keys = Vec::with_capacity(ordered_intermediate_keys.len());
             let mut intermediate_keys_exclude_original =
