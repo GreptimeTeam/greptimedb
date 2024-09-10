@@ -80,8 +80,10 @@ where
     pub fn http_server_builder(&self, opts: &FrontendOptions) -> HttpServerBuilder {
         let mut builder = HttpServerBuilder::new(opts.http.clone());
 
-        if let Some(threshold) = opts.logging.slow_query_threshold {
-            builder = builder.set_slow_query_threshold(threshold);
+        if opts.logging.slow_query.enable {
+            if let Some(threshold) = opts.logging.slow_query.threshold {
+                builder = builder.set_slow_query_threshold(threshold);
+            }
         }
 
         builder = builder.with_sql_handler(
@@ -226,6 +228,11 @@ where
             // will not watch if watch is disabled in tls option
             maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
+            let slow_query_threshold = if fn_opts.logging.slow_query.enable {
+                fn_opts.logging.slow_query.threshold
+            } else {
+                None
+            };
             let mysql_server = MysqlServer::create_server(
                 common_runtime::global_runtime(),
                 Arc::new(MysqlSpawnRef::new(
@@ -236,7 +243,7 @@ where
                     mysql_opts.tls.should_force_tls(),
                     tls_server_config,
                     mysql_opts.reject_no_database.unwrap_or(false),
-                    fn_opts.logging.slow_query_threshold,
+                    slow_query_threshold,
                 )),
             );
             handlers.insert((mysql_server, mysql_addr)).await;
@@ -254,13 +261,18 @@ where
 
             maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
+            let slow_query_threshold = if fn_opts.logging.slow_query.enable {
+                fn_opts.logging.slow_query.threshold
+            } else {
+                None
+            };
             let pg_server = Box::new(PostgresServer::new(
                 ServerSqlQueryHandlerAdapter::arc(instance.clone()),
                 pg_opts.tls.should_force_tls(),
                 tls_server_config,
                 common_runtime::global_runtime(),
                 user_provider.clone(),
-                fn_opts.logging.slow_query_threshold,
+                slow_query_threshold,
             )) as Box<dyn Server>;
 
             handlers.insert((pg_server, pg_addr)).await;
