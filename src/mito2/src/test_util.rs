@@ -112,6 +112,12 @@ pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
 #[tokio::test]
 pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFactory>) {}
 
+#[template]
+#[rstest]
+#[case::with_kafka(kafka_log_store_factory())]
+#[tokio::test]
+pub(crate) fn single_kafka_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
+
 #[derive(Clone)]
 pub(crate) struct RaftEngineLogStoreFactory;
 
