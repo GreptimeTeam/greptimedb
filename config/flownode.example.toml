@@ -2,7 +2,7 @@
 mode = "distributed"
 
 ## The flownode identifier and should be unique in the cluster.
-## +toml2docs:none-default
+## @toml2docs:none-default
 node_id = 14
 
 ## The gRPC server options.
@@ -63,7 +63,7 @@ retry_interval = "3s"
 dir = "/tmp/greptimedb/logs"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
-## +toml2docs:none-default
+## @toml2docs:none-default
 level = "info"
 
 ## Enable OTLP tracing.
@@ -87,6 +87,6 @@ default_ratio = 1.0
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
 [tracing]
 ## The tokio console address.
-## +toml2docs:none-default
+## @toml2docs:none-default
 tokio_console_addr = "127.0.0.1"
 
