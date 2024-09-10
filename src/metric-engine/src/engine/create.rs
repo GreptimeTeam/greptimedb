@@ -427,7 +427,7 @@ impl MetricEngineInner {
         // concat region dir
         let metadata_region_dir = join_dir(&request.region_dir, METADATA_REGION_SUBDIR);
 
-        // remove TTL option
+        // remove TTL and APPEND_MODE option
         let mut options = request.options.clone();
         options.remove(TTL_KEY);
         options.remove(APPEND_MODE_KEY);
