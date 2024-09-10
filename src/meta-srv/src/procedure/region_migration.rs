@@ -76,6 +76,9 @@ pub struct PersistentContext {
     /// The timeout of waiting for a candidate to replay the WAL.
     #[serde(with = "humantime_serde", default = "default_replay_timeout")]
     replay_timeout: Duration,
+    /// The timeout of waiting for a candidate to replay the WAL.
+    #[serde(with = "humantime_serde", default)]
+    flush_timeout: Option<Duration>,
 }
 
 fn default_replay_timeout() -> Duration {
@@ -442,6 +445,7 @@ impl RegionMigrationProcedure {
             from_peer: persistent_ctx.from_peer.clone(),
             to_peer: persistent_ctx.to_peer.clone(),
             replay_timeout: persistent_ctx.replay_timeout,
+            flush_timeout: persistent_ctx.flush_timeout,
         });
         let context = context_factory.new_context(persistent_ctx);
 

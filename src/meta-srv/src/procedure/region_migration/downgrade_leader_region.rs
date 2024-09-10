@@ -88,7 +88,11 @@ impl DowngradeLeaderRegion {
     fn build_downgrade_region_instruction(&self, ctx: &Context) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
-        Instruction::DowngradeRegion(DowngradeRegion { region_id })
+        let wait_for_flush_timeout = ctx.persistent_ctx.flush_timeout;
+        Instruction::DowngradeRegion(DowngradeRegion {
+            region_id,
+            wait_for_flush_timeout,
+        })
     }
 
     /// Tries to downgrade a leader region.
@@ -238,6 +242,7 @@ mod tests {
             region_id: RegionId::new(1024, 1),
             cluster_id: 0,
             replay_timeout: Duration::from_millis(1000),
+            flush_timeout: Some(Duration::from_millis(1000)),
         }
     }
 

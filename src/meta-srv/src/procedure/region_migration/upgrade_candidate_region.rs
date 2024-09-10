@@ -240,6 +240,7 @@ mod tests {
             region_id: RegionId::new(1024, 1),
             cluster_id: 0,
             replay_timeout: Duration::from_millis(1000),
+            flush_timeout: Some(Duration::from_millis(1000)),
         }
     }
 

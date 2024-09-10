@@ -105,6 +105,7 @@ pub struct RegionMigrationProcedureTask {
     pub(crate) from_peer: Peer,
     pub(crate) to_peer: Peer,
     pub(crate) replay_timeout: Duration,
+    pub(crate) flush_timeout: Option<Duration>,
 }
 
 impl RegionMigrationProcedureTask {
@@ -114,6 +115,7 @@ impl RegionMigrationProcedureTask {
         from_peer: Peer,
         to_peer: Peer,
         replay_timeout: Duration,
+        flush_timeout: Option<Duration>,
     ) -> Self {
         Self {
             cluster_id,
@@ -121,6 +123,7 @@ impl RegionMigrationProcedureTask {
             from_peer,
             to_peer,
             replay_timeout,
+            flush_timeout,
         }
     }
 }
@@ -329,6 +332,7 @@ impl RegionMigrationManager {
             from_peer,
             to_peer,
             replay_timeout,
+            flush_timeout,
         } = task.clone();
         let procedure = RegionMigrationProcedure::new(
             PersistentContext {
@@ -339,6 +343,7 @@ impl RegionMigrationManager {
                 from_peer,
                 to_peer,
                 replay_timeout,
+                flush_timeout,
             },
             self.context_factory.clone(),
             Some(guard),
@@ -391,6 +396,7 @@ mod test {
             from_peer: Peer::empty(2),
             to_peer: Peer::empty(1),
             replay_timeout: Duration::from_millis(1000),
+            flush_timeout: Some(Duration::from_millis(1000)),
         };
         // Inserts one
         manager
@@ -416,6 +422,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(1),
             replay_timeout: Duration::from_millis(1000),
+            flush_timeout: Some(Duration::from_millis(1000)),
         };
 
         let err = manager.submit_procedure(task).await.unwrap_err();
@@ -434,6 +441,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             replay_timeout: Duration::from_millis(1000),
+            flush_timeout: Some(Duration::from_millis(1000)),
         };
 
         let err = manager.submit_procedure(task).await.unwrap_err();
@@ -452,6 +460,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             replay_timeout: Duration::from_millis(1000),
+            flush_timeout: Some(Duration::from_millis(1000)),
         };
 
         let table_info = new_test_table_info(1024, vec![1]).into();
@@ -480,6 +489,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             replay_timeout: Duration::from_millis(1000),
+            flush_timeout: Some(Duration::from_millis(1000)),
         };
 
         let table_info = new_test_table_info(1024, vec![1]).into();
@@ -512,6 +522,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             replay_timeout: Duration::from_millis(1000),
+            flush_timeout: Some(Duration::from_millis(1000)),
         };
 
         let table_info = new_test_table_info(1024, vec![1]).into();
@@ -539,6 +550,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             replay_timeout: Duration::from_millis(1000),
+            flush_timeout: Some(Duration::from_millis(1000)),
         };
 
         let err = manager

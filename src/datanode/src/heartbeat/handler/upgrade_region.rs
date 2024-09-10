@@ -129,7 +129,6 @@ mod tests {
 
     use crate::error;
     use crate::heartbeat::handler::HandlerContext;
-    use crate::heartbeat::task_tracker::TaskTracker;
     use crate::tests::{mock_region_server, MockRegionEngine};
 
     #[tokio::test]
@@ -138,10 +137,7 @@ mod tests {
         let (mock_engine, _) = MockRegionEngine::new(MITO_ENGINE_NAME);
         mock_region_server.register_engine(mock_engine);
 
-        let handler_context = HandlerContext {
-            region_server: mock_region_server,
-            catchup_tasks: TaskTracker::new(),
-        };
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         let region_id = RegionId::new(1024, 1);
         let waits = vec![None, Some(Duration::from_millis(100u64))];
@@ -180,10 +176,7 @@ mod tests {
             });
         mock_region_server.register_test_region(region_id, mock_engine);
 
-        let handler_context = HandlerContext {
-            region_server: mock_region_server,
-            catchup_tasks: TaskTracker::new(),
-        };
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         let waits = vec![None, Some(Duration::from_millis(100u64))];
 
@@ -222,10 +215,7 @@ mod tests {
             });
         mock_region_server.register_test_region(region_id, mock_engine);
 
-        let handler_context = HandlerContext {
-            region_server: mock_region_server,
-            catchup_tasks: TaskTracker::new(),
-        };
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         let waits = vec![None, Some(Duration::from_millis(100u64))];
 
@@ -269,10 +259,7 @@ mod tests {
             Some(Duration::from_millis(100u64)),
         ];
 
-        let handler_context = HandlerContext {
-            region_server: mock_region_server,
-            catchup_tasks: TaskTracker::new(),
-        };
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         for wait_for_replay_timeout in waits {
             let reply = handler_context
@@ -333,10 +320,7 @@ mod tests {
             });
         mock_region_server.register_test_region(region_id, mock_engine);
 
-        let handler_context = HandlerContext {
-            region_server: mock_region_server,
-            catchup_tasks: TaskTracker::new(),
-        };
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         let reply = handler_context
             .clone()

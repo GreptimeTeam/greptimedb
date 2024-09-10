@@ -135,6 +135,8 @@ impl procedure_service_server::ProcedureService for Metasrv {
                 from_peer,
                 to_peer,
                 replay_timeout: Duration::from_secs(replay_timeout_secs.into()),
+                // TODO(weny): setting `flush_timeout`
+                flush_timeout: None,
             })
             .await?
             .map(procedure::pid_to_pb_pid);
