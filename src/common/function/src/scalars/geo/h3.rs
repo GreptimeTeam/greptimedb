@@ -123,6 +123,10 @@ impl Function for H3LatLngToCell {
     }
 }
 
+/// Function that returns [h3] encoding cellid in string form for a given
+/// geospatial coordinate.
+///
+/// [h3]: https://h3geo.org/
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
 pub struct H3LatLngToCellString;
@@ -211,6 +215,7 @@ impl Function for H3LatLngToCellString {
     }
 }
 
+/// Function that converts cell id to its string form
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
 pub struct H3CellToString;
@@ -253,6 +258,7 @@ impl Function for H3CellToString {
     }
 }
 
+/// Function that converts cell string id to uint64 number
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
 pub struct H3StringToCell;
@@ -313,6 +319,7 @@ impl Function for H3StringToCell {
     }
 }
 
+/// Function that returns centroid latitude of given cell id
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
 pub struct H3CellCenterLat;
@@ -356,6 +363,7 @@ impl Function for H3CellCenterLat {
     }
 }
 
+/// Function that returns centroid longitude of given cell id
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
 pub struct H3CellCenterLng;
@@ -399,6 +407,7 @@ impl Function for H3CellCenterLng {
     }
 }
 
+/// Function that returns resolution of given cell id
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
 pub struct H3CellResolution;
@@ -442,6 +451,7 @@ impl Function for H3CellResolution {
     }
 }
 
+/// Function that returns base cell of given cell id
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
 pub struct H3CellBase;
@@ -485,6 +495,7 @@ impl Function for H3CellBase {
     }
 }
 
+/// Function that check if given cell id is a pentagon
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
 pub struct H3CellIsPentagon;
@@ -528,6 +539,7 @@ impl Function for H3CellIsPentagon {
     }
 }
 
+/// Function that returns center child cell of given cell id
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
 pub struct H3CellCenterChild;
@@ -575,6 +587,7 @@ impl Function for H3CellCenterChild {
     }
 }
 
+/// Function that returns parent cell of given cell id and resolution
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
 pub struct H3CellParent;
@@ -620,6 +633,7 @@ impl Function for H3CellParent {
     }
 }
 
+/// Function that checks if two cells are neighbour
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
 pub struct H3IsNeighbour;
