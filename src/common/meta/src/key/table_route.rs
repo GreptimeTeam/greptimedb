@@ -675,20 +675,15 @@ impl TableRouteStorage {
             return Ok(HashMap::default());
         }
 
-        let kvs = self
+        let node_addrs = self
             .kv_backend
             .batch_get(BatchGetRequest { keys })
             .await?
             .kvs
             .into_iter()
-            .map(|kv| (kv.key, kv.value))
-            .collect::<HashMap<_, _>>();
-
-        let node_addrs = kvs
-            .into_iter()
-            .map(|(key, value)| {
-                let node_id = NodeAddressKey::from_bytes(&key)?.node_id;
-                let node_addr = NodeAddressValue::try_from_raw_value(&value)?;
+            .map(|kv| {
+                let node_id = NodeAddressKey::from_bytes(&kv.key)?.node_id;
+                let node_addr = NodeAddressValue::try_from_raw_value(&kv.value)?;
                 Ok((node_id, node_addr))
             })
             .collect::<Result<HashMap<_, _>>>()?;
