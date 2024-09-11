@@ -18,7 +18,7 @@ use common_query::AddColumnLocation;
 use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
-use super::OptionMap;
+use crate::statements::OptionMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct AlterTable {
