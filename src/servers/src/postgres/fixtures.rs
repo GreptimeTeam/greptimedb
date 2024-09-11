@@ -103,7 +103,6 @@ mod test {
     fn assert_tag(q: &str, t: &str, query_context: QueryContextRef) {
         if let Response::Execution(tag) = process(q, query_context.clone())
             .unwrap_or_else(|| panic!("fail to match {}", q))
-            .expect("unexpected error")
             .remove(0)
         {
             assert_eq!(Tag::new(t), tag);
@@ -115,7 +114,6 @@ mod test {
     fn get_data<'a>(q: &str, query_context: QueryContextRef) -> QueryResponse<'a> {
         if let Response::Query(resp) = process(q, query_context.clone())
             .unwrap_or_else(|| panic!("fail to match {}", q))
-            .expect("unexpected error")
             .remove(0)
         {
             resp
