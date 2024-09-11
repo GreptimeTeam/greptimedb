@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_json_is_misc() {
-        let json_is_functions: Vec<&dyn Function> = vec![
+        let json_is_functions: [&dyn Function; 6] = [
             &JsonIsBool,
             &JsonIsInt,
             &JsonIsFloat,
@@ -148,7 +148,7 @@ mod tests {
             &JsonIsArray,
             &JsonIsObject,
         ];
-        let expected_names = vec![
+        let expected_names = [
             "json_is_bool",
             "json_is_int",
             "json_is_float",
@@ -172,7 +172,7 @@ mod tests {
             );
         }
 
-        let json_strings = vec![
+        let json_strings = [
             r#"true"#,
             r#"1"#,
             r#"1.0"#,
@@ -180,14 +180,14 @@ mod tests {
             r#"[1, 2]"#,
             r#"{"a": 1}"#,
         ];
-        let expected_results = vec![
-            vec![true, false, false, false, false, false],
-            vec![false, true, false, false, false, false],
+        let expected_results = [
+            [true, false, false, false, false, false],
+            [false, true, false, false, false, false],
             // Integers are also floats
-            vec![false, true, true, false, false, false],
-            vec![false, false, false, true, false, false],
-            vec![false, false, false, false, true, false],
-            vec![false, false, false, false, false, true],
+            [false, true, true, false, false, false],
+            [false, false, false, true, false, false],
+            [false, false, false, false, true, false],
+            [false, false, false, false, false, true],
         ];
 
         let jsonbs = json_strings
