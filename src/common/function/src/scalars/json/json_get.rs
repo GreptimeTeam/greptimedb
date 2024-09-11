@@ -45,8 +45,8 @@ fn get_json_by_path(json: &[u8], path: &str) -> Option<Vec<u8>> {
 
 /// Get the value from the JSONB by the given path and return it as specified type.
 /// If the path does not exist or the value is not the type specified, return `NULL`.
-macro_rules! get_by_path {
-    // e.g. name = GetByPathInt, type = Int64, rust_type = i64, doc = "Get the value from the JSONB by the given path and return it as an integer."
+macro_rules! json_get {
+    // e.g. name = JsonGetInt, type = Int64, rust_type = i64, doc = "Get the value from the JSONB by the given path and return it as an integer."
     ($name: ident, $type: ident, $rust_type: ident, $doc:expr) => {
         paste::paste! {
             #[doc = $doc]
@@ -131,22 +131,22 @@ macro_rules! get_by_path {
     };
 }
 
-get_by_path!(
-    GetByPathInt,
+json_get!(
+    JsonGetInt,
     Int64,
     i64,
     "Get the value from the JSONB by the given path and return it as an integer."
 );
 
-get_by_path!(
-    GetByPathFloat,
+json_get!(
+    JsonGetFloat,
     Float64,
     f64,
     "Get the value from the JSONB by the given path and return it as a float."
 );
 
-get_by_path!(
-    GetByPathBool,
+json_get!(
+    JsonGetBool,
     Boolean,
     bool,
     "Get the value from the JSONB by the given path and return it as a boolean."
@@ -154,11 +154,11 @@ get_by_path!(
 
 /// Get the value from the JSONB by the given path and return it as a string.
 #[derive(Clone, Debug, Default)]
-pub struct GetByPathString;
+pub struct JsonGetString;
 
-impl Function for GetByPathString {
+impl Function for JsonGetString {
     fn name(&self) -> &str {
-        "get_by_path_string"
+        "json_get_string"
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
@@ -213,7 +213,7 @@ impl Function for GetByPathString {
             }
             _ => {
                 return UnsupportedInputDataTypeSnafu {
-                    function: "get_by_path_string",
+                    function: "json_get_string",
                     datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
                 }
                 .fail();
@@ -224,9 +224,9 @@ impl Function for GetByPathString {
     }
 }
 
-impl Display for GetByPathString {
+impl Display for JsonGetString {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", "get_by_path_string".to_ascii_uppercase())
+        write!(f, "{}", "json_get_string".to_ascii_uppercase())
     }
 }
 
@@ -241,13 +241,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_by_path_int() {
-        let get_by_path_int = GetByPathInt;
+    fn test_json_get_int() {
+        let json_get_int = JsonGetInt;
 
-        assert_eq!("get_by_path_int", get_by_path_int.name());
+        assert_eq!("json_get_int", json_get_int.name());
         assert_eq!(
             ConcreteDataType::int64_datatype(),
-            get_by_path_int
+            json_get_int
                 .return_type(&[
                     ConcreteDataType::json_datatype(),
                     ConcreteDataType::string_datatype()
@@ -255,7 +255,7 @@ mod tests {
                 .unwrap()
         );
 
-        assert!(matches!(get_by_path_int.signature(),
+        assert!(matches!(json_get_int.signature(),
                          Signature {
                              type_signature: TypeSignature::Exact(valid_types),
                              volatility: Volatility::Immutable
@@ -281,7 +281,7 @@ mod tests {
         let json_vector = BinaryVector::from_vec(jsonbs);
         let path_vector = StringVector::from_vec(paths);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
-        let vector = get_by_path_int
+        let vector = json_get_int
             .eval(FunctionContext::default(), &args)
             .unwrap();
 
@@ -294,13 +294,13 @@ mod tests {
     }
 
     #[test]
-    fn test_get_by_path_float() {
-        let get_by_path_float = GetByPathFloat;
+    fn test_json_get_float() {
+        let json_get_float = JsonGetFloat;
 
-        assert_eq!("get_by_path_float", get_by_path_float.name());
+        assert_eq!("json_get_float", json_get_float.name());
         assert_eq!(
             ConcreteDataType::float64_datatype(),
-            get_by_path_float
+            json_get_float
                 .return_type(&[
                     ConcreteDataType::json_datatype(),
                     ConcreteDataType::string_datatype()
@@ -308,7 +308,7 @@ mod tests {
                 .unwrap()
         );
 
-        assert!(matches!(get_by_path_float.signature(),
+        assert!(matches!(json_get_float.signature(),
                          Signature {
                              type_signature: TypeSignature::Exact(valid_types),
                              volatility: Volatility::Immutable
@@ -334,7 +334,7 @@ mod tests {
         let json_vector = BinaryVector::from_vec(jsonbs);
         let path_vector = StringVector::from_vec(paths);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
-        let vector = get_by_path_float
+        let vector = json_get_float
             .eval(FunctionContext::default(), &args)
             .unwrap();
 
@@ -347,13 +347,13 @@ mod tests {
     }
 
     #[test]
-    fn test_get_by_path_boolean() {
-        let get_by_path_bool = GetByPathBool;
+    fn test_json_get_bool() {
+        let json_get_bool = JsonGetBool;
 
-        assert_eq!("get_by_path_bool", get_by_path_bool.name());
+        assert_eq!("json_get_bool", json_get_bool.name());
         assert_eq!(
             ConcreteDataType::boolean_datatype(),
-            get_by_path_bool
+            json_get_bool
                 .return_type(&[
                     ConcreteDataType::json_datatype(),
                     ConcreteDataType::string_datatype()
@@ -361,7 +361,7 @@ mod tests {
                 .unwrap()
         );
 
-        assert!(matches!(get_by_path_bool.signature(),
+        assert!(matches!(json_get_bool.signature(),
                          Signature {
                              type_signature: TypeSignature::Exact(valid_types),
                              volatility: Volatility::Immutable
@@ -387,7 +387,7 @@ mod tests {
         let json_vector = BinaryVector::from_vec(jsonbs);
         let path_vector = StringVector::from_vec(paths);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
-        let vector = get_by_path_bool
+        let vector = json_get_bool
             .eval(FunctionContext::default(), &args)
             .unwrap();
 
@@ -400,13 +400,13 @@ mod tests {
     }
 
     #[test]
-    fn test_get_by_path_string() {
-        let get_by_path_string = GetByPathString;
+    fn test_json_get_string() {
+        let json_get_string = JsonGetString;
 
-        assert_eq!("get_by_path_string", get_by_path_string.name());
+        assert_eq!("json_get_string", json_get_string.name());
         assert_eq!(
             ConcreteDataType::string_datatype(),
-            get_by_path_string
+            json_get_string
                 .return_type(&[
                     ConcreteDataType::json_datatype(),
                     ConcreteDataType::string_datatype()
@@ -414,7 +414,7 @@ mod tests {
                 .unwrap()
         );
 
-        assert!(matches!(get_by_path_string.signature(),
+        assert!(matches!(json_get_string.signature(),
                          Signature {
                              type_signature: TypeSignature::Exact(valid_types),
                              volatility: Volatility::Immutable
@@ -440,7 +440,7 @@ mod tests {
         let json_vector = BinaryVector::from_vec(jsonbs);
         let path_vector = StringVector::from_vec(paths);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
-        let vector = get_by_path_string
+        let vector = json_get_string
             .eval(FunctionContext::default(), &args)
             .unwrap();
 
