@@ -192,7 +192,7 @@ impl HeartbeatTask {
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel(16);
         let mailbox = Arc::new(HeartbeatMailbox::new(outgoing_tx));
 
-        let quit_signal = Arc::new(tokio::sync::Notify::new());
+        let quit_signal = Arc::new(Notify::new());
 
         let mut tx = Self::create_streams(
             &meta_client,

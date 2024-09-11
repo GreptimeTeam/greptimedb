@@ -18,15 +18,16 @@ mod pg_namespace;
 mod table_names;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, LazyLock, Weak};
 
-use common_catalog::consts::{self, PG_CATALOG_NAME};
+use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, PG_CATALOG_NAME};
 use datatypes::schema::ColumnSchema;
 use lazy_static::lazy_static;
 use paste::paste;
 use pg_catalog_memory_table::get_schema_columns;
 use pg_class::PGClass;
 use pg_namespace::PGNamespace;
+use session::context::{Channel, QueryContext};
 use table::TableRef;
 pub use table_names::*;
 
@@ -141,4 +142,13 @@ impl SystemSchemaProviderInner for PGCatalogProvider {
     fn catalog_name(&self) -> &str {
         &self.catalog_name
     }
+}
+
+/// Provide query context to call the [`CatalogManager`]'s method.
+static PG_QUERY_CTX: LazyLock<QueryContext> = LazyLock::new(|| {
+    QueryContext::with_channel(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Channel::Postgres)
+});
+
+fn query_ctx() -> Option<&'static QueryContext> {
+    Some(&PG_QUERY_CTX)
 }

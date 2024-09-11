@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::{HeartbeatRequest, Role};
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 
 use super::node_stat::Stat;
 use crate::error::Result;
@@ -40,12 +40,15 @@ impl HeartbeatHandler for ExtractStatHandler {
             return Ok(HandleControl::Continue);
         }
 
-        match Stat::try_from(req.clone()) {
+        match Stat::try_from(req) {
             Ok(stat) => {
                 let _ = acc.stat.insert(stat);
             }
-            Err(err) => {
-                warn!(err; "Incomplete heartbeat data: {:?}", req);
+            Err(Some(header)) => {
+                info!("New handshake request: {:?}", header);
+            }
+            Err(_) => {
+                warn!("Incomplete heartbeat data: {:?}", req);
             }
         };
 

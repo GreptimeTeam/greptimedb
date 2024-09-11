@@ -128,6 +128,7 @@ impl DistExtensionPlanner {
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
+                None,
             )
             .await
             .context(CatalogSnafu)?

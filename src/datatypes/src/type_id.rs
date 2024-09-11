@@ -68,6 +68,8 @@ pub enum LogicalTypeId {
 
     List,
     Dictionary,
+
+    Json,
 }
 
 impl LogicalTypeId {
@@ -126,6 +128,7 @@ impl LogicalTypeId {
             LogicalTypeId::DurationMicrosecond => ConcreteDataType::duration_microsecond_datatype(),
             LogicalTypeId::DurationNanosecond => ConcreteDataType::duration_nanosecond_datatype(),
             LogicalTypeId::Decimal128 => ConcreteDataType::decimal128_default_datatype(),
+            LogicalTypeId::Json => ConcreteDataType::json_datatype(),
         }
     }
 }

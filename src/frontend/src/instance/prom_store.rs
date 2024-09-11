@@ -102,7 +102,7 @@ impl Instance {
     ) -> Result<Output> {
         let table = self
             .catalog_manager
-            .table(catalog_name, schema_name, table_name)
+            .table(catalog_name, schema_name, table_name, Some(ctx))
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {

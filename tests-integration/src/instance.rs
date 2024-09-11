@@ -278,7 +278,7 @@ mod tests {
         assert!(instance
             .frontend()
             .catalog_manager()
-            .table("greptime", "public", "demo")
+            .table("greptime", "public", "demo", None)
             .await
             .unwrap()
             .is_none())

@@ -68,7 +68,7 @@ impl SortField {
             ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => 9,
             ConcreteDataType::Float32(_) => 5,
             ConcreteDataType::Float64(_) => 9,
-            ConcreteDataType::Binary(_) => 11,
+            ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => 11,
             ConcreteDataType::String(_) => 11, // a non-empty string takes at least 11 bytes.
             ConcreteDataType::Date(_) => 5,
             ConcreteDataType::DateTime(_) => 9,
@@ -146,7 +146,8 @@ impl SortField {
             Time, time,
             Interval, interval,
             Duration, duration,
-            Decimal128, decimal128
+            Decimal128, decimal128,
+            Json, binary
         );
 
         Ok(())
@@ -169,7 +170,7 @@ impl SortField {
                             Ok(Value::from(Option::<$f>::deserialize(deserializer).context(error::DeserializeFieldSnafu)?))
                         }
                     )*
-                    ConcreteDataType::Binary(_) => Ok(Value::from(
+                    ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => Ok(Value::from(
                         Option::<Vec<u8>>::deserialize(deserializer)
                             .context(error::DeserializeFieldSnafu)?
                             .map(Bytes::from),
@@ -237,7 +238,7 @@ impl SortField {
             ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => 9,
             ConcreteDataType::Float32(_) => 5,
             ConcreteDataType::Float64(_) => 9,
-            ConcreteDataType::Binary(_) => {
+            ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => {
                 // Now the encoder encode binary as a list of bytes so we can't use
                 // skip bytes.
                 let pos_before = deserializer.position();

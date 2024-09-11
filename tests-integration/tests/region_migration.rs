@@ -1013,7 +1013,7 @@ async fn prepare_testing_metric_table(cluster: &GreptimeDbCluster) -> TableId {
     let table = cluster
         .frontend
         .catalog_manager()
-        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy")
+        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy", None)
         .await
         .unwrap()
         .unwrap();
@@ -1039,7 +1039,12 @@ async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
     let table = cluster
         .frontend
         .catalog_manager()
-        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, TEST_TABLE_NAME)
+        .table(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            TEST_TABLE_NAME,
+            None,
+        )
         .await
         .unwrap()
         .unwrap();

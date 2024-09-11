@@ -192,8 +192,8 @@ impl InformationSchemaViewsBuilder {
             .context(CastManagerSnafu)?
             .view_info_cache()?;
 
-        for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name);
+        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, None);
 
             while let Some(table) = stream.try_next().await? {
                 let table_info = table.table_info();

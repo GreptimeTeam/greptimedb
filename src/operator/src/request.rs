@@ -219,7 +219,7 @@ impl Requester {
     ) -> Result<Vec<PartitionInfo>> {
         let table = self
             .catalog_manager
-            .table(catalog, schema, table_name)
+            .table(catalog, schema, table_name, None)
             .await
             .context(CatalogSnafu)?;
 

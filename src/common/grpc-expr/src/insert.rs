@@ -14,11 +14,10 @@
 
 use api::helper;
 use api::v1::column::Values;
-use api::v1::{AddColumns, Column, CreateTableExpr};
+use api::v1::{Column, CreateTableExpr};
 use common_base::BitVec;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::VectorRef;
-use datatypes::schema::SchemaRef;
 use snafu::{ensure, ResultExt};
 use table::metadata::TableId;
 use table::table_reference::TableReference;
@@ -26,11 +25,6 @@ use table::table_reference::TableReference;
 use crate::error::{CreateVectorSnafu, Result, UnexpectedValuesLengthSnafu};
 use crate::util;
 use crate::util::ColumnExpr;
-
-pub fn find_new_columns(schema: &SchemaRef, columns: &[Column]) -> Result<Option<AddColumns>> {
-    let column_exprs = ColumnExpr::from_columns(columns);
-    util::extract_new_columns(schema, column_exprs)
-}
 
 /// Try to build create table request from insert data.
 pub fn build_create_expr_from_insertion(
@@ -114,7 +108,6 @@ mod tests {
     use super::*;
     use crate::error;
     use crate::error::ColumnDataTypeSnafu;
-    use crate::insert::find_new_columns;
 
     #[inline]
     fn build_column_schema(
@@ -281,11 +274,18 @@ mod tests {
 
         let schema = Arc::new(SchemaBuilder::try_from(columns).unwrap().build().unwrap());
 
-        assert!(find_new_columns(&schema, &[]).unwrap().is_none());
+        assert!(
+            util::extract_new_columns(&schema, ColumnExpr::from_columns(&[]))
+                .unwrap()
+                .is_none()
+        );
 
         let insert_batch = mock_insert_batch();
 
-        let add_columns = find_new_columns(&schema, &insert_batch.0).unwrap().unwrap();
+        let add_columns =
+            util::extract_new_columns(&schema, ColumnExpr::from_columns(&insert_batch.0))
+                .unwrap()
+                .unwrap();
 
         assert_eq!(5, add_columns.add_columns.len());
         let host_column = &add_columns.add_columns[0];

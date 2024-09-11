@@ -1812,10 +1812,12 @@ name = "common-base"
 version = "0.9.3"
 dependencies = [
  "anymap",
+ "async-trait",
  "bitvec",
  "bytes",
  "common-error",
  "common-macro",
+ "futures",
  "paste",
  "serde",
  "snafu 0.8.4",
@@ -1952,6 +1954,7 @@ dependencies = [
  "datatypes",
  "geohash",
  "h3o",
+ "jsonb",
  "num",
  "num-traits",
  "once_cell",
@@ -2293,6 +2296,7 @@ dependencies = [
  "common-telemetry",
  "futures-util",
  "humantime-serde",
+ "num_cpus",
  "rskafka",
  "rustls 0.23.10",
  "rustls-native-certs",
@@ -3166,6 +3170,7 @@ dependencies = [
  "datafusion-common",
  "enum_dispatch",
  "greptime-proto",
+ "jsonb",
  "num",
  "num-traits",
  "ordered-float 3.9.2",
@@ -3697,6 +3702,12 @@ name = "fallible-streaming-iterator"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
+name = "fast-float"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95765f67b4b18863968b4a1bd5bb576f732b29a4a28c7cd84c09fa3e2875f33c"
 
 [[package]]
 name = "fastdivide"
@@ -4302,7 +4313,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=157cfdb52709e489cf1f3ce8e3042ed4ee8a524a#157cfdb52709e489cf1f3ce8e3042ed4ee8a524a"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=973f49cde88a582fb65755cc572ebcf6fb93ccf7#973f49cde88a582fb65755cc572ebcf6fb93ccf7"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -5407,6 +5418,21 @@ dependencies = [
  "pest",
  "pest_derive",
  "serde",
+]
+
+[[package]]
+name = "jsonb"
+version = "0.4.1"
+source = "git+https://github.com/CookiePieWw/jsonb.git?rev=d0166c130fce903bf6c58643417a3173a6172d31#d0166c130fce903bf6c58643417a3173a6172d31"
+dependencies = [
+ "byteorder",
+ "fast-float",
+ "itoa",
+ "nom",
+ "ordered-float 4.2.0",
+ "rand",
+ "ryu",
+ "serde_json",
 ]
 
 [[package]]
@@ -8062,6 +8088,8 @@ dependencies = [
  "chrono",
  "fallible-iterator",
  "postgres-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -10400,6 +10428,7 @@ dependencies = [
  "hyper 0.14.29",
  "influxdb_line_protocol",
  "itertools 0.10.5",
+ "jsonb",
  "lazy_static",
  "mime_guess",
  "mysql_async",
@@ -10779,6 +10808,7 @@ dependencies = [
  "hex",
  "iso8601",
  "itertools 0.10.5",
+ "jsonb",
  "lazy_static",
  "regex",
  "serde_json",

@@ -48,7 +48,7 @@ pub(crate) struct GreptimeDBStartupParameters {
 impl GreptimeDBStartupParameters {
     fn new() -> GreptimeDBStartupParameters {
         GreptimeDBStartupParameters {
-            version: format!("16.3-greptime-{}", env!("CARGO_PKG_VERSION")),
+            version: format!("16.3-greptimedb-{}", env!("CARGO_PKG_VERSION")),
         }
     }
 }

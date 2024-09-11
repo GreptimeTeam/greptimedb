@@ -454,7 +454,7 @@ impl DatanodeBuilder {
             "Creating raft-engine logstore with config: {:?} and storage path: {}",
             config, &wal_dir
         );
-        let logstore = RaftEngineLogStore::try_new(wal_dir, config.clone())
+        let logstore = RaftEngineLogStore::try_new(wal_dir, config)
             .await
             .map_err(Box::new)
             .context(OpenLogStoreSnafu)?;

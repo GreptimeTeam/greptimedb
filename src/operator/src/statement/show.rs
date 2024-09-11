@@ -143,7 +143,7 @@ impl StatementExecutor {
 
         let table_ref = self
             .catalog_manager
-            .table(&catalog, &schema, &view)
+            .table(&catalog, &schema, &view, Some(&query_ctx))
             .await
             .context(CatalogSnafu)?
             .context(ViewNotFoundSnafu { view_name: &view })?;

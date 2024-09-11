@@ -33,6 +33,7 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
     PHYSICAL_TABLE_METADATA_KEY,
 };
+use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
 use store_api::storage::consts::ReservedColumnId;
@@ -426,9 +427,10 @@ impl MetricEngineInner {
         // concat region dir
         let metadata_region_dir = join_dir(&request.region_dir, METADATA_REGION_SUBDIR);
 
-        // remove TTL option
+        // remove TTL and APPEND_MODE option
         let mut options = request.options.clone();
-        options.remove("ttl");
+        options.remove(TTL_KEY);
+        options.remove(APPEND_MODE_KEY);
 
         RegionCreateRequest {
             engine: MITO_ENGINE_NAME.to_string(),

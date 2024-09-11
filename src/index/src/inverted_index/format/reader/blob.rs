@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::SeekFrom;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
+use common_base::range_read::RangeReader;
 use greptime_proto::v1::index::InvertedIndexMetas;
 use snafu::{ensure, ResultExt};
 
-use crate::inverted_index::error::{ReadSnafu, Result, SeekSnafu, UnexpectedBlobSizeSnafu};
+use crate::inverted_index::error::{CommonIoSnafu, Result, UnexpectedBlobSizeSnafu};
 use crate::inverted_index::format::reader::footer::InvertedIndeFooterReader;
 use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::format::MIN_BLOB_SIZE;
@@ -49,28 +48,28 @@ impl<R> InvertedIndexBlobReader<R> {
 }
 
 #[async_trait]
-impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIndexBlobReader<R> {
+impl<R: RangeReader> InvertedIndexReader for InvertedIndexBlobReader<R> {
     async fn read_all(&mut self, dest: &mut Vec<u8>) -> Result<usize> {
+        let metadata = self.source.metadata().await.context(CommonIoSnafu)?;
         self.source
-            .seek(SeekFrom::Start(0))
+            .read_into(0..metadata.content_length, dest)
             .await
-            .context(SeekSnafu)?;
-        self.source.read_to_end(dest).await.context(ReadSnafu)
+            .context(CommonIoSnafu)?;
+        Ok(metadata.content_length as usize)
     }
 
     async fn seek_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
-        self.source
-            .seek(SeekFrom::Start(offset))
+        let buf = self
+            .source
+            .read(offset..offset + size as u64)
             .await
-            .context(SeekSnafu)?;
-        let mut buf = vec![0u8; size as usize];
-        self.source.read(&mut buf).await.context(ReadSnafu)?;
-        Ok(buf)
+            .context(CommonIoSnafu)?;
+        Ok(buf.into())
     }
 
     async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>> {
-        let end = SeekFrom::End(0);
-        let blob_size = self.source.seek(end).await.context(SeekSnafu)?;
+        let metadata = self.source.metadata().await.context(CommonIoSnafu)?;
+        let blob_size = metadata.content_length;
         Self::validate_blob_size(blob_size)?;
 
         let mut footer_reader = InvertedIndeFooterReader::new(&mut self.source, blob_size);

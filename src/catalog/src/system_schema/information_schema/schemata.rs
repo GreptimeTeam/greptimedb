@@ -171,7 +171,7 @@ impl InformationSchemaSchemataBuilder {
         let table_metadata_manager = utils::table_meta_manager(&self.catalog_manager)?;
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager.schema_names(&catalog_name).await? {
+        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
             let opts = if let Some(table_metadata_manager) = &table_metadata_manager {
                 table_metadata_manager
                     .schema_manager()

@@ -112,7 +112,7 @@ impl SchemaProvider for DummySchemaProvider {
     async fn table(&self, name: &str) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
         let table = self
             .catalog_manager
-            .table(&self.catalog_name, &self.schema_name, name)
+            .table(&self.catalog_name, &self.schema_name, name, None)
             .await?
             .with_context(|| TableNotExistSnafu {
                 table: format_full_table_name(&self.catalog_name, &self.schema_name, name),

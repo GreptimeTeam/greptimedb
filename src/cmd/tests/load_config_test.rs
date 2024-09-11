@@ -65,6 +65,7 @@ fn test_load_datanode_example_config() {
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some("/tmp/greptimedb/wal".to_string()),
                 sync_period: Some(Duration::from_secs(10)),
+                recovery_parallelism: 2,
                 ..Default::default()
             }),
             storage: StorageConfig {
@@ -207,6 +208,7 @@ fn test_load_standalone_example_config() {
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some("/tmp/greptimedb/wal".to_string()),
                 sync_period: Some(Duration::from_secs(10)),
+                recovery_parallelism: 2,
                 ..Default::default()
             }),
             region_engine: vec![

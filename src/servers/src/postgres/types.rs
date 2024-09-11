@@ -62,6 +62,7 @@ pub(super) fn encode_value(
     query_ctx: &QueryContextRef,
     value: &Value,
     builder: &mut DataRowEncoder,
+    datatype: &ConcreteDataType,
 ) -> PgWireResult<()> {
     match value {
         Value::Null => builder.encode_field(&None::<&i8>),
@@ -77,13 +78,18 @@ pub(super) fn encode_value(
         Value::Float32(v) => builder.encode_field(&v.0),
         Value::Float64(v) => builder.encode_field(&v.0),
         Value::String(v) => builder.encode_field(&v.as_utf8()),
-        Value::Binary(v) => {
-            let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
-            match *bytea_output {
-                PGByteaOutputValue::ESCAPE => builder.encode_field(&EscapeOutputBytea(v.deref())),
-                PGByteaOutputValue::HEX => builder.encode_field(&HexOutputBytea(v.deref())),
+        Value::Binary(v) => match datatype {
+            ConcreteDataType::Json(_) => builder.encode_field(&jsonb::to_string(v)),
+            _ => {
+                let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
+                match *bytea_output {
+                    PGByteaOutputValue::ESCAPE => {
+                        builder.encode_field(&EscapeOutputBytea(v.deref()))
+                    }
+                    PGByteaOutputValue::HEX => builder.encode_field(&HexOutputBytea(v.deref())),
+                }
             }
-        }
+        },
         Value::Date(v) => {
             if let Some(date) = v.to_chrono_date() {
                 let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
@@ -154,6 +160,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Time(_) => Ok(Type::TIME),
         &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL),
         &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC),
+        &ConcreteDataType::Json(_) => Ok(Type::JSON),
         &ConcreteDataType::Duration(_)
         | &ConcreteDataType::List(_)
         | &ConcreteDataType::Dictionary(_) => server_error::UnsupportedDataTypeSnafu {
@@ -549,6 +556,23 @@ pub(super) fn parameters_to_scalar_values(
                     }
                 }
             }
+            &Type::JSONB => {
+                let data = portal.parameter::<serde_json::Value>(idx, &client_type)?;
+                match server_type {
+                    ConcreteDataType::Binary(_) => {
+                        ScalarValue::Binary(data.map(|d| jsonb::Value::from(d).to_vec()))
+                    }
+                    _ => {
+                        return Err(invalid_parameter_error(
+                            "invalid_parameter_type",
+                            Some(&format!(
+                                "Expected: {}, found: {}",
+                                server_type, client_type
+                            )),
+                        ));
+                    }
+                }
+            }
             _ => Err(invalid_parameter_error(
                 "unsupported_parameter_value",
                 Some(&format!("Found type: {}", client_type)),
@@ -581,6 +605,8 @@ pub(super) fn param_types_to_pg_types(
 mod test {
     use std::sync::Arc;
 
+    use common_time::interval::IntervalUnit;
+    use common_time::timestamp::TimeUnit;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::value::ListValue;
     use pgwire::api::results::{FieldFormat, FieldInfo};
@@ -778,6 +804,35 @@ mod test {
             ),
         ];
 
+        let datatypes = vec![
+            ConcreteDataType::null_datatype(),
+            ConcreteDataType::boolean_datatype(),
+            ConcreteDataType::uint8_datatype(),
+            ConcreteDataType::uint16_datatype(),
+            ConcreteDataType::uint32_datatype(),
+            ConcreteDataType::uint64_datatype(),
+            ConcreteDataType::int8_datatype(),
+            ConcreteDataType::int8_datatype(),
+            ConcreteDataType::int16_datatype(),
+            ConcreteDataType::int16_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::float32_datatype(),
+            ConcreteDataType::float32_datatype(),
+            ConcreteDataType::float32_datatype(),
+            ConcreteDataType::float64_datatype(),
+            ConcreteDataType::float64_datatype(),
+            ConcreteDataType::float64_datatype(),
+            ConcreteDataType::string_datatype(),
+            ConcreteDataType::binary_datatype(),
+            ConcreteDataType::date_datatype(),
+            ConcreteDataType::time_datatype(TimeUnit::Second),
+            ConcreteDataType::datetime_datatype(),
+            ConcreteDataType::timestamp_datatype(TimeUnit::Second),
+            ConcreteDataType::interval_datatype(IntervalUnit::YearMonth),
+        ];
         let values = vec![
             Value::Null,
             Value::Boolean(true),
@@ -812,14 +867,15 @@ mod test {
             .build()
             .into();
         let mut builder = DataRowEncoder::new(Arc::new(schema));
-        for i in values.iter() {
-            encode_value(&query_context, i, &mut builder).unwrap();
+        for (value, datatype) in values.iter().zip(datatypes) {
+            encode_value(&query_context, value, &mut builder, &datatype).unwrap();
         }
 
         let err = encode_value(
             &query_context,
             &Value::List(ListValue::new(vec![], ConcreteDataType::int16_datatype())),
             &mut builder,
+            &ConcreteDataType::list_datatype(ConcreteDataType::int16_datatype()),
         )
         .unwrap_err();
         match err {
