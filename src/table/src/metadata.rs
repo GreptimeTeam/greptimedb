@@ -1,5 +1,3 @@
-// Copyright 2023 Greptime Team
-//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -21,7 +19,8 @@ use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{
-    ColumnSchema, FulltextAnalyzer, FulltextOptions, RawSchema, Schema, SchemaBuilder, SchemaRef,
+    validate_fulltext_options, ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder,
+    SchemaRef,
 };
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
@@ -33,9 +32,6 @@ use crate::requests::{AddColumnRequest, AlterKind, ChangeColumnTypeRequest, Tabl
 
 pub type TableId = u32;
 pub type TableVersion = u64;
-
-const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
-const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
 
 /// Indicates whether and how a filter expression can be handled by a
 /// Table for table scans.
@@ -606,13 +602,12 @@ impl TableMeta {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
 
-        let index = table_schema
-            .column_index_by_name(column_name)
+        let column = &table_schema
+            .column_schema_by_name(column_name)
             .with_context(|| error::ColumnNotExistsSnafu {
                 column_name,
                 table_name,
             })?;
-        let column = &table_schema.column_schemas()[index];
 
         let mut fulltext = if let Ok(Some(f)) = column.fulltext_options() {
             f
@@ -620,35 +615,8 @@ impl TableMeta {
             FulltextOptions::default()
         };
 
-        if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
-            match analyzer.to_ascii_lowercase().as_str() {
-                "english" => {
-                    fulltext.enable = true;
-                    fulltext.analyzer = FulltextAnalyzer::English;
-                }
-                "chinese" => {
-                    fulltext.enable = true;
-                    fulltext.analyzer = FulltextAnalyzer::Chinese;
-                }
-                _ => {
-                    return error::InvalidFulltextOptionsSnafu { column_name }.fail()?;
-                }
-            }
-        }
-        if let Some(case_sensitive) = options.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
-            match case_sensitive.to_ascii_lowercase().as_str() {
-                "true" => {
-                    fulltext.enable = true;
-                    fulltext.case_sensitive = true;
-                }
-                "false" => {
-                    fulltext.enable = true;
-                    fulltext.case_sensitive = false;
-                }
-                _ => {
-                    return error::InvalidFulltextOptionsSnafu { column_name }.fail()?;
-                }
-            }
+        if !validate_fulltext_options(&mut fulltext, &options) {
+            return error::InvalidFulltextOptionsSnafu { column_name }.fail();
         }
 
         let columns: Vec<_> = table_schema
@@ -659,7 +627,7 @@ impl TableMeta {
                 if column.name == *column_name {
                     column = column
                         .clone()
-                        .with_fulltext_options(fulltext.clone())
+                        .with_fulltext_options(&fulltext)
                         .unwrap();
                 }
                 column

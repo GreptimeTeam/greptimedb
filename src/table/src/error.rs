@@ -138,7 +138,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid fulltext options"))]
+    #[snafu(display("Invalid fulltext options, column: {}", column_name))]
     InvalidFulltextOptions {
         #[snafu(implicit)]
         location: Location,

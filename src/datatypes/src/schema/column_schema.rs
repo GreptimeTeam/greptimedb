@@ -255,19 +255,18 @@ impl ColumnSchema {
         }
     }
 
-    pub fn with_fulltext_options(mut self, options: FulltextOptions) -> Result<Self> {
-        self.metadata.insert(
-            FULLTEXT_KEY.to_string(),
-            serde_json::to_string(&options).context(error::SerializeSnafu)?,
-        );
+    pub fn with_fulltext_options(mut self, options: &FulltextOptions) -> Result<Self> {
+        self.set_fulltext_options(options)?;
         Ok(self)
     }
 
-    pub fn set_fulltext_options(&mut self, options: FulltextOptions) -> Result<()> {
-        self.metadata.insert(
-            FULLTEXT_KEY.to_string(),
-            serde_json::to_string(&options).context(error::SerializeSnafu)?,
-        );
+    pub fn set_fulltext_options(&mut self, options: &FulltextOptions) -> Result<()> {
+        if self.data_type == ConcreteDataType::string_datatype() {
+            self.metadata.insert(
+                FULLTEXT_KEY.to_string(),
+                serde_json::to_string(&options).context(error::SerializeSnafu)?,
+            );
+        }
         Ok(())
     }
 }

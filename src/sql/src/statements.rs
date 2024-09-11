@@ -463,7 +463,7 @@ pub fn column_to_schema(
 
     if let Some(options) = column.extensions.build_fulltext_options()? {
         column_schema = column_schema
-            .with_fulltext_options(options)
+            .with_fulltext_options(&options)
             .context(SetFulltextOptionSnafu)?;
     }
 

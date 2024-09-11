@@ -490,7 +490,10 @@ impl AlterKind {
                     return InvalidFulltextOptionsSnafu { column_name }.fail();
                 }
             } else {
-                return InvalidFulltextOptionsSnafu { column_name }.fail();
+                return InvalidFulltextOptionsSnafu {
+                    column_name,
+                }
+                .fail();
             }
         }
 

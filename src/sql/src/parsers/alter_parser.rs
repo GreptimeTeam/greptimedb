@@ -14,7 +14,6 @@ use std::collections::HashMap;
 
 use common_query::AddColumnLocation;
 use snafu::ResultExt;
-use sqlparser::ast::{Expr, SqlOption};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::Token;
@@ -23,6 +22,7 @@ use crate::error::{self, Result};
 use crate::parser::ParserContext;
 use crate::statements::alter::{AlterTable, AlterTableOperation};
 use crate::statements::statement::Statement;
+use crate::util::parse_option_string;
 
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
@@ -75,7 +75,12 @@ impl<'a> ParserContext<'a> {
                 )));
             }
         } else if self.consume_token("MODIFY") {
-            let _ = self.parser.parse_keyword(Keyword::COLUMN);
+            if !self.parser.parse_keyword(Keyword::COLUMN) {
+                return Err(ParserError::ParserError(format!(
+                    "expect keyword COLUMN after ALTER TABLE MODIFY, found {}",
+                    self.parser.peek_token()
+                )));
+            }
             let column_name = Self::canonicalize_identifier(self.parser.parse_identifier(false)?);
 
             if self.parser.parse_keyword(Keyword::SET) {
@@ -85,18 +90,7 @@ impl<'a> ParserContext<'a> {
                     .parser
                     .parse_options(Keyword::WITH)?
                     .into_iter()
-                    .map(|option: SqlOption| -> Result<(String, String)> {
-                        let (key, value) = (option.name, option.value);
-                        let v = match value {
-                            Expr::Value(sqlparser::ast::Value::SingleQuotedString(v))
-                            | Expr::Value(sqlparser::ast::Value::DoubleQuotedString(v)) => v,
-                            Expr::Identifier(v) => v.value,
-                            Expr::Value(sqlparser::ast::Value::Number(v, _)) => v.to_string(),
-                            _ => return error::InvalidTableOptionValueSnafu { key, value }.fail(),
-                        };
-                        let k = key.value.to_lowercase();
-                        Ok((k, v))
-                    })
+                    .map(parse_option_string)
                     .collect::<Result<HashMap<String, String>>>()
                     .unwrap();
 

@@ -32,6 +32,9 @@ pub use crate::schema::column_schema::{
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
 
+const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
+const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
+
 /// Key used to store version number of the schema in metadata.
 pub const VERSION_KEY: &str = "greptime:version";
 
@@ -298,6 +301,48 @@ fn validate_timestamp_index(column_schemas: &[ColumnSchema], timestamp_index: us
     );
 
     Ok(())
+}
+
+pub fn validate_fulltext_options(
+    fulltext: &mut FulltextOptions,
+    options: &HashMap<String, String>,
+) -> bool {
+    let mut is_fulltext_key_exist = false;
+    if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
+        match analyzer.to_ascii_lowercase().as_str() {
+            "english" => {
+                fulltext.enable = true;
+                fulltext.analyzer = FulltextAnalyzer::English;
+            }
+            "chinese" => {
+                fulltext.enable = true;
+                fulltext.analyzer = FulltextAnalyzer::Chinese;
+            }
+            _ => {
+                return false;
+            }
+        }
+        is_fulltext_key_exist = true;
+    }
+
+    if let Some(case_sensitive) = options.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
+        match case_sensitive.to_ascii_lowercase().as_str() {
+            "true" => {
+                fulltext.enable = true;
+                fulltext.case_sensitive = true;
+            }
+            "false" => {
+                fulltext.enable = true;
+                fulltext.case_sensitive = false;
+            }
+            _ => {
+                return false;
+            }
+        }
+        is_fulltext_key_exist = true;
+    }
+
+    is_fulltext_key_exist
 }
 
 pub type SchemaRef = Arc<Schema>;
