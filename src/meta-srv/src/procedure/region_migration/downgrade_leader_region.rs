@@ -58,10 +58,17 @@ impl State for DowngradeLeaderRegion {
         ctx.volatile_ctx
             .set_leader_region_lease_deadline(Duration::from_secs(REGION_LEASE_SECS));
 
-        // Rollbacks the metadata if occurring any non-retryable errors.
-        if let Err(err) = self.downgrade_region_with_retry(ctx).await {
-            warn!(err; "Occurs non-retryable error");
-            return Ok((Box::new(UpdateMetadata::Rollback), Status::executing(false)));
+        match self.downgrade_region_with_retry(ctx).await {
+            Ok(_) => {
+                // Do nothing
+            }
+            Err(error::Error::ExceededDeadline { .. }) => {
+                // Rollbacks the metadata if procedure is timeout
+                return Ok((Box::new(UpdateMetadata::Rollback), Status::executing(false)));
+            }
+            Err(err) => {
+                warn!(err; "Occurs non-retryable error");
+            }
         }
 
         if let Some(deadline) = ctx.volatile_ctx.leader_region_lease_deadline.as_ref() {
@@ -200,7 +207,7 @@ impl DowngradeLeaderRegion {
     /// - Waits for the lease of the leader region expired.
     ///
     /// Abort:
-    /// - Non-retryable error.
+    /// - ExceededDeadline
     async fn downgrade_region_with_retry(&self, ctx: &mut Context) -> Result<()> {
         let mut retry = 0;
 
@@ -209,12 +216,12 @@ impl DowngradeLeaderRegion {
             if let Err(err) = self.downgrade_region(ctx).await {
                 ctx.update_operations_elapsed(timer);
                 retry += 1;
-                if err.is_retryable() && retry < self.optimistic_retry {
+                // Throws the error immediately if the procedure exceeded the deadline.
+                if matches!(err, error::Error::ExceededDeadline { .. }) {
+                    return Err(err);
+                } else if err.is_retryable() && retry < self.optimistic_retry {
                     warn!("Failed to downgrade region, error: {err:?}, retry later");
                     sleep(self.retry_initial_interval).await;
-                } else if !err.is_retryable() {
-                    // Throws the non-retryable error
-                    return Err(err);
                 } else {
                     break;
                 }
