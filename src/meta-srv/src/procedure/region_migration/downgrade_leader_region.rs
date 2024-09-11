@@ -313,6 +313,13 @@ mod tests {
 
         assert_matches!(err, Error::ExceededDeadline { .. });
         assert!(!err.is_retryable());
+
+        let err = state
+            .downgrade_region_with_retry(&mut ctx)
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::ExceededDeadline { .. });
+        assert!(!err.is_retryable());
     }
 
     #[tokio::test]
