@@ -561,7 +561,7 @@ fn reduce_batch_subgraph(
                     .context(InternalSnafu{
                         reason: format!(
                             "Output builder should have the same length as the row, expected at most {} but got {}", 
-                            column_cnt-1,
+                            column_cnt - 1,
                             i
                         )
                     })?
