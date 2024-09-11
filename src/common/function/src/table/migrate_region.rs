@@ -133,7 +133,7 @@ mod tests {
                          Signature {
                              type_signature: TypeSignature::OneOf(sigs),
                              volatility: Volatility::Immutable
-                         } if sigs.len() == 3));
+                         } if sigs.len() == 2));
     }
 
     #[tokio::test]
