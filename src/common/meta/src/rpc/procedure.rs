@@ -30,8 +30,7 @@ pub struct MigrateRegionRequest {
     pub region_id: u64,
     pub from_peer: u64,
     pub to_peer: u64,
-    pub replay_timeout: Duration,
-    pub flush_timeout: Option<Duration>,
+    pub timeout: Duration,
 }
 
 /// Cast the protobuf [`ProcedureId`] to common [`ProcedureId`].

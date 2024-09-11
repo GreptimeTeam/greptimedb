@@ -473,8 +473,7 @@ impl MetaClient {
                 request.region_id,
                 request.from_peer,
                 request.to_peer,
-                request.replay_timeout,
-                request.flush_timeout,
+                request.timeout,
             )
             .await
     }

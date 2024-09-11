@@ -16,23 +16,22 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
-use common_meta::distributed_time_constants::{MAILBOX_RTT_SECS, REGION_LEASE_SECS};
+use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{
     DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
 };
 use common_procedure::Status;
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
-use tokio::time::sleep;
+use snafu::{OptionExt, ResultExt};
+use tokio::time::{sleep, Instant};
 
+use super::update_metadata::UpdateMetadata;
 use super::upgrade_candidate_region::UpgradeCandidateRegion;
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
-
-const DOWNGRADE_LEADER_REGION_TIMEOUT: Duration = Duration::from_secs(MAILBOX_RTT_SECS);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DowngradeLeaderRegion {
@@ -55,11 +54,15 @@ impl Default for DowngradeLeaderRegion {
 #[typetag::serde]
 impl State for DowngradeLeaderRegion {
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
-        let replay_timeout = ctx.persistent_ctx.replay_timeout;
         // Ensures the `leader_region_lease_deadline` must exist after recovering.
         ctx.volatile_ctx
             .set_leader_region_lease_deadline(Duration::from_secs(REGION_LEASE_SECS));
-        self.downgrade_region_with_retry(ctx).await;
+
+        // Rollbacks the metadata if occurring any non-retryable errors.
+        if let Err(err) = self.downgrade_region_with_retry(ctx).await {
+            warn!(err; "Occurs non-retryable error");
+            return Ok((Box::new(UpdateMetadata::Rollback), Status::executing(false)));
+        }
 
         if let Some(deadline) = ctx.volatile_ctx.leader_region_lease_deadline.as_ref() {
             info!(
@@ -70,10 +73,7 @@ impl State for DowngradeLeaderRegion {
         }
 
         Ok((
-            Box::new(UpgradeCandidateRegion {
-                replay_timeout,
-                ..Default::default()
-            }),
+            Box::new(UpgradeCandidateRegion::default()),
             Status::executing(false),
         ))
     }
@@ -85,13 +85,16 @@ impl State for DowngradeLeaderRegion {
 
 impl DowngradeLeaderRegion {
     /// Builds downgrade region instruction.
-    fn build_downgrade_region_instruction(&self, ctx: &Context) -> Instruction {
+    fn build_downgrade_region_instruction(
+        &self,
+        ctx: &Context,
+        wait_for_flush_timeout: Duration,
+    ) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
-        let wait_for_flush_timeout = ctx.persistent_ctx.flush_timeout;
         Instruction::DowngradeRegion(DowngradeRegion {
             region_id,
-            wait_for_flush_timeout,
+            wait_for_flush_timeout: Some(wait_for_flush_timeout),
         })
     }
 
@@ -106,32 +109,32 @@ impl DowngradeLeaderRegion {
     /// - [PushMessage](error::Error::PushMessage), The receiver is dropped.
     /// - [MailboxReceiver](error::Error::MailboxReceiver), The sender is dropped without sending (impossible).
     /// - [UnexpectedInstructionReply](error::Error::UnexpectedInstructionReply).
+    /// - [ExceededDeadline](error::Error::ExceededDeadline)
     /// - Invalid JSON.
-    async fn downgrade_region(
-        &self,
-        ctx: &mut Context,
-        downgrade_instruction: &Instruction,
-    ) -> Result<()> {
+    async fn downgrade_region(&self, ctx: &mut Context) -> Result<()> {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
         let leader = &pc.from_peer;
+        let operation_timeout =
+            ctx.next_operation_timeout()
+                .context(error::ExceededDeadlineSnafu {
+                    operation: "Downgrade region",
+                })?;
+        let downgrade_instruction = self.build_downgrade_region_instruction(ctx, operation_timeout);
 
         let msg = MailboxMessage::json_message(
             &format!("Downgrade leader region: {}", region_id),
             &format!("Meta@{}", ctx.server_addr()),
             &format!("Datanode-{}@{}", leader.id, leader.addr),
             common_time::util::current_time_millis(),
-            downgrade_instruction,
+            &downgrade_instruction,
         )
         .with_context(|_| error::SerializeToJsonSnafu {
             input: downgrade_instruction.to_string(),
         })?;
 
         let ch = Channel::Datanode(leader.id);
-        let receiver = ctx
-            .mailbox
-            .send(&ch, msg, DOWNGRADE_LEADER_REGION_TIMEOUT)
-            .await?;
+        let receiver = ctx.mailbox.send(&ch, msg, operation_timeout).await?;
 
         match receiver.await? {
             Ok(msg) => {
@@ -195,26 +198,35 @@ impl DowngradeLeaderRegion {
     ///
     /// Slow path:
     /// - Waits for the lease of the leader region expired.
-    async fn downgrade_region_with_retry(&self, ctx: &mut Context) {
-        let instruction = self.build_downgrade_region_instruction(ctx);
-
+    ///
+    /// Abort:
+    /// - Non-retryable error.
+    async fn downgrade_region_with_retry(&self, ctx: &mut Context) -> Result<()> {
         let mut retry = 0;
 
         loop {
-            if let Err(err) = self.downgrade_region(ctx, &instruction).await {
+            let timer = Instant::now();
+            if let Err(err) = self.downgrade_region(ctx).await {
+                ctx.update_operations_elapsed(timer);
                 retry += 1;
                 if err.is_retryable() && retry < self.optimistic_retry {
                     warn!("Failed to downgrade region, error: {err:?}, retry later");
                     sleep(self.retry_initial_interval).await;
+                } else if !err.is_retryable() {
+                    // Throws the non-retryable error
+                    return Err(err);
                 } else {
                     break;
                 }
             } else {
+                ctx.update_operations_elapsed(timer);
                 // Resets the deadline.
                 ctx.volatile_ctx.reset_leader_region_lease_deadline();
                 break;
             }
         }
+
+        Ok(())
     }
 }
 
@@ -241,8 +253,7 @@ mod tests {
             to_peer: Peer::empty(2),
             region_id: RegionId::new(1024, 1),
             cluster_id: 0,
-            replay_timeout: Duration::from_millis(1000),
-            flush_timeout: Some(Duration::from_millis(1000)),
+            timeout: Duration::from_millis(1000),
         }
     }
 
@@ -253,11 +264,7 @@ mod tests {
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
 
-        let instruction = &state.build_downgrade_region_instruction(&ctx);
-        let err = state
-            .downgrade_region(&mut ctx, instruction)
-            .await
-            .unwrap_err();
+        let err = state.downgrade_region(&mut ctx).await.unwrap_err();
 
         assert_matches!(err, Error::PusherNotFound { .. });
         assert!(!err.is_retryable());
@@ -281,11 +288,7 @@ mod tests {
 
         drop(rx);
 
-        let instruction = &state.build_downgrade_region_instruction(&ctx);
-        let err = state
-            .downgrade_region(&mut ctx, instruction)
-            .await
-            .unwrap_err();
+        let err = state.downgrade_region(&mut ctx).await.unwrap_err();
 
         assert_matches!(err, Error::PushMessage { .. });
         assert!(!err.is_retryable());
@@ -311,11 +314,7 @@ mod tests {
         // Sends an incorrect reply.
         send_mock_reply(mailbox, rx, |id| Ok(new_close_region_reply(id)));
 
-        let instruction = &state.build_downgrade_region_instruction(&ctx);
-        let err = state
-            .downgrade_region(&mut ctx, instruction)
-            .await
-            .unwrap_err();
+        let err = state.downgrade_region(&mut ctx).await.unwrap_err();
 
         assert_matches!(err, Error::UnexpectedInstructionReply { .. });
         assert!(!err.is_retryable());
@@ -342,11 +341,7 @@ mod tests {
             Err(error::MailboxTimeoutSnafu { id }.build())
         });
 
-        let instruction = &state.build_downgrade_region_instruction(&ctx);
-        let err = state
-            .downgrade_region(&mut ctx, instruction)
-            .await
-            .unwrap_err();
+        let err = state.downgrade_region(&mut ctx).await.unwrap_err();
 
         assert_matches!(err, Error::RetryLater { .. });
         assert!(err.is_retryable());
@@ -378,11 +373,7 @@ mod tests {
             ))
         });
 
-        let instruction = &state.build_downgrade_region_instruction(&ctx);
-        let err = state
-            .downgrade_region(&mut ctx, instruction)
-            .await
-            .unwrap_err();
+        let err = state.downgrade_region(&mut ctx).await.unwrap_err();
 
         assert_matches!(err, Error::RetryLater { .. });
         assert!(err.is_retryable());
@@ -430,7 +421,7 @@ mod tests {
                 .unwrap();
         });
 
-        state.downgrade_region_with_retry(&mut ctx).await;
+        state.downgrade_region_with_retry(&mut ctx).await.unwrap();
         assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, Some(1));
         assert!(ctx.volatile_ctx.leader_region_lease_deadline.is_none());
     }
@@ -472,7 +463,7 @@ mod tests {
         ctx.volatile_ctx
             .set_leader_region_lease_deadline(Duration::from_secs(5));
         let expected_deadline = ctx.volatile_ctx.leader_region_lease_deadline.unwrap();
-        state.downgrade_region_with_retry(&mut ctx).await;
+        state.downgrade_region_with_retry(&mut ctx).await.unwrap();
         assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, None);
         // Should remain no change.
         assert_eq!(

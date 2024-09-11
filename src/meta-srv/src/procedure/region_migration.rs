@@ -30,6 +30,7 @@ use std::time::Duration;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::RegionFailureDetectorControllerRef;
+use common_meta::distributed_time_constants::MAILBOX_RTT_SECS;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
@@ -73,16 +74,13 @@ pub struct PersistentContext {
     to_peer: Peer,
     /// The [RegionId] of migration region.
     region_id: RegionId,
-    /// The timeout of waiting for a candidate to replay the WAL.
-    #[serde(with = "humantime_serde", default = "default_replay_timeout")]
-    replay_timeout: Duration,
-    /// The timeout of waiting for a candidate to replay the WAL.
-    #[serde(with = "humantime_serde", default)]
-    flush_timeout: Option<Duration>,
+    /// The timeout for downgrading leader region and upgrading candidate region operations.
+    #[serde(with = "humantime_serde", default = "default_timeout")]
+    timeout: Duration,
 }
 
-fn default_replay_timeout() -> Duration {
-    Duration::from_secs(1)
+fn default_timeout() -> Duration {
+    Duration::from_secs(10)
 }
 
 impl PersistentContext {
@@ -126,6 +124,8 @@ pub struct VolatileContext {
     leader_region_lease_deadline: Option<Instant>,
     /// The last_entry_id of leader region.
     leader_region_last_entry_id: Option<u64>,
+    /// Elapsed time of downgrading region and upgrading region.
+    operations_elapsed: Duration,
 }
 
 impl VolatileContext {
@@ -214,6 +214,23 @@ pub struct Context {
 }
 
 impl Context {
+    /// Returns the next operation timeout.
+    ///
+    /// It always returns (timeout - operations_elapsed) / 2 + Mailbox RRT.
+    pub fn next_operation_timeout(&self) -> Option<Duration> {
+        let remaining = self
+            .persistent_ctx
+            .timeout
+            .checked_sub(self.volatile_ctx.operations_elapsed);
+
+        remaining.map(|time| time / 2 + Duration::from_secs(MAILBOX_RTT_SECS))
+    }
+
+    /// Updates operations elapsed.
+    pub fn update_operations_elapsed(&mut self, instant: Instant) {
+        self.volatile_ctx.operations_elapsed += instant.elapsed();
+    }
+
     /// Returns address of meta server.
     pub fn server_addr(&self) -> &str {
         &self.server_addr
@@ -444,8 +461,7 @@ impl RegionMigrationProcedure {
             region_id: persistent_ctx.region_id,
             from_peer: persistent_ctx.from_peer.clone(),
             to_peer: persistent_ctx.to_peer.clone(),
-            replay_timeout: persistent_ctx.replay_timeout,
-            flush_timeout: persistent_ctx.flush_timeout,
+            timeout: persistent_ctx.timeout,
         });
         let context = context_factory.new_context(persistent_ctx);
 

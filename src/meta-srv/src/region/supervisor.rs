@@ -402,9 +402,7 @@ impl RegionSupervisor {
             region_id,
             from_peer,
             to_peer,
-            replay_timeout: Duration::from_secs(60),
-            // Leader is dead, no need to flush the leader region.
-            flush_timeout: None,
+            timeout: Duration::from_secs(60),
         };
 
         if let Err(err) = self.region_migration_manager.submit_procedure(task).await {

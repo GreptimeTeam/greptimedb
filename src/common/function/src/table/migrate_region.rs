@@ -25,8 +25,7 @@ use session::context::QueryContextRef;
 use crate::handlers::ProcedureServiceHandlerRef;
 use crate::helper::cast_u64;
 
-const DEFAULT_REPLAY_TIMEOUT_SECS: u64 = 10;
-const DEFAULT_FLUSH_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
 /// A function to migrate a region from source peer to target peer.
 /// Returns the submitted procedure id if success. Only available in cluster mode.
@@ -50,19 +49,13 @@ pub(crate) async fn migrate_region(
     _ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
-    let (region_id, from_peer, to_peer, replay_timeout, flush_timeout) = match params.len() {
+    let (region_id, from_peer, to_peer, timeout) = match params.len() {
         3 => {
             let region_id = cast_u64(&params[0])?;
             let from_peer = cast_u64(&params[1])?;
             let to_peer = cast_u64(&params[2])?;
 
-            (
-                region_id,
-                from_peer,
-                to_peer,
-                Some(DEFAULT_REPLAY_TIMEOUT_SECS),
-                Some(DEFAULT_FLUSH_TIMEOUT_SECS),
-            )
+            (region_id, from_peer, to_peer, Some(DEFAULT_TIMEOUT_SECS))
         }
 
         4 => {
@@ -71,23 +64,7 @@ pub(crate) async fn migrate_region(
             let to_peer = cast_u64(&params[2])?;
             let replay_timeout = cast_u64(&params[3])?;
 
-            (
-                region_id,
-                from_peer,
-                to_peer,
-                replay_timeout,
-                Some(DEFAULT_FLUSH_TIMEOUT_SECS),
-            )
-        }
-
-        5 => {
-            let region_id = cast_u64(&params[0])?;
-            let from_peer = cast_u64(&params[1])?;
-            let to_peer = cast_u64(&params[2])?;
-            let replay_timeout = cast_u64(&params[3])?;
-            let flush_timeout = cast_u64(&params[4])?;
-
-            (region_id, from_peer, to_peer, replay_timeout, flush_timeout)
+            (region_id, from_peer, to_peer, replay_timeout)
         }
 
         size => {
@@ -101,27 +78,14 @@ pub(crate) async fn migrate_region(
         }
     };
 
-    match (region_id, from_peer, to_peer, replay_timeout, flush_timeout) {
-        (
-            Some(region_id),
-            Some(from_peer),
-            Some(to_peer),
-            Some(replay_timeout),
-            Some(flush_timeout),
-        ) => {
-            let flush_timeout = if flush_timeout == 0 {
-                None
-            } else {
-                Some(Duration::from_secs(flush_timeout))
-            };
-
+    match (region_id, from_peer, to_peer, timeout) {
+        (Some(region_id), Some(from_peer), Some(to_peer), Some(timeout)) => {
             let pid = procedure_service_handler
                 .migrate_region(MigrateRegionRequest {
                     region_id,
                     from_peer,
                     to_peer,
-                    replay_timeout: Duration::from_secs(replay_timeout),
-                    flush_timeout,
+                    timeout: Duration::from_secs(timeout),
                 })
                 .await?;
 
@@ -140,10 +104,8 @@ fn signature() -> Signature {
         vec![
             // migrate_region(region_id, from_peer, to_peer)
             TypeSignature::Uniform(3, ConcreteDataType::numerics()),
-            // migrate_region(region_id, from_peer, to_peer, replay WAL timeout(secs))
+            // migrate_region(region_id, from_peer, to_peer, timeout(secs))
             TypeSignature::Uniform(4, ConcreteDataType::numerics()),
-            // migrate_region(region_id, from_peer, to_peer, replay WAL timeout(secs), flush timeout(secs))
-            TypeSignature::Uniform(5, ConcreteDataType::numerics()),
         ],
         Volatility::Immutable,
     )
