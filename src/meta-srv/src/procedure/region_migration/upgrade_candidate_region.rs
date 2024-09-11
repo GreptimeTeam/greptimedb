@@ -277,6 +277,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_procedure_exceeded_deadline() {
+        let state = UpgradeCandidateRegion::default();
+        let persistent_context = new_persistent_context();
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        ctx.volatile_ctx.operations_elapsed = ctx.persistent_ctx.timeout + Duration::from_secs(1);
+
+        let err = state.upgrade_region(&mut ctx).await.unwrap_err();
+
+        assert_matches!(err, Error::ExceededDeadline { .. });
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
     async fn test_unexpected_instruction_reply() {
         let state = UpgradeCandidateRegion::default();
         let persistent_context = new_persistent_context();
@@ -523,6 +537,33 @@ mod tests {
 
         let (next, _) = state.next(&mut ctx).await.unwrap();
 
+        let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
+        assert_matches!(update_metadata, UpdateMetadata::Rollback);
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_region_procedure_exceeded_deadline() {
+        let mut state = Box::<UpgradeCandidateRegion>::default();
+        state.retry_initial_interval = Duration::from_millis(100);
+        let persistent_context = new_persistent_context();
+        let to_peer_id = persistent_context.to_peer.id;
+
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+        ctx.volatile_ctx.operations_elapsed = ctx.persistent_ctx.timeout + Duration::from_secs(1);
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
+            .await;
+
+        send_mock_reply(mailbox, rx, |id| {
+            Ok(new_upgrade_region_reply(id, false, true, None))
+        });
+
+        let (next, _) = state.next(&mut ctx).await.unwrap();
         let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
         assert_matches!(update_metadata, UpdateMetadata::Rollback);
     }
