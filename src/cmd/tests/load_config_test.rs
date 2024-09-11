@@ -74,15 +74,9 @@ fn test_load_datanode_example_config() {
             },
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    num_workers: 8,
                     auto_flush_interval: Duration::from_secs(3600),
                     scan_parallelism: 0,
-                    global_write_buffer_size: ReadableSize::gb(1),
                     global_write_buffer_reject_size: ReadableSize::gb(2),
-                    sst_meta_cache_size: ReadableSize::mb(128),
-                    vector_cache_size: ReadableSize::mb(512),
-                    page_cache_size: ReadableSize::mb(512),
-                    selector_result_cache_size: ReadableSize::mb(512),
                     max_background_jobs: 4,
                     experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
@@ -213,15 +207,10 @@ fn test_load_standalone_example_config() {
             }),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    num_workers: 8,
                     auto_flush_interval: Duration::from_secs(3600),
                     scan_parallelism: 0,
-                    global_write_buffer_size: ReadableSize::gb(1),
                     global_write_buffer_reject_size: ReadableSize::gb(2),
                     sst_meta_cache_size: ReadableSize::mb(128),
-                    vector_cache_size: ReadableSize::mb(512),
-                    page_cache_size: ReadableSize::mb(512),
-                    selector_result_cache_size: ReadableSize::mb(512),
                     max_background_jobs: 4,
                     experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
