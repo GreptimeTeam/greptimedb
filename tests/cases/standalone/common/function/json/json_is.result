@@ -1,114 +1,114 @@
 -- json_is functions --
-SELECT json_is_object(to_json('{"a": 1}'));
+SELECT json_is_object(parse_json('{"a": 1}'));
 
-+-------------------------------------------+
-| json_is_object(to_json(Utf8("{"a": 1}"))) |
-+-------------------------------------------+
-| true                                      |
-+-------------------------------------------+
++----------------------------------------------+
+| json_is_object(parse_json(Utf8("{"a": 1}"))) |
++----------------------------------------------+
+| true                                         |
++----------------------------------------------+
 
-SELECT json_is_array(to_json('[1, 2, 3]'));
+SELECT json_is_array(parse_json('[1, 2, 3]'));
 
-+-------------------------------------------+
-| json_is_array(to_json(Utf8("[1, 2, 3]"))) |
-+-------------------------------------------+
-| true                                      |
-+-------------------------------------------+
++----------------------------------------------+
+| json_is_array(parse_json(Utf8("[1, 2, 3]"))) |
++----------------------------------------------+
+| true                                         |
++----------------------------------------------+
 
-SELECT json_is_int(to_json('1'));
+SELECT json_is_int(parse_json('1'));
 
-+---------------------------------+
-| json_is_int(to_json(Utf8("1"))) |
-+---------------------------------+
-| true                            |
-+---------------------------------+
++------------------------------------+
+| json_is_int(parse_json(Utf8("1"))) |
++------------------------------------+
+| true                               |
++------------------------------------+
 
-SELECT json_is_bool(to_json('true'));
-
-+-------------------------------------+
-| json_is_bool(to_json(Utf8("true"))) |
-+-------------------------------------+
-| true                                |
-+-------------------------------------+
-
-SELECT json_is_null(to_json('null'));
-
-+-------------------------------------+
-| json_is_null(to_json(Utf8("null"))) |
-+-------------------------------------+
-| true                                |
-+-------------------------------------+
-
-SELECT json_is_float(to_json('1.2'));
-
-+-------------------------------------+
-| json_is_float(to_json(Utf8("1.2"))) |
-+-------------------------------------+
-| true                                |
-+-------------------------------------+
-
-SELECT json_is_string(to_json('"foo"'));
+SELECT json_is_bool(parse_json('true'));
 
 +----------------------------------------+
-| json_is_string(to_json(Utf8(""foo""))) |
+| json_is_bool(parse_json(Utf8("true"))) |
 +----------------------------------------+
 | true                                   |
 +----------------------------------------+
 
-SELECT json_is_null(to_json('{"a": 1}'));
+SELECT json_is_null(parse_json('null'));
 
-+-----------------------------------------+
-| json_is_null(to_json(Utf8("{"a": 1}"))) |
-+-----------------------------------------+
-| false                                   |
-+-----------------------------------------+
++----------------------------------------+
+| json_is_null(parse_json(Utf8("null"))) |
++----------------------------------------+
+| true                                   |
++----------------------------------------+
 
-SELECT json_is_string(to_json('[1, 2, 3]'));
+SELECT json_is_float(parse_json('1.2'));
+
++----------------------------------------+
+| json_is_float(parse_json(Utf8("1.2"))) |
++----------------------------------------+
+| true                                   |
++----------------------------------------+
+
+SELECT json_is_string(parse_json('"foo"'));
+
++-------------------------------------------+
+| json_is_string(parse_json(Utf8(""foo""))) |
++-------------------------------------------+
+| true                                      |
++-------------------------------------------+
+
+SELECT json_is_null(parse_json('{"a": 1}'));
 
 +--------------------------------------------+
-| json_is_string(to_json(Utf8("[1, 2, 3]"))) |
+| json_is_null(parse_json(Utf8("{"a": 1}"))) |
 +--------------------------------------------+
 | false                                      |
 +--------------------------------------------+
 
-SELECT json_is_float(to_json('1'));
+SELECT json_is_string(parse_json('[1, 2, 3]'));
 
-+-----------------------------------+
-| json_is_float(to_json(Utf8("1"))) |
-+-----------------------------------+
-| true                              |
-+-----------------------------------+
++-----------------------------------------------+
+| json_is_string(parse_json(Utf8("[1, 2, 3]"))) |
++-----------------------------------------------+
+| false                                         |
++-----------------------------------------------+
+
+SELECT json_is_float(parse_json('1'));
+
++--------------------------------------+
+| json_is_float(parse_json(Utf8("1"))) |
++--------------------------------------+
+| true                                 |
++--------------------------------------+
 
 -- test json_is functions in table rows and WHERE clause --
 CREATE TABLE jsons(j JSON, ts timestamp time index);
 
 Affected Rows: 0
 
-INSERT INTO jsons VALUES(to_json('{"a": 1}'), 1);
+INSERT INTO jsons VALUES(parse_json('{"a": 1}'), 1);
 
 Affected Rows: 1
 
-INSERT INTO jsons VALUES(to_json('[1, 2, 3]'), 2);
+INSERT INTO jsons VALUES(parse_json('[1, 2, 3]'), 2);
 
 Affected Rows: 1
 
-INSERT INTO jsons VALUES(to_json('1'), 3);
+INSERT INTO jsons VALUES(parse_json('1'), 3);
 
 Affected Rows: 1
 
-INSERT INTO jsons VALUES(to_json('true'), 4);
+INSERT INTO jsons VALUES(parse_json('true'), 4);
 
 Affected Rows: 1
 
-INSERT INTO jsons VALUES(to_json('null'), 5);
+INSERT INTO jsons VALUES(parse_json('null'), 5);
 
 Affected Rows: 1
 
-INSERT INTO jsons VALUES(to_json('1.2'), 6);
+INSERT INTO jsons VALUES(parse_json('1.2'), 6);
 
 Affected Rows: 1
 
-INSERT INTO jsons VALUES(to_json('"foo"'), 7);
+INSERT INTO jsons VALUES(parse_json('"foo"'), 7);
 
 Affected Rows: 1
 
