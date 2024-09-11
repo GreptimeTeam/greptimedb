@@ -14,12 +14,12 @@
 
 use std::sync::Arc;
 
-use axum::extract::{RawBody, State};
+use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Extension;
+use bytes::Bytes;
 use common_telemetry::tracing;
-use hyper::Body;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
@@ -39,7 +39,7 @@ use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 pub async fn metrics(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(mut query_ctx): Extension<QueryContext>,
-    RawBody(body): RawBody,
+    bytes: Bytes,
 ) -> Result<OtlpMetricsResponse> {
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
@@ -47,7 +47,8 @@ pub async fn metrics(
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
-    let request = parse_metrics_body(body).await?;
+    let request =
+        ExportMetricsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
 
     handler
         .metrics(request, query_ctx)
@@ -57,15 +58,6 @@ pub async fn metrics(
                 partial_success: None,
             },
             write_cost: o.meta.cost,
-        })
-}
-
-async fn parse_metrics_body(body: Body) -> Result<ExportMetricsServiceRequest> {
-    hyper::body::to_bytes(body)
-        .await
-        .context(error::HyperSnafu)
-        .and_then(|buf| {
-            ExportMetricsServiceRequest::decode(&buf[..]).context(error::DecodeOtlpRequestSnafu)
         })
 }
 
@@ -88,7 +80,7 @@ impl IntoResponse for OtlpMetricsResponse {
 pub async fn traces(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(mut query_ctx): Extension<QueryContext>,
-    RawBody(body): RawBody,
+    bytes: Bytes,
 ) -> Result<OtlpTracesResponse> {
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
@@ -96,7 +88,8 @@ pub async fn traces(
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
-    let request = parse_traces_body(body).await?;
+    let request =
+        ExportTraceServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
     handler
         .traces(request, query_ctx)
         .await
@@ -105,15 +98,6 @@ pub async fn traces(
                 partial_success: None,
             },
             write_cost: o.meta.cost,
-        })
-}
-
-async fn parse_traces_body(body: Body) -> Result<ExportTraceServiceRequest> {
-    hyper::body::to_bytes(body)
-        .await
-        .context(error::HyperSnafu)
-        .and_then(|buf| {
-            ExportTraceServiceRequest::decode(&buf[..]).context(error::DecodeOtlpRequestSnafu)
         })
 }
 
