@@ -30,9 +30,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = 10;
 /// A function to migrate a region from source peer to target peer.
 /// Returns the submitted procedure id if success. Only available in cluster mode.
 ///
-/// - `migrate_region(region_id, from_peer, to_peer)`, with default replay WAL timeout(10 seconds), and default flush region timeout(10 seconds).
-/// - `migrate_region(region_id, from_peer, to_peer, replay WAL  timeout(secs))` and default flush region timeout(10 seconds).
-/// - `migrate_region(region_id, from_peer, to_peer, replay WAL timeout(secs), flush region timeout(secs))`
+/// - `migrate_region(region_id, from_peer, to_peer)`, with timeout(10 seconds).
+/// - `migrate_region(region_id, from_peer, to_peer, timeout(secs))`.
 ///
 /// The parameters:
 /// - `region_id`:  the region id
