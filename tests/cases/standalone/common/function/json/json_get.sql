@@ -54,3 +54,26 @@ SELECT json_get_bool(j, '[2]') FROM jsons;
 SELECT json_get_string(j, '[3]') FROM jsons;
 
 DROP TABLE jsons;
+
+-- test functions in WHERE clause --
+CREATE TABLE jsons(j JSON, ts timestamp time index);
+
+INSERT INTO jsons VALUES(to_json('{"a": {"b": {"c": 1}}}'), 1);
+
+INSERT INTO jsons VALUES(to_json('{"a": {"b": {"c": 1.234}}}'), 2);
+
+INSERT INTO jsons VALUES(to_json('{"a": {"b": {"c": "foo"}}}'), 3);
+
+INSERT INTO jsons VALUES(to_json('{"a": {"b": {"c": true}}}'), 4);
+
+SELECT * FROM jsons WHERE json_get_int(j, 'a.b.c') = 1;
+
+SELECT * FROM jsons WHERE json_get_float(j, 'a.b.c') = 1.234;
+
+SELECT * FROM jsons WHERE json_get_string(j, 'a.b.c') = 'foo';
+
+SELECT * FROM jsons WHERE json_get_bool(j, 'a.b.c') = true;
+
+SELECT * FROM jsons WHERE json_get_int(j, 'a.b.c') = NULL;
+
+DROP TABLE jsons;

@@ -14,10 +14,14 @@
 
 use std::sync::Arc;
 mod json_get;
+mod json_is;
 mod json_to_string;
 mod to_json;
 
 use json_get::{JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString};
+use json_is::{
+    JsonIsArray, JsonIsBool, JsonIsFloat, JsonIsInt, JsonIsNull, JsonIsObject, JsonIsString,
+};
 use json_to_string::JsonToStringFunction;
 use to_json::ToJsonFunction;
 
@@ -34,5 +38,13 @@ impl JsonFunction {
         registry.register(Arc::new(JsonGetFloat));
         registry.register(Arc::new(JsonGetString));
         registry.register(Arc::new(JsonGetBool));
+
+        registry.register(Arc::new(JsonIsNull));
+        registry.register(Arc::new(JsonIsInt));
+        registry.register(Arc::new(JsonIsFloat));
+        registry.register(Arc::new(JsonIsString));
+        registry.register(Arc::new(JsonIsBool));
+        registry.register(Arc::new(JsonIsArray));
+        registry.register(Arc::new(JsonIsObject));
     }
 }
