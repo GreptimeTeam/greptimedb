@@ -526,7 +526,7 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
             }
-            alter_request::Kind::ChangeFulltex(x) => AlterKind::ChangeColumnFulltext {
+            alter_request::Kind::ChangeFulltext(x) => AlterKind::ChangeColumnFulltext {
                 column_name: x.column_name,
                 options: x.options,
             },

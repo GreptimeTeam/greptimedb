@@ -106,7 +106,7 @@ fn create_proto_alter_kind(
             })))
         }
         Kind::RenameTable(_) => Ok(None),
-        Kind::ChangeFulltext(x) => Ok(Some(alter_request::Kind::ChangeFulltex(x.clone()))),
+        Kind::ChangeFulltext(x) => Ok(Some(alter_request::Kind::ChangeFulltext(x.clone()))),
     }
 }
 
