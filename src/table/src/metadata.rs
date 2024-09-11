@@ -627,7 +627,7 @@ impl TableMeta {
                 if column.name == *column_name {
                     column = column
                         .clone()
-                        .with_fulltext_options(&fulltext)
+                        .with_fulltext_options(fulltext.clone())
                         .unwrap();
                 }
                 column
@@ -933,6 +933,24 @@ mod tests {
     fn new_test_schema() -> Schema {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
+        ];
+        SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .version(123)
+            .build()
+            .unwrap()
+    }
+
+    fn new_test_schema2() -> Schema {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(
                 "ts",
                 ConcreteDataType::timestamp_millisecond_datatype(),
@@ -1365,5 +1383,36 @@ mod tests {
         );
         assert_eq!(&[0, 1], &new_meta.primary_key_indices[..]);
         assert_eq!(&[2, 3, 4], &new_meta.value_indices[..]);
+    }
+
+    #[test]
+    fn test_change_column_fulltext() {
+        let schema = Arc::new(new_test_schema2());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::ChangeFulltext {
+            column_name: "col1".to_string(),
+            options: HashMap::from([(String::from("analyzer"), String::from("English"))]),
+        };
+        assert!(meta
+            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .is_ok());
+
+        let alter_kind = AlterKind::ChangeFulltext {
+            column_name: "col1".to_string(),
+            options: HashMap::from([(String::from("case_sensitive"), String::from("no"))]),
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .err()
+            .unwrap();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+
     }
 }

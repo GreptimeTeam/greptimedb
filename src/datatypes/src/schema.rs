@@ -529,4 +529,16 @@ mod tests {
             .build()
             .is_err());
     }
+
+    #[test]
+    fn test_validate_fulltext_options() {
+        let mut fulltext = FulltextOptions::default();
+        let options = HashMap::from([(String::from("analyzer"), String::from("English"))]);
+        assert!(validate_fulltext_options(&mut fulltext, &options));
+
+        let mut fulltext = FulltextOptions::default();
+        let options = HashMap::from([(String::from("analyzer"), String::from("Chinglish"))]);
+        assert!(!validate_fulltext_options(&mut fulltext, &options));
+
+   }
 }

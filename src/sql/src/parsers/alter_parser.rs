@@ -430,4 +430,38 @@ mod tests {
             _ => unreachable!(),
         }
     }
+
+    #[test]
+    fn test_parse_alter_change_fulltext() {
+        let sql = "ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'true');";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::Alter { .. });
+        match statement {
+            Statement::Alter(alter_table) => {
+                assert_eq!("test", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_matches!(
+                    alter_operation,
+                    AlterTableOperation::AlterColumnFulltext { .. }
+                );
+                match alter_operation {
+                    AlterTableOperation::AlterColumnFulltext {
+                        column_name,
+                        options,
+                    } => {
+                        assert_eq!(column_name.value, r#"message"#);
+                        assert_eq!(options.get("analyzer").unwrap(), "Chinese");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
 }

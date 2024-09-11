@@ -648,7 +648,7 @@ impl RegionMetadataBuilder {
 
             column_meta
                 .column_schema
-                .set_fulltext_options(&fulltext)
+                .set_fulltext_options(fulltext)
                 .expect("set fulltext");
         }
 

@@ -9,6 +9,7 @@ SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'true');
 
+-- SQLNESS ARG restart=true
 SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');

@@ -255,12 +255,12 @@ impl ColumnSchema {
         }
     }
 
-    pub fn with_fulltext_options(mut self, options: &FulltextOptions) -> Result<Self> {
+    pub fn with_fulltext_options(mut self, options: FulltextOptions) -> Result<Self> {
         self.set_fulltext_options(options)?;
         Ok(self)
     }
 
-    pub fn set_fulltext_options(&mut self, options: &FulltextOptions) -> Result<()> {
+    pub fn set_fulltext_options(&mut self, options: FulltextOptions) -> Result<()> {
         if self.data_type == ConcreteDataType::string_datatype() {
             self.metadata.insert(
                 FULLTEXT_KEY.to_string(),
