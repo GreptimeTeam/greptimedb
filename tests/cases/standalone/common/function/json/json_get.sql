@@ -66,14 +66,14 @@ INSERT INTO jsons VALUES(parse_json('{"a": {"b": {"c": "foo"}}}'), 3);
 
 INSERT INTO jsons VALUES(parse_json('{"a": {"b": {"c": true}}}'), 4);
 
-SELECT * FROM jsons WHERE json_get_int(j, 'a.b.c') = 1;
+SELECT json_to_string(j) FROM jsons WHERE json_get_int(j, 'a.b.c') = 1;
 
-SELECT * FROM jsons WHERE json_get_float(j, 'a.b.c') = 1.234;
+SELECT json_to_string(j) FROM jsons WHERE json_get_float(j, 'a.b.c') = 1.234;
 
-SELECT * FROM jsons WHERE json_get_string(j, 'a.b.c') = 'foo';
+SELECT json_to_string(j) FROM jsons WHERE json_get_string(j, 'a.b.c') = 'foo';
 
-SELECT * FROM jsons WHERE json_get_bool(j, 'a.b.c') = true;
+SELECT json_to_string(j) FROM jsons WHERE json_get_bool(j, 'a.b.c') = true;
 
-SELECT * FROM jsons WHERE json_get_int(j, 'a.b.c') = NULL;
+SELECT json_to_string(j) FROM jsons WHERE CAST(json_get_int(j, 'a.b.c') AS BOOLEAN);
 
 DROP TABLE jsons;

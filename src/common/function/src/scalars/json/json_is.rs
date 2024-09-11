@@ -130,6 +130,7 @@ json_is!(
     "Checks if the input JSONB is a JSON object"
 );
 
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
