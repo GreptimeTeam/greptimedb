@@ -282,8 +282,7 @@ pub(super) fn parameters_to_scalar_values(
     for idx in 0..param_count {
         let server_type = param_types
             .get(&format!("${}", idx + 1))
-            .map(|t| t.as_ref())
-            .flatten();
+            .and_then(|t| t.as_ref());
 
         let client_type = if let Some(client_given_type) = client_param_types.get(idx) {
             client_given_type.clone()
@@ -351,7 +350,7 @@ pub(super) fn parameters_to_scalar_values(
                         ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
                         ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
                         ConcreteDataType::Timestamp(unit) => {
-                            to_timestamp_scalar_value(data, unit, &server_type)?
+                            to_timestamp_scalar_value(data, unit, server_type)?
                         }
                         ConcreteDataType::DateTime(_) => {
                             ScalarValue::Date64(data.map(|d| d as i64))
