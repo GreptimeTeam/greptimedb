@@ -139,7 +139,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_json_is_misc() {
+    fn test_json_is_functions() {
         let json_is_functions: [&dyn Function; 6] = [
             &JsonIsBool,
             &JsonIsInt,
