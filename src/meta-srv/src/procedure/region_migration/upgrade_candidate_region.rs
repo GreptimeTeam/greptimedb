@@ -284,7 +284,7 @@ mod tests {
         let mut ctx = env.context_factory().new_context(persistent_context);
         ctx.volatile_ctx.operations_elapsed = ctx.persistent_ctx.timeout + Duration::from_secs(1);
 
-        let err = state.upgrade_region(&mut ctx).await.unwrap_err();
+        let err = state.upgrade_region(&ctx).await.unwrap_err();
 
         assert_matches!(err, Error::ExceededDeadline { .. });
         assert!(!err.is_retryable());
