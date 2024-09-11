@@ -136,6 +136,7 @@ mod tests {
     use store_api::storage::RegionId;
     use tokio::time::Instant;
 
+    use crate::error;
     use crate::heartbeat::handler::HandlerContext;
     use crate::tests::{mock_region_server, MockRegionEngine};
 
@@ -290,6 +291,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_region_flush_timeout_and_retry_error() {
+        let mock_region_server = mock_region_server();
+        let region_id = RegionId::new(1024, 1);
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                region_engine.mock_role = Some(Some(RegionRole::Leader));
+                region_engine.handle_request_delay = Some(Duration::from_millis(300));
+                region_engine.handle_request_mock_fn = Some(Box::new(|_, _| {
+                    error::UnexpectedSnafu {
+                        violated: "mock flush failed",
+                    }
+                    .fail()
+                }));
+                region_engine.handle_set_readonly_gracefully_mock_fn =
+                    Some(Box::new(|_| Ok(SetReadonlyResponse::success(Some(1024)))))
+            });
+        mock_region_server.register_test_region(region_id, mock_engine);
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
+
+        let waits = vec![
+            Some(Duration::from_millis(100u64)),
+            Some(Duration::from_millis(100u64)),
+        ];
+
+        for wait_for_flush_timeout in waits {
+            let reply = handler_context
+                .clone()
+                .handle_downgrade_region_instruction(DowngradeRegion {
+                    region_id,
+                    wait_for_flush_timeout,
+                })
+                .await;
+            assert_matches!(reply, InstructionReply::DowngradeRegion(_));
+            if let InstructionReply::DowngradeRegion(reply) = reply {
+                assert!(reply.exists);
+                assert!(reply.error.unwrap().contains("timeout"));
+                assert!(reply.last_entry_id.is_none());
+            }
+        }
+        let timer = Instant::now();
+        let reply = handler_context
+            .handle_downgrade_region_instruction(DowngradeRegion {
+                region_id,
+                wait_for_flush_timeout: Some(Duration::from_millis(500)),
+            })
+            .await;
+        assert_matches!(reply, InstructionReply::DowngradeRegion(_));
+        // Must less than 300 ms.
+        assert!(timer.elapsed().as_millis() < 300);
+
+        if let InstructionReply::DowngradeRegion(reply) = reply {
+            assert!(reply.exists);
+            assert!(reply.error.unwrap().contains("flush failed"));
+            assert!(reply.last_entry_id.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn test_set_region_readonly_not_found() {
         let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
@@ -312,6 +371,40 @@ mod tests {
         if let InstructionReply::DowngradeRegion(reply) = reply {
             assert!(!reply.exists);
             assert!(reply.error.is_none());
+            assert!(reply.last_entry_id.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_region_readonly_error() {
+        let mock_region_server = mock_region_server();
+        let region_id = RegionId::new(1024, 1);
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                region_engine.mock_role = Some(Some(RegionRole::Leader));
+                region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
+                    error::UnexpectedSnafu {
+                        violated: "Failed to set region to readonly",
+                    }
+                    .fail()
+                }));
+            });
+        mock_region_server.register_test_region(region_id, mock_engine);
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let reply = handler_context
+            .clone()
+            .handle_downgrade_region_instruction(DowngradeRegion {
+                region_id,
+                wait_for_flush_timeout: None,
+            })
+            .await;
+        assert_matches!(reply, InstructionReply::DowngradeRegion(_));
+        if let InstructionReply::DowngradeRegion(reply) = reply {
+            assert!(reply.exists);
+            assert!(reply
+                .error
+                .unwrap()
+                .contains("Failed to set region to readonly"));
             assert!(reply.last_entry_id.is_none());
         }
     }
