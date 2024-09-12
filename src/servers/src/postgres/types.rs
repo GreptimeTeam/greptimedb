@@ -260,7 +260,9 @@ fn encode_array(
                 .map(|v| match v {
                     Value::Null => Ok(None),
                     Value::DateTime(v) => {
-                        if let Some(datetime) = v.to_chrono_datetime() {
+                        if let Some(datetime) =
+                            v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
+                        {
                             let (style, order) =
                                 *query_ctx.configuration_parameter().pg_datetime_style();
                             Ok(Some(StylingDateTime(datetime, style, order)))
@@ -284,7 +286,9 @@ fn encode_array(
                 .map(|v| match v {
                     Value::Null => Ok(None),
                     Value::Timestamp(v) => {
-                        if let Some(datetime) = v.to_chrono_datetime() {
+                        if let Some(datetime) =
+                            v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
+                        {
                             let (style, order) =
                                 *query_ctx.configuration_parameter().pg_datetime_style();
                             Ok(Some(StylingDateTime(datetime, style, order)))
@@ -409,7 +413,8 @@ pub(super) fn encode_value(
             }
         }
         Value::DateTime(v) => {
-            if let Some(datetime) = v.to_chrono_datetime() {
+            if let Some(datetime) = v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
+            {
                 let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
                 builder.encode_field(&StylingDateTime(datetime, style, order))
             } else {
@@ -419,7 +424,8 @@ pub(super) fn encode_value(
             }
         }
         Value::Timestamp(v) => {
-            if let Some(datetime) = v.to_chrono_datetime() {
+            if let Some(datetime) = v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
+            {
                 let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
                 builder.encode_field(&StylingDateTime(datetime, style, order))
             } else {
@@ -954,6 +960,7 @@ mod test {
 
     use common_time::interval::IntervalUnit;
     use common_time::timestamp::TimeUnit;
+    use common_time::Timestamp;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::value::ListValue;
     use pgwire::api::results::{FieldFormat, FieldInfo};
@@ -1149,6 +1156,34 @@ mod test {
                 Type::INTERVAL,
                 FieldFormat::Text,
             ),
+            FieldInfo::new(
+                "int_list".into(),
+                None,
+                None,
+                Type::INT8_ARRAY,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "float_list".into(),
+                None,
+                None,
+                Type::FLOAT8_ARRAY,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "string_list".into(),
+                None,
+                None,
+                Type::VARCHAR_ARRAY,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "timestamp_list".into(),
+                None,
+                None,
+                Type::TIMESTAMP_ARRAY,
+                FieldFormat::Text,
+            ),
         ];
 
         let datatypes = vec![
@@ -1179,6 +1214,10 @@ mod test {
             ConcreteDataType::datetime_datatype(),
             ConcreteDataType::timestamp_datatype(TimeUnit::Second),
             ConcreteDataType::interval_datatype(IntervalUnit::YearMonth),
+            ConcreteDataType::list_datatype(ConcreteDataType::int64_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::float64_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::timestamp_second_datatype()),
         ];
         let values = vec![
             Value::Null,
@@ -1208,6 +1247,22 @@ mod test {
             Value::DateTime(1000001i64.into()),
             Value::Timestamp(1000001i64.into()),
             Value::Interval(1000001i128.into()),
+            Value::List(ListValue::new(
+                vec![Value::Int64(1i64)],
+                ConcreteDataType::int64_datatype(),
+            )),
+            Value::List(ListValue::new(
+                vec![Value::Float64(1.0f64.into())],
+                ConcreteDataType::float64_datatype(),
+            )),
+            Value::List(ListValue::new(
+                vec![Value::String("tom".into())],
+                ConcreteDataType::string_datatype(),
+            )),
+            Value::List(ListValue::new(
+                vec![Value::Timestamp(Timestamp::new(1i64, TimeUnit::Second))],
+                ConcreteDataType::timestamp_second_datatype(),
+            )),
         ];
         let query_context = QueryContextBuilder::default()
             .configuration_parameter(Default::default())
@@ -1216,22 +1271,6 @@ mod test {
         let mut builder = DataRowEncoder::new(Arc::new(schema));
         for (value, datatype) in values.iter().zip(datatypes) {
             encode_value(&query_context, value, &mut builder, &datatype).unwrap();
-        }
-
-        let err = encode_value(
-            &query_context,
-            &Value::List(ListValue::new(vec![], ConcreteDataType::int16_datatype())),
-            &mut builder,
-            &ConcreteDataType::list_datatype(ConcreteDataType::int16_datatype()),
-        )
-        .unwrap_err();
-        match err {
-            PgWireError::ApiError(e) => {
-                assert!(format!("{e}").contains("Internal error:"));
-            }
-            _ => {
-                unreachable!()
-            }
         }
     }
 
