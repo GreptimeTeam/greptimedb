@@ -122,3 +122,49 @@ transform:
 
     assert_eq!(output.rows[0].values[0].value_data, None);
 }
+
+#[test]
+fn test_unuse_regex_group() {
+    let input_value_str = r#"
+  [
+    {
+      "str": "123 456"
+    }
+  ]
+"#;
+
+    let pipeline_yaml = r#"
+processors:
+- regex:
+    fields:
+      - str
+    pattern: "(?<id1>\\d+) (?<id2>\\d+)"
+
+transform:
+- field: str_id1
+  type: string
+"#;
+
+    let output = common::parse_and_exec(input_value_str, pipeline_yaml);
+
+    assert_eq!(
+        output.schema,
+        vec![
+            common::make_column_schema(
+                "str_id1".to_string(),
+                ColumnDataType::String,
+                SemanticType::Field,
+            ),
+            common::make_column_schema(
+                "greptime_timestamp".to_string(),
+                ColumnDataType::TimestampNanosecond,
+                SemanticType::Timestamp,
+            ),
+        ]
+    );
+
+    assert_eq!(
+        output.rows[0].values[0].value_data,
+        Some(StringValue("123".to_string()))
+    );
+}
