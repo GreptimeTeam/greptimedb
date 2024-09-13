@@ -249,7 +249,7 @@ impl Function for GeohashNeighboursFunction {
                             neighbours.ne,
                         ]
                         .into_iter()
-                        .map(|s| Value::from(s))
+                        .map(Value::from)
                         .collect(),
                         ConcreteDataType::string_datatype(),
                     ))
