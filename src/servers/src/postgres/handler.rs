@@ -190,16 +190,8 @@ impl QueryParser for DefaultQueryParser {
         crate::metrics::METRIC_POSTGRES_PREPARED_COUNT.inc();
         let query_ctx = self.session.new_query_context();
 
-        if sql.is_empty() {
-            return Ok(SqlPlan {
-                query: sql.to_owned(),
-                plan: None,
-                schema: None,
-            });
-        }
-
-        // test against predefined rules first
-        if fixtures::matches(sql) {
+        // do not parse if query is empty or matches rules
+        if sql.is_empty() || fixtures::matches(sql) {
             return Ok(SqlPlan {
                 query: sql.to_owned(),
                 plan: None,
