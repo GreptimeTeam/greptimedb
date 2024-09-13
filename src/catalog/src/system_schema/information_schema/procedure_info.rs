@@ -177,8 +177,8 @@ impl InformationSchemaProcedureInfoBuilder {
                         .map_err(BoxedError::new)
                         .context(ListProceduresSnafu)?;
                     for procedure in procedures {
-                        let status = format!("{:?}", procedure.state);
-                        self.add_procedure(&predicates, procedure, status);
+                        let (state, _) = procedure::procedure_state_to_pb_state(&procedure.state);
+                        self.add_procedure(&predicates, procedure, state.as_str_name());
                     }
                 } else {
                     return GetProcedureClientSnafu { mode: "standalone" }.fail();
@@ -210,7 +210,7 @@ impl InformationSchemaProcedureInfoBuilder {
         &mut self,
         predicates: &Predicates,
         procedure_info: ProcedureInfo,
-        status: String,
+        status: &str,
     ) {
         let ProcedureInfo {
             id,
@@ -230,7 +230,7 @@ impl InformationSchemaProcedureInfoBuilder {
             (PROCEDURE_TYPE, &Value::from(type_name.clone())),
             (START_TIME, &Value::from(start_time)),
             (END_TIME, &Value::from(end_time)),
-            (STATUS, &Value::from(status.clone())),
+            (STATUS, &Value::from(status.to_string())),
             (LOCK_KEYS, &Value::from(lock_keys.clone())),
         ];
         if !predicates.eval(&row) {
@@ -240,7 +240,7 @@ impl InformationSchemaProcedureInfoBuilder {
         self.procedure_types.push(Some(&type_name));
         self.start_times.push(Some(start_time));
         self.end_times.push(Some(end_time));
-        self.statuses.push(Some(&status));
+        self.statuses.push(Some(status));
         self.lock_keys.push(Some(&lock_keys));
     }
 
@@ -267,7 +267,7 @@ impl InformationSchemaProcedureInfoBuilder {
             state: ProcedureState::Running,
             lock_keys: procedure.lock_keys,
         };
-        self.add_procedure(predicates, procedure_info, status.to_string());
+        self.add_procedure(predicates, procedure_info, status);
         Ok(())
     }
 

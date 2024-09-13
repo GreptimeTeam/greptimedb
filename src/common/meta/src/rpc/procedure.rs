@@ -51,7 +51,7 @@ pub fn pid_to_pb_pid(pid: ProcedureId) -> PbProcedureId {
 }
 
 /// Cast the [`ProcedureState`] to protobuf [`PbProcedureStatus`].
-fn procedure_state_to_pb_state(state: &ProcedureState) -> (PbProcedureStatus, String) {
+pub fn procedure_state_to_pb_state(state: &ProcedureState) -> (PbProcedureStatus, String) {
     match state {
         ProcedureState::Running => (PbProcedureStatus::Running, String::default()),
         ProcedureState::Done { .. } => (PbProcedureStatus::Done, String::default()),
