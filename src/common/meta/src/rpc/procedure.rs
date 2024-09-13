@@ -20,8 +20,7 @@ use api::v1::meta::{
     ProcedureMeta as PbProcedureMeta, ProcedureStateResponse as PbProcedureStateResponse,
     ProcedureStatus as PbProcedureStatus,
 };
-use common_procedure::procedure::ProcedureInfo;
-use common_procedure::{ProcedureId, ProcedureState};
+use common_procedure::{ProcedureId, ProcedureInfo, ProcedureState};
 use snafu::ResultExt;
 
 use crate::error::{ParseProcedureIdSnafu, Result};

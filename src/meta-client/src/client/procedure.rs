@@ -91,9 +91,9 @@ impl Client {
             .await
     }
 
-    pub async fn list_procedure(&self) -> Result<ProcedureDetailResponse> {
+    pub async fn list_procedures(&self) -> Result<ProcedureDetailResponse> {
         let inner = self.inner.read().await;
-        inner.list_procedure().await
+        inner.list_procedures().await
     }
 }
 
@@ -286,7 +286,7 @@ impl Inner {
         .await
     }
 
-    async fn list_procedure(&self) -> Result<ProcedureDetailResponse> {
+    async fn list_procedures(&self) -> Result<ProcedureDetailResponse> {
         let mut req = ProcedureDetailRequest::default();
         req.set_header(
             self.id,

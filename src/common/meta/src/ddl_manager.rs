@@ -829,10 +829,10 @@ impl ProcedureExecutor for DdlManager {
         Ok(procedure::procedure_state_to_pb_response(&state))
     }
 
-    async fn list_procedure(&self, _ctx: &ExecutorContext) -> Result<ProcedureDetailResponse> {
+    async fn list_procedures(&self, _ctx: &ExecutorContext) -> Result<ProcedureDetailResponse> {
         let metas = self
             .procedure_manager
-            .list_procedure()
+            .list_procedures()
             .await
             .context(QueryProcedureSnafu)?;
         Ok(procedure::procedure_details_to_pb_response(metas))

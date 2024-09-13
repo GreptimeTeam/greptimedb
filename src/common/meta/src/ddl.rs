@@ -84,7 +84,7 @@ pub trait ProcedureExecutor: Send + Sync {
         pid: &str,
     ) -> Result<ProcedureStateResponse>;
 
-    async fn list_procedure(&self, ctx: &ExecutorContext) -> Result<ProcedureDetailResponse>;
+    async fn list_procedures(&self, ctx: &ExecutorContext) -> Result<ProcedureDetailResponse>;
 }
 
 pub type ProcedureExecutorRef = Arc<dyn ProcedureExecutor>;

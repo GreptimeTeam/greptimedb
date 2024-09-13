@@ -155,7 +155,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
         let _header = header.context(error::MissingRequestHeaderSnafu)?;
         let metas = self
             .procedure_manager()
-            .list_procedure()
+            .list_procedures()
             .await
             .context(error::QueryProcedureSnafu)?;
         Ok(Response::new(procedure::procedure_details_to_pb_response(

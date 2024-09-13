@@ -427,7 +427,7 @@ pub trait ProcedureManager: Send + Sync + 'static {
     fn procedure_watcher(&self, procedure_id: ProcedureId) -> Option<Watcher>;
 
     /// Returns the details of the procedure.
-    async fn list_procedure(&self) -> Result<Vec<ProcedureInfo>>;
+    async fn list_procedures(&self) -> Result<Vec<ProcedureInfo>>;
 }
 
 /// Ref-counted pointer to the [ProcedureManager].
@@ -437,7 +437,7 @@ pub type ProcedureManagerRef = Arc<dyn ProcedureManager>;
 pub struct ProcedureInfo {
     /// Id of this procedure.
     pub id: ProcedureId,
-    /// Type of this procedure.
+    /// Type name of this procedure.
     pub type_name: String,
     /// Start execution time of this procedure.
     pub start_time_ms: i64,

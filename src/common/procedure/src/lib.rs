@@ -19,14 +19,14 @@
 pub mod error;
 pub mod local;
 pub mod options;
-pub mod procedure;
+mod procedure;
 pub mod store;
 pub mod watcher;
 
 pub use crate::error::{Error, Result};
 pub use crate::procedure::{
     BoxedProcedure, BoxedProcedureLoader, Context, ContextProvider, LockKey, Output, ParseIdError,
-    Procedure, ProcedureId, ProcedureManager, ProcedureManagerRef, ProcedureState, ProcedureWithId,
-    Status, StringKey,
+    Procedure, ProcedureId, ProcedureInfo, ProcedureManager, ProcedureManagerRef, ProcedureState,
+    ProcedureWithId, Status, StringKey,
 };
 pub use crate::watcher::Watcher;

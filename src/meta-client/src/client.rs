@@ -260,11 +260,11 @@ impl ProcedureExecutor for MetaClient {
             .context(meta_error::ExternalSnafu)
     }
 
-    async fn list_procedure(&self, _ctx: &ExecutorContext) -> MetaResult<ProcedureDetailResponse> {
+    async fn list_procedures(&self, _ctx: &ExecutorContext) -> MetaResult<ProcedureDetailResponse> {
         self.procedure_client()
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?
-            .list_procedure()
+            .list_procedures()
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)

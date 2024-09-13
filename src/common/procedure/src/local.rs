@@ -57,7 +57,7 @@ const META_TTL: Duration = Duration::from_secs(60 * 10);
 pub(crate) struct ProcedureMeta {
     /// Id of this procedure.
     id: ProcedureId,
-    /// Type of this procedure.
+    /// Type name of this procedure.
     type_name: String,
     /// Parent procedure id.
     parent_id: Option<ProcedureId>,
@@ -101,7 +101,7 @@ impl ProcedureMeta {
     }
 
     /// Returns current [ProcedureState].
-    pub fn state(&self) -> ProcedureState {
+    fn state(&self) -> ProcedureState {
         self.state_receiver.borrow().clone()
     }
 
@@ -681,7 +681,7 @@ impl ProcedureManager for LocalManager {
         self.manager_ctx.watcher(procedure_id)
     }
 
-    async fn list_procedure(&self) -> Result<Vec<ProcedureInfo>> {
+    async fn list_procedures(&self) -> Result<Vec<ProcedureInfo>> {
         Ok(self.manager_ctx.list_procedure())
     }
 }

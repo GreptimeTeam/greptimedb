@@ -21,6 +21,7 @@ use common_config::Mode;
 use common_error::ext::BoxedError;
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::rpc::procedure;
+use common_procedure::{ProcedureInfo, ProcedureState};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::timestamp::Timestamp;
@@ -171,13 +172,13 @@ impl InformationSchemaProcedureInfoBuilder {
             Mode::Standalone => {
                 if let Some(procedure_manager) = utils::procedure_manager(&self.catalog_manager)? {
                     let procedures = procedure_manager
-                        .list_procedure()
+                        .list_procedures()
                         .await
                         .map_err(BoxedError::new)
                         .context(ListProceduresSnafu)?;
-                    let procedures = procedure::procedure_details_to_pb_response(procedures);
-                    for procedure in procedures.procedures {
-                        self.add_procedure_info(&predicates, procedure)?;
+                    for procedure in procedures {
+                        let status = format!("{:?}", procedure.state);
+                        self.add_procedure(&predicates, procedure, status);
                     }
                 } else {
                     return GetProcedureClientSnafu { mode: "standalone" }.fail();
@@ -186,7 +187,7 @@ impl InformationSchemaProcedureInfoBuilder {
             Mode::Distributed => {
                 if let Some(meta_client) = utils::meta_client(&self.catalog_manager)? {
                     let procedures = meta_client
-                        .list_procedure(&ExecutorContext::default())
+                        .list_procedures(&ExecutorContext::default())
                         .await
                         .map_err(BoxedError::new)
                         .context(ListProceduresSnafu)?;
@@ -205,6 +206,44 @@ impl InformationSchemaProcedureInfoBuilder {
         self.finish()
     }
 
+    fn add_procedure(
+        &mut self,
+        predicates: &Predicates,
+        procedure_info: ProcedureInfo,
+        status: String,
+    ) {
+        let ProcedureInfo {
+            id,
+            type_name,
+            start_time_ms,
+            end_time_ms,
+            lock_keys,
+            ..
+        } = procedure_info;
+        let pid = id.to_string();
+        let start_time = TimestampMillisecond(Timestamp::new_millisecond(start_time_ms));
+        let end_time = TimestampMillisecond(Timestamp::new_millisecond(end_time_ms));
+        let lock_keys = lock_keys.join(",");
+
+        let row = [
+            (PROCEDURE_ID, &Value::from(pid.clone())),
+            (PROCEDURE_TYPE, &Value::from(type_name.clone())),
+            (START_TIME, &Value::from(start_time)),
+            (END_TIME, &Value::from(end_time)),
+            (STATUS, &Value::from(status.clone())),
+            (LOCK_KEYS, &Value::from(lock_keys.clone())),
+        ];
+        if !predicates.eval(&row) {
+            return;
+        }
+        self.procedure_ids.push(Some(&pid));
+        self.procedure_types.push(Some(&type_name));
+        self.start_times.push(Some(start_time));
+        self.end_times.push(Some(end_time));
+        self.statuses.push(Some(&status));
+        self.lock_keys.push(Some(&lock_keys));
+    }
+
     fn add_procedure_info(
         &mut self,
         predicates: &Predicates,
@@ -214,37 +253,21 @@ impl InformationSchemaProcedureInfoBuilder {
             Some(pid) => pid,
             None => return ProcedureIdNotFoundSnafu {}.fail(),
         };
-
         let pid = procedure::pb_pid_to_pid(&pid)
             .map_err(BoxedError::new)
-            .context(ConvertProtoDataSnafu)?
-            .to_string();
-
-        let start_time_ms =
-            TimestampMillisecond(Timestamp::new_millisecond(procedure.start_time_ms));
-        let end_time_ms = TimestampMillisecond(Timestamp::new_millisecond(procedure.end_time_ms));
+            .context(ConvertProtoDataSnafu)?;
         let status = ProcedureStatus::try_from(procedure.status)
             .map(|v| v.as_str_name())
             .unwrap_or("Unknown");
-
-        let row = [
-            (PROCEDURE_ID, &Value::from(pid.clone())),
-            (PROCEDURE_TYPE, &Value::from(procedure.type_name.clone())),
-            (START_TIME, &Value::from(start_time_ms)),
-            (END_TIME, &Value::from(end_time_ms)),
-            (STATUS, &Value::from(status)),
-            (LOCK_KEYS, &Value::from(procedure.lock_keys.join(","))),
-        ];
-        if !predicates.eval(&row) {
-            return Ok(());
-        }
-
-        self.procedure_ids.push(Some(&pid));
-        self.procedure_types.push(Some(&procedure.type_name));
-        self.start_times.push(Some(start_time_ms));
-        self.end_times.push(Some(end_time_ms));
-        self.statuses.push(Some(status));
-        self.lock_keys.push(Some(&procedure.lock_keys.join(",")));
+        let procedure_info = ProcedureInfo {
+            id: pid,
+            type_name: procedure.type_name,
+            start_time_ms: procedure.start_time_ms,
+            end_time_ms: procedure.end_time_ms,
+            state: ProcedureState::Running,
+            lock_keys: procedure.lock_keys,
+        };
+        self.add_procedure(predicates, procedure_info, status.to_string());
         Ok(())
     }
 
