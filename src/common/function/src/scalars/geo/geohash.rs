@@ -229,7 +229,7 @@ impl Function for GeohashNeighboursFunction {
                             ))
                         })
                         .context(error::ExecuteSnafu)?;
-                    let neightbours = geohash::neighbors(&encoded)
+                    let neighbours = geohash::neighbors(&encoded)
                         .map_err(|e| {
                             BoxedError::new(PlainError::new(
                                 format!("Geohash error: {}", e),
@@ -239,14 +239,14 @@ impl Function for GeohashNeighboursFunction {
                         .context(error::ExecuteSnafu)?;
                     Some(ListValue::new(
                         vec![
-                            neightbours.n,
-                            neightbours.nw,
-                            neightbours.w,
-                            neightbours.sw,
-                            neightbours.s,
-                            neightbours.se,
-                            neightbours.e,
-                            neightbours.ne,
+                            neighbours.n,
+                            neighbours.nw,
+                            neighbours.w,
+                            neighbours.sw,
+                            neighbours.s,
+                            neighbours.se,
+                            neighbours.e,
+                            neighbours.ne,
                         ]
                         .into_iter()
                         .map(|s| Value::from(s))
