@@ -21,6 +21,8 @@ use common_wal::options::WAL_OPTIONS_KEY;
 pub const APPEND_MODE_KEY: &str = "append_mode";
 /// Option key for merge mode.
 pub const MERGE_MODE_KEY: &str = "merge_mode";
+/// Option key for TTL(time-to-live)
+pub const TTL_KEY: &str = "ttl";
 
 /// Returns true if the `key` is a valid option key for the mito engine.
 pub fn is_mito_engine_option_key(key: &str) -> bool {

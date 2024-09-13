@@ -247,3 +247,37 @@ transform:
         Some(StringValue("key1_key2".to_string()))
     );
 }
+
+#[test]
+fn test_parse_failure() {
+    let input_str = r#"
+{
+    "str": "key1 key2"
+}"#;
+
+    let pipeline_yaml = r#"
+processors:
+  - dissect:
+      field: str
+      patterns:
+        - "%{key1} %{key2} %{key3}"
+
+transform:
+  - fields:
+      - key1
+    type: string
+"#;
+
+    let input_value = serde_json::from_str::<serde_json::Value>(input_str).unwrap();
+
+    let yaml_content = pipeline::Content::Yaml(pipeline_yaml.into());
+    let pipeline: pipeline::Pipeline<pipeline::GreptimeTransformer> =
+        pipeline::parse(&yaml_content).expect("failed to parse pipeline");
+    let mut result = pipeline.init_intermediate_state();
+
+    pipeline.prepare(input_value, &mut result).unwrap();
+    let row = pipeline.exec_mut(&mut result);
+
+    assert!(row.is_err());
+    assert_eq!(row.err().unwrap(), "No matching pattern found");
+}

@@ -221,7 +221,7 @@ config-docs: ## Generate configuration documentation from toml files.
 	docker run --rm \
     -v ${PWD}:/greptimedb \
     -w /greptimedb/config \
-    toml2docs/toml2docs:v0.1.1 \
+    toml2docs/toml2docs:v0.1.3 \
     -p '##' \
     -t ./config-docs-template.md \
     -o ./config.md

@@ -14,6 +14,7 @@
 
 //! Describes an aggregation function and it's input expression.
 
+pub(crate) use accum::{Accum, Accumulator};
 pub(crate) use func::AggregateFunc;
 
 use crate::expr::ScalarExpr;

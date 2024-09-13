@@ -216,22 +216,16 @@ mod tests {
             .await;
         }
 
+        // Doesn't have compressed page cached.
+        let page_key = PageKey::new_compressed(metadata.region_id, handle.file_id(), 0, 0);
+        assert!(cache.as_ref().unwrap().get_pages(&page_key).is_none());
+
         // Cache 4 row groups.
         for i in 0..4 {
-            let page_key = PageKey {
-                region_id: metadata.region_id,
-                file_id: handle.file_id(),
-                row_group_idx: i,
-                column_idx: 0,
-            };
+            let page_key = PageKey::new_uncompressed(metadata.region_id, handle.file_id(), i, 0);
             assert!(cache.as_ref().unwrap().get_pages(&page_key).is_some());
         }
-        let page_key = PageKey {
-            region_id: metadata.region_id,
-            file_id: handle.file_id(),
-            row_group_idx: 5,
-            column_idx: 0,
-        };
+        let page_key = PageKey::new_uncompressed(metadata.region_id, handle.file_id(), 5, 0);
         assert!(cache.as_ref().unwrap().get_pages(&page_key).is_none());
     }
 

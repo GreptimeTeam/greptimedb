@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::sync::Arc;
+mod json_get;
 mod json_to_string;
 mod to_json;
 
+use json_get::{JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString};
 use json_to_string::JsonToStringFunction;
 use to_json::ToJsonFunction;
 
@@ -27,5 +29,10 @@ impl JsonFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(JsonToStringFunction));
         registry.register(Arc::new(ToJsonFunction));
+
+        registry.register(Arc::new(JsonGetInt));
+        registry.register(Arc::new(JsonGetFloat));
+        registry.register(Arc::new(JsonGetString));
+        registry.register(Arc::new(JsonGetBool));
     }
 }

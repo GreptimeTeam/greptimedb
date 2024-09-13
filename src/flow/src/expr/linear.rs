@@ -17,8 +17,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use arrow::array::BooleanArray;
+use arrow::buffer::BooleanBuffer;
 use arrow::compute::FilterBuilder;
-use common_telemetry::debug;
+use common_telemetry::trace;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper};
@@ -500,7 +501,7 @@ impl SafeMfpPlan {
         for col in batch.batch() {
             let filtered = pred
                 .filter(col.to_arrow_array().as_ref())
-                .context(ArrowSnafu {
+                .with_context(|_| ArrowSnafu {
                     context: format!("failed to filter column for mfp operator {:?}", self),
                 })?;
             result.push(Helper::try_into_vector(filtered).context(DataTypeSnafu {
@@ -523,7 +524,9 @@ impl SafeMfpPlan {
         // mark the columns that have been evaluated and appended to the `batch`
         let mut expression = 0;
         // preds default to true and will be updated as we evaluate each predicate
-        let mut all_preds = BooleanVector::from(vec![Some(true); batch.row_count()]);
+        let buf = BooleanBuffer::new_set(batch.row_count());
+        let arr = BooleanArray::new(buf, None);
+        let mut all_preds = BooleanVector::from(arr);
 
         // to compute predicate, need to first compute all expressions used in predicates
         for (support, predicate) in self.mfp.predicates.iter() {
@@ -793,7 +796,7 @@ impl MfpPlan {
 
         if Some(lower_bound) != upper_bound && !null_eval {
             if self.mfp.mfp.projection.iter().any(|c| values.len() <= *c) {
-                debug!("values={:?}, mfp={:?}", &values, &self.mfp.mfp);
+                trace!("values={:?}, mfp={:?}", &values, &self.mfp.mfp);
                 let err = InternalSnafu {
                     reason: format!(
                         "Index out of bound for mfp={:?} and values={:?}",

@@ -1813,10 +1813,12 @@ name = "common-base"
 version = "0.9.3"
 dependencies = [
  "anymap",
+ "async-trait",
  "bitvec",
  "bytes",
  "common-error",
  "common-macro",
+ "futures",
  "paste",
  "serde",
  "snafu 0.8.4",

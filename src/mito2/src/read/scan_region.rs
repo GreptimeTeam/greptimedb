@@ -731,14 +731,28 @@ impl ScanInput {
         }
 
         for file in &self.files {
-            let range = PartitionRange {
-                start: file.meta_ref().time_range.0,
-                end: file.meta_ref().time_range.1,
-                num_rows: file.meta_ref().num_rows as usize,
-                identifier: id,
-            };
-            id += 1;
-            container.push(range);
+            if self.append_mode {
+                // For append mode, we can parallelize reading row groups.
+                for _ in 0..file.meta_ref().num_row_groups {
+                    let range = PartitionRange {
+                        start: file.time_range().0,
+                        end: file.time_range().1,
+                        num_rows: file.num_rows(),
+                        identifier: id,
+                    };
+                    id += 1;
+                    container.push(range);
+                }
+            } else {
+                let range = PartitionRange {
+                    start: file.meta_ref().time_range.0,
+                    end: file.meta_ref().time_range.1,
+                    num_rows: file.meta_ref().num_rows as usize,
+                    identifier: id,
+                };
+                id += 1;
+                container.push(range);
+            }
         }
 
         container
@@ -887,10 +901,21 @@ impl ScanPartList {
         })
     }
 
+    /// Returns the number of files.
+    pub(crate) fn num_files(&self) -> usize {
+        self.0.as_ref().map_or(0, |parts| {
+            parts.iter().map(|part| part.file_ranges.len()).sum()
+        })
+    }
+
     /// Returns the number of file ranges.
     pub(crate) fn num_file_ranges(&self) -> usize {
         self.0.as_ref().map_or(0, |parts| {
-            parts.iter().map(|part| part.file_ranges.len()).sum()
+            parts
+                .iter()
+                .flat_map(|part| part.file_ranges.iter())
+                .map(|ranges| ranges.len())
+                .sum()
         })
     }
 }
@@ -933,9 +958,10 @@ impl StreamContext {
             Ok(inner) => match t {
                 DisplayFormatType::Default => write!(
                     f,
-                    "partition_count={} ({} memtable ranges, {} file ranges)",
+                    "partition_count={} ({} memtable ranges, {} file {} ranges)",
                     inner.0.len(),
                     inner.0.num_mem_ranges(),
+                    inner.0.num_files(),
                     inner.0.num_file_ranges()
                 )?,
                 DisplayFormatType::Verbose => write!(f, "{:?}", inner.0)?,

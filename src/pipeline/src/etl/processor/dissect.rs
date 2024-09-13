@@ -817,16 +817,12 @@ impl Processor for DissectProcessor {
         for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
-                Some(Value::String(val_str)) => match self.process(val_str) {
-                    Ok(r) => {
-                        for (k, v) in r {
-                            val[k] = v;
-                        }
+                Some(Value::String(val_str)) => {
+                    let r = self.process(val_str)?;
+                    for (k, v) in r {
+                        val[k] = v;
                     }
-                    Err(e) => {
-                        warn!("dissect processor: {}", e);
-                    }
-                },
+                }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return Err(format!(
