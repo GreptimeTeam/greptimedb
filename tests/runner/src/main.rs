@@ -15,12 +15,15 @@
 #![allow(clippy::print_stdout)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
 use env::{Env, WalConfig};
+use sqlness::interceptor::Registry;
 use sqlness::{ConfigBuilder, Runner};
 
 mod env;
+mod protocol_interceptor;
 mod util;
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -101,12 +104,19 @@ async fn main() {
         .unwrap();
     let data_home = temp_dir.into_path();
 
+    let mut interceptor_registry: Registry = Default::default();
+    interceptor_registry.register(
+        protocol_interceptor::PREFIX,
+        Arc::new(protocol_interceptor::BeginProtocolInterceptorFactory),
+    );
+
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir(args.case_dir))
         .fail_fast(args.fail_fast)
         .test_filter(args.test_filter)
         .follow_links(true)
         .env_config_file(args.env_config_file)
+        .interceptor_registry(interceptor_registry)
         .build()
         .unwrap();
 

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::{Borrow, Cow};
 use std::fmt::Display;
 use std::fs::OpenOptions;
 use std::io;
@@ -31,13 +32,19 @@ use client::{
 use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
-use mysql::Conn as MySqlClient;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::scalars::ScalarVectorBuilder;
+use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::vectors::{StringVectorBuilder, VectorRef};
+use mysql::prelude::Queryable;
+use mysql::{Conn as MySqlClient, Row as MySqlRow};
 use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
 use tinytemplate::TinyTemplate;
 use tokio::sync::Mutex as TokioMutex;
-use tokio_postgres::Client as PgClient;
+use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 
+use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
 use crate::{util, ServerAddr};
 
 const METASRV_ADDR: &str = "127.0.0.1:3002";
@@ -496,13 +503,43 @@ pub struct GreptimeDB {
     env: Env,
 }
 
-#[async_trait]
-impl Database for GreptimeDB {
-    async fn query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
-        if ctx.context.contains_key("restart") && self.env.server_addrs.server_addr.is_none() {
-            self.env.restart_server(self).await;
+impl GreptimeDB {
+    async fn postgres_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
+        let client = self.pg_client.lock().await;
+        match client.simple_query(&query).await {
+            Ok(rows) => Box::new(PostgresqlFormatter { rows }),
+            Err(e) => Box::new(format!("Failed to execute query, encountered: {:?}", e)),
         }
+    }
 
+    async fn mysql_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
+        // copy from https://github.com/CeresDB/sqlness/blob/main/sqlness/src/database_impl/mysql.rs
+        let mut conn = self.mysql_client.lock().await;
+        let result = conn.query_iter(query);
+        Box::new(match result {
+            Ok(result) => {
+                let mut rows = vec![];
+                let affected_rows = result.affected_rows();
+                for row in result {
+                    match row {
+                        Ok(r) => rows.push(r),
+                        Err(e) => {
+                            return Box::new(format!("Failed to parse query result, err: {:?}", e))
+                        }
+                    }
+                }
+
+                if rows.is_empty() {
+                    format!("affected_rows: {}", affected_rows)
+                } else {
+                    format!("{}", MysqlFormatter { rows })
+                }
+            }
+            Err(e) => format!("Failed to execute query, err: {:?}", e),
+        })
+    }
+
+    async fn grpc_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
         let mut client = self.grpc_client.lock().await;
 
         let query_str = query.trim().to_lowercase();
@@ -561,6 +598,25 @@ impl Database for GreptimeDB {
                 }
             }
             Box::new(ResultDisplayer { result }) as _
+        }
+    }
+}
+
+#[async_trait]
+impl Database for GreptimeDB {
+    async fn query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
+        if ctx.context.contains_key("restart") && self.env.server_addrs.server_addr.is_none() {
+            self.env.restart_server(self).await;
+        }
+        if let Some(protocol) = ctx.context.get(PROTOCOL_KEY) {
+            // protocol is bound to be either "mysql" or "postgres"
+            if protocol == MYSQL {
+                self.mysql_query(ctx, query).await
+            } else {
+                self.postgres_query(ctx, query).await
+            }
+        } else {
+            self.grpc_query(ctx, query).await
         }
     }
 }
@@ -678,5 +734,100 @@ impl Display for ResultDisplayer {
                 )
             }
         }
+    }
+}
+
+struct PostgresqlFormatter {
+    pub rows: Vec<PgRow>,
+}
+
+impl Display for PostgresqlFormatter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.rows.is_empty() {
+            return f.write_fmt(format_args!("(Empty response)"));
+        }
+
+        // create schema
+        let schema = match &self.rows[0] {
+            PgRow::CommandComplete(affected_rows) => {
+                write!(
+                    f,
+                    "{}",
+                    ResultDisplayer {
+                        result: Ok(Output::new_with_affected_rows(*affected_rows as usize)),
+                    }
+                )?;
+                return Ok(());
+            }
+            PgRow::RowDescription(desc) => Arc::new(Schema::new(
+                desc.iter()
+                    .map(|column| {
+                        ColumnSchema::new(column.name(), ConcreteDataType::string_datatype(), false)
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            _ => unreachable!(),
+        };
+        if schema.num_columns() == 0 {
+            return Ok(());
+        }
+
+        // convert to string vectors
+        let mut columns: Vec<StringVectorBuilder> = (0..schema.num_columns())
+            .map(|_| StringVectorBuilder::with_capacity(schema.num_columns()))
+            .collect();
+        for row in self.rows.iter().skip(1) {
+            match row {
+                PgRow::Row(row) => {
+                    for i in 0..schema.num_columns() {
+                        columns[i].push(row.get(i));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let columns: Vec<VectorRef> = columns
+            .into_iter()
+            .map(|mut col| Arc::new(col.finish()) as VectorRef)
+            .collect();
+
+        // construct recordbatch
+        let recordbatches = RecordBatches::try_from_columns(schema, columns)
+            .expect("Failed to construct recordbatches from columns. Please check the schema.");
+        let result_displayer = ResultDisplayer {
+            result: Ok(Output::new_with_record_batches(recordbatches)),
+        };
+        write!(f, "{}", result_displayer)?;
+
+        Ok(())
+    }
+}
+
+struct MysqlFormatter {
+    pub rows: Vec<MySqlRow>,
+}
+
+impl Display for MysqlFormatter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let head_column = &self.rows[0];
+        let head_binding = head_column.columns();
+        let names = head_binding
+            .iter()
+            .map(|column| column.name_str())
+            .collect::<Vec<Cow<str>>>();
+        for name in &names {
+            f.write_fmt(format_args!("{},", name))?;
+        }
+        f.write_str("\n")?;
+
+        for row in &self.rows {
+            for column_name in &names {
+                let name = column_name.borrow();
+                f.write_fmt(format_args!("{:?},", row.get::<String, &str>(name)))?;
+            }
+            f.write_str("\n")?;
+        }
+
+        Ok(())
     }
 }

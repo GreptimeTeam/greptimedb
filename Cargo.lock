@@ -11168,6 +11168,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-time",
+ "datatypes",
  "mysql",
  "serde",
  "serde_json",
