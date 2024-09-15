@@ -16,6 +16,7 @@ use std::fmt::Display;
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -30,16 +31,19 @@ use client::{
 use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
+use mysql::Conn as MySqlClient;
 use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
 use tinytemplate::TinyTemplate;
 use tokio::sync::Mutex as TokioMutex;
+use tokio_postgres::Client as PgClient;
 
 use crate::{util, ServerAddr};
 
 const METASRV_ADDR: &str = "127.0.0.1:3002";
 const GRPC_SERVER_ADDR: &str = "127.0.0.1:4001";
-const POSTGRES_SERVER_ADDR: &str = "127.0.0.1:4001";
+const MYSQL_SERVER_ADDR: &str = "127.0.0.1:4002";
+const POSTGRES_SERVER_ADDR: &str = "127.0.0.1:4003";
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
 #[derive(Clone)]
@@ -100,7 +104,7 @@ impl Env {
 
     async fn start_standalone(&self) -> GreptimeDB {
         if self.server_addrs.server_addr.is_some() {
-            self.connect_db(&self.server_addrs)
+            self.connect_db(&self.server_addrs).await
         } else {
             self.build_db();
             self.setup_wal();
@@ -109,25 +113,18 @@ impl Env {
 
             let server_process = self.start_server("standalone", &db_ctx, true).await;
 
-            let grpc_client = Client::with_urls(vec![GRPC_SERVER_ADDR]);
-            let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
+            let mut greptimedb = self.connect_db(&Default::default()).await;
+            greptimedb.server_processes = Some(Arc::new(Mutex::new(vec![server_process])));
+            greptimedb.is_standalone = true;
+            greptimedb.ctx = db_ctx;
 
-            GreptimeDB {
-                server_processes: Some(Arc::new(Mutex::new(vec![server_process]))),
-                metasrv_process: None,
-                frontend_process: None,
-                flownode_process: None,
-                grpc_client: TokioMutex::new(db),
-                ctx: db_ctx,
-                is_standalone: true,
-                env: self.clone(),
-            }
+            greptimedb
         }
     }
 
     async fn start_distributed(&self) -> GreptimeDB {
         if self.server_addrs.server_addr.is_some() {
-            self.connect_db(&self.server_addrs)
+            self.connect_db(&self.server_addrs).await
         } else {
             self.build_db();
             self.setup_wal();
@@ -145,33 +142,63 @@ impl Env {
 
             let flownode = self.start_server("flownode", &db_ctx, true).await;
 
-            let client = Client::with_urls(vec![GRPC_SERVER_ADDR]);
-            let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+            let mut greptimedb = self.connect_db(&Default::default()).await;
 
-            GreptimeDB {
-                server_processes: Some(Arc::new(Mutex::new(vec![
-                    datanode_1, datanode_2, datanode_3,
-                ]))),
-                metasrv_process: Some(meta_server),
-                frontend_process: Some(frontend),
-                flownode_process: Some(flownode),
-                grpc_client: TokioMutex::new(db),
-                ctx: db_ctx,
-                is_standalone: false,
-                env: self.clone(),
-            }
+            greptimedb.metasrv_process = Some(meta_server);
+            greptimedb.server_processes = Some(Arc::new(Mutex::new(vec![
+                datanode_1, datanode_2, datanode_3,
+            ])));
+            greptimedb.frontend_process = Some(frontend);
+            greptimedb.flownode_process = Some(flownode);
+            greptimedb.is_standalone = false;
+
+            greptimedb
         }
     }
 
-    fn connect_db(&self, server_addr: &ServerAddr) -> GreptimeDB {
+    async fn connect_db(&self, server_addr: &ServerAddr) -> GreptimeDB {
         let grpc_server_addr = server_addr
             .server_addr
             .clone()
             .unwrap_or(GRPC_SERVER_ADDR.to_owned());
+        let pg_server_addr = server_addr
+            .pg_server_addr
+            .clone()
+            .unwrap_or(POSTGRES_SERVER_ADDR.to_owned());
+        let mysql_server_addr = server_addr
+            .mysql_server_addr
+            .clone()
+            .unwrap_or(MYSQL_SERVER_ADDR.to_owned());
+
         let grpc_client = Client::with_urls(vec![grpc_server_addr.to_owned()]);
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
+        let pg_client = {
+            let mut config = tokio_postgres::config::Config::new();
+            let sockaddr: SocketAddr = pg_server_addr.parse().unwrap();
+            config.host(&sockaddr.ip().to_string());
+            config.port(sockaddr.port());
+            config.dbname(DEFAULT_SCHEMA_NAME);
+            let (pg_client, conn) = config.connect(tokio_postgres::NoTls).await.expect(
+                "Failed to connect to Postgres server. Please check if the server is running.",
+            );
+            tokio::spawn(conn);
+            pg_client
+        };
+
+        let mysql_client = {
+            let sockaddr: SocketAddr = mysql_server_addr.parse().unwrap();
+            let ops = mysql::OptsBuilder::new()
+                .ip_or_hostname(Some(sockaddr.ip().to_string()))
+                .tcp_port(sockaddr.port())
+                .db_name(Some(DEFAULT_SCHEMA_NAME));
+            mysql::Conn::new(ops)
+                .expect("Failed to connect to MySQL server. Please check if the server is running.")
+        };
+
         GreptimeDB {
             grpc_client: TokioMutex::new(db),
+            pg_client: TokioMutex::new(pg_client),
+            mysql_client: TokioMutex::new(mysql_client),
             server_processes: None,
             metasrv_process: None,
             frontend_process: None,
@@ -221,9 +248,15 @@ impl Env {
             .open(log_file_name)
             .unwrap();
 
-        let (args, check_ip_addr) = match subcommand {
-            "datanode" => self.datanode_start_args(db_ctx),
-            "flownode" => self.flownode_start_args(db_ctx),
+        let (args, check_ip_addrs) = match subcommand {
+            "datanode" => {
+                let (args, addr) = self.datanode_start_args(db_ctx);
+                (args, vec![addr])
+            }
+            "flownode" => {
+                let (args, addr) = self.flownode_start_args(db_ctx);
+                (args, vec![addr])
+            }
             "standalone" => {
                 let args = vec![
                     DEFAULT_LOG_LEVEL.to_string(),
@@ -233,7 +266,7 @@ impl Env {
                     self.generate_config_file(subcommand, db_ctx),
                     "--http-addr=127.0.0.1:5002".to_string(),
                 ];
-                (args, GRPC_SERVER_ADDR.to_string())
+                (args, vec![GRPC_SERVER_ADDR.to_string()])
             }
             "frontend" => {
                 let args = vec![
@@ -243,7 +276,7 @@ impl Env {
                     "--metasrv-addrs=127.0.0.1:3002".to_string(),
                     "--http-addr=127.0.0.1:5003".to_string(),
                 ];
-                (args, GRPC_SERVER_ADDR.to_string())
+                (args, vec![GRPC_SERVER_ADDR.to_string()])
             }
             "metasrv" => {
                 let args = vec![
@@ -258,16 +291,18 @@ impl Env {
                     "-c".to_string(),
                     self.generate_config_file(subcommand, db_ctx),
                 ];
-                (args, METASRV_ADDR.to_string())
+                (args, vec![METASRV_ADDR.to_string()])
             }
             _ => panic!("Unexpected subcommand: {subcommand}"),
         };
 
-        if util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(1)).await {
-            panic!(
-                "Port {check_ip_addr} is already in use, please check and retry.",
-                check_ip_addr = check_ip_addr
-            );
+        for check_ip_addr in &check_ip_addrs {
+            if util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(1)).await {
+                panic!(
+                    "Port {check_ip_addr} is already in use, please check and retry.",
+                    check_ip_addr = check_ip_addr
+                );
+            }
         }
 
         #[cfg(not(windows))]
@@ -289,9 +324,11 @@ impl Env {
                 panic!("Failed to start the DB with subcommand {subcommand},Error: {error}")
             });
 
-        if !util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(10)).await {
-            Env::stop_server(&mut process);
-            panic!("{subcommand} doesn't up in 10 seconds, quit.")
+        for check_ip_addr in &check_ip_addrs {
+            if !util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(10)).await {
+                Env::stop_server(&mut process);
+                panic!("{subcommand} doesn't up in 10 seconds, quit.")
+            }
         }
 
         process
@@ -451,6 +488,8 @@ pub struct GreptimeDB {
     frontend_process: Option<Child>,
     flownode_process: Option<Child>,
     grpc_client: TokioMutex<DB>,
+    pg_client: TokioMutex<PgClient>,
+    mysql_client: TokioMutex<MySqlClient>,
     ctx: GreptimeDBContext,
     is_standalone: bool,
     env: Env,

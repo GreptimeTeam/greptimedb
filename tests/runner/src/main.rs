@@ -31,7 +31,7 @@ enum Wal {
 }
 
 // add a group to ensure that all server addresses are set together
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, Default)]
 #[group(multiple = true, requires_all=["server_addr", "pg_server_addr", "mysql_server_addr"])]
 struct ServerAddr {
     /// Address of the grpc server.

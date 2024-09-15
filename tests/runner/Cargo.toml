@@ -15,6 +15,8 @@ common-error.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
 common-time.workspace = true
+mysql = { version = "23.0.1" }
+tokio-postgres = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 # sqlness 0.6.0 have a bug causing `cargo sqlness` to fail(see https://github.com/CeresDB/sqlness/issues/68) which is fixed in 0.6.1
