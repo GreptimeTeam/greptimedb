@@ -151,6 +151,7 @@ impl Env {
             greptimedb.frontend_process = Some(frontend);
             greptimedb.flownode_process = Some(flownode);
             greptimedb.is_standalone = false;
+            greptimedb.ctx = db_ctx;
 
             greptimedb
         }
