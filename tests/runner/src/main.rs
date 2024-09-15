@@ -30,6 +30,23 @@ enum Wal {
     Kafka,
 }
 
+// add a group to ensure that all server addresses are set together
+#[derive(clap::Args, Debug, Clone)]
+#[group(multiple = true, requires_all=["server_addr", "pg_server_addr", "mysql_server_addr"])]
+struct ServerAddr {
+    /// Address of the grpc server.
+    #[clap(short, long)]
+    server_addr: Option<String>,
+
+    /// Address of the postgres server. Must be set if server_addr is set.
+    #[clap(short, long, requires = "server_addr")]
+    pg_server_addr: Option<String>,
+
+    /// Address of the mysql server. Must be set if server_addr is set.
+    #[clap(short, long, requires = "server_addr")]
+    mysql_server_addr: Option<String>,
+}
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 /// SQL Harness for GrepTimeDB
@@ -50,9 +67,9 @@ struct Args {
     #[clap(short, long, default_value = ".*")]
     test_filter: String,
 
-    /// Address of the server.
-    #[clap(short, long)]
-    server_addr: Option<String>,
+    /// Addresses of the server.
+    #[command(flatten)]
+    server_addr: ServerAddr,
 
     /// The type of Wal.
     #[clap(short, long, default_value = "raft_engine")]
@@ -107,7 +124,12 @@ async fn main() {
 
     let runner = Runner::new(
         config,
-        Env::new(data_home.clone(), args.server_addr, wal, args.bins_dir),
+        Env::new(
+            data_home.clone(),
+            args.server_addr.clone(),
+            wal,
+            args.bins_dir,
+        ),
     );
     runner.run().await.unwrap();
 

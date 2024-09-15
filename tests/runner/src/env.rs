@@ -35,10 +35,11 @@ use sqlness::{Database, EnvController, QueryContext};
 use tinytemplate::TinyTemplate;
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::util;
+use crate::{util, ServerAddr};
 
 const METASRV_ADDR: &str = "127.0.0.1:3002";
-const SERVER_ADDR: &str = "127.0.0.1:4001";
+const GRPC_SERVER_ADDR: &str = "127.0.0.1:4001";
+const POSTGRES_SERVER_ADDR: &str = "127.0.0.1:4001";
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
 #[derive(Clone)]
@@ -55,7 +56,7 @@ pub enum WalConfig {
 #[derive(Clone)]
 pub struct Env {
     data_home: PathBuf,
-    server_addr: Option<String>,
+    server_addrs: ServerAddr,
     wal: WalConfig,
 
     /// The path to the directory that contains the pre-built GreptimeDB binary.
@@ -85,21 +86,21 @@ impl EnvController for Env {
 impl Env {
     pub fn new(
         data_home: PathBuf,
-        server_addr: Option<String>,
+        server_addrs: ServerAddr,
         wal: WalConfig,
         bins_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             data_home,
-            server_addr,
+            server_addrs,
             wal,
             bins_dir: Arc::new(Mutex::new(bins_dir)),
         }
     }
 
     async fn start_standalone(&self) -> GreptimeDB {
-        if let Some(server_addr) = self.server_addr.clone() {
-            self.connect_db(&server_addr)
+        if self.server_addrs.server_addr.is_some() {
+            self.connect_db(&self.server_addrs)
         } else {
             self.build_db();
             self.setup_wal();
@@ -108,15 +109,15 @@ impl Env {
 
             let server_process = self.start_server("standalone", &db_ctx, true).await;
 
-            let client = Client::with_urls(vec![SERVER_ADDR]);
-            let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+            let grpc_client = Client::with_urls(vec![GRPC_SERVER_ADDR]);
+            let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
 
             GreptimeDB {
                 server_processes: Some(Arc::new(Mutex::new(vec![server_process]))),
                 metasrv_process: None,
                 frontend_process: None,
                 flownode_process: None,
-                client: TokioMutex::new(db),
+                grpc_client: TokioMutex::new(db),
                 ctx: db_ctx,
                 is_standalone: true,
                 env: self.clone(),
@@ -125,8 +126,8 @@ impl Env {
     }
 
     async fn start_distributed(&self) -> GreptimeDB {
-        if let Some(server_addr) = self.server_addr.clone() {
-            self.connect_db(&server_addr)
+        if self.server_addrs.server_addr.is_some() {
+            self.connect_db(&self.server_addrs)
         } else {
             self.build_db();
             self.setup_wal();
@@ -144,7 +145,7 @@ impl Env {
 
             let flownode = self.start_server("flownode", &db_ctx, true).await;
 
-            let client = Client::with_urls(vec![SERVER_ADDR]);
+            let client = Client::with_urls(vec![GRPC_SERVER_ADDR]);
             let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
             GreptimeDB {
@@ -154,7 +155,7 @@ impl Env {
                 metasrv_process: Some(meta_server),
                 frontend_process: Some(frontend),
                 flownode_process: Some(flownode),
-                client: TokioMutex::new(db),
+                grpc_client: TokioMutex::new(db),
                 ctx: db_ctx,
                 is_standalone: false,
                 env: self.clone(),
@@ -162,11 +163,15 @@ impl Env {
         }
     }
 
-    fn connect_db(&self, server_addr: &str) -> GreptimeDB {
-        let client = Client::with_urls(vec![server_addr.to_owned()]);
-        let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+    fn connect_db(&self, server_addr: &ServerAddr) -> GreptimeDB {
+        let grpc_server_addr = server_addr
+            .server_addr
+            .clone()
+            .unwrap_or(GRPC_SERVER_ADDR.to_owned());
+        let grpc_client = Client::with_urls(vec![grpc_server_addr.to_owned()]);
+        let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
         GreptimeDB {
-            client: TokioMutex::new(db),
+            grpc_client: TokioMutex::new(db),
             server_processes: None,
             metasrv_process: None,
             frontend_process: None,
@@ -228,7 +233,7 @@ impl Env {
                     self.generate_config_file(subcommand, db_ctx),
                     "--http-addr=127.0.0.1:5002".to_string(),
                 ];
-                (args, SERVER_ADDR.to_string())
+                (args, GRPC_SERVER_ADDR.to_string())
             }
             "frontend" => {
                 let args = vec![
@@ -238,7 +243,7 @@ impl Env {
                     "--metasrv-addrs=127.0.0.1:3002".to_string(),
                     "--http-addr=127.0.0.1:5003".to_string(),
                 ];
-                (args, SERVER_ADDR.to_string())
+                (args, GRPC_SERVER_ADDR.to_string())
             }
             "metasrv" => {
                 let args = vec![
@@ -445,7 +450,7 @@ pub struct GreptimeDB {
     metasrv_process: Option<Child>,
     frontend_process: Option<Child>,
     flownode_process: Option<Child>,
-    client: TokioMutex<DB>,
+    grpc_client: TokioMutex<DB>,
     ctx: GreptimeDBContext,
     is_standalone: bool,
     env: Env,
@@ -454,11 +459,11 @@ pub struct GreptimeDB {
 #[async_trait]
 impl Database for GreptimeDB {
     async fn query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
-        if ctx.context.contains_key("restart") && self.env.server_addr.is_none() {
+        if ctx.context.contains_key("restart") && self.env.server_addrs.server_addr.is_none() {
             self.env.restart_server(self).await;
         }
 
-        let mut client = self.client.lock().await;
+        let mut client = self.grpc_client.lock().await;
 
         let query_str = query.trim().to_lowercase();
 
@@ -553,7 +558,7 @@ impl GreptimeDB {
 
 impl Drop for GreptimeDB {
     fn drop(&mut self) {
-        if self.env.server_addr.is_none() {
+        if self.env.server_addrs.server_addr.is_none() {
             self.stop();
         }
     }
