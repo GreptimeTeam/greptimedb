@@ -7,11 +7,11 @@ pub const POSTGRES: &str = "postgres";
 pub const MYSQL: &str = "mysql";
 
 pub const PREFIX: &str = "PROTOCOL";
-pub struct BeginProtocolInterceptor {
+pub struct ProtocolInterceptor {
     protocol: String,
 }
 pub struct BeginProtocolInterceptorFactory;
-impl Interceptor for BeginProtocolInterceptor {
+impl Interceptor for ProtocolInterceptor {
     fn before_execute(&self, _: &mut Vec<String>, context: &mut sqlness::QueryContext) {
         context
             .context
@@ -21,8 +21,8 @@ impl Interceptor for BeginProtocolInterceptor {
 impl InterceptorFactory for BeginProtocolInterceptorFactory {
     fn try_new(&self, ctx: &str) -> Result<InterceptorRef, SqlnessError> {
         match ctx.to_lowercase().as_str() {
-            POSTGRES | MYSQL => Ok(Box::new(BeginProtocolInterceptor {
-                protocol: ctx.to_string(),
+            POSTGRES | MYSQL => Ok(Box::new(ProtocolInterceptor {
+                protocol: ctx.to_lowercase().to_string(),
             })),
             _ => Err(SqlnessError::InvalidContext {
                 prefix: PREFIX.to_string(),

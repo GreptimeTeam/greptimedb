@@ -513,7 +513,6 @@ impl GreptimeDB {
     }
 
     async fn mysql_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
-        // copy from https://github.com/CeresDB/sqlness/blob/main/sqlness/src/database_impl/mysql.rs
         let mut conn = self.mysql_client.lock().await;
         let result = conn.query_iter(query);
         Box::new(match result {
@@ -764,7 +763,7 @@ impl Display for PostgresqlFormatter {
                     .map(|column| {
                         ColumnSchema::new(column.name(), ConcreteDataType::string_datatype(), false)
                     })
-                    .collect::<Vec<_>>(),
+                    .collect(),
             )),
             _ => unreachable!(),
         };
@@ -809,24 +808,46 @@ struct MysqlFormatter {
 
 impl Display for MysqlFormatter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.rows.is_empty() {
+            return f.write_fmt(format_args!("(Empty response)"));
+        }
+        // create schema
         let head_column = &self.rows[0];
         let head_binding = head_column.columns();
         let names = head_binding
             .iter()
             .map(|column| column.name_str())
             .collect::<Vec<Cow<str>>>();
-        for name in &names {
-            f.write_fmt(format_args!("{},", name))?;
-        }
-        f.write_str("\n")?;
+        let schema = Arc::new(Schema::new(
+            names
+                .iter()
+                .map(|name| {
+                    ColumnSchema::new(name.to_string(), ConcreteDataType::string_datatype(), false)
+                })
+                .collect(),
+        ));
 
-        for row in &self.rows {
-            for column_name in &names {
-                let name = column_name.borrow();
-                f.write_fmt(format_args!("{:?},", row.get::<String, &str>(name)))?;
+        // convert to string vectors
+        let mut columns: Vec<StringVectorBuilder> = (0..schema.num_columns())
+            .map(|_| StringVectorBuilder::with_capacity(schema.num_columns()))
+            .collect();
+        for row in self.rows.iter() {
+            for (i, name) in names.iter().enumerate() {
+                columns[i].push(row.get::<String, &str>(name).as_deref());
             }
-            f.write_str("\n")?;
         }
+        let columns: Vec<VectorRef> = columns
+            .into_iter()
+            .map(|mut col| Arc::new(col.finish()) as VectorRef)
+            .collect();
+
+        // construct recordbatch
+        let recordbatches = RecordBatches::try_from_columns(schema, columns)
+            .expect("Failed to construct recordbatches from columns. Please check the schema.");
+        let result_displayer = ResultDisplayer {
+            result: Ok(Output::new_with_record_batches(recordbatches)),
+        };
+        write!(f, "{}", result_displayer)?;
 
         Ok(())
     }
