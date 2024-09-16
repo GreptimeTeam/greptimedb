@@ -107,7 +107,7 @@ async fn main() {
     let mut interceptor_registry: Registry = Default::default();
     interceptor_registry.register(
         protocol_interceptor::PREFIX,
-        Arc::new(protocol_interceptor::BeginProtocolInterceptorFactory),
+        Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
     );
 
     let config = ConfigBuilder::default()
