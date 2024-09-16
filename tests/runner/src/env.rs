@@ -178,12 +178,12 @@ impl Env {
             .clone()
             .unwrap_or(MYSQL_SERVER_ADDR.to_owned());
 
-        let grpc_client = Client::with_urls(vec![grpc_server_addr.to_owned()]);
+        let grpc_client = Client::with_urls(vec![grpc_server_addr.clone()]);
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
         let pg_client = {
             let mut config = tokio_postgres::config::Config::new();
             let sockaddr: SocketAddr = pg_server_addr.parse().unwrap();
-            config.host(&sockaddr.ip().to_string());
+            config.host(sockaddr.ip().to_string());
             config.port(sockaddr.port());
             config.dbname(DEFAULT_SCHEMA_NAME);
             let (pg_client, conn) = config.connect(tokio_postgres::NoTls).await.expect(
@@ -776,13 +776,10 @@ impl Display for PostgresqlFormatter {
             .map(|_| StringVectorBuilder::with_capacity(schema.num_columns()))
             .collect();
         for row in self.rows.iter().skip(1) {
-            match row {
-                PgRow::Row(row) => {
-                    for i in 0..schema.num_columns() {
-                        columns[i].push(row.get(i));
-                    }
+            if let PgRow::Row(row) = row {
+                for (i, column) in columns.iter_mut().enumerate().take(schema.num_columns()) {
+                    column.push(row.get(i));
                 }
-                _ => {}
             }
         }
         let columns: Vec<VectorRef> = columns
