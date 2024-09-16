@@ -158,11 +158,11 @@ SELECT geohash(37.76938, -122.3889, 11);
 
 SELECT geohash(37.76938, -122.3889, 100);
 
-Error: 3001(EngineExecuteQuery), Geohash error: Invalid length specified: 100. Accepted values are between 1 and 12, inclusive
+Error: 3001(EngineExecuteQuery), Invalid geohash resolution 100, expected value: [1, 12]
 
 SELECT geohash(37.76938, -122.3889, -1);
 
-Error: 3001(EngineExecuteQuery), Geohash error: Invalid length specified: 18446744073709551615. Accepted values are between 1 and 12, inclusive
+Error: 3001(EngineExecuteQuery), Invalid geohash resolution -1, expected value: [1, 12]
 
 SELECT geohash(37.76938, -122.3889, 11::Int8);
 

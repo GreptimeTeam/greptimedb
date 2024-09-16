@@ -28,6 +28,50 @@ use snafu::{ensure, ResultExt};
 
 use crate::function::{Function, FunctionContext};
 
+macro_rules! ensure_resolution_usize {
+    ($v: ident) => {
+        if !($v > 0 && $v <= 12) {
+            Err(BoxedError::new(PlainError::new(
+                format!("Invalid geohash resolution {}, expect value: [1, 12]", $v),
+                StatusCode::EngineExecuteQuery,
+            )))
+            .context(error::ExecuteSnafu)
+        } else {
+            Ok($v as usize)
+        }
+    };
+}
+
+fn try_into_resolution(v: Value) -> Result<usize> {
+    match v {
+        Value::Int8(v) => {
+            ensure_resolution_usize!(v)
+        }
+        Value::Int16(v) => {
+            ensure_resolution_usize!(v)
+        }
+        Value::Int32(v) => {
+            ensure_resolution_usize!(v)
+        }
+        Value::Int64(v) => {
+            ensure_resolution_usize!(v)
+        }
+        Value::UInt8(v) => {
+            ensure_resolution_usize!(v)
+        }
+        Value::UInt16(v) => {
+            ensure_resolution_usize!(v)
+        }
+        Value::UInt32(v) => {
+            ensure_resolution_usize!(v)
+        }
+        Value::UInt64(v) => {
+            ensure_resolution_usize!(v)
+        }
+        _ => unreachable!(),
+    }
+}
+
 /// Function that return geohash string for a given geospatial coordinate.
 #[derive(Clone, Debug, Default)]
 pub struct GeohashFunction;
@@ -95,17 +139,7 @@ impl Function for GeohashFunction {
         for i in 0..size {
             let lat = lat_vec.get(i).as_f64_lossy();
             let lon = lon_vec.get(i).as_f64_lossy();
-            let r = match resolution_vec.get(i) {
-                Value::Int8(v) => v as usize,
-                Value::Int16(v) => v as usize,
-                Value::Int32(v) => v as usize,
-                Value::Int64(v) => v as usize,
-                Value::UInt8(v) => v as usize,
-                Value::UInt16(v) => v as usize,
-                Value::UInt32(v) => v as usize,
-                Value::UInt64(v) => v as usize,
-                _ => unreachable!(),
-            };
+            let r = try_into_resolution(resolution_vec.get(i))?;
 
             let result = match (lat, lon) {
                 (Some(lat), Some(lon)) => {
@@ -206,17 +240,7 @@ impl Function for GeohashNeighboursFunction {
         for i in 0..size {
             let lat = lat_vec.get(i).as_f64_lossy();
             let lon = lon_vec.get(i).as_f64_lossy();
-            let r = match resolution_vec.get(i) {
-                Value::Int8(v) => v as usize,
-                Value::Int16(v) => v as usize,
-                Value::Int32(v) => v as usize,
-                Value::Int64(v) => v as usize,
-                Value::UInt8(v) => v as usize,
-                Value::UInt16(v) => v as usize,
-                Value::UInt32(v) => v as usize,
-                Value::UInt64(v) => v as usize,
-                _ => unreachable!(),
-            };
+            let r = try_into_resolution(resolution_vec.get(i))?;
 
             let result = match (lat, lon) {
                 (Some(lat), Some(lon)) => {
