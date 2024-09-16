@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::{Borrow, Cow};
+use std::borrow::Cow;
 use std::fmt::Display;
 use std::fs::OpenOptions;
 use std::io;
