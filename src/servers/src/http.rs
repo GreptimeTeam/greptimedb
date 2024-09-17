@@ -1131,7 +1131,7 @@ mod test {
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
             let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
             let json_resp = match format {
-                ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
+                ResponseFormat::Arrow => ArrowResponse::from_output(outputs, None).await,
                 ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
                 ResponseFormat::Table => TableResponse::from_output(outputs).await,
                 ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
