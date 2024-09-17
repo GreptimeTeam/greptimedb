@@ -191,7 +191,7 @@ impl Env {
             );
             tokio::spawn(async move {
                 if let Err(e) = conn.await {
-                    eprintln!("connection error: {}", e);
+                    panic!("connection error: {}", e);
                 }
             });
             pg_client
