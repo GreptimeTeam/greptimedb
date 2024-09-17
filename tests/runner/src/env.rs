@@ -189,7 +189,11 @@ impl Env {
             let (pg_client, conn) = config.connect(tokio_postgres::NoTls).await.expect(
                 "Failed to connect to Postgres server. Please check if the server is running.",
             );
-            tokio::spawn(conn);
+            tokio::spawn(async move {
+                if let Err(e) = conn.await {
+                    eprintln!("connection error: {}", e);
+                }
+            });
             pg_client
         };
 
