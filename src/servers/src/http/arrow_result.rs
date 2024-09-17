@@ -214,7 +214,7 @@ mod test {
                     assert_eq!(rb.num_rows(), 4);
                 }
                 HttpResponse::Error(e) => {
-                    panic!("unexpect {:?}", e);
+                    panic!("unexpected {:?}", e);
                 }
                 _ => unreachable!(),
             }
