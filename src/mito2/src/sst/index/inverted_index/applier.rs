@@ -16,6 +16,7 @@ pub mod builder;
 
 use std::sync::Arc;
 
+use common_base::range_read::RangeReaderAdapter;
 use common_telemetry::warn;
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
@@ -108,6 +109,7 @@ impl InvertedIndexApplier {
                 self.remote_blob_reader(file_id).await?
             }
         };
+        let blob = RangeReaderAdapter(blob);
 
         if let Some(index_cache) = &self.inverted_index_cache {
             let mut index_reader = CachedInvertedIndexBlobReader::new(
