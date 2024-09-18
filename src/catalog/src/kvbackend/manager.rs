@@ -180,7 +180,7 @@ impl CatalogManager for KvBackendCatalogManager {
         schema: &str,
         query_ctx: Option<&QueryContext>,
     ) -> Result<Vec<String>> {
-        let stream = self
+        let mut tables = self
             .table_metadata_manager
             .table_name_manager()
             .tables(catalog, schema)
