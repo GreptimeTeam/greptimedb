@@ -87,7 +87,7 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         OTLP_TRACES_ROWS.inc_by(rows as u64);
 
-        self.handle_row_inserts(requests, ctx)
+        self.handle_log_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)
