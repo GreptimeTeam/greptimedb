@@ -48,6 +48,7 @@ sql.workspace = true
 store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
+tokio-stream = "0.1"
 
 [dev-dependencies]
 cache.workspace = true

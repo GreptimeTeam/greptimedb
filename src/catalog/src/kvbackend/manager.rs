@@ -42,6 +42,7 @@ use table::dist_table::DistTable;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::table_name::TableName;
 use table::TableRef;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
@@ -182,18 +183,15 @@ impl CatalogManager for KvBackendCatalogManager {
         let stream = self
             .table_metadata_manager
             .table_name_manager()
-            .tables(catalog, schema);
-        let mut tables = stream
+            .tables(catalog, schema)
+            .map_ok(|(table_name, _)| table_name)
             .try_collect::<Vec<_>>()
             .await
             .map_err(BoxedError::new)
-            .context(ListTablesSnafu { catalog, schema })?
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect::<Vec<_>>();
-        tables.extend_from_slice(&self.system_catalog.table_names(schema, query_ctx));
+            .context(ListTablesSnafu { catalog, schema })?;
 
-        Ok(tables.into_iter().collect())
+        tables.extend(self.system_catalog.table_names(schema, query_ctx));
+        Ok(tables)
     }
 
     async fn catalog_exists(&self, catalog: &str) -> Result<bool> {
@@ -303,36 +301,70 @@ impl CatalogManager for KvBackendCatalogManager {
             }
         });
 
-        let table_id_stream = self
-            .table_metadata_manager
-            .table_name_manager()
-            .tables(catalog, schema)
-            .map_ok(|(_, v)| v.table_id());
         const BATCH_SIZE: usize = 128;
-        let user_tables = try_stream!({
+        const CONCURRENCY: usize = 8;
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let metadata_manager = self.table_metadata_manager.clone();
+        let catalog = catalog.to_string();
+        let schema = schema.to_string();
+        tokio::task::spawn(async move {
+            let table_id_stream = metadata_manager
+                .table_name_manager()
+                .tables(&catalog, &schema)
+                .map_ok(|(_, v)| v.table_id());
             // Split table ids into chunks
             let mut table_id_chunks = table_id_stream.ready_chunks(BATCH_SIZE);
 
+            let mut task_batch = Vec::with_capacity(CONCURRENCY);
             while let Some(table_ids) = table_id_chunks.next().await {
-                let table_ids = table_ids
+                let table_ids = match table_ids
                     .into_iter()
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(BoxedError::new)
-                    .context(ListTablesSnafu { catalog, schema })?;
+                    .context(ListTablesSnafu {
+                        catalog: &catalog,
+                        schema: &schema,
+                    }) {
+                    Ok(table_ids) => table_ids,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                };
 
-                let table_info_values = self
-                    .table_metadata_manager
-                    .table_info_manager()
-                    .batch_get(&table_ids)
-                    .await
-                    .context(TableMetadataManagerSnafu)?;
+                let metadata_manager = metadata_manager.clone();
+                let tx = tx.clone();
+                task_batch.push(tokio::spawn(async move {
+                    let table_info_values = match metadata_manager
+                        .table_info_manager()
+                        .batch_get(&table_ids)
+                        .await
+                        .context(TableMetadataManagerSnafu)
+                    {
+                        Ok(table_info_values) => table_info_values,
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
+                            return;
+                        }
+                    };
 
-                for table_info_value in table_info_values.into_values() {
-                    yield build_table(table_info_value)?;
+                    for table in table_info_values.into_values().map(build_table) {
+                        if tx.send(table).is_err() {
+                            return;
+                        }
+                    }
+                }));
+                if task_batch.len() == CONCURRENCY {
+                    let _ = futures::future::join_all(std::mem::take(&mut task_batch)).await;
                 }
+            }
+            if !task_batch.is_empty() {
+                let _ = futures::future::join_all(std::mem::take(&mut task_batch)).await;
             }
         });
 
+        let user_tables = UnboundedReceiverStream::new(rx);
         Box::pin(sys_tables.chain(user_tables))
     }
 }

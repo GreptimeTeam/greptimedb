@@ -207,7 +207,8 @@ impl TableFlowManager {
             req,
             DEFAULT_PAGE_SIZE,
             Arc::new(table_flow_decoder),
-        );
+        )
+        .into_stream();
 
         Box::pin(stream)
     }

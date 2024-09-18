@@ -200,7 +200,8 @@ impl FlowNameManager {
             req,
             DEFAULT_PAGE_SIZE,
             Arc::new(flow_name_decoder),
-        );
+        )
+        .into_stream();
 
         Box::pin(stream)
     }
