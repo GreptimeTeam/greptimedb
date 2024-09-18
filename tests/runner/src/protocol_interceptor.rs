@@ -38,9 +38,7 @@ impl InterceptorFactory for ProtocolInterceptorFactory {
     fn try_new(&self, ctx: &str) -> Result<InterceptorRef, SqlnessError> {
         let protocol = ctx.to_lowercase();
         match protocol.as_str() {
-            POSTGRES | MYSQL => Ok(Box::new(ProtocolInterceptor {
-                protocol,
-            })),
+            POSTGRES | MYSQL => Ok(Box::new(ProtocolInterceptor { protocol })),
             _ => Err(SqlnessError::InvalidContext {
                 prefix: PREFIX.to_string(),
                 msg: format!("Unsupported protocol: {}", ctx),
