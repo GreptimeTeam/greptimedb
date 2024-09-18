@@ -19,7 +19,7 @@ use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{
-    validate_fulltext_options, ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder,
+    parse_fulltext_options, ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder,
     SchemaRef,
 };
 use derive_builder::Builder;
@@ -615,8 +615,8 @@ impl TableMeta {
             FulltextOptions::default()
         };
 
-        if !validate_fulltext_options(&mut fulltext, &options) {
-            return error::InvalidFulltextOptionsSnafu { column_name }.fail();
+        if let Some(f) = parse_fulltext_options(&options) {
+            fulltext = f;
         }
 
         let columns: Vec<_> = table_schema
@@ -1413,6 +1413,5 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
-
     }
 }

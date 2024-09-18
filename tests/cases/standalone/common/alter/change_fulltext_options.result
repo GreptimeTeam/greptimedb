@@ -28,6 +28,7 @@ ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', c
 
 Affected Rows: 0
 
+-- SQLNESS ARG restart=true
 SHOW CREATE TABLE test;
 
 +-------+---------------------------------------------------------------------------------------+

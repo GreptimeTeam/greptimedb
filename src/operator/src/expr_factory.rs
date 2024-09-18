@@ -18,7 +18,7 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    AddColumn, AddColumns, ChangeFulltext, AlterExpr, ChangeColumnType, ChangeColumnTypes,
+    AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, ChangeFulltext,
     ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
     DropColumn, DropColumns, ExpireAfter, RenameTable, SemanticType, TableName,
 };

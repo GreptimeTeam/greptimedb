@@ -16,7 +16,7 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_expr::Kind;
 use api::v1::{
-    column_def, AddColumnLocation as Location, ChangeFulltext, AlterExpr, ChangeColumnTypes,
+    column_def, AddColumnLocation as Location, AlterExpr, ChangeColumnTypes, ChangeFulltext,
     CreateTableExpr, DropColumns, RenameTable, SemanticType,
 };
 use common_query::AddColumnLocation;

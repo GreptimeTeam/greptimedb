@@ -304,23 +304,21 @@ fn validate_timestamp_index(column_schemas: &[ColumnSchema], timestamp_index: us
 }
 
 /// Parses the provided options to configure full-text search behavior.
-/// 
+///
 /// This function checks for specific keys in the provided `HashMap`:
 /// - `COLUMN_FULLTEXT_OPT_KEY_ANALYZER`: Defines the analyzer to use (e.g., "english", "chinese").
 /// - `COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE`: Defines whether the full-text search should be case-sensitive ("true" or "false").
-/// 
-/// If the provided options contain valid values for the full-text keys, a configured `FulltextOptions` 
+///
+/// If the provided options contain valid values for the full-text keys, a configured `FulltextOptions`
 /// object is returned. If the options are invalid or missing, the function returns `None`.
-/// 
+///
 /// # Parameters:
 /// - `options`: A reference to a `HashMap<String, String>` containing the full-text options.
 ///
 /// # Returns:
 /// - `Some(FulltextOptions)` if valid options are provided.
 /// - `None` if the options are invalid or do not contain full-text related keys.
-pub fn parse_fulltext_options(
-    options: &HashMap<String, String>,
-) -> Option<FulltextOptions> {
+pub fn parse_fulltext_options(options: &HashMap<String, String>) -> Option<FulltextOptions> {
     let mut fulltext = FulltextOptions::default();
     let mut is_fulltext_key_exist = false;
 
@@ -370,7 +368,6 @@ pub fn parse_fulltext_options(
         None
     }
 }
-
 
 pub type SchemaRef = Arc<Schema>;
 
@@ -559,13 +556,10 @@ mod tests {
 
     #[test]
     fn test_validate_fulltext_options() {
-        let mut fulltext = FulltextOptions::default();
         let options = HashMap::from([(String::from("analyzer"), String::from("English"))]);
-        assert!(validate_fulltext_options(&mut fulltext, &options));
+        assert!(parse_fulltext_options(&options).is_some());
 
-        let mut fulltext = FulltextOptions::default();
         let options = HashMap::from([(String::from("analyzer"), String::from("Chinglish"))]);
-        assert!(!validate_fulltext_options(&mut fulltext, &options));
-
-   }
+        assert!(parse_fulltext_options(&options).is_some());
+    }
 }

@@ -28,9 +28,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{
-    validate_fulltext_options, ColumnSchema, FulltextOptions, Schema, SchemaRef,
-};
+use datatypes::schema::{parse_fulltext_options, ColumnSchema, FulltextOptions, Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -526,9 +524,9 @@ impl RegionMetadataBuilder {
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ChangeColumnTypes { columns } => self.change_column_types(columns),
             AlterKind::ChangeColumnFulltext {
-                column_name,
+                column_name: _,
                 options,
-            } => self.change_column_fulltext(column_name, options)?,
+            } => self.change_column_fulltext(options)?,
         }
         Ok(self)
     }
@@ -630,11 +628,7 @@ impl RegionMetadataBuilder {
     }
 
     /// Changes column fulltext option.
-    fn change_column_fulltext(
-        &mut self,
-        column_name: String,
-        options: HashMap<String, String>,
-    ) -> Result<()> {
+    fn change_column_fulltext(&mut self, options: HashMap<String, String>) -> Result<()> {
         for column_meta in self.column_metadatas.iter_mut() {
             let mut fulltext = if let Ok(Some(f)) = column_meta.column_schema.fulltext_options() {
                 f
@@ -642,8 +636,8 @@ impl RegionMetadataBuilder {
                 FulltextOptions::default()
             };
 
-            if !validate_fulltext_options(&mut fulltext, &options) {
-                return InvalidFulltextOptionsSnafu { column_name }.fail();
+            if let Some(f) = parse_fulltext_options(&options) {
+                fulltext = f;
             }
 
             column_meta

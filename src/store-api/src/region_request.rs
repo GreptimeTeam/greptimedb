@@ -464,52 +464,59 @@ impl AlterKind {
         Ok(())
     }
 
-/// Validates full-text options for altering a specific column in the region metadata.
-///
-/// This function checks if the provided column exists in the region metadata and validates
-/// the full-text options (`analyzer` and `case_sensitive`) for correctness. If any option is
-/// invalid, it returns an error.
-///
-/// # Parameters:
-/// - `metadata`: The region metadata that contains column information.
-/// - `column_name`: The name of the column to validate.
-/// - `options`: A `HashMap<String, String>` containing the full-text options to be validated.
-///
-/// # Returns:
-/// - `Ok(())` if the column exists and the options are valid.
-/// - `Err` if the column is not found or if any of the options are invalid.
-pub fn validate_column_fulltext_to_alter(
-    metadata: &RegionMetadata,
-    column_name: &str,
-    options: &HashMap<String, String>,
-) -> Result<()> {
-    // Ensure the column exists in the region metadata, otherwise return an error
-    metadata
-        .column_by_name(column_name)
-        .with_context(|| InvalidRegionRequestSnafu {
-            region_id: metadata.region_id,
-            err: format!("column {} not found", column_name),
-        })?;
+    /// Validates full-text options for altering a specific column in the region metadata.
+    ///
+    /// This function checks if the provided column exists in the region metadata and validates
+    /// the full-text options (`analyzer` and `case_sensitive`) for correctness. If any option is
+    /// invalid, it returns an error.
+    ///
+    /// # Parameters:
+    /// - `metadata`: The region metadata that contains column information.
+    /// - `column_name`: The name of the column to validate.
+    /// - `options`: A `HashMap<String, String>` containing the full-text options to be validated.
+    ///
+    /// # Returns:
+    /// - `Ok(())` if the column exists and the options are valid.
+    /// - `Err` if the column is not found or if any of the options are invalid.
+    pub fn validate_column_fulltext_to_alter(
+        metadata: &RegionMetadata,
+        column_name: &str,
+        options: &HashMap<String, String>,
+    ) -> Result<()> {
+        // Ensure the column exists in the region metadata, otherwise return an error
+        metadata
+            .column_by_name(column_name)
+            .with_context(|| InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!("column {} not found", column_name),
+            })?;
 
-    // Validate the full-text options in a simplified manner
-    for (k, v) in options {
-        match k.to_ascii_lowercase().as_str() {
-            // Validate the "analyzer" option
-            COLUMN_FULLTEXT_OPT_KEY_ANALYZER if !matches!(v.to_ascii_lowercase().as_str(), "english" | "chinese") => {
-                return InvalidFulltextOptionsSnafu { column_name }.fail();
+        // Validate the full-text options in a simplified manner
+        for (k, v) in options {
+            match k.to_ascii_lowercase().as_str() {
+                // Validate the "analyzer" option
+                COLUMN_FULLTEXT_OPT_KEY_ANALYZER => {
+                    if !matches!(v.to_ascii_lowercase().as_str(), "english")
+                        && !matches!(v.to_ascii_lowercase().as_str(), "chinese")
+                    {
+                        return InvalidFulltextOptionsSnafu { column_name }.fail();
+                    }
+                }
+                // Validate the "case_sensitive" option
+                COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE => {
+                    if !matches!(v.to_ascii_lowercase().as_str(), "true")
+                        && !matches!(v.to_ascii_lowercase().as_str(), "false")
+                    {
+                        return InvalidFulltextOptionsSnafu { column_name }.fail();
+                    }
+                }
+                // Return an error for any unknown options
+                _ => return InvalidFulltextOptionsSnafu { column_name }.fail(),
             }
-            // Validate the "case_sensitive" option
-            COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE if !matches!(v.to_ascii_lowercase().as_str(), "true" | "false") => {
-                return InvalidFulltextOptionsSnafu { column_name }.fail();
-            }
-            // Return an error for any unknown options
-            _ => return InvalidFulltextOptionsSnafu { column_name }.fail(),
         }
+
+        Ok(())
     }
-
-    Ok(())
-}
-
 }
 
 impl TryFrom<alter_request::Kind> for AlterKind {
