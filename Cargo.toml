@@ -99,7 +99,7 @@ base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
 bytemuck = "1.12"
-bytes = { version = "1.5", features = ["serde"] }
+bytes = { version = "1.7", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
