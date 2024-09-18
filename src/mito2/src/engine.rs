@@ -462,10 +462,10 @@ impl EngineInner {
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.workers.get_region(region_id).map(|region| {
-            if region.is_writable() {
-                RegionRole::Leader
-            } else {
+            if region.is_readonly() {
                 RegionRole::Follower
+            } else {
+                RegionRole::Leader
             }
         })
     }
