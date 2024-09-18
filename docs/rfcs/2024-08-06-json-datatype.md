@@ -123,13 +123,13 @@ Query directly through client:
     (Server identifies JSON type and performs auto-conversion based on column metadata)
                         Decode               Scan
         JSON Strings ┌──────────┐JSONB ┌──────────────┐JSONB
- Client ------------>│  Server  │----->│ Query Engine │<----- Storage
+ Client <------------│  Server  │<-----│ Query Engine │<----- Storage
                      └──────────┘      └──────────────┘
 Query through json_to_string function:
                                 (Conversion is performed by function inside Query Engine)
                                                Scan & Decode
         JSON Strings ┌──────────┐JSON Strings ┌──────────────┐JSONB
- Client ------------>│  Server  │------------>│ Query Engine │-----> Storage
+ Client <------------│  Server  │<------------│ Query Engine │<----- Storage
                      └──────────┘             └──────────────┘
 ```
 
