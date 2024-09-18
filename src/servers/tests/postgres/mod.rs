@@ -357,6 +357,9 @@ async fn test_extended_query() -> Result<()> {
 
 async fn start_test_server(server_tls: TlsOption) -> Result<u16> {
     common_telemetry::init_default_ut_logging();
+
+    let _ =
+        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
     let table = MemTable::default_numbers_table();
     let pg_server = create_postgres_server(table, false, server_tls, None)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();

@@ -392,6 +392,9 @@ mod tests {
     #[test]
     fn test_tls_file_change_watch() {
         common_telemetry::init_default_ut_logging();
+        let _ = rustls::crypto::CryptoProvider::install_default(
+            rustls::crypto::ring::default_provider(),
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let cert_path = dir.path().join("serevr.crt");
