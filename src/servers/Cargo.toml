@@ -70,7 +70,7 @@ openmetrics-parser = "0.4"
 opensrv-mysql = { git = "https://github.com/discord9/opensrv", branch = "fix_uaf" }
 opentelemetry-proto.workspace = true
 parking_lot = "0.12"
-pgwire = "0.22"
+pgwire = { version = "0.22", features = ["server-api-ring"] }
 pin-project = "1.0"
 pipeline.workspace = true
 postgres-types = { version = "0.2", features = ["with-chrono-0_4", "with-serde_json-1"] }
