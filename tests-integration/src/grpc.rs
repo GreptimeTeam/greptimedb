@@ -31,7 +31,6 @@ mod test {
     use common_meta::rpc::router::region_distribution;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
-    use datafusion_expr::LogicalPlan;
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
     use query::query_engine::DefaultSerializer;
