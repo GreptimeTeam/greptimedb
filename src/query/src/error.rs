@@ -108,13 +108,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert Datafusion schema"))]
-    ConvertDatafusionSchema {
-        source: datatypes::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to parse timestamp `{}`", raw))]
     ParseTimestamp {
         raw: String,
@@ -355,7 +348,6 @@ impl ErrorExt for Error {
 
             QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Catalog { source, .. } => source.status_code(),
-            ConvertDatafusionSchema { source, .. } => source.status_code(),
             CreateRecordBatch { source, .. } => source.status_code(),
             QueryExecution { source, .. } | QueryPlan { source, .. } => source.status_code(),
             PlanSql { error, .. } => {

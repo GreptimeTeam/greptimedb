@@ -133,13 +133,6 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to get schema from logical plan"))]
-    GetSchema {
-        #[snafu(implicit)]
-        location: Location,
-        source: query::error::Error,
-    },
-
     #[snafu(display("Column datatype error"))]
     ColumnDataType {
         #[snafu(implicit)]
@@ -880,7 +873,6 @@ impl ErrorExt for Error {
             | Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
 
             Error::ExecuteStatement { source, .. }
-            | Error::GetSchema { source, .. }
             | Error::ExtractTableNames { source, .. }
             | Error::PlanStatement { source, .. }
             | Error::ParseQuery { source, .. }
