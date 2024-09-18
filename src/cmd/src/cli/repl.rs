@@ -35,7 +35,6 @@ use either::Either;
 use meta_client::client::MetaClientBuilder;
 use query::datafusion::DatafusionQueryEngine;
 use query::parser::QueryLanguageParser;
-use query::plan::LogicalPlan;
 use query::query_engine::{DefaultSerializer, QueryEngineState};
 use query::QueryEngine;
 use rustyline::error::ReadlineError;
@@ -179,7 +178,7 @@ impl Repl {
                 .await
                 .context(PlanStatementSnafu)?;
 
-            let LogicalPlan::DfPlan(plan) = query_engine
+            let plan = query_engine
                 .optimize(&query_engine.engine_context(query_ctx), &plan)
                 .context(PlanStatementSnafu)?;
 

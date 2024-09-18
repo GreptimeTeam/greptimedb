@@ -184,6 +184,13 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Failed to convert datafusion schema"))]
+    ConvertSchema {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to convert expr to struct"))]
     InvalidExpr {
         #[snafu(implicit)]
@@ -795,6 +802,7 @@ impl ErrorExt for Error {
             | Error::PrepareFileTable { .. }
             | Error::InferFileTableSchema { .. }
             | Error::SchemaIncompatible { .. }
+            | Error::ConvertSchema { .. }
             | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. }
             | Error::InvalidViewName { .. }

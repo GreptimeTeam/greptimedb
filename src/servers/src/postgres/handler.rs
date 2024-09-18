@@ -20,6 +20,8 @@ use common_query::{Output, OutputData};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
 use common_telemetry::{debug, error, tracing};
+use datafusion_common::ParamValues;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use futures::{future, stream, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
@@ -246,7 +248,10 @@ impl ExtendedQueryHandler for PostgresServerHandler {
 
         let output = if let Some(plan) = &sql_plan.plan {
             let plan = plan
-                .replace_params_with_values(parameters_to_scalar_values(plan, portal)?.as_ref())
+                .clone()
+                .replace_params_with_values(&ParamValues::List(parameters_to_scalar_values(
+                    plan, portal,
+                )?))
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
             self.query_handler
                 .do_exec_plan(plan, query_ctx.clone())
@@ -280,8 +285,11 @@ impl ExtendedQueryHandler for PostgresServerHandler {
         let sql_plan = &stmt.statement;
         let (param_types, sql_plan, format) = if let Some(plan) = &sql_plan.plan {
             let param_types = plan
-                .get_param_types()
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                .get_parameter_types()
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+                .into_iter()
+                .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+                .collect();
 
             let types = param_types_to_pg_types(&param_types)
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;

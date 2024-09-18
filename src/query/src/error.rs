@@ -228,6 +228,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Unknown table type, downcast failed"))]
     UnknownTable {
         #[snafu(implicit)]

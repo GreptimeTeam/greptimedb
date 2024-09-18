@@ -46,6 +46,7 @@ common-version = { workspace = true, features = ["codec"] }
 dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
+datafusion-expr.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures = "0.3"

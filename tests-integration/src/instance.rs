@@ -28,10 +28,10 @@ mod tests {
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use common_telemetry::debug;
+    use datafusion_expr::LogicalPlan;
     use frontend::error::{self, Error, Result};
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
-    use query::plan::LogicalPlan;
     use query::query_engine::DefaultSerializer;
     use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
     use servers::query_handler::sql::SqlQueryHandler;
@@ -233,7 +233,7 @@ mod tests {
             &QueryContext::arc(),
         )
         .unwrap();
-        let LogicalPlan::DfPlan(plan) = instance
+        let plan = instance
             .frontend()
             .statement_executor()
             .plan(stmt, QueryContext::arc())
@@ -317,7 +317,7 @@ mod tests {
             fn pre_execute(
                 &self,
                 _statement: &Statement,
-                _plan: Option<&query::plan::LogicalPlan>,
+                _plan: Option<&LogicalPlan>,
                 _query_ctx: QueryContextRef,
             ) -> Result<()> {
                 let _ = self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

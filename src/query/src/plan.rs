@@ -39,7 +39,7 @@ use crate::error::{ConvertDatafusionSchemaSnafu, DataFusionSnafu, Result};
 /// schema. A plan represents a dataflow tree where data flows
 /// from leaves up to the root to produce the query result.
 #[derive(Clone, Debug)]
-pub enum LogicalPlan {
+enum LogicalPlan {
     DfPlan(DfLogicalPlan),
 }
 

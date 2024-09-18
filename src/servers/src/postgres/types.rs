@@ -23,6 +23,7 @@ use std::ops::Deref;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_time::Interval;
 use datafusion_common::ScalarValue;
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
 use datatypes::types::TimestampType;
@@ -30,7 +31,6 @@ use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::api::Type;
 use pgwire::error::{PgWireError, PgWireResult};
-use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use session::session_config::PGByteaOutputValue;
 
@@ -276,8 +276,11 @@ pub(super) fn parameters_to_scalar_values(
 
     let client_param_types = &portal.statement.parameter_types;
     let param_types = plan
-        .get_param_types()
-        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        .get_parameter_types()
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+        .into_iter()
+        .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+        .collect::<HashMap<_, _>>();
 
     // ensure parameter count consistent for: client parameter types, server
     // parameter types and parameter count
