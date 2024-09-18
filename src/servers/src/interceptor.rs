@@ -405,7 +405,7 @@ pub trait LogIngestInterceptor {
     type Error: ErrorExt;
 
     /// Called before pipeline execution.
-    fn pre_transform(
+    fn pre_pipeline(
         &self,
         _values: &[Value],
         _query_ctx: QueryContextRef,
@@ -432,13 +432,13 @@ where
 {
     type Error = E;
 
-    fn pre_transform(
+    fn pre_pipeline(
         &self,
         values: &[Value],
         query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
         if let Some(this) = self {
-            this.pre_transform(values, query_ctx)
+            this.pre_pipeline(values, query_ctx)
         } else {
             Ok(())
         }

@@ -383,7 +383,7 @@ pub async fn log_ingester(
     log_state
         .ingest_interceptor
         .as_ref()
-        .pre_transform(&value, query_ctx.clone())?;
+        .pre_pipeline(&value, query_ctx.clone())?;
 
     ingest_logs_inner(
         handler,
