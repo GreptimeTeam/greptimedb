@@ -16,15 +16,14 @@ use sqlness::interceptor::{Interceptor, InterceptorFactory, InterceptorRef};
 use sqlness::SqlnessError;
 
 pub const PROTOCOL_KEY: &str = "protocol";
-
 pub const POSTGRES: &str = "postgres";
 pub const MYSQL: &str = "mysql";
-
 pub const PREFIX: &str = "PROTOCOL";
+
 pub struct ProtocolInterceptor {
     protocol: String,
 }
-pub struct ProtocolInterceptorFactory;
+
 impl Interceptor for ProtocolInterceptor {
     fn before_execute(&self, _: &mut Vec<String>, context: &mut sqlness::QueryContext) {
         context
@@ -32,11 +31,15 @@ impl Interceptor for ProtocolInterceptor {
             .insert(PROTOCOL_KEY.to_string(), self.protocol.clone());
     }
 }
+
+pub struct ProtocolInterceptorFactory;
+
 impl InterceptorFactory for ProtocolInterceptorFactory {
     fn try_new(&self, ctx: &str) -> Result<InterceptorRef, SqlnessError> {
-        match ctx.to_lowercase().as_str() {
+        let protocol = ctx.to_lowercase();
+        match protocol.as_str() {
             POSTGRES | MYSQL => Ok(Box::new(ProtocolInterceptor {
-                protocol: ctx.to_lowercase().to_string(),
+                protocol,
             })),
             _ => Err(SqlnessError::InvalidContext {
                 prefix: PREFIX.to_string(),
