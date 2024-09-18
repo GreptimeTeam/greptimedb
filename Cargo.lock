@@ -1176,6 +1176,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40723b8fb387abc38f4f4a37c09073622e41dd12327033091ef8950659e6dc0c"
+dependencies = [
+ "memchr",
+ "regex-automata 0.4.7",
+ "serde",
+]
+
+[[package]]
 name = "btoi"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1761,6 +1772,7 @@ dependencies = [
  "serde_json",
  "servers",
  "session",
+ "similar-asserts",
  "snafu 0.8.4",
  "store-api",
  "substrait 0.9.3",
@@ -9657,7 +9669,7 @@ source = "git+https://github.com/discord9/RustPython?rev=9ed5137412#9ed51374125b
 dependencies = [
  "ascii",
  "bitflags 1.3.2",
- "bstr",
+ "bstr 0.2.17",
  "cfg-if",
  "hexf-parse",
  "itertools 0.10.5",
@@ -9692,7 +9704,7 @@ version = "0.2.0"
 source = "git+https://github.com/discord9/RustPython?rev=9ed5137412#9ed51374125b5f1a9e5cee5dd7e27023b8591f1e"
 dependencies = [
  "bitflags 1.3.2",
- "bstr",
+ "bstr 0.2.17",
  "itertools 0.10.5",
  "lz4_flex 0.9.5",
  "num-bigint",
@@ -9845,7 +9857,7 @@ dependencies = [
  "ascii",
  "atty",
  "bitflags 1.3.2",
- "bstr",
+ "bstr 0.2.17",
  "caseless",
  "cfg-if",
  "chrono",
@@ -10612,6 +10624,26 @@ name = "simdutf8"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27f6278552951f1f2b8cf9da965d10969b2efdea95a6ec47987ab46edfe263a"
+
+[[package]]
+name = "similar"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1de1d4f81173b03af4c0cbed3c898f6bff5b870e4a7f5d6f4057d62a7a4b686e"
+dependencies = [
+ "bstr 1.10.0",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "similar-asserts"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe85670573cd6f0fa97940f26e7e6601213c3b0555246c24234131f88c5709e"
+dependencies = [
+ "console",
+ "similar",
+]
 
 [[package]]
 name = "simple_asn1"
@@ -11801,6 +11833,7 @@ dependencies = [
  "serde_json",
  "servers",
  "session",
+ "similar-asserts",
  "snafu 0.8.4",
  "sql",
  "sqlx",
