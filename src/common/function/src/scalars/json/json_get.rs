@@ -47,7 +47,7 @@ fn get_json_by_path(json: &[u8], path: &str) -> Option<Vec<u8>> {
 /// If the path does not exist or the value is not the type specified, return `NULL`.
 macro_rules! json_get {
     // e.g. name = JsonGetInt, type = Int64, rust_type = i64, doc = "Get the value from the JSONB by the given path and return it as an integer."
-    ($name: ident, $type: ident, $rust_type: ident, $doc:expr) => {
+    ($name:ident, $type:ident, $rust_type:ident, $doc:expr) => {
         paste::paste! {
             #[doc = $doc]
             #[derive(Clone, Debug, Default)]
