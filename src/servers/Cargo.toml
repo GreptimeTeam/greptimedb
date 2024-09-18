@@ -87,7 +87,7 @@ rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rust-embed = { version = "6.6", features = ["debug-embed"] }
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
 schemars.workspace = true
@@ -100,7 +100,7 @@ sql.workspace = true
 strum.workspace = true
 table.workspace = true
 tokio.workspace = true
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", features = ["logging", "tls12", "ring"] }
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 tonic.workspace = true
