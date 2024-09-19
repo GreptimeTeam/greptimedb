@@ -33,7 +33,6 @@ mod test {
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
-    use query::plan::LogicalPlan;
     use query::query_engine::DefaultSerializer;
     use servers::query_handler::grpc::GrpcQueryHandler;
     use session::context::QueryContext;
@@ -540,7 +539,7 @@ CREATE TABLE {table_name} (
             &QueryContext::arc(),
         )
         .unwrap();
-        let LogicalPlan::DfPlan(plan) = instance
+        let plan = instance
             .frontend()
             .statement_executor()
             .plan(stmt, QueryContext::arc())
