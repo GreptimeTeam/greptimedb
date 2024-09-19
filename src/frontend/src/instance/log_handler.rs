@@ -43,10 +43,11 @@ impl LogHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::LogWrite)
             .context(AuthSnafu)?;
 
-        self.plugins
+        let log = self
+            .plugins
             .get::<LogIngestInterceptorRef<ServerError>>()
             .as_ref()
-            .pre_ingest(&log, ctx.clone())?;
+            .pre_ingest(log, ctx.clone())?;
 
         self.handle_log_inserts(log, ctx).await
     }

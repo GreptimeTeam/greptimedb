@@ -380,10 +380,10 @@ pub async fn log_ingester(
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
 
-    log_state
+    let value = log_state
         .ingest_interceptor
         .as_ref()
-        .pre_pipeline(&value, query_ctx.clone())?;
+        .pre_pipeline(value, query_ctx.clone())?;
 
     ingest_logs_inner(
         handler,

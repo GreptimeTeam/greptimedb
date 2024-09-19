@@ -407,19 +407,19 @@ pub trait LogIngestInterceptor {
     /// Called before pipeline execution.
     fn pre_pipeline(
         &self,
-        _values: &[Value],
+        values: Vec<Value>,
         _query_ctx: QueryContextRef,
-    ) -> Result<(), Self::Error> {
-        Ok(())
+    ) -> Result<Vec<Value>, Self::Error> {
+        Ok(values)
     }
 
     /// Called before insertion.
     fn pre_ingest(
         &self,
-        _request: &RowInsertRequests,
+        request: RowInsertRequests,
         _query_ctx: QueryContextRef,
-    ) -> Result<(), Self::Error> {
-        Ok(())
+    ) -> Result<RowInsertRequests, Self::Error> {
+        Ok(request)
     }
 }
 
@@ -434,25 +434,25 @@ where
 
     fn pre_pipeline(
         &self,
-        values: &[Value],
+        values: Vec<Value>,
         query_ctx: QueryContextRef,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<Vec<Value>, Self::Error> {
         if let Some(this) = self {
             this.pre_pipeline(values, query_ctx)
         } else {
-            Ok(())
+            Ok(values)
         }
     }
 
     fn pre_ingest(
         &self,
-        request: &RowInsertRequests,
+        request: RowInsertRequests,
         query_ctx: QueryContextRef,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<RowInsertRequests, Self::Error> {
         if let Some(this) = self {
             this.pre_ingest(request, query_ctx)
         } else {
-            Ok(())
+            Ok(request)
         }
     }
 }
