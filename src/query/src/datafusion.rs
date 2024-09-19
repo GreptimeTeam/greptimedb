@@ -390,16 +390,29 @@ impl QueryEngine for DatafusionQueryEngine {
         query_ctx: QueryContextRef,
     ) -> Result<DescribeResult> {
         let ctx = self.engine_context(query_ctx);
-        let optimised_plan = self.optimize(&ctx, &plan)?;
-        let schema = optimised_plan
-            .schema()
-            .clone()
-            .try_into()
-            .context(ConvertSchemaSnafu)?;
-        Ok(DescribeResult {
-            schema,
-            logical_plan: optimised_plan,
-        })
+        if let Ok(optimised_plan) = self.optimize(&ctx, &plan) {
+            let schema = optimised_plan
+                .schema()
+                .clone()
+                .try_into()
+                .context(ConvertSchemaSnafu)?;
+            Ok(DescribeResult {
+                schema,
+                logical_plan: optimised_plan,
+            })
+        } else {
+            // Table's like those in information_schema cannot be optimized when
+            // it contains parameters. So we fallback to original plans.
+            let schema = plan
+                .schema()
+                .clone()
+                .try_into()
+                .context(ConvertSchemaSnafu)?;
+            Ok(DescribeResult {
+                schema,
+                logical_plan: plan,
+            })
+        }
     }
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {

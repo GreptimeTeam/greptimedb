@@ -15,7 +15,6 @@
 use std::ops::Deref;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use common_telemetry::warn;
 use itertools::Itertools;
 
 use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
@@ -742,11 +741,8 @@ impl DissectProcessor {
         let chs = val.chars().collect::<Vec<char>>();
 
         for pattern in &self.patterns {
-            match self.process_pattern(&chs, pattern) {
-                Ok(map) => return Ok(map),
-                Err(e) => {
-                    warn!("dissect processor: {}", e);
-                }
+            if let Ok(map) = self.process_pattern(&chs, pattern) {
+                return Ok(map);
             }
         }
 

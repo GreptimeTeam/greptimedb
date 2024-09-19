@@ -24,6 +24,7 @@ common-macro.workspace = true
 common-meta.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
+common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-version.workspace = true
@@ -48,6 +49,7 @@ sql.workspace = true
 store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
+tokio-stream = "0.1"
 
 [dev-dependencies]
 cache.workspace = true

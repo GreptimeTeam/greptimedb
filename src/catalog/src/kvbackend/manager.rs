@@ -42,6 +42,8 @@ use table::dist_table::DistTable;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::table_name::TableName;
 use table::TableRef;
+use tokio::sync::Semaphore;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
@@ -179,21 +181,18 @@ impl CatalogManager for KvBackendCatalogManager {
         schema: &str,
         query_ctx: Option<&QueryContext>,
     ) -> Result<Vec<String>> {
-        let stream = self
+        let mut tables = self
             .table_metadata_manager
             .table_name_manager()
-            .tables(catalog, schema);
-        let mut tables = stream
+            .tables(catalog, schema)
+            .map_ok(|(table_name, _)| table_name)
             .try_collect::<Vec<_>>()
             .await
             .map_err(BoxedError::new)
-            .context(ListTablesSnafu { catalog, schema })?
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect::<Vec<_>>();
-        tables.extend_from_slice(&self.system_catalog.table_names(schema, query_ctx));
+            .context(ListTablesSnafu { catalog, schema })?;
 
-        Ok(tables.into_iter().collect())
+        tables.extend(self.system_catalog.table_names(schema, query_ctx));
+        Ok(tables)
     }
 
     async fn catalog_exists(&self, catalog: &str) -> Result<bool> {
@@ -303,36 +302,68 @@ impl CatalogManager for KvBackendCatalogManager {
             }
         });
 
-        let table_id_stream = self
-            .table_metadata_manager
-            .table_name_manager()
-            .tables(catalog, schema)
-            .map_ok(|(_, v)| v.table_id());
         const BATCH_SIZE: usize = 128;
-        let user_tables = try_stream!({
+        const CONCURRENCY: usize = 8;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let metadata_manager = self.table_metadata_manager.clone();
+        let catalog = catalog.to_string();
+        let schema = schema.to_string();
+        let semaphore = Arc::new(Semaphore::new(CONCURRENCY));
+
+        common_runtime::spawn_global(async move {
+            let table_id_stream = metadata_manager
+                .table_name_manager()
+                .tables(&catalog, &schema)
+                .map_ok(|(_, v)| v.table_id());
             // Split table ids into chunks
             let mut table_id_chunks = table_id_stream.ready_chunks(BATCH_SIZE);
 
             while let Some(table_ids) = table_id_chunks.next().await {
-                let table_ids = table_ids
+                let table_ids = match table_ids
                     .into_iter()
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(BoxedError::new)
-                    .context(ListTablesSnafu { catalog, schema })?;
+                    .context(ListTablesSnafu {
+                        catalog: &catalog,
+                        schema: &schema,
+                    }) {
+                    Ok(table_ids) => table_ids,
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                };
 
-                let table_info_values = self
-                    .table_metadata_manager
-                    .table_info_manager()
-                    .batch_get(&table_ids)
-                    .await
-                    .context(TableMetadataManagerSnafu)?;
+                let metadata_manager = metadata_manager.clone();
+                let tx = tx.clone();
+                let semaphore = semaphore.clone();
+                common_runtime::spawn_global(async move {
+                    // we don't explicitly close the semaphore so just ignore the potential error.
+                    let _ = semaphore.acquire().await;
+                    let table_info_values = match metadata_manager
+                        .table_info_manager()
+                        .batch_get(&table_ids)
+                        .await
+                        .context(TableMetadataManagerSnafu)
+                    {
+                        Ok(table_info_values) => table_info_values,
+                        Err(e) => {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                    };
 
-                for table_info_value in table_info_values.into_values() {
-                    yield build_table(table_info_value)?;
-                }
+                    for table in table_info_values.into_values().map(build_table) {
+                        if tx.send(table).await.is_err() {
+                            return;
+                        }
+                    }
+                });
             }
         });
 
+        let user_tables = ReceiverStream::new(rx);
         Box::pin(sys_tables.chain(user_tables))
     }
 }

@@ -239,14 +239,14 @@ pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWir
             .unwrap_or_else(|| "".to_owned())),
         _ => Err(invalid_parameter_error(
             "unsupported_parameter_type",
-            Some(&param_type.to_string()),
+            Some(param_type.to_string()),
         )),
     }
 }
 
-pub(super) fn invalid_parameter_error(msg: &str, detail: Option<&str>) -> PgWireError {
+pub(super) fn invalid_parameter_error(msg: &str, detail: Option<String>) -> PgWireError {
     let mut error_info = PgErrorCode::Ec22023.to_err_info(msg.to_string());
-    error_info.detail = detail.map(|s| s.to_owned());
+    error_info.detail = detail;
     PgWireError::UserError(Box::new(error_info))
 }
 
@@ -282,303 +282,314 @@ pub(super) fn parameters_to_scalar_values(
         .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
         .collect::<HashMap<_, _>>();
 
-    // ensure parameter count consistent for: client parameter types, server
-    // parameter types and parameter count
-    if param_types.len() != param_count {
-        return Err(invalid_parameter_error(
-            "invalid_parameter_count",
-            Some(&format!(
-                "Expected: {}, found: {}",
-                param_types.len(),
-                param_count
-            )),
-        ));
-    }
-
     for idx in 0..param_count {
-        let server_type =
-            if let Some(Some(server_infer_type)) = param_types.get(&format!("${}", idx + 1)) {
-                server_infer_type
-            } else {
-                // at the moment we require type information inferenced by
-                // server so here we return error if the type is unknown from
-                // server-side.
-                //
-                // It might be possible to parse the parameter just using client
-                // specified type, we will implement that if there is a case.
-                return Err(invalid_parameter_error("unknown_parameter_type", None));
-            };
+        let server_type = param_types
+            .get(&format!("${}", idx + 1))
+            .and_then(|t| t.as_ref());
 
         let client_type = if let Some(client_given_type) = client_param_types.get(idx) {
             client_given_type.clone()
+        } else if let Some(server_provided_type) = &server_type {
+            type_gt_to_pg(server_provided_type).map_err(|e| PgWireError::ApiError(Box::new(e)))?
         } else {
-            type_gt_to_pg(server_type).map_err(|e| PgWireError::ApiError(Box::new(e)))?
+            return Err(invalid_parameter_error(
+                "unknown_parameter_type",
+                Some(format!(
+                    "Cannot get parameter type information for parameter {}",
+                    idx
+                )),
+            ));
         };
 
         let value = match &client_type {
             &Type::VARCHAR | &Type::TEXT => {
                 let data = portal.parameter::<String>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::String(_) => ScalarValue::Utf8(data),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::String(_) => ScalarValue::Utf8(data),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
+                } else {
+                    ScalarValue::Utf8(data)
                 }
             }
             &Type::BOOL => {
                 let data = portal.parameter::<bool>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Boolean(_) => ScalarValue::Boolean(data),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Boolean(_) => ScalarValue::Boolean(data),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
+                } else {
+                    ScalarValue::Boolean(data)
                 }
             }
             &Type::INT2 => {
                 let data = portal.parameter::<i16>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                    ConcreteDataType::Int16(_) => ScalarValue::Int16(data),
-                    ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                    ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                    ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                    ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                    ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                    ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
-                    ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, unit, server_type)?
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Timestamp(unit) => {
+                            to_timestamp_scalar_value(data, unit, server_type)?
+                        }
+                        ConcreteDataType::DateTime(_) => {
+                            ScalarValue::Date64(data.map(|d| d as i64))
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
-                    ConcreteDataType::DateTime(_) => ScalarValue::Date64(data.map(|d| d as i64)),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
-                    }
+                } else {
+                    ScalarValue::Int16(data)
                 }
             }
             &Type::INT4 => {
                 let data = portal.parameter::<i32>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                    ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                    ConcreteDataType::Int32(_) => ScalarValue::Int32(data),
-                    ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                    ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                    ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                    ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                    ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
-                    ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, unit, server_type)?
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Timestamp(unit) => {
+                            to_timestamp_scalar_value(data, unit, server_type)?
+                        }
+                        ConcreteDataType::DateTime(_) => {
+                            ScalarValue::Date64(data.map(|d| d as i64))
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
-                    ConcreteDataType::DateTime(_) => ScalarValue::Date64(data.map(|d| d as i64)),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
-                    }
+                } else {
+                    ScalarValue::Int32(data)
                 }
             }
             &Type::INT8 => {
                 let data = portal.parameter::<i64>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                    ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                    ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                    ConcreteDataType::Int64(_) => ScalarValue::Int64(data),
-                    ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                    ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                    ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                    ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
-                    ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, unit, server_type)?
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Timestamp(unit) => {
+                            to_timestamp_scalar_value(data, unit, server_type)?
+                        }
+                        ConcreteDataType::DateTime(_) => ScalarValue::Date64(data),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
-                    ConcreteDataType::DateTime(_) => ScalarValue::Date64(data),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
-                    }
+                } else {
+                    ScalarValue::Int64(data)
                 }
             }
             &Type::FLOAT4 => {
                 let data = portal.parameter::<f32>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                    ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                    ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                    ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                    ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                    ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                    ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                    ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
-                    ConcreteDataType::Float32(_) => ScalarValue::Float32(data),
-                    ConcreteDataType::Float64(_) => ScalarValue::Float64(data.map(|n| n as f64)),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Float32(_) => ScalarValue::Float32(data),
+                        ConcreteDataType::Float64(_) => {
+                            ScalarValue::Float64(data.map(|n| n as f64))
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
+                } else {
+                    ScalarValue::Float32(data)
                 }
             }
             &Type::FLOAT8 => {
                 let data = portal.parameter::<f64>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                    ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                    ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                    ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                    ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                    ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                    ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                    ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
-                    ConcreteDataType::Float32(_) => ScalarValue::Float32(data.map(|n| n as f32)),
-                    ConcreteDataType::Float64(_) => ScalarValue::Float64(data),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Float32(_) => {
+                            ScalarValue::Float32(data.map(|n| n as f32))
+                        }
+                        ConcreteDataType::Float64(_) => ScalarValue::Float64(data),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
+                } else {
+                    ScalarValue::Float64(data)
                 }
             }
             &Type::TIMESTAMP => {
                 let data = portal.parameter::<NaiveDateTime>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Timestamp(unit) => match *unit {
-                        TimestampType::Second(_) => ScalarValue::TimestampSecond(
-                            data.map(|ts| ts.and_utc().timestamp()),
-                            None,
-                        ),
-                        TimestampType::Millisecond(_) => ScalarValue::TimestampMillisecond(
-                            data.map(|ts| ts.and_utc().timestamp_millis()),
-                            None,
-                        ),
-                        TimestampType::Microsecond(_) => ScalarValue::TimestampMicrosecond(
-                            data.map(|ts| ts.and_utc().timestamp_micros()),
-                            None,
-                        ),
-                        TimestampType::Nanosecond(_) => ScalarValue::TimestampNanosecond(
-                            data.map(|ts| ts.and_utc().timestamp_micros()),
-                            None,
-                        ),
-                    },
-                    ConcreteDataType::DateTime(_) => {
-                        ScalarValue::Date64(data.map(|d| d.and_utc().timestamp_millis()))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Timestamp(unit) => match *unit {
+                            TimestampType::Second(_) => ScalarValue::TimestampSecond(
+                                data.map(|ts| ts.and_utc().timestamp()),
+                                None,
+                            ),
+                            TimestampType::Millisecond(_) => ScalarValue::TimestampMillisecond(
+                                data.map(|ts| ts.and_utc().timestamp_millis()),
+                                None,
+                            ),
+                            TimestampType::Microsecond(_) => ScalarValue::TimestampMicrosecond(
+                                data.map(|ts| ts.and_utc().timestamp_micros()),
+                                None,
+                            ),
+                            TimestampType::Nanosecond(_) => ScalarValue::TimestampNanosecond(
+                                data.map(|ts| ts.and_utc().timestamp_micros()),
+                                None,
+                            ),
+                        },
+                        ConcreteDataType::DateTime(_) => {
+                            ScalarValue::Date64(data.map(|d| d.and_utc().timestamp_millis()))
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
-                    }
+                } else {
+                    ScalarValue::TimestampMillisecond(
+                        data.map(|ts| ts.and_utc().timestamp_millis()),
+                        None,
+                    )
                 }
             }
             &Type::DATE => {
                 let data = portal.parameter::<NaiveDate>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Date(_) => ScalarValue::Date32(data.map(|d| {
-                        (d - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days() as i32
-                    })),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ));
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Date(_) => ScalarValue::Date32(data.map(|d| {
+                            (d - NaiveDate::from(NaiveDateTime::UNIX_EPOCH)).num_days() as i32
+                        })),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ));
+                        }
                     }
+                } else {
+                    ScalarValue::Date32(data.map(|d| {
+                        (d - NaiveDate::from(NaiveDateTime::UNIX_EPOCH)).num_days() as i32
+                    }))
                 }
             }
             &Type::INTERVAL => {
                 let data = portal.parameter::<PgInterval>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Interval(_) => {
-                        ScalarValue::IntervalMonthDayNano(data.map(|i| Interval::from(i).to_i128()))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Interval(_) => ScalarValue::IntervalMonthDayNano(
+                            data.map(|i| Interval::from(i).to_i128()),
+                        ),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ));
+                        }
                     }
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ));
-                    }
+                } else {
+                    ScalarValue::IntervalMonthDayNano(data.map(|i| Interval::from(i).to_i128()))
                 }
             }
             &Type::BYTEA => {
                 let data = portal.parameter::<Vec<u8>>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::String(_) => {
-                        ScalarValue::Utf8(data.map(|d| String::from_utf8_lossy(&d).to_string()))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::String(_) => {
+                            ScalarValue::Utf8(data.map(|d| String::from_utf8_lossy(&d).to_string()))
+                        }
+                        ConcreteDataType::Binary(_) => ScalarValue::Binary(data),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ));
+                        }
                     }
-                    ConcreteDataType::Binary(_) => ScalarValue::Binary(data),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ));
-                    }
+                } else {
+                    ScalarValue::Binary(data)
                 }
             }
             &Type::JSONB => {
                 let data = portal.parameter::<serde_json::Value>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Binary(_) => {
-                        ScalarValue::Binary(data.map(|d| jsonb::Value::from(d).to_vec()))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Binary(_) => {
+                            ScalarValue::Binary(data.map(|d| jsonb::Value::from(d).to_vec()))
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ));
+                        }
                     }
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ));
-                    }
+                } else {
+                    ScalarValue::Binary(data.map(|d| jsonb::Value::from(d).to_vec()))
                 }
             }
             _ => Err(invalid_parameter_error(
                 "unsupported_parameter_value",
-                Some(&format!("Found type: {}", client_type)),
+                Some(format!("Found type: {}", client_type)),
             ))?,
         };
 

@@ -119,7 +119,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_by_path_function() {
+    fn test_json_to_string_function() {
         let json_to_string = JsonToStringFunction;
 
         assert_eq!("json_to_string", json_to_string.name());

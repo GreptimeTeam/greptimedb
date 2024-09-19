@@ -888,7 +888,7 @@ write_interval = "30s"
     .trim()
     .to_string();
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
-    assert_eq!(body_text, expected_toml_str);
+    similar_asserts::assert_eq!(body_text, expected_toml_str);
 }
 
 fn drop_lines_with_inconsistent_results(input: String) -> String {

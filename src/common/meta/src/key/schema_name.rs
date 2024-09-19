@@ -230,7 +230,8 @@ impl SchemaManager {
             req,
             DEFAULT_PAGE_SIZE,
             Arc::new(schema_decoder),
-        );
+        )
+        .into_stream();
 
         Box::pin(stream)
     }

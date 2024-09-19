@@ -15,6 +15,7 @@ workspace = true
 anymap2 = "0.13.0"
 api.workspace = true
 async-recursion = "1.0"
+async-stream = "0.3"
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
