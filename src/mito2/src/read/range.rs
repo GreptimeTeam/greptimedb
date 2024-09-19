@@ -19,6 +19,7 @@ use smallvec::SmallVec;
 use crate::sst::file::{overlaps, FileTimeRange};
 
 /// Index to access a row group.
+#[derive(Clone)]
 struct RowGroupIndex {
     /// Index to the file.
     file_index: usize,
@@ -33,11 +34,12 @@ pub(crate) struct RangeMeta {
     /// The time range of the range.
     pub(crate) time_range: FileTimeRange,
     /// Indices to memtables.
-    mem_indices: SmallVec<[usize; 4]>,
+    mem_indices: SmallVec<[usize; 2]>,
     /// Indices to files. It contains the indices to all the files in `row_group_indices`.
     file_indices: SmallVec<[usize; 4]>,
     /// Indices to file row groups that this range scans.
-    row_group_indices: SmallVec<[RowGroupIndex; 4]>,
+    /// An empty vec indicates all row groups. (Some file metas don't have row group number).
+    row_group_indices: SmallVec<[RowGroupIndex; 2]>,
 }
 
 impl RangeMeta {
@@ -61,9 +63,27 @@ impl RangeMeta {
     /// Returns true if we can split the range into multiple smaller ranges and
     /// still preserve the order for [SeqScan].
     pub(crate) fn can_split_preserve_order(&self) -> bool {
+        // No memtable, only one file, and multiple row groups.
         self.mem_indices.is_empty()
             && self.file_indices.len() == 1
             && self.row_group_indices.len() > 1
+    }
+
+    /// Splits the range if it can preserve the order.
+    pub(crate) fn maybe_split(self, output: &mut Vec<RangeMeta>) {
+        if self.can_split_preserve_order() {
+            output.reserve(self.row_group_indices.len());
+            for index in self.row_group_indices {
+                output.push(RangeMeta {
+                    time_range: self.time_range,
+                    mem_indices: SmallVec::new(),
+                    file_indices: self.file_indices.clone(),
+                    row_group_indices: SmallVec::from_elem(index, 1),
+                });
+            }
+        } else {
+            output.push(self);
+        }
     }
 }
 
@@ -103,4 +123,15 @@ fn group_ranges_for_merge_mode(mut ranges: Vec<RangeMeta>) -> Vec<RangeMeta> {
     }
 
     exclusive_ranges
+}
+
+/// Splits the range into multiple smaller ranges.
+/// It assumes the input `ranges` list is created by [group_ranges_for_merge_mode()].
+fn maybe_split_ranges_for_merge_mode(ranges: Vec<RangeMeta>) -> Vec<RangeMeta> {
+    let mut new_ranges = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        range.maybe_split(&mut new_ranges);
+    }
+
+    new_ranges
 }
