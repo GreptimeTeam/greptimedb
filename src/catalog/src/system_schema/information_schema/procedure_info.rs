@@ -177,8 +177,11 @@ impl InformationSchemaProcedureInfoBuilder {
                         .map_err(BoxedError::new)
                         .context(ListProceduresSnafu)?;
                     for procedure in procedures {
-                        let status = procedure.state.as_str_name().to_string();
-                        self.add_procedure(&predicates, procedure, &status);
+                        self.add_procedure(
+                            &predicates,
+                            procedure.state.as_str_name().to_string(),
+                            procedure,
+                        );
                     }
                 } else {
                     return GetProcedureClientSnafu { mode: "standalone" }.fail();
@@ -209,8 +212,8 @@ impl InformationSchemaProcedureInfoBuilder {
     fn add_procedure(
         &mut self,
         predicates: &Predicates,
+        status: String,
         procedure_info: ProcedureInfo,
-        status: &str,
     ) {
         let ProcedureInfo {
             id,
@@ -230,7 +233,7 @@ impl InformationSchemaProcedureInfoBuilder {
             (PROCEDURE_TYPE, &Value::from(type_name.clone())),
             (START_TIME, &Value::from(start_time)),
             (END_TIME, &Value::from(end_time)),
-            (STATUS, &Value::from(status.to_string())),
+            (STATUS, &Value::from(status.clone())),
             (LOCK_KEYS, &Value::from(lock_keys.clone())),
         ];
         if !predicates.eval(&row) {
@@ -240,7 +243,7 @@ impl InformationSchemaProcedureInfoBuilder {
         self.procedure_types.push(Some(&type_name));
         self.start_times.push(Some(start_time));
         self.end_times.push(Some(end_time));
-        self.statuses.push(Some(status));
+        self.statuses.push(Some(&status));
         self.lock_keys.push(Some(&lock_keys));
     }
 
@@ -258,7 +261,8 @@ impl InformationSchemaProcedureInfoBuilder {
             .context(ConvertProtoDataSnafu)?;
         let status = ProcedureStatus::try_from(procedure.status)
             .map(|v| v.as_str_name())
-            .unwrap_or("Unknown");
+            .unwrap_or("Unknown")
+            .to_string();
         let procedure_info = ProcedureInfo {
             id: pid,
             type_name: procedure.type_name,
@@ -267,7 +271,7 @@ impl InformationSchemaProcedureInfoBuilder {
             state: ProcedureState::Running,
             lock_keys: procedure.lock_keys,
         };
-        self.add_procedure(predicates, procedure_info, status);
+        self.add_procedure(predicates, status, procedure_info);
         Ok(())
     }
 
