@@ -387,6 +387,17 @@ impl ProcedureState {
             _ => None,
         }
     }
+
+    pub fn as_str_name(&self) -> &str {
+        match self {
+            ProcedureState::Running => "Running",
+            ProcedureState::Done => "Done",
+            ProcedureState::Retrying => "Retrying",
+            ProcedureState::Failed => "Failed",
+            ProcedureState::PrepareRollback => "PrepareRollback",
+            ProcedureState::RollingBack => "RollingBack",
+        }
+    }
 }
 
 /// The initial procedure state.
