@@ -54,17 +54,19 @@ static SET_TRANSACTION_PATTERN: Lazy<Regex> =
 static TRANSACTION_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(BEGIN|ROLLBACK|COMMIT);?").unwrap());
 
+/// Test if given query statement matches the patterns
+pub(crate) fn matches(query: &str) -> bool {
+    TRANSACTION_PATTERN.captures(query).is_some()
+        || SHOW_PATTERN.captures(query).is_some()
+        || SET_TRANSACTION_PATTERN.is_match(query)
+}
+
 /// Process unsupported SQL and return fixed result as a compatibility solution
-pub(crate) fn process<'a>(
-    query: &str,
-    _query_ctx: QueryContextRef,
-) -> Option<PgWireResult<Vec<Response<'a>>>> {
+pub(crate) fn process<'a>(query: &str, _query_ctx: QueryContextRef) -> Option<Vec<Response<'a>>> {
     // Transaction directives:
     if let Some(tx) = TRANSACTION_PATTERN.captures(query) {
         let tx_tag = &tx[1];
-        Some(Ok(vec![Response::Execution(Tag::new(
-            &tx_tag.to_uppercase(),
-        ))]))
+        Some(vec![Response::Execution(Tag::new(&tx_tag.to_uppercase()))])
     } else if let Some(show_var) = SHOW_PATTERN.captures(query) {
         let show_var = show_var[1].to_lowercase();
         if let Some(value) = VAR_VALUES.get(&show_var.as_ref()) {
@@ -81,12 +83,12 @@ pub(crate) fn process<'a>(
                 vec![vec![value.to_string()]],
             ));
 
-            Some(Ok(vec![Response::Query(QueryResponse::new(schema, data))]))
+            Some(vec![Response::Query(QueryResponse::new(schema, data))])
         } else {
             None
         }
     } else if SET_TRANSACTION_PATTERN.is_match(query) {
-        Some(Ok(vec![Response::Execution(Tag::new("SET"))]))
+        Some(vec![Response::Execution(Tag::new("SET"))])
     } else {
         None
     }
@@ -101,7 +103,6 @@ mod test {
     fn assert_tag(q: &str, t: &str, query_context: QueryContextRef) {
         if let Response::Execution(tag) = process(q, query_context.clone())
             .unwrap_or_else(|| panic!("fail to match {}", q))
-            .expect("unexpected error")
             .remove(0)
         {
             assert_eq!(Tag::new(t), tag);
@@ -113,7 +114,6 @@ mod test {
     fn get_data<'a>(q: &str, query_context: QueryContextRef) -> QueryResponse<'a> {
         if let Response::Query(resp) = process(q, query_context.clone())
             .unwrap_or_else(|| panic!("fail to match {}", q))
-            .expect("unexpected error")
             .remove(0)
         {
             resp
