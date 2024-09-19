@@ -23,6 +23,14 @@ insert into prune_field(ts, tag, a, b) values(0, 1, null, 1);
 
 Affected Rows: 1
 
+admin flush_table('prune_field');
+
++----------------------------------+
+| ADMIN flush_table('prune_field') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
 select * from prune_field where a = 1;
 
 +---------------------+-----+---+---+

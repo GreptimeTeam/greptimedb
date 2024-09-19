@@ -11,6 +11,8 @@ admin flush_table('prune_field');
 
 insert into prune_field(ts, tag, a, b) values(0, 1, null, 1);
 
+admin flush_table('prune_field');
+
 select * from prune_field where a = 1;
 
 select * from prune_field where b = 1;
