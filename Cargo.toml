@@ -90,7 +90,7 @@ aquamarine = "0.3"
 arrow = { version = "51.0.0", features = ["prettyprint"] }
 arrow-array = { version = "51.0.0", default-features = false, features = ["chrono-tz"] }
 arrow-flight = "51.0"
-arrow-ipc = { version = "51.0.0", default-features = false, features = ["lz4"] }
+arrow-ipc = { version = "51.0.0", default-features = false, features = ["lz4", "zstd"] }
 arrow-schema = { version = "51.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"

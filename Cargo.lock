@@ -443,6 +443,7 @@ dependencies = [
  "arrow-schema",
  "flatbuffers",
  "lz4_flex 0.11.3",
+ "zstd 0.13.1",
 ]
 
 [[package]]

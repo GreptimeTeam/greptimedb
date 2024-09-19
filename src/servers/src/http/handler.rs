@@ -51,7 +51,8 @@ use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 pub struct SqlQuery {
     pub db: Option<String>,
     pub sql: Option<String>,
-    // (Optional) result format: [`greptimedb_v1`, `influxdb_v1`, `csv`],
+    // (Optional) result format: [`greptimedb_v1`, `influxdb_v1`, `csv`,
+    // `arrow`],
     // the default value is `greptimedb_v1`
     pub format: Option<String>,
     // Returns epoch timestamps with the specified precision.
@@ -64,6 +65,8 @@ pub struct SqlQuery {
     // param too.
     pub epoch: Option<String>,
     pub limit: Option<usize>,
+    // For arrow output
+    pub compression: Option<String>,
 }
 
 /// Handler to execute sql
@@ -128,7 +131,9 @@ pub async fn sql(
     };
 
     let mut resp = match format {
-        ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
+        ResponseFormat::Arrow => {
+            ArrowResponse::from_output(outputs, query_params.compression).await
+        }
         ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
         ResponseFormat::Table => TableResponse::from_output(outputs).await,
         ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
