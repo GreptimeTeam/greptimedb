@@ -42,6 +42,7 @@ use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
 use tinytemplate::TinyTemplate;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::time::sleep;
 use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
@@ -164,7 +165,7 @@ impl Env {
         }
     }
 
-    async fn create_pg_client(&self, pg_server_addr: &str) -> PgClient {
+    async fn create_pg_client(&self, pg_server_addr: &str, grpc_client: &DB) -> PgClient {
         let sockaddr: SocketAddr = pg_server_addr.parse().expect(
             "Failed to parse the Postgres server address. Please check if the address is in the format of `ip:port`.",
         );
@@ -172,6 +173,8 @@ impl Env {
         config.host(sockaddr.ip().to_string());
         config.port(sockaddr.port());
         config.dbname(DEFAULT_SCHEMA_NAME);
+        // wait for the server to start
+        grpc_client.sql("SELECT 1;").await.unwrap();
         let (pg_client, conn) = config
             .connect(tokio_postgres::NoTls)
             .await
@@ -179,10 +182,13 @@ impl Env {
         tokio::spawn(conn);
         pg_client
     }
-    fn create_mysql_client(&self, mysql_server_addr: &str) -> MySqlClient {
+
+    async fn create_mysql_client(&self, mysql_server_addr: &str, grpc_client: &DB) -> MySqlClient {
         let sockaddr: SocketAddr = mysql_server_addr.parse().expect(
             "Failed to parse the MySQL server address. Please check if the address is in the format of `ip:port`.",
         );
+        // wait for the server to start
+        grpc_client.sql("SELECT 1;").await.unwrap();
         let ops = mysql::OptsBuilder::new()
             .ip_or_hostname(Some(sockaddr.ip().to_string()))
             .tcp_port(sockaddr.port())
@@ -207,9 +213,9 @@ impl Env {
 
         let grpc_client = Client::with_urls(vec![grpc_server_addr.clone()]);
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
-        let pg_client = self.create_pg_client(&pg_server_addr).await;
+        let pg_client = self.create_pg_client(&pg_server_addr, &db).await;
 
-        let mysql_client = self.create_mysql_client(&mysql_server_addr);
+        let mysql_client = self.create_mysql_client(&mysql_server_addr, &db).await;
 
         GreptimeDB {
             grpc_client: TokioMutex::new(db),
@@ -415,8 +421,13 @@ impl Env {
         };
 
         if let Some(server_process) = db.server_processes.clone() {
-            *db.pg_client.lock().await = self.create_pg_client(&self.pg_server_addr()).await;
-            *db.mysql_client.lock().await = self.create_mysql_client(&self.mysql_server_addr());
+            let grpc_client = &db.grpc_client.lock().await;
+            *db.pg_client.lock().await = self
+                .create_pg_client(&self.pg_server_addr(), &grpc_client)
+                .await;
+            *db.mysql_client.lock().await = self
+                .create_mysql_client(&self.mysql_server_addr(), &grpc_client)
+                .await;
             let mut server_processes = server_process.lock().unwrap();
             *server_processes = new_server_processes;
         }
