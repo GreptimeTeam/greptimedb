@@ -42,7 +42,6 @@ use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
 use tinytemplate::TinyTemplate;
 use tokio::sync::Mutex as TokioMutex;
-use tokio::time::sleep;
 use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
@@ -421,7 +420,7 @@ impl Env {
         };
 
         if let Some(server_process) = db.server_processes.clone() {
-            let grpc_client = &db.grpc_client.lock().await;
+            let grpc_client = db.grpc_client.lock().await;
             *db.pg_client.lock().await = self
                 .create_pg_client(&self.pg_server_addr(), &grpc_client)
                 .await;
