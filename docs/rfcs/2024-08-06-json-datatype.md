@@ -138,11 +138,11 @@ Query directly through client:
 (Server identifies JSON type and performs auto-conversion based on column metadata)
 
 Query through json_to_string function:
-                                                               Scan & Decode
-        String(Serialized JSON)┌──────────┐Arrow Binary(JSONB)┌──────────────┐Arrow Binary(JSONB)
- Client <----------------------│  Server  │<------------------│ Query Engine │<----- Storage
-                               └──────────┘                   └──────────────┘
-                                              (Conversion is performed by UDF inside Query Engine)
+                                                                   Scan & Decode
+        String(Serialized JSON)┌──────────┐String(Serialized JSON)┌──────────────┐Arrow Binary(JSONB)
+ Client <----------------------│  Server  │<----------------------│ Query Engine │<----------------- Storage
+                               └──────────┘                       └──────────────┘
+                                                 (Conversion is performed by UDF inside Query Engine)
 
 ```
 
@@ -169,7 +169,7 @@ INSERT INTO test VALUES(
     }'
 );
 
-SELECT json_get_int(b, 'name') FROM test;
+SELECT json_get_string(b, 'name') FROM test;
 +---------------------+
 | b.name              |
 +---------------------+
