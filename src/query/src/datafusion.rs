@@ -564,10 +564,10 @@ mod tests {
         // TODO(sunng87): do not rely on to_string for compare
         assert_eq!(
             format!("{plan:?}"),
-            r#"DfPlan(Limit: skip=0, fetch=20
+            r#"Limit: skip=0, fetch=20
   Projection: SUM(numbers.number)
     Aggregate: groupBy=[[]], aggr=[[SUM(numbers.number)]]
-      TableScan: numbers)"#
+      TableScan: numbers"#
         );
     }
 
