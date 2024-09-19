@@ -46,7 +46,7 @@ use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
-use crate::sst::file::{overlaps, FileHandle, FileMeta};
+use crate::sst::file::{overlaps, FileHandle, FileMeta, FileTimeRange};
 use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
@@ -954,6 +954,55 @@ impl ScanPartList {
                 .map(|ranges| ranges.len())
                 .sum()
         })
+    }
+}
+
+/// Index to access a row group.
+struct RowGroupIndex {
+    /// Index to the file.
+    file_index: usize,
+    /// Row group index in the file.
+    row_group_index: usize,
+}
+
+/// Meta data of a partition range.
+/// If the scanner is [UnorderedScan], each meta only has one row group or memtable.
+/// If the scanner is [SeqScan], each meta may have multiple row groups and memtables.
+pub(crate) struct RangeMeta {
+    /// The time range of the range.
+    pub(crate) time_range: FileTimeRange,
+    /// Indices to memtables.
+    mem_indices: SmallVec<[usize; 4]>,
+    /// Indices to files. It contains the indices to all the files in `row_group_indices`.
+    file_indices: SmallVec<[usize; 4]>,
+    /// Indices to file row groups that this range scans.
+    row_group_indices: SmallVec<[RowGroupIndex; 4]>,
+}
+
+impl RangeMeta {
+    /// Returns true if the time range of given `meta` overlaps with the time range of this meta.
+    pub(crate) fn overlaps(&self, meta: &RangeMeta) -> bool {
+        overlaps(&self.time_range, &meta.time_range)
+    }
+
+    /// Merges given `meta` to this meta.
+    /// It assumes that the time ranges overlap and they don't have the same file or memtable index.
+    pub(crate) fn merge(&mut self, mut other: RangeMeta) {
+        self.time_range = (
+            self.time_range.0.min(other.time_range.0),
+            self.time_range.1.max(other.time_range.1),
+        );
+        self.mem_indices.append(&mut other.mem_indices);
+        self.file_indices.append(&mut other.file_indices);
+        self.row_group_indices.append(&mut other.row_group_indices);
+    }
+
+    /// Returns true if we can split the range into multiple smaller ranges and
+    /// still preserve the order for [SeqScan].
+    pub(crate) fn can_split_preserve_order(&self) -> bool {
+        self.mem_indices.is_empty()
+            && self.file_indices.len() == 1
+            && self.row_group_indices.len() > 1
     }
 }
 
