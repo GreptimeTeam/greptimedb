@@ -820,7 +820,6 @@ dependencies = [
  "aws-lc-sys",
  "mirai-annotations",
  "paste",
- "untrusted 0.7.1",
  "zeroize",
 ]
 
@@ -7819,7 +7818,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3770f56e1e8a608c6de40011b9a00c6b669c14d121024411701b4bc3b2a5be99"
 dependencies = [
  "async-trait",
- "aws-lc-rs",
  "bytes",
  "chrono",
  "derive-new 0.6.0",
@@ -7828,6 +7826,7 @@ dependencies = [
  "md5",
  "postgres-types",
  "rand",
+ "ring 0.17.8",
  "thiserror",
  "tokio",
  "tokio-rustls 0.26.0",
