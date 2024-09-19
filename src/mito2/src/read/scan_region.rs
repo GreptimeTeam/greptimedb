@@ -344,36 +344,34 @@ impl ScanRegion {
 
     /// Remove field filters if the merge mode is [MergeMode::LastNonNull].
     fn maybe_remove_field_filters(&mut self) {
-        if self.version.options.merge_mode() == MergeMode::LastNonNull {
-            // TODO(yingwen): We can ignore field filters only when there are multiple sources in the same time window.
-            let field_columns = self
-                .version
-                .metadata
-                .field_columns()
-                .map(|col| &col.column_schema.name)
-                .collect::<HashSet<_>>();
-            // Columns in the expr.
-            let mut columns = HashSet::new();
-            let filters = std::mem::take(&mut self.request.filters);
-            self.request.filters = filters
-                .into_iter()
-                .filter_map(|expr| {
-                    columns.clear();
-                    expr_to_columns(&expr, &mut columns)
-                        .inspect_err(|e| {
-                            warn!(e; "Failed to get columns from expr: {:?}", expr);
-                        })
-                        .ok()?;
-                    for column in &columns {
-                        if field_columns.contains(&column.name) {
-                            // This expr uses the field column.
-                            return None;
-                        }
-                    }
-                    Some(expr)
-                })
-                .collect();
+        if self.version.options.merge_mode() != MergeMode::LastNonNull {
+            return;
         }
+
+        // TODO(yingwen): We can ignore field filters only when there are multiple sources in the same time window.
+        let field_columns = self
+            .version
+            .metadata
+            .field_columns()
+            .map(|col| &col.column_schema.name)
+            .collect::<HashSet<_>>();
+        // Columns in the expr.
+        let mut columns = HashSet::new();
+
+        self.request.filters.retain(|expr| {
+            columns.clear();
+            // `expr_to_columns` won't return error.
+            if expr_to_columns(expr, &mut columns).is_err() {
+                return false;
+            }
+            for column in &columns {
+                if field_columns.contains(&column.name) {
+                    // This expr uses the field column.
+                    return false;
+                }
+            }
+            true
+        });
     }
 
     /// Use the latest schema to build the inveretd index applier.
