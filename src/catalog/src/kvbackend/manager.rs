@@ -42,7 +42,8 @@ use table::dist_table::DistTable;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::table_name::TableName;
 use table::TableRef;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio::sync::Semaphore;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
@@ -304,10 +305,12 @@ impl CatalogManager for KvBackendCatalogManager {
         const BATCH_SIZE: usize = 128;
         const CONCURRENCY: usize = 8;
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
         let metadata_manager = self.table_metadata_manager.clone();
         let catalog = catalog.to_string();
         let schema = schema.to_string();
+        let semaphore = Arc::new(Semaphore::new(CONCURRENCY));
+
         tokio::task::spawn(async move {
             let table_id_stream = metadata_manager
                 .table_name_manager()
@@ -316,7 +319,6 @@ impl CatalogManager for KvBackendCatalogManager {
             // Split table ids into chunks
             let mut table_id_chunks = table_id_stream.ready_chunks(BATCH_SIZE);
 
-            let mut task_batch = Vec::with_capacity(CONCURRENCY);
             while let Some(table_ids) = table_id_chunks.next().await {
                 let table_ids = match table_ids
                     .into_iter()
@@ -335,7 +337,10 @@ impl CatalogManager for KvBackendCatalogManager {
 
                 let metadata_manager = metadata_manager.clone();
                 let tx = tx.clone();
-                task_batch.push(tokio::spawn(async move {
+                let semaphore = semaphore.clone();
+                tokio::spawn(async move {
+                    // we don't explicitly close the semaphore so just ignore the potential error.
+                    let _ = semaphore.acquire().await;
                     let table_info_values = match metadata_manager
                         .table_info_manager()
                         .batch_get(&table_ids)
@@ -354,17 +359,11 @@ impl CatalogManager for KvBackendCatalogManager {
                             return;
                         }
                     }
-                }));
-                if task_batch.len() == CONCURRENCY {
-                    let _ = futures::future::join_all(std::mem::take(&mut task_batch)).await;
-                }
-            }
-            if !task_batch.is_empty() {
-                let _ = futures::future::join_all(std::mem::take(&mut task_batch)).await;
+                });
             }
         });
 
-        let user_tables = UnboundedReceiverStream::new(rx);
+        let user_tables = ReceiverStream::new(rx);
         Box::pin(sys_tables.chain(user_tables))
     }
 }
