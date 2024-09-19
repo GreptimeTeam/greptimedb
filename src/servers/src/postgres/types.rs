@@ -239,14 +239,14 @@ pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWir
             .unwrap_or_else(|| "".to_owned())),
         _ => Err(invalid_parameter_error(
             "unsupported_parameter_type",
-            Some(&param_type.to_string()),
+            Some(param_type.to_string()),
         )),
     }
 }
 
-pub(super) fn invalid_parameter_error(msg: &str, detail: Option<&str>) -> PgWireError {
+pub(super) fn invalid_parameter_error(msg: &str, detail: Option<String>) -> PgWireError {
     let mut error_info = PgErrorCode::Ec22023.to_err_info(msg.to_string());
-    error_info.detail = detail.map(|s| s.to_owned());
+    error_info.detail = detail;
     PgWireError::UserError(Box::new(error_info))
 }
 
@@ -291,7 +291,7 @@ pub(super) fn parameters_to_scalar_values(
         } else {
             return Err(invalid_parameter_error(
                 "unknown_parameter_type",
-                Some(&format!(
+                Some(format!(
                     "Cannot get parameter type information for parameter {}",
                     idx
                 )),
@@ -307,10 +307,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ))
                         }
                     }
@@ -326,10 +323,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ))
                         }
                     }
@@ -358,10 +352,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ))
                         }
                     }
@@ -390,10 +381,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ))
                         }
                     }
@@ -420,10 +408,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ))
                         }
                     }
@@ -450,10 +435,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ))
                         }
                     }
@@ -480,10 +462,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ))
                         }
                     }
@@ -519,10 +498,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ))
                         }
                     }
@@ -543,10 +519,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ));
                         }
                     }
@@ -566,10 +539,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ));
                         }
                     }
@@ -588,10 +558,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ));
                         }
                     }
@@ -609,10 +576,7 @@ pub(super) fn parameters_to_scalar_values(
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
-                                Some(&format!(
-                                    "Expected: {}, found: {}",
-                                    server_type, client_type
-                                )),
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
                             ));
                         }
                     }
@@ -622,7 +586,7 @@ pub(super) fn parameters_to_scalar_values(
             }
             _ => Err(invalid_parameter_error(
                 "unsupported_parameter_value",
-                Some(&format!("Found type: {}", client_type)),
+                Some(format!("Found type: {}", client_type)),
             ))?,
         };
 
