@@ -180,7 +180,8 @@ impl FlowRouteManager {
             req,
             DEFAULT_PAGE_SIZE,
             Arc::new(flow_route_decoder),
-        );
+        )
+        .into_stream();
 
         Box::pin(stream)
     }
