@@ -330,7 +330,7 @@ impl CatalogManager for KvBackendCatalogManager {
                     }) {
                     Ok(table_ids) => table_ids,
                     Err(e) => {
-                        let _ = tx.send(Err(e));
+                        let _ = tx.send(Err(e)).await;
                         return;
                     }
                 };
