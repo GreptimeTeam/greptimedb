@@ -320,7 +320,6 @@ fn validate_timestamp_index(column_schemas: &[ColumnSchema], timestamp_index: us
 /// - `None` if the options are invalid or do not contain full-text related keys.
 pub fn parse_fulltext_options(options: &HashMap<String, String>) -> Option<FulltextOptions> {
     let mut fulltext = FulltextOptions::default();
-    let mut is_fulltext_key_exist = false;
 
     // Check and parse the "analyzer" option
     if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
@@ -338,7 +337,6 @@ pub fn parse_fulltext_options(options: &HashMap<String, String>) -> Option<Fullt
                 return None;
             }
         }
-        is_fulltext_key_exist = true;
     }
 
     // Check and parse the "case_sensitive" option
@@ -357,11 +355,10 @@ pub fn parse_fulltext_options(options: &HashMap<String, String>) -> Option<Fullt
                 return None;
             }
         }
-        is_fulltext_key_exist = true;
     }
 
     // If any fulltext-related key exists, return the constructed FulltextOptions
-    if is_fulltext_key_exist {
+    if fulltext.enable {
         Some(fulltext)
     } else {
         // Return None if no valid fulltext keys are found

@@ -619,7 +619,7 @@ impl TableMeta {
             fulltext = f;
         }
 
-        let columns: Vec<_> = table_schema
+        let columns: Result<Vec<_>> = table_schema
             .column_schemas()
             .iter()
             .cloned()
@@ -627,31 +627,42 @@ impl TableMeta {
                 if column.name == *column_name {
                     column = column
                         .clone()
-                        .with_fulltext_options(fulltext.clone())
-                        .unwrap();
+                        .with_fulltext_options(&fulltext)
+                        .context(error::InvalidFulltextColumnTypeSnafu { column_name })?;
                 }
-                column
+                Ok(column)
             })
             .collect();
 
-        let mut builder = SchemaBuilder::try_from_columns(columns)
-            .with_context(|_| error::SchemaBuildSnafu {
-                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
-            })?
-            .version(table_schema.version() + 1);
+        match columns {
+            Ok(columns) => {
+                let mut builder = SchemaBuilder::try_from_columns(columns)
+                    .with_context(|_| error::SchemaBuildSnafu {
+                        msg: format!(
+                            "Failed to convert column schemas into schema for table {table_name}"
+                        ),
+                    })?
+                    .version(table_schema.version() + 1);
 
-        for (k, v) in table_schema.metadata().iter() {
-            builder = builder.add_metadata(k, v);
+                for (k, v) in table_schema.metadata().iter() {
+                    builder = builder.add_metadata(k, v);
+                }
+                let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+                    msg: format!(
+                        "Table {table_name} cannot change datatype with columns {column_name}"
+                    ),
+                })?;
+
+                let _ = meta_builder
+                    .schema(Arc::new(new_schema))
+                    .primary_key_indices(self.primary_key_indices.clone());
+
+                Ok(meta_builder)
+            }
+            Err(e) => {
+                return Err(e);
+            }
         }
-        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
-            msg: format!("Table {table_name} cannot change datatype with columns {column_name}"),
-        })?;
-
-        let _ = meta_builder
-            .schema(Arc::new(new_schema))
-            .primary_key_indices(self.primary_key_indices.clone());
-
-        Ok(meta_builder)
     }
 
     /// Split requests into different groups using column location info.

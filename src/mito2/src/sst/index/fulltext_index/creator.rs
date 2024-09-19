@@ -329,7 +329,7 @@ mod tests {
                     ConcreteDataType::string_datatype(),
                     true,
                 )
-                .with_fulltext_options(FulltextOptions {
+                .with_fulltext_options(&FulltextOptions {
                     enable: true,
                     analyzer: FulltextAnalyzer::English,
                     case_sensitive: true,
@@ -344,7 +344,7 @@ mod tests {
                     ConcreteDataType::string_datatype(),
                     true,
                 )
-                .with_fulltext_options(FulltextOptions {
+                .with_fulltext_options(&FulltextOptions {
                     enable: true,
                     analyzer: FulltextAnalyzer::English,
                     case_sensitive: false,
@@ -359,7 +359,7 @@ mod tests {
                     ConcreteDataType::string_datatype(),
                     true,
                 )
-                .with_fulltext_options(FulltextOptions {
+                .with_fulltext_options(&FulltextOptions {
                     enable: true,
                     analyzer: FulltextAnalyzer::Chinese,
                     case_sensitive: false,

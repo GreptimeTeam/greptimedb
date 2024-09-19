@@ -138,11 +138,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid fulltext options, column: {}", column_name))]
-    InvalidFulltextOptions {
+    #[snafu(display("column {} has invalid colum type to set fulltext", column_name))]
+    InvalidFulltextColumnType {
+        column_name: String,
+        source: datatypes::error::Error,
         #[snafu(implicit)]
         location: Location,
-        column_name: String,
     },
 }
 
@@ -160,11 +161,10 @@ impl ErrorExt for Error {
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
             Error::SchemaBuild { source, .. } => source.status_code(),
             Error::TableOperation { source } => source.status_code(),
+            Error::InvalidFulltextColumnType { source, .. } => source.status_code(),
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::Unsupported { .. } => StatusCode::Unsupported,
-            Error::ParseTableOption { .. } | Error::InvalidFulltextOptions { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
             Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
         }
     }

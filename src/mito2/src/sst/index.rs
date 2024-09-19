@@ -349,7 +349,7 @@ mod tests {
         if with_fulltext {
             let column_schema =
                 ColumnSchema::new("text", ConcreteDataType::string_datatype(), true)
-                    .with_fulltext_options(FulltextOptions {
+                    .with_fulltext_options(&FulltextOptions {
                         enable: true,
                         ..Default::default()
                     })

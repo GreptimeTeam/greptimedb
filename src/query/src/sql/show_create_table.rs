@@ -222,7 +222,7 @@ mod tests {
             ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("disk", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("msg", ConcreteDataType::string_datatype(), true)
-                .with_fulltext_options(FulltextOptions {
+                .with_fulltext_options(&FulltextOptions {
                     enable: true,
                     ..Default::default()
                 })

@@ -205,6 +205,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid data type {} for fulltext", data_type))]
+    InvalidFulltextDataType {
+        data_type: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -222,7 +229,8 @@ impl ErrorExt for Error {
             | DefaultValueType { .. }
             | DuplicateMeta { .. }
             | InvalidTimestampPrecision { .. }
-            | InvalidPrecisionOrScale { .. } => StatusCode::InvalidArguments,
+            | InvalidPrecisionOrScale { .. }
+            | InvalidFulltextDataType { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
             | CastType { .. }

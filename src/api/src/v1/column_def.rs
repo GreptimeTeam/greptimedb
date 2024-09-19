@@ -148,7 +148,7 @@ mod tests {
         assert!(options.is_none());
 
         let schema = ColumnSchema::new("test", ConcreteDataType::string_datatype(), true)
-            .with_fulltext_options(FulltextOptions {
+            .with_fulltext_options(&FulltextOptions {
                 enable: true,
                 analyzer: FulltextAnalyzer::English,
                 case_sensitive: false,

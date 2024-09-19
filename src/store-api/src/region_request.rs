@@ -492,15 +492,20 @@ impl AlterKind {
             })?;
 
         // Validate the full-text options in a simplified manner
-        for (k, v) in options {
-            let value_lower = v.to_ascii_lowercase();
-            match k.to_ascii_lowercase().as_str() {
+        for (key, value) in options {
+            let value_lower = value.to_ascii_lowercase();
+            match key.to_ascii_lowercase().as_str() {
                 // Validate the "analyzer" option
                 COLUMN_FULLTEXT_OPT_KEY_ANALYZER => {
                     if !matches!(value_lower.as_str(), "english")
                         && !matches!(value_lower.as_str(), "chinese")
                     {
-                        return InvalidFulltextOptionsSnafu { column_name }.fail();
+                        return InvalidFulltextOptionsSnafu {
+                            column_name,
+                            key,
+                            value,
+                        }
+                        .fail();
                     }
                 }
                 // Validate the "case_sensitive" option
@@ -508,11 +513,23 @@ impl AlterKind {
                     if !matches!(value_lower.as_str(), "true")
                         && !matches!(value_lower.as_str(), "false")
                     {
-                        return InvalidFulltextOptionsSnafu { column_name }.fail();
+                        return InvalidFulltextOptionsSnafu {
+                            column_name,
+                            key,
+                            value,
+                        }
+                        .fail();
                     }
                 }
                 // Return an error for any unknown options
-                _ => return InvalidFulltextOptionsSnafu { column_name }.fail(),
+                _ => {
+                    return InvalidFulltextOptionsSnafu {
+                        column_name,
+                        key,
+                        value,
+                    }
+                    .fail()
+                }
             }
         }
 

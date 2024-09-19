@@ -111,7 +111,7 @@ SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'English', case_sensitive = 'yes');
 
-Error: 1004(InvalidArguments), Invalid fulltext options, column: message
+Error: 1004(InvalidArguments), Invalid fulltext options, column: message, key: case_sensitive, value: yes
 
 SHOW CREATE TABLE test;
 
@@ -132,7 +132,7 @@ SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinglish', case_sensitive = 'false');
 
-Error: 1004(InvalidArguments), Invalid fulltext options, column: message
+Error: 1004(InvalidArguments), Invalid fulltext options, column: message, key: analyzer, value: Chinglish
 
 SHOW CREATE TABLE test;
 
@@ -153,7 +153,7 @@ SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN time SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');
 
-Affected Rows: 0
+Error: 1004(InvalidArguments), Invalid data type TimestampMillisecond for fulltext
 
 SHOW CREATE TABLE test;
 
@@ -174,7 +174,7 @@ SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN time SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'no');
 
-Error: 1004(InvalidArguments), Invalid fulltext options, column: time
+Error: 1004(InvalidArguments), Invalid data type TimestampMillisecond for fulltext
 
 SHOW CREATE TABLE test;
 

@@ -524,9 +524,9 @@ impl RegionMetadataBuilder {
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ChangeColumnTypes { columns } => self.change_column_types(columns),
             AlterKind::ChangeColumnFulltext {
-                column_name: _,
+                column_name,
                 options,
-            } => self.change_column_fulltext(options)?,
+            } => self.change_column_fulltext(column_name, options)?,
         }
         Ok(self)
     }
@@ -628,22 +628,29 @@ impl RegionMetadataBuilder {
     }
 
     /// Changes column fulltext option.
-    fn change_column_fulltext(&mut self, options: HashMap<String, String>) -> Result<()> {
+    fn change_column_fulltext(
+        &mut self,
+        column_name: String,
+        options: HashMap<String, String>,
+    ) -> Result<()> {
         for column_meta in self.column_metadatas.iter_mut() {
-            let mut fulltext = if let Ok(Some(f)) = column_meta.column_schema.fulltext_options() {
-                f
-            } else {
-                FulltextOptions::default()
-            };
+            if column_name.eq(&column_meta.column_schema.name) {
+                let mut fulltext = if let Ok(Some(f)) = column_meta.column_schema.fulltext_options()
+                {
+                    f
+                } else {
+                    FulltextOptions::default()
+                };
 
-            if let Some(f) = parse_fulltext_options(&options) {
-                fulltext = f;
+                if let Some(f) = parse_fulltext_options(&options) {
+                    fulltext = f;
+                }
+
+                column_meta
+                    .column_schema
+                    .set_fulltext_options(&fulltext)
+                    .expect("set fulltext");
             }
-
-            column_meta
-                .column_schema
-                .set_fulltext_options(fulltext)
-                .expect("set fulltext");
         }
 
         Ok(())
@@ -765,11 +772,18 @@ pub enum MetadataError {
         location: Location,
     },
 
-    #[snafu(display("Invalid fulltext options, column: {}", column_name))]
+    #[snafu(display(
+        "Invalid fulltext options, column: {}, key: {}, value: {}",
+        column_name,
+        key,
+        value
+    ))]
     InvalidFulltextOptions {
         #[snafu(implicit)]
         location: Location,
         column_name: String,
+        key: String,
+        value: String,
     },
 }
 
