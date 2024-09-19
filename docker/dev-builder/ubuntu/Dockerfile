@@ -24,6 +24,10 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3.10 \
     python3.10-dev
 
+# https://github.com/GreptimeTeam/greptimedb/actions/runs/10935485852/job/30357457188#step:3:7106
+# `aws-lc-sys` require gcc >= 10.3.0 to work, hence alias to use gcc-10
+RUN alias gcc="gcc-10" && alias cc="gcc-10"
+
 # Remove Python 3.8 and install pip.
 RUN apt-get -y purge python3.8 && \
     apt-get -y autoremove && \
