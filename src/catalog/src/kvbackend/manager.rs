@@ -311,7 +311,7 @@ impl CatalogManager for KvBackendCatalogManager {
         let schema = schema.to_string();
         let semaphore = Arc::new(Semaphore::new(CONCURRENCY));
 
-        tokio::task::spawn(async move {
+        common_runtime::spawn_global(async move {
             let table_id_stream = metadata_manager
                 .table_name_manager()
                 .tables(&catalog, &schema)
@@ -338,7 +338,7 @@ impl CatalogManager for KvBackendCatalogManager {
                 let metadata_manager = metadata_manager.clone();
                 let tx = tx.clone();
                 let semaphore = semaphore.clone();
-                tokio::spawn(async move {
+                common_runtime::spawn_global(async move {
                     // we don't explicitly close the semaphore so just ignore the potential error.
                     let _ = semaphore.acquire().await;
                     let table_info_values = match metadata_manager
@@ -349,13 +349,13 @@ impl CatalogManager for KvBackendCatalogManager {
                     {
                         Ok(table_info_values) => table_info_values,
                         Err(e) => {
-                            let _ = tx.send(Err(e));
+                            let _ = tx.send(Err(e)).await;
                             return;
                         }
                     };
 
                     for table in table_info_values.into_values().map(build_table) {
-                        if tx.send(table).is_err() {
+                        if tx.send(table).await.is_err() {
                             return;
                         }
                     }
