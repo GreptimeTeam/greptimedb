@@ -32,7 +32,8 @@ use std::sync::Arc;
 use ::auth::UserProviderRef;
 use derive_builder::Builder;
 use pgwire::api::auth::ServerParameterProvider;
-use pgwire::api::ClientInfo;
+use pgwire::api::copy::NoopCopyHandler;
+use pgwire::api::{ClientInfo, PgWireHandlerFactory};
 pub use server::PostgresServer;
 use session::context::Channel;
 use session::Session;
@@ -68,7 +69,7 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
     }
 }
 
-pub struct PostgresServerHandler {
+pub struct PostgresServerHandlerInner {
     query_handler: ServerSqlQueryHandlerRef,
     login_verifier: PgLoginVerifier,
     force_tls: bool,
@@ -87,10 +88,35 @@ pub(crate) struct MakePostgresServerHandler {
     force_tls: bool,
 }
 
+pub(crate) struct PostgresServerHandler(Arc<PostgresServerHandlerInner>);
+
+impl PgWireHandlerFactory for PostgresServerHandler {
+    type StartupHandler = PostgresServerHandlerInner;
+    type SimpleQueryHandler = PostgresServerHandlerInner;
+    type ExtendedQueryHandler = PostgresServerHandlerInner;
+    type CopyHandler = NoopCopyHandler;
+
+    fn simple_query_handler(&self) -> Arc<Self::SimpleQueryHandler> {
+        self.0.clone()
+    }
+
+    fn extended_query_handler(&self) -> Arc<Self::ExtendedQueryHandler> {
+        self.0.clone()
+    }
+
+    fn startup_handler(&self) -> Arc<Self::StartupHandler> {
+        self.0.clone()
+    }
+
+    fn copy_handler(&self) -> Arc<Self::CopyHandler> {
+        Arc::new(NoopCopyHandler)
+    }
+}
+
 impl MakePostgresServerHandler {
     fn make(&self, addr: Option<SocketAddr>) -> PostgresServerHandler {
         let session = Arc::new(Session::new(addr, Channel::Postgres, Default::default()));
-        PostgresServerHandler {
+        let handler = PostgresServerHandlerInner {
             query_handler: self.query_handler.clone(),
             login_verifier: PgLoginVerifier::new(self.user_provider.clone()),
             force_tls: self.force_tls,
@@ -98,6 +124,7 @@ impl MakePostgresServerHandler {
 
             session: session.clone(),
             query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
-        }
+        };
+        PostgresServerHandler(Arc::new(handler))
     }
 }

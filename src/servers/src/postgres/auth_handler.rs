@@ -29,7 +29,7 @@ use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use session::Session;
 use snafu::IntoError;
 
-use super::PostgresServerHandler;
+use super::PostgresServerHandlerInner;
 use crate::error::{AuthSnafu, Result};
 use crate::metrics::METRIC_AUTH_FAILURE;
 use crate::postgres::types::PgErrorCode;
@@ -127,7 +127,7 @@ where
 }
 
 #[async_trait]
-impl StartupHandler for PostgresServerHandler {
+impl StartupHandler for PostgresServerHandlerInner {
     async fn on_startup<C>(
         &self,
         client: &mut C,

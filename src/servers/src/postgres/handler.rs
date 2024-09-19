@@ -39,13 +39,13 @@ use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
 use super::types::*;
-use super::{fixtures, PostgresServerHandler};
+use super::{fixtures, PostgresServerHandlerInner};
 use crate::error::Result;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::SqlPlan;
 
 #[async_trait]
-impl SimpleQueryHandler for PostgresServerHandler {
+impl SimpleQueryHandler for PostgresServerHandlerInner {
     #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
     async fn do_query<'a, C>(
         &self,
@@ -237,7 +237,7 @@ impl QueryParser for DefaultQueryParser {
 }
 
 #[async_trait]
-impl ExtendedQueryHandler for PostgresServerHandler {
+impl ExtendedQueryHandler for PostgresServerHandlerInner {
     type Statement = SqlPlan;
     type QueryParser = DefaultQueryParser;
 
