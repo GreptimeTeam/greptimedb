@@ -325,8 +325,8 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         let values = count_values(&ctx.greptime, &sql).await?;
         assert_eq!(
             values.count as u64, expected_rows,
-            "table: {}",
-            table_ctx.name
+            "Expected rows: {}, got: {}, table: {}",
+            expected_rows, values.count, table_ctx.name
         );
     }
 
