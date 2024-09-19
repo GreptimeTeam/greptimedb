@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::alter_expr::Kind;
 use api::v1::region::{InsertRequests as RegionInsertRequests, RegionRequestHeader};
@@ -34,8 +35,10 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use futures_util::future;
 use meter_macros::write_meter;
+use moka::sync::{Cache, CacheBuilder};
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
+use sha2::{Digest, Sha256};
 use snafu::prelude::*;
 use snafu::ResultExt;
 use sql::statements::insert::Insert;
@@ -62,6 +65,7 @@ pub struct Inserter {
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     table_flownode_set_cache: TableFlownodeSetCacheRef,
+    last_insert_schema_hash_cache: Cache<TableId, Arc<Vec<u8>>>,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -90,6 +94,10 @@ impl AutoCreateTableType {
     }
 }
 
+const DEFAULT_CACHE_MAX_CAPACITY: u64 = 65536;
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const DEFAULT_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
+
 impl Inserter {
     pub fn new(
         catalog_manager: CatalogManagerRef,
@@ -97,11 +105,16 @@ impl Inserter {
         node_manager: NodeManagerRef,
         table_flownode_set_cache: TableFlownodeSetCacheRef,
     ) -> Self {
+        let last_insert_schema_hash_cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+            .time_to_idle(DEFAULT_CACHE_TTI)
+            .time_to_live(DEFAULT_CACHE_TTL)
+            .build();
         Self {
             catalog_manager,
             partition_manager,
             node_manager,
             table_flownode_set_cache,
+            last_insert_schema_hash_cache,
         }
     }
 
@@ -685,17 +698,38 @@ impl Inserter {
         Ok(create_table_expr)
     }
 
+    fn request_schema_hash(request_schema: &[ColumnSchema]) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        for schema in request_schema {
+            hasher.update(&schema.column_name);
+        }
+        hasher.finalize().to_vec()
+    }
+
+    fn has_same_schema(&self, table_id: TableId, request_schema: &[ColumnSchema]) -> bool {
+        let request_schema_hash = Arc::new(Self::request_schema_hash(request_schema));
+        let last_insert_schema_hash = self
+            .last_insert_schema_hash_cache
+            .get_with(table_id, || request_schema_hash.clone());
+        request_schema_hash == last_insert_schema_hash
+    }
+
     fn get_alter_table_expr_on_demand(
         &self,
         req: &RowInsertRequest,
         table: &TableRef,
         ctx: &QueryContextRef,
     ) -> Result<Option<AlterExpr>> {
+        let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
+        // Fast-path
+        if self.has_same_schema(table.table_info().table_id(), request_schema) {
+            return Ok(None);
+        }
+
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
         let table_name = table.table_info().name.clone();
 
-        let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let column_exprs = ColumnExpr::from_column_schemas(request_schema);
         let add_columns = extract_new_columns(&table.schema(), column_exprs)
             .context(FindNewColumnsOnInsertionSnafu)?;
