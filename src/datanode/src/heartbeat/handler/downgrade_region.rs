@@ -52,7 +52,7 @@ impl HandlerContext {
         self,
         DowngradeRegion {
             region_id,
-            wait_for_flush_timeout,
+            flush_timeout,
         }: DowngradeRegion,
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
@@ -70,7 +70,7 @@ impl HandlerContext {
             }
 
             let region_server_moved = self.region_server.clone();
-            if let Some(flush_timeout) = wait_for_flush_timeout {
+            if let Some(flush_timeout) = flush_timeout {
                 let register_result = self
                     .downgrade_tasks
                     .try_register(
@@ -149,12 +149,12 @@ mod tests {
         let region_id = RegionId::new(1024, 1);
         let waits = vec![None, Some(Duration::from_millis(100u64))];
 
-        for wait_for_flush_timeout in waits {
+        for flush_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
-                    wait_for_flush_timeout,
+                    flush_timeout,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -189,12 +189,12 @@ mod tests {
         let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         let waits = vec![None, Some(Duration::from_millis(100u64))];
-        for wait_for_flush_timeout in waits {
+        for flush_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
-                    wait_for_flush_timeout,
+                    flush_timeout,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -221,12 +221,12 @@ mod tests {
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
 
-        let wait_for_flush_timeout = Duration::from_millis(100);
+        let flush_timeout = Duration::from_millis(100);
         let reply = handler_context
             .clone()
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
-                wait_for_flush_timeout: Some(wait_for_flush_timeout),
+                flush_timeout: Some(flush_timeout),
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -257,12 +257,12 @@ mod tests {
             Some(Duration::from_millis(100u64)),
         ];
 
-        for wait_for_flush_timeout in waits {
+        for flush_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
-                    wait_for_flush_timeout,
+                    flush_timeout,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -276,7 +276,7 @@ mod tests {
         let reply = handler_context
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
-                wait_for_flush_timeout: Some(Duration::from_millis(500)),
+                flush_timeout: Some(Duration::from_millis(500)),
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -315,12 +315,12 @@ mod tests {
             Some(Duration::from_millis(100u64)),
         ];
 
-        for wait_for_flush_timeout in waits {
+        for flush_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
-                    wait_for_flush_timeout,
+                    flush_timeout,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -334,7 +334,7 @@ mod tests {
         let reply = handler_context
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
-                wait_for_flush_timeout: Some(Duration::from_millis(500)),
+                flush_timeout: Some(Duration::from_millis(500)),
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -364,7 +364,7 @@ mod tests {
             .clone()
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
-                wait_for_flush_timeout: None,
+                flush_timeout: None,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -395,7 +395,7 @@ mod tests {
             .clone()
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
-                wait_for_flush_timeout: None,
+                flush_timeout: None,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));

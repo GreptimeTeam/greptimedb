@@ -30,7 +30,6 @@ use std::time::Duration;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::RegionFailureDetectorControllerRef;
-use common_meta::distributed_time_constants::MAILBOX_RTT_SECS;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
@@ -214,16 +213,11 @@ pub struct Context {
 }
 
 impl Context {
-    /// Returns the next operation timeout.
-    ///
-    /// It always returns (timeout - operations_elapsed) / 2 + Mailbox RRT.
+    /// Returns the next operation's timeout.
     pub fn next_operation_timeout(&self) -> Option<Duration> {
-        let remaining = self
-            .persistent_ctx
+        self.persistent_ctx
             .timeout
-            .checked_sub(self.volatile_ctx.operations_elapsed);
-
-        remaining.map(|time| time / 2 + Duration::from_secs(MAILBOX_RTT_SECS))
+            .checked_sub(self.volatile_ctx.operations_elapsed)
     }
 
     /// Updates operations elapsed.

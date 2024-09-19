@@ -95,13 +95,13 @@ impl DowngradeLeaderRegion {
     fn build_downgrade_region_instruction(
         &self,
         ctx: &Context,
-        wait_for_flush_timeout: Duration,
+        flush_timeout: Duration,
     ) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
         Instruction::DowngradeRegion(DowngradeRegion {
             region_id,
-            wait_for_flush_timeout: Some(wait_for_flush_timeout),
+            flush_timeout: Some(flush_timeout),
         })
     }
 
