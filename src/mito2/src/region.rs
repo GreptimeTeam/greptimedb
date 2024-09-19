@@ -174,6 +174,11 @@ impl MitoRegion {
         self.manifest_ctx.state.load() == RegionState::Writable
     }
 
+    /// Returns whether the region is readonly.
+    pub(crate) fn is_readonly(&self) -> bool {
+        self.manifest_ctx.state.load() == RegionState::ReadOnly
+    }
+
     /// Returns the state of the region.
     pub(crate) fn state(&self) -> RegionState {
         self.manifest_ctx.state.load()

@@ -14,6 +14,7 @@
 
 #![no_main]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::info;
@@ -68,12 +69,17 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
 
     // Create physical table
     let physical_table_if_not_exists = rng.gen_bool(0.5);
+    let mut with_clause = HashMap::new();
+    if rng.gen_bool(0.5) {
+        with_clause.insert("append_mode".to_string(), "true".to_string());
+    }
     let create_physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,
             merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
         )))
         .if_not_exists(physical_table_if_not_exists)
+        .with_clause(with_clause)
         .build()
         .unwrap()
         .generate(&mut rng)?;

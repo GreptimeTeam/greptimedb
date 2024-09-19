@@ -13,11 +13,17 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
 use api::prom_store::remote::WriteRequest;
 use auth::user_provider_from_option;
 use axum::http::{HeaderName, StatusCode};
 use common_error::status_code::StatusCode as ErrorCode;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use opentelemetry_proto::tonic::metrics::v1::ResourceMetrics;
 use prost::Message;
 use serde_json::{json, Value};
 use servers::http::error_result::ErrorResponse;
@@ -26,7 +32,7 @@ use servers::http::handler::HealthResponse;
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
-use servers::http::test_helpers::TestClient;
+use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::http::GreptimeQueryOutput;
 use servers::prom_store;
 use tests_integration::test_util::{
@@ -80,6 +86,9 @@ macro_rules! http_tests {
                 test_pipeline_api,
                 test_test_pipeline_api,
                 test_plain_text_ingestion,
+
+                test_otlp_metrics,
+                test_otlp_traces,
             );
         )*
     };
@@ -879,7 +888,7 @@ write_interval = "30s"
     .trim()
     .to_string();
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
-    assert_eq!(body_text, expected_toml_str);
+    similar_asserts::assert_eq!(body_text, expected_toml_str);
 }
 
 fn drop_lines_with_inconsistent_results(input: String) -> String {
@@ -1391,19 +1400,7 @@ transform:
     assert_eq!(res.status(), StatusCode::OK);
     let resp = res.text().await;
 
-    let resp: Value = serde_json::from_str(&resp).unwrap();
-    let v = resp
-        .get("output")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .first()
-        .unwrap()
-        .get("records")
-        .unwrap()
-        .get("rows")
-        .unwrap()
-        .to_string();
+    let v = get_rows_from_output(&resp);
 
     assert_eq!(
         v,
@@ -1411,4 +1408,131 @@ transform:
     );
 
     guard.remove_all().await;
+}
+
+pub async fn test_otlp_metrics(store_type: StorageType) {
+    // init
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_metrics").await;
+
+    let content = r#"
+{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","data":{"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":0,"timeUnixNano":1726053452870391000,"exemplars":[],"flags":0,"value":{"asInt":9471}}]}}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"}
+    "#;
+
+    let metrics: ResourceMetrics = serde_json::from_str(content).unwrap();
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![metrics],
+    };
+    let body = req.encode_to_vec();
+
+    // handshake
+    let client = TestClient::new(app);
+
+    // write metrics data
+    let res = send_req(&client, "/v1/otlp/v1/metrics", body.clone(), false).await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // select metrics data
+    let expected = r#"[[1726053452870391000,9471.0]]"#;
+    validate_data(&client, "select * from gen;", expected).await;
+
+    // drop table
+    let res = client.get("/v1/sql?sql=drop table gen;").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // write metrics data with gzip
+    let res = send_req(&client, "/v1/otlp/v1/metrics", body.clone(), true).await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // select metrics data again
+    validate_data(&client, "select * from gen;", expected).await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_otlp_traces(store_type: StorageType) {
+    // init
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_traces").await;
+
+    let content = r#"
+{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"telemetrygen"}}],"droppedAttributesCount":0},"scopeSpans":[{"scope":{"name":"telemetrygen","version":"","attributes":[],"droppedAttributesCount":0},"spans":[{"traceId":"b5e5fb572cf0a3335dd194a14145fef5","spanId":"74c82efa6f628e80","traceState":"","parentSpanId":"3364d2da58c9fd2b","flags":0,"name":"okey-dokey-0","kind":2,"startTimeUnixNano":1726631197820927000,"endTimeUnixNano":1726631197821050000,"attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-client"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"b5e5fb572cf0a3335dd194a14145fef5","spanId":"3364d2da58c9fd2b","traceState":"","parentSpanId":"","flags":0,"name":"lets-go","kind":3,"startTimeUnixNano":1726631197820927000,"endTimeUnixNano":1726631197821050000,"attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-server"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
+    "#;
+
+    let req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
+    let body = req.encode_to_vec();
+
+    // handshake
+    let client = TestClient::new(app);
+
+    // write traces data
+    let res = send_req(&client, "/v1/otlp/v1/traces", body.clone(), false).await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // select traces data
+    let expected = r#"[["b5e5fb572cf0a3335dd194a14145fef5","3364d2da58c9fd2b","","{\"service.name\":\"telemetrygen\"}","telemetrygen","","{}","","lets-go","SPAN_KIND_CLIENT","STATUS_CODE_UNSET","","{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-server\"}","[]","[]",1726631197820927000,1726631197821050000,0.123,1726631197820927000],["b5e5fb572cf0a3335dd194a14145fef5","74c82efa6f628e80","3364d2da58c9fd2b","{\"service.name\":\"telemetrygen\"}","telemetrygen","","{}","","okey-dokey-0","SPAN_KIND_SERVER","STATUS_CODE_UNSET","","{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-client\"}","[]","[]",1726631197820927000,1726631197821050000,0.123,1726631197820927000]]"#;
+    validate_data(&client, "select * from traces_preview_v01;", expected).await;
+
+    // drop table
+    let res = client
+        .get("/v1/sql?sql=drop table traces_preview_v01;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // write metrics data with gzip
+    let res = send_req(&client, "/v1/otlp/v1/traces", body.clone(), true).await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // select metrics data again
+    validate_data(&client, "select * from traces_preview_v01;", expected).await;
+
+    guard.remove_all().await;
+}
+
+async fn validate_data(client: &TestClient, sql: &str, expected: &str) {
+    let res = client
+        .get(format!("/v1/sql?sql={sql}").as_str())
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+    let v = get_rows_from_output(&resp);
+
+    assert_eq!(v, expected);
+}
+
+async fn send_req(client: &TestClient, path: &str, body: Vec<u8>, with_gzip: bool) -> TestResponse {
+    let mut req = client
+        .post(path)
+        .header("content-type", "application/x-protobuf");
+
+    let mut len = body.len();
+
+    if with_gzip {
+        let encoded = compress_vec_with_gzip(body);
+        len = encoded.len();
+        req = req.header("content-encoding", "gzip").body(encoded);
+    } else {
+        req = req.body(body);
+    }
+
+    req.header("content-length", len).send().await
+}
+
+fn get_rows_from_output(output: &str) -> String {
+    let resp: Value = serde_json::from_str(output).unwrap();
+    resp.get("output")
+        .and_then(Value::as_array)
+        .and_then(|v| v.first())
+        .and_then(|v| v.get("records"))
+        .and_then(|v| v.get("rows"))
+        .unwrap()
+        .to_string()
+}
+
+fn compress_vec_with_gzip(data: Vec<u8>) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&data).unwrap();
+    encoder.finish().unwrap()
 }
