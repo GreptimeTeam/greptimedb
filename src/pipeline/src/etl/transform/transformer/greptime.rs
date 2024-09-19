@@ -16,9 +16,14 @@ pub mod coerce;
 
 use std::collections::HashSet;
 
+use api::helper::proto_value_type;
+use api::v1::column_data_type_extension::TypeExt;
+use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, SemanticType};
 use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
+use serde_json::Map;
 
 use crate::etl::error::{
     Result, TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
@@ -120,6 +125,7 @@ impl Transformer for GreptimeTransformer {
             if let Some(idx) = transform.index {
                 if idx == Index::Time {
                     match transform.real_fields.len() {
+                        //safety unwrap is fine here because we have checked the length of real_fields
                         1 => timestamp_columns
                             .push(transform.real_fields.first().unwrap().input_name()),
                         _ => {
@@ -192,5 +198,216 @@ impl Transformer for GreptimeTransformer {
 
     fn transforms_mut(&mut self) -> &mut Transforms {
         &mut self.transforms
+    }
+}
+
+fn resolve_schema(
+    index: Option<usize>,
+    value_data: ValueData,
+    column_schema: ColumnSchema,
+    row: &mut Vec<GreptimeValue>,
+    schema: &mut Vec<ColumnSchema>,
+) {
+    if let Some(index) = index {
+        let api_value = GreptimeValue {
+            value_data: Some(value_data),
+        };
+        let value_column_data_type = proto_value_type(&api_value);
+        // safety unwrap is fine here because index is always valid
+        let schema_column_data_type = schema.get(index).unwrap().datatype();
+        if value_column_data_type.is_some_and(|t| t != schema_column_data_type) {
+            row[index] = GreptimeValue { value_data: None };
+        } else {
+            row[index] = api_value;
+        }
+    } else {
+        schema.push(column_schema);
+        let api_value = GreptimeValue {
+            value_data: Some(value_data),
+        };
+        row.push(api_value);
+    }
+}
+
+fn json_value_to_row(schemas: &mut Vec<ColumnSchema>, map: Map<String, serde_json::Value>) -> Row {
+    let mut row: Vec<GreptimeValue> = Vec::with_capacity(schemas.len());
+    for _ in 0..schemas.len() {
+        row.push(GreptimeValue { value_data: None });
+    }
+    for (key, value) in map {
+        if key == DEFAULT_GREPTIME_TIMESTAMP_COLUMN {
+            continue;
+        }
+        let index = schemas.iter().position(|x| x.column_name == key);
+        match value {
+            serde_json::Value::Null => {
+                // do nothing
+            }
+            serde_json::Value::String(s) => {
+                resolve_schema(
+                    index,
+                    ValueData::StringValue(s),
+                    ColumnSchema {
+                        column_name: key,
+                        datatype: ColumnDataType::String as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension: None,
+                        options: None,
+                    },
+                    &mut row,
+                    schemas,
+                );
+            }
+            serde_json::Value::Bool(b) => {
+                resolve_schema(
+                    index,
+                    ValueData::BoolValue(b),
+                    ColumnSchema {
+                        column_name: key,
+                        datatype: ColumnDataType::Boolean as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension: None,
+                        options: None,
+                    },
+                    &mut row,
+                    schemas,
+                );
+            }
+            serde_json::Value::Number(n) => {
+                if n.is_i64() {
+                    resolve_schema(
+                        index,
+                        // safety unwrap is fine here because we have checked the number type
+                        ValueData::I64Value(n.as_i64().unwrap()),
+                        ColumnSchema {
+                            column_name: key,
+                            datatype: ColumnDataType::Int64 as i32,
+                            semantic_type: SemanticType::Field as i32,
+                            datatype_extension: None,
+                            options: None,
+                        },
+                        &mut row,
+                        schemas,
+                    );
+                } else if n.is_u64() {
+                    resolve_schema(
+                        index,
+                        // safety unwrap is fine here because we have checked the number type
+                        ValueData::U64Value(n.as_u64().unwrap()),
+                        ColumnSchema {
+                            column_name: key,
+                            datatype: ColumnDataType::Uint64 as i32,
+                            semantic_type: SemanticType::Field as i32,
+                            datatype_extension: None,
+                            options: None,
+                        },
+                        &mut row,
+                        schemas,
+                    );
+                } else if n.is_f64() {
+                    resolve_schema(
+                        index,
+                        // safety unwrap is fine here because we have checked the number type
+                        ValueData::F64Value(n.as_f64().unwrap()),
+                        ColumnSchema {
+                            column_name: key,
+                            datatype: ColumnDataType::Float64 as i32,
+                            semantic_type: SemanticType::Field as i32,
+                            datatype_extension: None,
+                            options: None,
+                        },
+                        &mut row,
+                        schemas,
+                    );
+                } else {
+                    unreachable!("unexpected number type");
+                }
+            }
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                resolve_schema(
+                    index,
+                    ValueData::BinaryValue(jsonb::Value::from(value).to_vec()),
+                    ColumnSchema {
+                        column_name: key,
+                        datatype: ColumnDataType::Binary as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension: Some(ColumnDataTypeExtension {
+                            type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+                        }),
+                        options: None,
+                    },
+                    &mut row,
+                    schemas,
+                );
+            }
+        }
+    }
+    Row { values: row }
+}
+
+pub fn identify_pipeline(array: Vec<serde_json::Value>) -> Result<Rows, String> {
+    let mut rows = Vec::with_capacity(array.len());
+
+    let mut schema = Vec::new();
+    for value in array {
+        if let serde_json::Value::Object(map) = value {
+            let row = json_value_to_row(&mut schema, map);
+            rows.push(row);
+        }
+    }
+    let greptime_timestamp_schema = ColumnSchema {
+        column_name: DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
+        datatype: ColumnDataType::TimestampNanosecond as i32,
+        semantic_type: SemanticType::Timestamp as i32,
+        datatype_extension: None,
+        options: None,
+    };
+    let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    let ts = GreptimeValue {
+        value_data: Some(ValueData::TimestampNanosecondValue(ns)),
+    };
+    let column_count = schema.len();
+    for row in rows.iter_mut() {
+        let diff = column_count - row.values.len();
+        for _ in 0..diff {
+            row.values.push(GreptimeValue { value_data: None });
+        }
+        row.values.push(ts.clone());
+    }
+    schema.push(greptime_timestamp_schema);
+    Ok(Rows { schema, rows })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::identify_pipeline;
+
+    #[test]
+    fn test_identify_pipeline() {
+        let array = vec![
+            serde_json::json!({
+                "woshinull": null,
+                "name": "Alice",
+                "age": 20,
+                "is_student": true,
+                "score": 99.5,
+                "hobbies": "reading",
+                "address": "Beijing",
+            }),
+            serde_json::json!({
+                "name": "Bob",
+                "age": 21,
+                "is_student": false,
+                "score": "88.5",
+                "hobbies": "swimming",
+                "address": "Shanghai",
+                "gaga": "gaga"
+            }),
+        ];
+        let rows = identify_pipeline(array).unwrap();
+        assert_eq!(rows.schema.len(), 8);
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(8, rows.rows[0].values.len());
+        assert_eq!(8, rows.rows[1].values.len());
     }
 }

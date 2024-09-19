@@ -13,3 +13,4 @@
 // limitations under the License.
 
 pub mod greptime;
+pub use greptime::identify_pipeline;
