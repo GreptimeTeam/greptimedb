@@ -72,7 +72,7 @@ impl SeqScan {
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows());
         properties.partitions = vec![input.partition_ranges()];
-        let stream_ctx = Arc::new(StreamContext::new(input));
+        let stream_ctx = Arc::new(StreamContext::new(input, true));
 
         Self {
             properties,

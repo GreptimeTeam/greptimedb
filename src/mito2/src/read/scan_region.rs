@@ -41,6 +41,7 @@ use crate::memtable::{MemtableRange, MemtableRef};
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, CompatBatch};
 use crate::read::projection::ProjectionMapper;
+use crate::read::range::RangeMeta;
 use crate::read::seq_scan::SeqScan;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
@@ -967,6 +968,8 @@ pub(crate) struct StreamContext {
     /// The scanner builds parts to scan from the input lazily.
     /// The mutex is used to ensure the parts are only built once.
     pub(crate) parts: Mutex<(ScanPartList, Duration)>,
+    /// Metadata for partition ranges.
+    pub(crate) ranges: Vec<RangeMeta>,
 
     // Metrics:
     /// The start time of the query.
@@ -975,12 +978,14 @@ pub(crate) struct StreamContext {
 
 impl StreamContext {
     /// Creates a new [StreamContext].
-    pub(crate) fn new(input: ScanInput) -> Self {
+    pub(crate) fn new(input: ScanInput, seq_scan: bool) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
+        let ranges = RangeMeta::ranges_from_input(&input, seq_scan);
 
         Self {
             input,
             parts: Mutex::new((ScanPartList::default(), Duration::default())),
+            ranges,
             query_start,
         }
     }
