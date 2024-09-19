@@ -5435,7 +5435,7 @@ dependencies = [
 [[package]]
 name = "jsonb"
 version = "0.4.1"
-source = "git+https://github.com/CookiePieWw/jsonb.git?rev=d0166c130fce903bf6c58643417a3173a6172d31#d0166c130fce903bf6c58643417a3173a6172d31"
+source = "git+https://github.com/datafuselabs/jsonb.git?rev=46ad50fc71cf75afbf98eec455f7892a6387c1fc#46ad50fc71cf75afbf98eec455f7892a6387c1fc"
 dependencies = [
  "byteorder",
  "fast-float",
