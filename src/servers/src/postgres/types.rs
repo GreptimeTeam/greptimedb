@@ -20,13 +20,14 @@ mod interval;
 use std::collections::HashMap;
 use std::ops::Deref;
 
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use common_time::Interval;
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
 use datatypes::types::TimestampType;
+use datatypes::value::ListValue;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::api::Type;
@@ -56,6 +57,313 @@ pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Ve
             ))
         })
         .collect::<Result<Vec<FieldInfo>>>()
+}
+
+fn encode_array(
+    query_ctx: &QueryContextRef,
+    value_list: &ListValue,
+    builder: &mut DataRowEncoder,
+) -> PgWireResult<()> {
+    match value_list.datatype() {
+        &ConcreteDataType::Boolean(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Boolean(v) => Ok(Some(*v)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected bool",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<bool>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Int8(v) => Ok(Some(*v)),
+                    Value::UInt8(v) => Ok(Some(*v as i8)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!(
+                            "Invalid list item type, find {v:?}, expected int8 or uint8",
+                        ),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<i8>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Int16(v) => Ok(Some(*v)),
+                    Value::UInt16(v) => Ok(Some(*v as i16)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!(
+                            "Invalid list item type, find {v:?}, expected int16 or uint16",
+                        ),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<i16>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Int32(v) => Ok(Some(*v)),
+                    Value::UInt32(v) => Ok(Some(*v as i32)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!(
+                            "Invalid list item type, find {v:?}, expected int32 or uint32",
+                        ),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<i32>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Int64(v) => Ok(Some(*v)),
+                    Value::UInt64(v) => Ok(Some(*v as i64)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!(
+                            "Invalid list item type, find {v:?}, expected int64 or uint64",
+                        ),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<i64>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Float32(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Float32(v) => Ok(Some(v.0)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected float32",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<f32>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Float64(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Float64(v) => Ok(Some(v.0)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected float64",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<f64>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Binary(_) => {
+            let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
+
+            match *bytea_output {
+                PGByteaOutputValue::ESCAPE => {
+                    let array = value_list
+                        .items()
+                        .iter()
+                        .map(|v| match v {
+                            Value::Null => Ok(None),
+                            Value::Binary(v) => Ok(Some(EscapeOutputBytea(v.deref()))),
+
+                            _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                                err_msg: format!(
+                                    "Invalid list item type, find {v:?}, expected binary",
+                                ),
+                            }))),
+                        })
+                        .collect::<PgWireResult<Vec<Option<EscapeOutputBytea>>>>()?;
+                    builder.encode_field(&array)
+                }
+                PGByteaOutputValue::HEX => {
+                    let array = value_list
+                        .items()
+                        .iter()
+                        .map(|v| match v {
+                            Value::Null => Ok(None),
+                            Value::Binary(v) => Ok(Some(HexOutputBytea(v.deref()))),
+
+                            _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                                err_msg: format!(
+                                    "Invalid list item type, find {v:?}, expected binary",
+                                ),
+                            }))),
+                        })
+                        .collect::<PgWireResult<Vec<Option<HexOutputBytea>>>>()?;
+                    builder.encode_field(&array)
+                }
+            }
+        }
+        &ConcreteDataType::String(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::String(v) => Ok(Some(v.as_utf8())),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected string",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<&str>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Date(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Date(v) => {
+                        if let Some(date) = v.to_chrono_date() {
+                            let (style, order) =
+                                *query_ctx.configuration_parameter().pg_datetime_style();
+                            Ok(Some(StylingDate(date, style, order)))
+                        } else {
+                            Err(PgWireError::ApiError(Box::new(Error::Internal {
+                                err_msg: format!("Failed to convert date to postgres type {v:?}",),
+                            })))
+                        }
+                    }
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected date",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<StylingDate>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::DateTime(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::DateTime(v) => {
+                        if let Some(datetime) = v.to_chrono_datetime() {
+                            let (style, order) =
+                                *query_ctx.configuration_parameter().pg_datetime_style();
+                            Ok(Some(StylingDateTime(datetime, style, order)))
+                        } else {
+                            Err(PgWireError::ApiError(Box::new(Error::Internal {
+                                err_msg: format!("Failed to convert date to postgres type {v:?}",),
+                            })))
+                        }
+                    }
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected date",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<StylingDateTime>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Timestamp(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Timestamp(v) => {
+                        if let Some(datetime) = v.to_chrono_datetime() {
+                            let (style, order) =
+                                *query_ctx.configuration_parameter().pg_datetime_style();
+                            Ok(Some(StylingDateTime(datetime, style, order)))
+                        } else {
+                            Err(PgWireError::ApiError(Box::new(Error::Internal {
+                                err_msg: format!("Failed to convert date to postgres type {v:?}",),
+                            })))
+                        }
+                    }
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected timestamp",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<StylingDateTime>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Time(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Time(v) => Ok(v.to_chrono_time()),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected time",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<NaiveTime>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Interval(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Interval(v) => Ok(Some(PgInterval::from(*v))),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected interval",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<PgInterval>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Decimal128(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Decimal128(v) => Ok(Some(v.to_string())),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected decimal",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<String>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Json(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Binary(v) => Ok(Some(jsonb::to_string(v))),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected json",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<String>>>>()?;
+            builder.encode_field(&array)
+        }
+        _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+            err_msg: format!(
+                "cannot write array type {:?} in postgres protocol: unimplemented",
+                value_list.datatype()
+            ),
+        }))),
+    }
 }
 
 pub(super) fn encode_value(
@@ -93,7 +401,7 @@ pub(super) fn encode_value(
         Value::Date(v) => {
             if let Some(date) = v.to_chrono_date() {
                 let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
-                builder.encode_field(&StylingDate(&date, style, order))
+                builder.encode_field(&StylingDate(date, style, order))
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
                     err_msg: format!("Failed to convert date to postgres type {v:?}",),
@@ -103,7 +411,7 @@ pub(super) fn encode_value(
         Value::DateTime(v) => {
             if let Some(datetime) = v.to_chrono_datetime() {
                 let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
-                builder.encode_field(&StylingDateTime(&datetime, style, order))
+                builder.encode_field(&StylingDateTime(datetime, style, order))
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
                     err_msg: format!("Failed to convert date to postgres type {v:?}",),
@@ -113,7 +421,7 @@ pub(super) fn encode_value(
         Value::Timestamp(v) => {
             if let Some(datetime) = v.to_chrono_datetime() {
                 let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
-                builder.encode_field(&StylingDateTime(&datetime, style, order))
+                builder.encode_field(&StylingDateTime(datetime, style, order))
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
                     err_msg: format!("Failed to convert date to postgres type {v:?}",),
@@ -131,14 +439,13 @@ pub(super) fn encode_value(
         }
         Value::Interval(v) => builder.encode_field(&PgInterval::from(*v)),
         Value::Decimal128(v) => builder.encode_field(&v.to_string()),
-        Value::List(_) | Value::Duration(_) => {
-            Err(PgWireError::ApiError(Box::new(Error::Internal {
-                err_msg: format!(
-                    "cannot write value {:?} in postgres protocol: unimplemented",
-                    &value
-                ),
-            })))
-        }
+        Value::List(values) => encode_array(query_ctx, values, builder),
+        Value::Duration(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
+            err_msg: format!(
+                "cannot write value {:?} in postgres protocol: unimplemented",
+                &value
+            ),
+        }))),
     }
 }
 
@@ -155,19 +462,45 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Binary(_) => Ok(Type::BYTEA),
         &ConcreteDataType::String(_) => Ok(Type::VARCHAR),
         &ConcreteDataType::Date(_) => Ok(Type::DATE),
-        &ConcreteDataType::DateTime(_) => Ok(Type::TIMESTAMP),
-        &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
+        &ConcreteDataType::DateTime(_) | &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Time(_) => Ok(Type::TIME),
         &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL),
         &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC),
         &ConcreteDataType::Json(_) => Ok(Type::JSON),
-        &ConcreteDataType::Duration(_)
-        | &ConcreteDataType::List(_)
-        | &ConcreteDataType::Dictionary(_) => server_error::UnsupportedDataTypeSnafu {
-            data_type: origin,
-            reason: "not implemented",
+        ConcreteDataType::List(list) => match list.item_type() {
+            &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
+            &ConcreteDataType::Boolean(_) => Ok(Type::BOOL_ARRAY),
+            &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => Ok(Type::CHAR_ARRAY),
+            &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => Ok(Type::INT2_ARRAY),
+            &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => Ok(Type::INT4_ARRAY),
+            &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => Ok(Type::INT8_ARRAY),
+            &ConcreteDataType::Float32(_) => Ok(Type::FLOAT4_ARRAY),
+            &ConcreteDataType::Float64(_) => Ok(Type::FLOAT8_ARRAY),
+            &ConcreteDataType::Binary(_) => Ok(Type::BYTEA_ARRAY),
+            &ConcreteDataType::String(_) => Ok(Type::VARCHAR_ARRAY),
+            &ConcreteDataType::Date(_) => Ok(Type::DATE_ARRAY),
+            &ConcreteDataType::DateTime(_) | &ConcreteDataType::Timestamp(_) => {
+                Ok(Type::TIMESTAMP_ARRAY)
+            }
+            &ConcreteDataType::Time(_) => Ok(Type::TIME_ARRAY),
+            &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL_ARRAY),
+            &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC_ARRAY),
+            &ConcreteDataType::Json(_) => Ok(Type::JSON_ARRAY),
+            &ConcreteDataType::Duration(_)
+            | &ConcreteDataType::Dictionary(_)
+            | &ConcreteDataType::List(_) => server_error::UnsupportedDataTypeSnafu {
+                data_type: origin,
+                reason: "not implemented",
+            }
+            .fail(),
+        },
+        &ConcreteDataType::Duration(_) | &ConcreteDataType::Dictionary(_) => {
+            server_error::UnsupportedDataTypeSnafu {
+                data_type: origin,
+                reason: "not implemented",
+            }
+            .fail()
         }
-        .fail(),
     }
 }
 
