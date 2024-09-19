@@ -257,7 +257,12 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     for (table_ctx, insert_expr) in tables.values() {
         let sql = format!("select count(1) as count from {}", table_ctx.name);
         let values = count_values(&ctx.greptime, &sql).await?;
-        assert_eq!(values.count as usize, insert_expr.values_list.len());
+        assert_eq!(
+            values.count as usize,
+            insert_expr.values_list.len(),
+            "table: {}",
+            table_ctx.name
+        );
     }
 
     // Clean up
