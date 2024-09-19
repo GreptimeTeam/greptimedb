@@ -493,19 +493,20 @@ impl AlterKind {
 
         // Validate the full-text options in a simplified manner
         for (k, v) in options {
+            let value_lower = v.to_ascii_lowercase();
             match k.to_ascii_lowercase().as_str() {
                 // Validate the "analyzer" option
                 COLUMN_FULLTEXT_OPT_KEY_ANALYZER => {
-                    if !matches!(v.to_ascii_lowercase().as_str(), "english")
-                        && !matches!(v.to_ascii_lowercase().as_str(), "chinese")
+                    if !matches!(value_lower.as_str(), "english")
+                        && !matches!(value_lower.as_str(), "chinese")
                     {
                         return InvalidFulltextOptionsSnafu { column_name }.fail();
                     }
                 }
                 // Validate the "case_sensitive" option
                 COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE => {
-                    if !matches!(v.to_ascii_lowercase().as_str(), "true")
-                        && !matches!(v.to_ascii_lowercase().as_str(), "false")
+                    if !matches!(value_lower.as_str(), "true")
+                        && !matches!(value_lower.as_str(), "false")
                     {
                         return InvalidFulltextOptionsSnafu { column_name }.fail();
                     }
