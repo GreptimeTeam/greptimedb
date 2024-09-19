@@ -177,8 +177,8 @@ impl InformationSchemaProcedureInfoBuilder {
                         .map_err(BoxedError::new)
                         .context(ListProceduresSnafu)?;
                     for procedure in procedures {
-                        let status = procedure.state.as_str_name();
-                        self.add_procedure(&predicates, procedure, status);
+                        let status = procedure.state.as_str_name().to_string();
+                        self.add_procedure(&predicates, procedure, &status);
                     }
                 } else {
                     return GetProcedureClientSnafu { mode: "standalone" }.fail();
