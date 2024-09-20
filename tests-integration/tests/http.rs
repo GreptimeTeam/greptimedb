@@ -86,6 +86,7 @@ macro_rules! http_tests {
                 test_pipeline_api,
                 test_test_pipeline_api,
                 test_plain_text_ingestion,
+                test_identify_pipeline,
 
                 test_otlp_metrics,
                 test_otlp_traces,
@@ -1153,6 +1154,61 @@ transform:
         .await;
     // todo(shuiyisong): refactor http error handling
     assert_ne!(res.status(), StatusCode::OK);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_identify_pipeline(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
+
+    // handshake
+    let client = TestClient::new(app);
+    let body = r#"{"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java"}
+{"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java","hasagei":"hasagei","dongdongdong":"guaguagua"}"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs")
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = res.json().await;
+
+    assert!(body.get("execution_time_ms").unwrap().is_number());
+    assert_eq!(body["output"][0]["affectedrows"], 2);
+
+    let res = client.get("/v1/sql?sql=select * from logs").send().await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let line1_expected = r#"["10.170.***.***",1453809242,"","10.200.**.***","200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java","guaguagua","hasagei",null]"#;
+    let line2_expected = r#"["10.170.***.***",1453809242,"","10.200.**.***","200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java",null,null,null]"#;
+    let res = client.get("/v1/sql?sql=select * from logs").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp: serde_json::Value = res.json().await;
+    let result = resp["output"][0]["records"]["rows"].as_array().unwrap();
+    assert_eq!(result.len(), 2);
+    let mut line1 = result[0].as_array().unwrap().clone();
+    let mut line2 = result[1].as_array().unwrap().clone();
+    assert!(line1.last().unwrap().is_i64());
+    assert!(line2.last().unwrap().is_i64());
+    *line1.last_mut().unwrap() = serde_json::Value::Null;
+    *line2.last_mut().unwrap() = serde_json::Value::Null;
+
+    assert_eq!(
+        line1,
+        serde_json::from_str::<Vec<Value>>(line1_expected).unwrap()
+    );
+    assert_eq!(
+        line2,
+        serde_json::from_str::<Vec<Value>>(line2_expected).unwrap()
+    );
+
+    let expected = r#"[["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"],["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"]]"#;
+    validate_data(&client, "desc logs", expected).await;
 
     guard.remove_all().await;
 }

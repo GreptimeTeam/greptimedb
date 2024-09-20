@@ -16,6 +16,7 @@ pub mod coerce;
 
 use std::collections::HashSet;
 
+use ahash::HashMap;
 use api::helper::proto_value_type;
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
@@ -201,12 +202,18 @@ impl Transformer for GreptimeTransformer {
     }
 }
 
+#[derive(Debug, Default)]
+struct SchemaInfo {
+    schema: Vec<ColumnSchema>,
+    index: HashMap<String, usize>,
+}
+
 fn resolve_schema(
     index: Option<usize>,
     value_data: ValueData,
     column_schema: ColumnSchema,
     row: &mut Vec<GreptimeValue>,
-    schema: &mut Vec<ColumnSchema>,
+    schema_info: &mut SchemaInfo,
 ) {
     if let Some(index) = index {
         let api_value = GreptimeValue {
@@ -214,14 +221,16 @@ fn resolve_schema(
         };
         let value_column_data_type = proto_value_type(&api_value);
         // safety unwrap is fine here because index is always valid
-        let schema_column_data_type = schema.get(index).unwrap().datatype();
+        let schema_column_data_type = schema_info.schema.get(index).unwrap().datatype();
         if value_column_data_type.is_some_and(|t| t != schema_column_data_type) {
             row[index] = GreptimeValue { value_data: None };
         } else {
             row[index] = api_value;
         }
     } else {
-        schema.push(column_schema);
+        let key = column_schema.column_name.clone();
+        schema_info.schema.push(column_schema);
+        schema_info.index.insert(key, schema_info.schema.len() - 1);
         let api_value = GreptimeValue {
             value_data: Some(value_data),
         };
@@ -229,16 +238,16 @@ fn resolve_schema(
     }
 }
 
-fn json_value_to_row(schemas: &mut Vec<ColumnSchema>, map: Map<String, serde_json::Value>) -> Row {
-    let mut row: Vec<GreptimeValue> = Vec::with_capacity(schemas.len());
-    for _ in 0..schemas.len() {
+fn json_value_to_row(schema_info: &mut SchemaInfo, map: Map<String, serde_json::Value>) -> Row {
+    let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
+    for _ in 0..schema_info.schema.len() {
         row.push(GreptimeValue { value_data: None });
     }
     for (key, value) in map {
         if key == DEFAULT_GREPTIME_TIMESTAMP_COLUMN {
             continue;
         }
-        let index = schemas.iter().position(|x| x.column_name == key);
+        let index = schema_info.index.get(&key).copied();
         match value {
             serde_json::Value::Null => {
                 // do nothing
@@ -255,7 +264,7 @@ fn json_value_to_row(schemas: &mut Vec<ColumnSchema>, map: Map<String, serde_jso
                         options: None,
                     },
                     &mut row,
-                    schemas,
+                    schema_info,
                 );
             }
             serde_json::Value::Bool(b) => {
@@ -270,7 +279,7 @@ fn json_value_to_row(schemas: &mut Vec<ColumnSchema>, map: Map<String, serde_jso
                         options: None,
                     },
                     &mut row,
-                    schemas,
+                    schema_info,
                 );
             }
             serde_json::Value::Number(n) => {
@@ -287,7 +296,7 @@ fn json_value_to_row(schemas: &mut Vec<ColumnSchema>, map: Map<String, serde_jso
                             options: None,
                         },
                         &mut row,
-                        schemas,
+                        schema_info,
                     );
                 } else if n.is_u64() {
                     resolve_schema(
@@ -302,7 +311,7 @@ fn json_value_to_row(schemas: &mut Vec<ColumnSchema>, map: Map<String, serde_jso
                             options: None,
                         },
                         &mut row,
-                        schemas,
+                        schema_info,
                     );
                 } else if n.is_f64() {
                     resolve_schema(
@@ -317,7 +326,7 @@ fn json_value_to_row(schemas: &mut Vec<ColumnSchema>, map: Map<String, serde_jso
                             options: None,
                         },
                         &mut row,
-                        schemas,
+                        schema_info,
                     );
                 } else {
                     unreachable!("unexpected number type");
@@ -337,7 +346,7 @@ fn json_value_to_row(schemas: &mut Vec<ColumnSchema>, map: Map<String, serde_jso
                         options: None,
                     },
                     &mut row,
-                    schemas,
+                    schema_info,
                 );
             }
         }
@@ -345,10 +354,10 @@ fn json_value_to_row(schemas: &mut Vec<ColumnSchema>, map: Map<String, serde_jso
     Row { values: row }
 }
 
-pub fn identify_pipeline(array: Vec<serde_json::Value>) -> Result<Rows, String> {
+pub fn identity_pipeline(array: Vec<serde_json::Value>) -> Result<Rows, String> {
     let mut rows = Vec::with_capacity(array.len());
 
-    let mut schema = Vec::new();
+    let mut schema = SchemaInfo::default();
     for value in array {
         if let serde_json::Value::Object(map) = value {
             let row = json_value_to_row(&mut schema, map);
@@ -366,7 +375,7 @@ pub fn identify_pipeline(array: Vec<serde_json::Value>) -> Result<Rows, String> 
     let ts = GreptimeValue {
         value_data: Some(ValueData::TimestampNanosecondValue(ns)),
     };
-    let column_count = schema.len();
+    let column_count = schema.schema.len();
     for row in rows.iter_mut() {
         let diff = column_count - row.values.len();
         for _ in 0..diff {
@@ -374,13 +383,16 @@ pub fn identify_pipeline(array: Vec<serde_json::Value>) -> Result<Rows, String> 
         }
         row.values.push(ts.clone());
     }
-    schema.push(greptime_timestamp_schema);
-    Ok(Rows { schema, rows })
+    schema.schema.push(greptime_timestamp_schema);
+    Ok(Rows {
+        schema: schema.schema,
+        rows,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::identify_pipeline;
+    use crate::identity_pipeline;
 
     #[test]
     fn test_identify_pipeline() {
@@ -404,7 +416,7 @@ mod tests {
                 "gaga": "gaga"
             }),
         ];
-        let rows = identify_pipeline(array).unwrap();
+        let rows = identity_pipeline(array).unwrap();
         assert_eq!(rows.schema.len(), 8);
         assert_eq!(rows.rows.len(), 2);
         assert_eq!(8, rows.rows[0].values.len());
