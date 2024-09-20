@@ -221,7 +221,7 @@ mod tests {
         let instruction = Instruction::UpgradeRegion(UpgradeRegion {
             region_id,
             last_entry_id: None,
-            wait_for_replay_timeout: None,
+            replay_timeout: None,
             location_id: None,
         });
         assert!(

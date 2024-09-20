@@ -21,7 +21,7 @@ use common_meta::instruction::{
     DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
 };
 use common_procedure::Status;
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tokio::time::{sleep, Instant};
@@ -67,7 +67,7 @@ impl State for DowngradeLeaderRegion {
                 return Ok((Box::new(UpdateMetadata::Rollback), Status::executing(false)));
             }
             Err(err) => {
-                warn!(err; "Occurs non-retryable error");
+                error!(err; "Occurs non-retryable error");
             }
         }
 
@@ -220,7 +220,7 @@ impl DowngradeLeaderRegion {
                 if matches!(err, error::Error::ExceededDeadline { .. }) {
                     return Err(err);
                 } else if err.is_retryable() && retry < self.optimistic_retry {
-                    warn!("Failed to downgrade region, error: {err:?}, retry later");
+                    error!("Failed to downgrade region, error: {err:?}, retry later");
                     sleep(self.retry_initial_interval).await;
                 } else {
                     break;

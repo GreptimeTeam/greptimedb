@@ -71,7 +71,7 @@ impl UpgradeCandidateRegion {
     fn build_upgrade_region_instruction(
         &self,
         ctx: &Context,
-        wait_for_replay_timeout: Duration,
+        replay_timeout: Duration,
     ) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
@@ -80,7 +80,7 @@ impl UpgradeCandidateRegion {
         Instruction::UpgradeRegion(UpgradeRegion {
             region_id,
             last_entry_id,
-            wait_for_replay_timeout: Some(wait_for_replay_timeout),
+            replay_timeout: Some(replay_timeout),
             location_id: Some(ctx.persistent_ctx.from_peer.id),
         })
     }
