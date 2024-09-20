@@ -111,8 +111,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
             region_id,
             from_peer,
             to_peer,
-            replay_timeout_secs,
-            ..
+            timeout_secs,
         } = request.into_inner();
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
@@ -134,7 +133,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
                 region_id: region_id.into(),
                 from_peer,
                 to_peer,
-                replay_timeout: Duration::from_secs(replay_timeout_secs.into()),
+                timeout: Duration::from_secs(timeout_secs.into()),
             })
             .await?
             .map(procedure::pid_to_pb_pid);

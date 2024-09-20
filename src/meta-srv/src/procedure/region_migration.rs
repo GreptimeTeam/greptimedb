@@ -73,13 +73,13 @@ pub struct PersistentContext {
     to_peer: Peer,
     /// The [RegionId] of migration region.
     region_id: RegionId,
-    /// The timeout of waiting for a candidate to replay the WAL.
-    #[serde(with = "humantime_serde", default = "default_replay_timeout")]
-    replay_timeout: Duration,
+    /// The timeout for downgrading leader region and upgrading candidate region operations.
+    #[serde(with = "humantime_serde", default = "default_timeout")]
+    timeout: Duration,
 }
 
-fn default_replay_timeout() -> Duration {
-    Duration::from_secs(1)
+fn default_timeout() -> Duration {
+    Duration::from_secs(10)
 }
 
 impl PersistentContext {
@@ -123,6 +123,8 @@ pub struct VolatileContext {
     leader_region_lease_deadline: Option<Instant>,
     /// The last_entry_id of leader region.
     leader_region_last_entry_id: Option<u64>,
+    /// Elapsed time of downgrading region and upgrading region.
+    operations_elapsed: Duration,
 }
 
 impl VolatileContext {
@@ -211,6 +213,18 @@ pub struct Context {
 }
 
 impl Context {
+    /// Returns the next operation's timeout.
+    pub fn next_operation_timeout(&self) -> Option<Duration> {
+        self.persistent_ctx
+            .timeout
+            .checked_sub(self.volatile_ctx.operations_elapsed)
+    }
+
+    /// Updates operations elapsed.
+    pub fn update_operations_elapsed(&mut self, instant: Instant) {
+        self.volatile_ctx.operations_elapsed += instant.elapsed();
+    }
+
     /// Returns address of meta server.
     pub fn server_addr(&self) -> &str {
         &self.server_addr
@@ -441,7 +455,7 @@ impl RegionMigrationProcedure {
             region_id: persistent_ctx.region_id,
             from_peer: persistent_ctx.from_peer.clone(),
             to_peer: persistent_ctx.to_peer.clone(),
-            replay_timeout: persistent_ctx.replay_timeout,
+            timeout: persistent_ctx.timeout,
         });
         let context = context_factory.new_context(persistent_ctx);
 
@@ -537,7 +551,7 @@ mod tests {
         let procedure = RegionMigrationProcedure::new(persistent_context, context, None);
 
         let serialized = procedure.dump().unwrap();
-        let expected = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"replay_timeout":"1s"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"timeout":"10s"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 

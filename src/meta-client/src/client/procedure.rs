@@ -77,17 +77,17 @@ impl Client {
     /// - `region_id`:  the migrated region id
     /// - `from_peer`:  the source datanode id
     /// - `to_peer`:  the target datanode id
-    /// - `replay_timeout`: replay WAL timeout after migration.
+    /// - `timeout`: timeout for downgrading region and upgrading region operations
     pub async fn migrate_region(
         &self,
         region_id: u64,
         from_peer: u64,
         to_peer: u64,
-        replay_timeout: Duration,
+        timeout: Duration,
     ) -> Result<MigrateRegionResponse> {
         let inner = self.inner.read().await;
         inner
-            .migrate_region(region_id, from_peer, to_peer, replay_timeout)
+            .migrate_region(region_id, from_peer, to_peer, timeout)
             .await
     }
 
@@ -216,13 +216,13 @@ impl Inner {
         region_id: u64,
         from_peer: u64,
         to_peer: u64,
-        replay_timeout: Duration,
+        timeout: Duration,
     ) -> Result<MigrateRegionResponse> {
         let mut req = MigrateRegionRequest {
             region_id,
             from_peer,
             to_peer,
-            replay_timeout_secs: replay_timeout.as_secs() as u32,
+            timeout_secs: timeout.as_secs() as u32,
             ..Default::default()
         };
 

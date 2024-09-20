@@ -32,6 +32,13 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Exceeded deadline, operation: {}", operation))]
+    ExceededDeadline {
+        #[snafu(implicit)]
+        location: Location,
+        operation: String,
+    },
+
     #[snafu(display("The target peer is unavailable temporally: {}", peer_id))]
     PeerUnavailable {
         #[snafu(implicit)]
@@ -783,7 +790,8 @@ impl ErrorExt for Error {
             | Error::Join { .. }
             | Error::WeightArray { .. }
             | Error::NotSetWeightArray { .. }
-            | Error::PeerUnavailable { .. } => StatusCode::Internal,
+            | Error::PeerUnavailable { .. }
+            | Error::ExceededDeadline { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 

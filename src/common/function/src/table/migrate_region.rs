@@ -25,13 +25,13 @@ use session::context::QueryContextRef;
 use crate::handlers::ProcedureServiceHandlerRef;
 use crate::helper::cast_u64;
 
-const DEFAULT_REPLAY_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// A function to migrate a region from source peer to target peer.
 /// Returns the submitted procedure id if success. Only available in cluster mode.
 ///
-/// - `migrate_region(region_id, from_peer, to_peer)`, with default replay WAL timeout(10 seconds).
-/// - `migrate_region(region_id, from_peer, to_peer, timeout(secs))`
+/// - `migrate_region(region_id, from_peer, to_peer)`, with timeout(30 seconds).
+/// - `migrate_region(region_id, from_peer, to_peer, timeout(secs))`.
 ///
 /// The parameters:
 /// - `region_id`:  the region id
@@ -48,18 +48,13 @@ pub(crate) async fn migrate_region(
     _ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
-    let (region_id, from_peer, to_peer, replay_timeout) = match params.len() {
+    let (region_id, from_peer, to_peer, timeout) = match params.len() {
         3 => {
             let region_id = cast_u64(&params[0])?;
             let from_peer = cast_u64(&params[1])?;
             let to_peer = cast_u64(&params[2])?;
 
-            (
-                region_id,
-                from_peer,
-                to_peer,
-                Some(DEFAULT_REPLAY_TIMEOUT_SECS),
-            )
+            (region_id, from_peer, to_peer, Some(DEFAULT_TIMEOUT_SECS))
         }
 
         4 => {
@@ -82,14 +77,14 @@ pub(crate) async fn migrate_region(
         }
     };
 
-    match (region_id, from_peer, to_peer, replay_timeout) {
-        (Some(region_id), Some(from_peer), Some(to_peer), Some(replay_timeout)) => {
+    match (region_id, from_peer, to_peer, timeout) {
+        (Some(region_id), Some(from_peer), Some(to_peer), Some(timeout)) => {
             let pid = procedure_service_handler
                 .migrate_region(MigrateRegionRequest {
                     region_id,
                     from_peer,
                     to_peer,
-                    replay_timeout: Duration::from_secs(replay_timeout),
+                    timeout: Duration::from_secs(timeout),
                 })
                 .await?;
 
