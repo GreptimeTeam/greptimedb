@@ -47,7 +47,6 @@ RUN apt-get -y purge python3.8 && \
 RUN git config --global --add safe.directory *
 
 # Install Python dependencies.
-RUN ls -la ./docker/python/requirements.txt && echo $DOCKER_BUILD_ROOT
 COPY $DOCKER_BUILD_ROOT/docker/python/requirements.txt /etc/greptime/requirements.txt
 RUN python3 -m pip install -r /etc/greptime/requirements.txt
 
