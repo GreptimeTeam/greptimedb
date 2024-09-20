@@ -223,6 +223,7 @@ impl DowngradeLeaderRegion {
                     error!("Failed to downgrade region, error: {err:?}, retry later");
                     sleep(self.retry_initial_interval).await;
                 } else {
+                    error!("Failed to downgrade region, error: {err:?}");
                     break;
                 }
             } else {
