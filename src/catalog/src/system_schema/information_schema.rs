@@ -18,6 +18,7 @@ pub mod flows;
 mod information_memory_table;
 pub mod key_column_usage;
 mod partitions;
+mod procedure_info;
 mod region_peers;
 mod runtime_metrics;
 pub mod schemata;
@@ -188,6 +189,11 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.flow_metadata_manager.clone(),
             )) as _),
+            PROCEDURE_INFO => Some(
+                Arc::new(procedure_info::InformationSchemaProcedureInfo::new(
+                    self.catalog_manager.clone(),
+                )) as _,
+            ),
             _ => None,
         }
     }
@@ -250,7 +256,10 @@ impl InformationSchemaProvider {
             self.build_table(TABLE_CONSTRAINTS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
-
+        tables.insert(
+            PROCEDURE_INFO.to_string(),
+            self.build_table(PROCEDURE_INFO).unwrap(),
+        );
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
             tables.insert((*name).to_string(), self.build_table(name).expect(name));

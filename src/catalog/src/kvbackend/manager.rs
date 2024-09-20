@@ -31,6 +31,7 @@ use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
+use common_procedure::ProcedureManagerRef;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
 use meta_client::client::MetaClient;
@@ -69,6 +70,7 @@ pub struct KvBackendCatalogManager {
     /// A sub-CatalogManager that handles system tables
     system_catalog: SystemCatalog,
     cache_registry: LayeredCacheRegistryRef,
+    procedure_manager: Option<ProcedureManagerRef>,
 }
 
 const CATALOG_CACHE_MAX_CAPACITY: u64 = 128;
@@ -79,6 +81,7 @@ impl KvBackendCatalogManager {
         meta_client: Option<Arc<MetaClient>>,
         backend: KvBackendRef,
         cache_registry: LayeredCacheRegistryRef,
+        procedure_manager: Option<ProcedureManagerRef>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             mode,
@@ -106,6 +109,7 @@ impl KvBackendCatalogManager {
                 backend,
             },
             cache_registry,
+            procedure_manager,
         })
     }
 
@@ -131,6 +135,10 @@ impl KvBackendCatalogManager {
 
     pub fn table_metadata_manager_ref(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
+    }
+
+    pub fn procedure_manager(&self) -> Option<ProcedureManagerRef> {
+        self.procedure_manager.clone()
     }
 }
 
