@@ -23,11 +23,11 @@ use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 /// Index to access a row group.
 #[derive(Clone)]
-struct RowGroupIndex {
+pub(crate) struct RowGroupIndex {
     /// Index to the file.
-    file_index: usize,
+    pub(crate) file_index: usize,
     /// Row group index in the file.
-    row_group_index: usize,
+    pub(crate) row_group_index: usize,
 }
 
 /// Meta data of a partition range.
@@ -113,6 +113,7 @@ impl RangeMeta {
         }
     }
 
+    // FIXME(yingwen): Replaces memtables by mem ranges.
     fn push_mem_ranges(memtables: &[MemtableRef], ranges: &mut Vec<RangeMeta>) {
         for (i, memtable) in memtables.iter().enumerate() {
             let stats = memtable.stats();

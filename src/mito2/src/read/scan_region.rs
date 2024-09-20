@@ -14,7 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,6 +26,7 @@ use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datafusion::physical_plan::DisplayFormatType;
 use datafusion_expr::utils::expr_to_columns;
+use parquet::arrow::arrow_reader::RowSelection;
 use smallvec::SmallVec;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
@@ -41,7 +42,7 @@ use crate::memtable::{MemtableRange, MemtableRef};
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, CompatBatch};
 use crate::read::projection::ProjectionMapper;
-use crate::read::range::RangeMeta;
+use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::seq_scan::SeqScan;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
@@ -52,7 +53,7 @@ use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBui
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
-use crate::sst::parquet::file_range::FileRange;
+use crate::sst::parquet::file_range::{FileRange, FileRangeContextRef};
 use crate::sst::parquet::reader::ReaderMetrics;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
@@ -644,6 +645,54 @@ impl ScanInput {
         Ok(sources)
     }
 
+    /// Prunes a file to scan and returns the builder to build reader.
+    async fn prune_file(
+        &self,
+        file_index: usize,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<RangeBuilder> {
+        let file = &self.files[file_index];
+        let res = self
+            .access_layer
+            .read_sst(file.clone())
+            .predicate(self.predicate.clone())
+            .time_range(self.time_range)
+            .projection(Some(self.mapper.column_ids().to_vec()))
+            .cache(self.cache_manager.clone())
+            .inverted_index_applier(self.inverted_index_applier.clone())
+            .fulltext_index_applier(self.fulltext_index_applier.clone())
+            .expected_metadata(Some(self.mapper.metadata().clone()))
+            .build_reader_input(reader_metrics)
+            .await;
+        let (mut file_range_ctx, row_groups) = match res {
+            Ok(x) => x,
+            Err(e) => {
+                if e.is_object_not_found() && self.ignore_file_not_found {
+                    error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
+                    return Ok(RangeBuilder::default());
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+        if !compat::has_same_columns(
+            self.mapper.metadata(),
+            file_range_ctx.read_format().metadata(),
+        ) {
+            // They have different schema. We need to adapt the batch first so the
+            // mapper can convert it.
+            let compat = CompatBatch::new(
+                &self.mapper,
+                file_range_ctx.read_format().metadata().clone(),
+            )?;
+            file_range_ctx.set_compat_batch(Some(compat));
+        }
+        Ok(RangeBuilder {
+            context: Some(Arc::new(file_range_ctx)),
+            row_groups,
+        })
+    }
+
     /// Prunes file ranges to scan and adds them to the `collector`.
     pub(crate) async fn prune_file_ranges(
         &self,
@@ -924,7 +973,9 @@ pub(crate) struct StreamContext {
     /// The mutex is used to ensure the parts are only built once.
     pub(crate) parts: Mutex<(ScanPartList, Duration)>,
     /// Metadata for partition ranges.
-    pub(crate) ranges: Vec<RangeMeta>,
+    ranges: Vec<RangeMeta>,
+    /// Lists of range builders.
+    range_builders: RangeBuilderList,
 
     // Metrics:
     /// The start time of the query.
@@ -936,11 +987,15 @@ impl StreamContext {
     pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
+        // TODO(yingwen): Find a better place to put it.
+        READ_SST_COUNT.observe(input.files.len() as f64);
+        let range_builders = RangeBuilderList::new(input.files.len());
 
         Self {
             input,
             parts: Mutex::new((ScanPartList::default(), Duration::default())),
             ranges,
+            range_builders,
             query_start,
         }
     }
@@ -949,13 +1004,27 @@ impl StreamContext {
     pub(crate) fn unordered_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::unordered_scan_ranges(&input);
+        READ_SST_COUNT.observe(input.files.len() as f64);
+        let range_builders = RangeBuilderList::new(input.files.len());
 
         Self {
             input,
             parts: Mutex::new((ScanPartList::default(), Duration::default())),
             ranges,
+            range_builders,
             query_start,
         }
+    }
+
+    /// Creates a file range to scan.
+    pub(crate) async fn build_file_range(
+        &self,
+        index: RowGroupIndex,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<Option<FileRange>> {
+        self.range_builders
+            .build_range(&self.input, index, reader_metrics)
+            .await
     }
 
     /// Retrieves the partition ranges.
@@ -996,5 +1065,59 @@ impl StreamContext {
             write!(f, ", selector={}", selector)?;
         }
         Ok(())
+    }
+}
+
+/// List to manages the builders to create file ranges.
+struct RangeBuilderList {
+    builders: Vec<Mutex<Option<RangeBuilder>>>,
+}
+
+impl RangeBuilderList {
+    /// Creates a new [ReaderBuilderList] with the given number of files.
+    fn new(num_files: usize) -> Self {
+        let builders = (0..num_files).map(|_| Mutex::new(None)).collect();
+        Self { builders }
+    }
+
+    /// Builds file range to read the row group at `index`.
+    /// Returns None if nothing to read at this row group.
+    async fn build_range(
+        &self,
+        input: &ScanInput,
+        index: RowGroupIndex,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<Option<FileRange>> {
+        let mut builder_opt = self.builders[index.file_index].lock().await;
+        match &mut *builder_opt {
+            Some(builder) => Ok(builder.build_reader(index.row_group_index)),
+            None => {
+                let builder = input.prune_file(index.file_index, reader_metrics).await?;
+                let range = builder.build_reader(index.row_group_index);
+                *builder_opt = Some(builder);
+                Ok(range)
+            }
+        }
+    }
+}
+
+/// Builder to create file ranges.
+#[derive(Default)]
+struct RangeBuilder {
+    /// Context for the file.
+    /// None indicates nothing to read.
+    context: Option<FileRangeContextRef>,
+    /// Row selections for each row group to read.
+    /// It skips the row group if it is not in the map.
+    row_groups: BTreeMap<usize, Option<RowSelection>>,
+}
+
+impl RangeBuilder {
+    /// Builds a file range to read the row group.
+    /// Returns None if we don't need to read the row group.
+    fn build_reader(&self, row_group_index: usize) -> Option<FileRange> {
+        let context = self.context.clone()?;
+        let row_selection = self.row_groups.get(&row_group_index).cloned()?;
+        Some(FileRange::new(context, row_group_index, row_selection))
     }
 }
