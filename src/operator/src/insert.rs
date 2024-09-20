@@ -647,6 +647,28 @@ impl Inserter {
             .context(CatalogSnafu)
     }
 
+    fn request_schema_hash(request_schema: &[ColumnSchema]) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        for schema in request_schema {
+            hasher.update(&schema.column_name);
+        }
+        hasher.finalize().to_vec()
+    }
+
+    fn has_same_schema(&self, table_id: TableId, request_schema: &[ColumnSchema]) -> bool {
+        let request_schema_hash = Arc::new(Self::request_schema_hash(request_schema));
+        let last_insert_schema_hash = self.last_insert_schema_hash_cache.get(&table_id);
+        let same_schema = last_insert_schema_hash
+            .map(|hash| hash == request_schema_hash)
+            .unwrap_or_default();
+
+        if !same_schema {
+            self.last_insert_schema_hash_cache
+                .insert(table_id, request_schema_hash);
+        }
+        same_schema
+    }
+
     fn get_create_table_expr_on_demand(
         &self,
         req: &RowInsertRequest,
@@ -696,22 +718,6 @@ impl Inserter {
         }
 
         Ok(create_table_expr)
-    }
-
-    fn request_schema_hash(request_schema: &[ColumnSchema]) -> Vec<u8> {
-        let mut hasher = Sha256::new();
-        for schema in request_schema {
-            hasher.update(&schema.column_name);
-        }
-        hasher.finalize().to_vec()
-    }
-
-    fn has_same_schema(&self, table_id: TableId, request_schema: &[ColumnSchema]) -> bool {
-        let request_schema_hash = Arc::new(Self::request_schema_hash(request_schema));
-        let last_insert_schema_hash = self
-            .last_insert_schema_hash_cache
-            .get_with(table_id, || request_schema_hash.clone());
-        request_schema_hash == last_insert_schema_hash
     }
 
     fn get_alter_table_expr_on_demand(
