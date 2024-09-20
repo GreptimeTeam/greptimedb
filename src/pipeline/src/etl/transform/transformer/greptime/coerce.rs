@@ -417,6 +417,29 @@ fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<Value
     }
 }
 
+fn coerce_nested_value(v: &Value, transform: &Transform) -> Result<Option<ValueData>, String> {
+    match &transform.type_ {
+        Value::Array(_) | Value::Map(_) => (),
+        t => {
+            return Err(format!(
+                "nested value type not supported {}",
+                t.to_str_type()
+            ))
+        }
+    }
+    match v {
+        Value::Map(_) => {
+            let data: jsonb::Value = v.into();
+            Ok(Some(ValueData::BinaryValue(data.to_vec())))
+        }
+        Value::Array(_) => {
+            let data: jsonb::Value = v.into();
+            Ok(Some(ValueData::BinaryValue(data.to_vec())))
+        }
+        _ => Err(format!("nested type not support {}", v.to_str_type())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
