@@ -131,13 +131,14 @@ pub fn new_picker(
         Arc::new(WindowedCompactionPicker::new(window)) as Arc<_>
     } else {
         match compaction_options {
-            CompactionOptions::Twcs(twcs_opts) => Arc::new(TwcsPicker::new(
-                twcs_opts.max_active_window_runs,
-                twcs_opts.max_active_window_files,
-                twcs_opts.max_inactive_window_runs,
-                twcs_opts.max_inactive_window_files,
-                twcs_opts.time_window_seconds(),
-            )) as Arc<_>,
+            CompactionOptions::Twcs(twcs_opts) => Arc::new(TwcsPicker {
+                max_active_window_runs: twcs_opts.max_active_window_runs,
+                max_active_window_files: twcs_opts.max_active_window_files,
+                max_inactive_window_runs: twcs_opts.max_inactive_window_runs,
+                max_inactive_window_files: twcs_opts.max_inactive_window_files,
+                time_window_seconds: twcs_opts.time_window_seconds(),
+                max_output_file_size: twcs_opts.max_output_file_size.map(|r| r.as_bytes()),
+            }) as Arc<_>,
         }
     }
 }
