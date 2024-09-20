@@ -750,51 +750,6 @@ impl ScanInput {
     pub(crate) fn predicate(&self) -> Option<Predicate> {
         self.predicate.clone()
     }
-
-    /// Retrieves [`PartitionRange`] from memtable and files
-    pub(crate) fn partition_ranges(&self) -> Vec<PartitionRange> {
-        let mut id = 0;
-        let mut container = Vec::with_capacity(self.memtables.len() + self.files.len());
-
-        for memtable in &self.memtables {
-            let range = PartitionRange {
-                // TODO(ruihang): filter out empty memtables in the future.
-                start: memtable.stats().time_range().unwrap().0,
-                end: memtable.stats().time_range().unwrap().1,
-                num_rows: memtable.stats().num_rows(),
-                identifier: id,
-            };
-            id += 1;
-            container.push(range);
-        }
-
-        for file in &self.files {
-            if self.append_mode {
-                // For append mode, we can parallelize reading row groups.
-                for _ in 0..file.meta_ref().num_row_groups {
-                    let range = PartitionRange {
-                        start: file.time_range().0,
-                        end: file.time_range().1,
-                        num_rows: file.num_rows(),
-                        identifier: id,
-                    };
-                    id += 1;
-                    container.push(range);
-                }
-            } else {
-                let range = PartitionRange {
-                    start: file.meta_ref().time_range.0,
-                    end: file.meta_ref().time_range.1,
-                    num_rows: file.meta_ref().num_rows as usize,
-                    identifier: id,
-                };
-                id += 1;
-                container.push(range);
-            }
-        }
-
-        container
-    }
 }
 
 #[cfg(test)]
@@ -977,10 +932,10 @@ pub(crate) struct StreamContext {
 }
 
 impl StreamContext {
-    /// Creates a new [StreamContext].
-    pub(crate) fn new(input: ScanInput, seq_scan: bool) -> Self {
+    /// Creates a new [StreamContext] for [SeqScan].
+    pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
-        let ranges = RangeMeta::ranges_from_input(&input, seq_scan);
+        let ranges = RangeMeta::seq_scan_ranges(&input);
 
         Self {
             input,
@@ -988,6 +943,33 @@ impl StreamContext {
             ranges,
             query_start,
         }
+    }
+
+    /// Creates a new [StreamContext] for [UnorderedScan].
+    pub(crate) fn unordered_scan_ctx(input: ScanInput) -> Self {
+        let query_start = input.query_start.unwrap_or_else(Instant::now);
+        let ranges = RangeMeta::unordered_scan_ranges(&input);
+
+        Self {
+            input,
+            parts: Mutex::new((ScanPartList::default(), Duration::default())),
+            ranges,
+            query_start,
+        }
+    }
+
+    /// Retrieves the partition ranges.
+    pub(crate) fn partition_ranges(&self) -> Vec<PartitionRange> {
+        self.ranges
+            .iter()
+            .enumerate()
+            .map(|(idx, range_meta)| PartitionRange {
+                start: range_meta.time_range.0,
+                end: range_meta.time_range.1,
+                num_rows: range_meta.num_rows,
+                identifier: idx,
+            })
+            .collect()
     }
 
     /// Format the context for explain.

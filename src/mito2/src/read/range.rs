@@ -16,8 +16,10 @@
 
 use smallvec::{smallvec, SmallVec};
 
+use crate::memtable::MemtableRef;
 use crate::read::scan_region::ScanInput;
 use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
+use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 /// Index to access a row group.
 #[derive(Clone)]
@@ -41,31 +43,26 @@ pub(crate) struct RangeMeta {
     /// Indices to file row groups that this range scans.
     /// An empty vec indicates all row groups. (Some file metas don't have row group number).
     row_group_indices: SmallVec<[RowGroupIndex; 2]>,
+    /// Estimated number of rows in the range. This can be 0 if the statistics are not available.
+    pub(crate) num_rows: usize,
 }
 
 impl RangeMeta {
-    /// Creates a list of ranges from the `input`.
-    pub(crate) fn ranges_from_input(input: &ScanInput, seq_scan: bool) -> Vec<RangeMeta> {
+    /// Creates a list of ranges from the `input` for seq scan.
+    pub(crate) fn seq_scan_ranges(input: &ScanInput) -> Vec<RangeMeta> {
         let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
-        for (i, memtable) in input.memtables.iter().enumerate() {
-            let Some(time_range) = memtable.stats().time_range() else {
-                continue;
-            };
-            ranges.push(RangeMeta {
-                time_range,
-                mem_indices: smallvec![i],
-                file_indices: SmallVec::new(),
-                row_group_indices: SmallVec::new(),
-            });
-        }
+        Self::push_mem_ranges(&input.memtables, &mut ranges);
+        Self::push_seq_file_ranges(&input.files, &mut ranges);
 
-        if seq_scan {
-            Self::push_seq_file_ranges(&input.files, &mut ranges);
-            ranges = group_ranges_for_seq_scan(ranges);
-            ranges = maybe_split_ranges_for_seq_scan(ranges);
-        } else {
-            Self::push_unordered_file_ranges(&input.files, &mut ranges);
-        }
+        let ranges = group_ranges_for_seq_scan(ranges);
+        maybe_split_ranges_for_seq_scan(ranges)
+    }
+
+    /// Creates a list of ranges from the `input` for unordered scan.
+    pub(crate) fn unordered_scan_ranges(input: &ScanInput) -> Vec<RangeMeta> {
+        let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
+        Self::push_mem_ranges(&input.memtables, &mut ranges);
+        Self::push_unordered_file_ranges(&input.files, &mut ranges);
 
         ranges
     }
@@ -85,6 +82,7 @@ impl RangeMeta {
         self.mem_indices.append(&mut other.mem_indices);
         self.file_indices.append(&mut other.file_indices);
         self.row_group_indices.append(&mut other.row_group_indices);
+        self.num_rows += other.num_rows;
     }
 
     /// Returns true if we can split the range into multiple smaller ranges and
@@ -100,12 +98,14 @@ impl RangeMeta {
     pub(crate) fn maybe_split(self, output: &mut Vec<RangeMeta>) {
         if self.can_split_preserve_order() {
             output.reserve(self.row_group_indices.len());
+            // Splits by row group.
             for index in self.row_group_indices {
                 output.push(RangeMeta {
                     time_range: self.time_range,
                     mem_indices: SmallVec::new(),
                     file_indices: self.file_indices.clone(),
                     row_group_indices: smallvec![index],
+                    num_rows: DEFAULT_ROW_GROUP_SIZE,
                 });
             }
         } else {
@@ -113,10 +113,27 @@ impl RangeMeta {
         }
     }
 
+    fn push_mem_ranges(memtables: &[MemtableRef], ranges: &mut Vec<RangeMeta>) {
+        for (i, memtable) in memtables.iter().enumerate() {
+            let stats = memtable.stats();
+            let Some(time_range) = stats.time_range() else {
+                continue;
+            };
+            ranges.push(RangeMeta {
+                time_range,
+                mem_indices: smallvec![i],
+                file_indices: SmallVec::new(),
+                row_group_indices: SmallVec::new(),
+                num_rows: stats.num_rows(),
+            });
+        }
+    }
+
     fn push_unordered_file_ranges(files: &[FileHandle], ranges: &mut Vec<RangeMeta>) {
         // For append mode, we can parallelize reading row groups.
         for (file_index, file) in files.iter().enumerate() {
             if file.meta_ref().num_row_groups > 0 {
+                // Scans each row group.
                 for row_group_index in 0..file.meta_ref().num_row_groups {
                     ranges.push(RangeMeta {
                         time_range: file.time_range(),
@@ -129,6 +146,7 @@ impl RangeMeta {
                             },
                             1,
                         ),
+                        num_rows: DEFAULT_ROW_GROUP_SIZE,
                     });
                 }
             } else {
@@ -138,6 +156,8 @@ impl RangeMeta {
                     mem_indices: SmallVec::new(),
                     file_indices: smallvec![file_index],
                     row_group_indices: SmallVec::new(),
+                    // This may be 0.
+                    num_rows: file.meta_ref().num_rows as usize,
                 });
             }
         }
@@ -151,6 +171,7 @@ impl RangeMeta {
                 mem_indices: SmallVec::new(),
                 file_indices: smallvec![file_index],
                 row_group_indices: SmallVec::new(),
+                num_rows: file.meta_ref().num_rows as usize,
             });
         }
     }
