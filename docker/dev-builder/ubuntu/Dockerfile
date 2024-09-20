@@ -26,11 +26,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 
 # https://github.com/GreptimeTeam/greptimedb/actions/runs/10935485852/job/30357457188#step:3:7106
 # `aws-lc-sys` require gcc >= 10.3.0 to work, hence alias to use gcc-10
-RUN apt-get install -y gcc-10 g++-10 cpp-10 make cmake &&\
-    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 \
-    --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
-    --slave /usr/bin/gcov gcov /usr/bin/gcov-10 && \
-    cc --version
+RUN apt-get remove -y gcc-9 && apt-get install -y gcc-10 g++-10 cpp-10 make cmake && cc --version
 
 # Remove Python 3.8 and install pip.
 RUN apt-get -y purge python3.8 && \
