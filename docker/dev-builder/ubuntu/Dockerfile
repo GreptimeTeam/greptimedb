@@ -26,7 +26,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 
 # https://github.com/GreptimeTeam/greptimedb/actions/runs/10935485852/job/30357457188#step:3:7106
 # `aws-lc-sys` require gcc >= 10.3.0 to work, hence alias to use gcc-10
-RUN alias gcc="gcc-10" && alias cc="gcc-10"
+RUN apt-get install -y gcc-10 && ln -sf /usr/bin/gcc-10 /usr/bin/cc
 
 # Remove Python 3.8 and install pip.
 RUN apt-get -y purge python3.8 && \
@@ -47,6 +47,7 @@ RUN apt-get -y purge python3.8 && \
 RUN git config --global --add safe.directory *
 
 # Install Python dependencies.
+RUN ls -la ./docker/python/requirements.txt && echo $DOCKER_BUILD_ROOT
 COPY $DOCKER_BUILD_ROOT/docker/python/requirements.txt /etc/greptime/requirements.txt
 RUN python3 -m pip install -r /etc/greptime/requirements.txt
 
@@ -61,7 +62,10 @@ RUN rustup toolchain install ${RUST_TOOLCHAIN}
 
 # Install cargo-binstall with a specific version to adapt the current rust toolchain.
 # Note: if we use the latest version, we may encounter the following `use of unstable library feature 'io_error_downcast'` error.
-RUN cargo install cargo-binstall --version 1.6.6 --locked
+# RUN cargo install cargo-binstall --version 1.6.6 --locked
+# compile from source take too long, so we use the precompiled binary instead
+COPY pull_binstall.sh /usr/local/bin/pull_binstall.sh
+RUN chmod +x /usr/local/bin/pull_binstall.sh && /usr/local/bin/pull_binstall.sh
 
 # Install nextest.
 RUN cargo binstall cargo-nextest --no-confirm
