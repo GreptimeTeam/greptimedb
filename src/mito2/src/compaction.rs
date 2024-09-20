@@ -500,7 +500,7 @@ pub struct CompactionOutput {
     pub inputs: Vec<FileHandle>,
     /// Whether to remove deletion markers.
     pub filter_deleted: bool,
-    /// Compaction output time range.
+    /// Compaction output time range. Only windowed compaction specifies output time range.
     pub output_time_range: Option<TimestampRange>,
 }
 
