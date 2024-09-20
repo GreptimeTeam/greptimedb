@@ -50,7 +50,7 @@ runs:
           BUILDX_MULTI_PLATFORM_BUILD=all \
           IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
-          IMAGE_TAG=${{ inputs.version }}
+          DEV_BUILDER_IMAGE_TAG=${{ inputs.version }}
 
     - name: Build and push dev-builder-centos image
       shell: bash
@@ -61,7 +61,7 @@ runs:
           BUILDX_MULTI_PLATFORM_BUILD=amd64 \
           IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
-          IMAGE_TAG=${{ inputs.version }}
+          DEV_BUILDER_IMAGE_TAG=${{ inputs.version }}
 
     - name: Build and push dev-builder-android image # Only build image for amd64 platform.
       shell: bash
@@ -71,6 +71,6 @@ runs:
           BASE_IMAGE=android \
           IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
-          IMAGE_TAG=${{ inputs.version }} && \
+          DEV_BUILDER_IMAGE_TAG=${{ inputs.version }} && \
 
         docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-android:${{ inputs.version }}

@@ -63,6 +63,7 @@ use crate::http::prometheus::{
     build_info_query, format_query, instant_query, label_values_query, labels_query, range_query,
     series_query,
 };
+use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
@@ -596,11 +597,16 @@ impl HttpServerBuilder {
         self,
         handler: LogHandlerRef,
         validator: Option<LogValidatorRef>,
+        ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
     ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/events"),
-                HttpServer::route_log(handler, validator),
+                HttpServer::route_log(LogState {
+                    log_handler: handler,
+                    log_validator: validator,
+                    ingest_interceptor,
+                }),
             ),
             ..self
         }
@@ -739,10 +745,7 @@ impl HttpServer {
             .with_state(metrics_handler)
     }
 
-    fn route_log<S>(
-        log_handler: LogHandlerRef,
-        log_validator: Option<LogValidatorRef>,
-    ) -> Router<S> {
+    fn route_log<S>(log_state: LogState) -> Router<S> {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
             .route(
@@ -759,10 +762,7 @@ impl HttpServer {
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(RequestDecompressionLayer::new()),
             )
-            .with_state(LogState {
-                log_handler,
-                log_validator,
-            })
+            .with_state(log_state)
     }
 
     fn route_sql<S>(api_state: ApiState) -> ApiRouter<S> {
@@ -867,6 +867,11 @@ impl HttpServer {
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
             .route("/v1/logs", routing::post(otlp::logs))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_error))
+                    .layer(RequestDecompressionLayer::new()),
+            )
             .with_state(otlp_handler)
     }
 
@@ -965,11 +970,11 @@ mod test {
     use axum::routing::get;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
+    use datafusion_expr::LogicalPlan;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
     use query::parser::PromQuery;
-    use query::plan::LogicalPlan;
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
@@ -1132,7 +1137,7 @@ mod test {
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
             let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
             let json_resp = match format {
-                ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
+                ResponseFormat::Arrow => ArrowResponse::from_output(outputs, None).await,
                 ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
                 ResponseFormat::Table => TableResponse::from_output(outputs).await,
                 ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,

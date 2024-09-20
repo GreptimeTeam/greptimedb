@@ -92,12 +92,8 @@ impl DfScalarFunction {
 
         let len = rb.num_rows();
 
-        let res = self.fn_impl.evaluate(&rb).map_err(|err| {
-            EvalDatafusionSnafu {
-                raw: err,
-                context: "Failed to evaluate datafusion scalar function",
-            }
-            .build()
+        let res = self.fn_impl.evaluate(&rb).context(EvalDatafusionSnafu {
+            context: "Failed to evaluate datafusion scalar function",
         })?;
         let res = common_query::columnar_value::ColumnarValue::try_from(&res)
             .map_err(BoxedError::new)
@@ -157,12 +153,8 @@ impl DfScalarFunction {
             .into_error(err)
         })?;
 
-        let res = self.fn_impl.evaluate(&rb).map_err(|err| {
-            EvalDatafusionSnafu {
-                raw: err,
-                context: "Failed to evaluate datafusion scalar function",
-            }
-            .build()
+        let res = self.fn_impl.evaluate(&rb).context(EvalDatafusionSnafu {
+            context: "Failed to evaluate datafusion scalar function",
         })?;
         let res = common_query::columnar_value::ColumnarValue::try_from(&res)
             .map_err(BoxedError::new)

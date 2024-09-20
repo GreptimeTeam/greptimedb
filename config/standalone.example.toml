@@ -5,7 +5,7 @@ mode = "standalone"
 enable_telemetry = true
 
 ## The default timezone of the server.
-## +toml2docs:none-default
+## @toml2docs:none-default
 default_timezone = "UTC"
 
 ## Initialize all regions in the background during the startup.
@@ -16,11 +16,11 @@ init_regions_in_background = false
 init_regions_parallelism = 16
 
 ## The runtime options.
-[runtime]
+#+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
-global_rt_size = 8
+#+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
-compact_rt_size = 4
+#+ compact_rt_size = 4
 
 ## The HTTP server options.
 [http]
@@ -46,11 +46,11 @@ runtime_size = 8
 mode = "disable"
 
 ## Certificate file path.
-## +toml2docs:none-default
+## @toml2docs:none-default
 cert_path = ""
 
 ## Private key file path.
-## +toml2docs:none-default
+## @toml2docs:none-default
 key_path = ""
 
 ## Watch for Certificate and key file change and auto reload.
@@ -78,11 +78,11 @@ runtime_size = 2
 mode = "disable"
 
 ## Certificate file path.
-## +toml2docs:none-default
+## @toml2docs:none-default
 cert_path = ""
 
 ## Private key file path.
-## +toml2docs:none-default
+## @toml2docs:none-default
 key_path = ""
 
 ## Watch for Certificate and key file change and auto reload
@@ -103,11 +103,11 @@ runtime_size = 2
 mode = "disable"
 
 ## Certificate file path.
-## +toml2docs:none-default
+## @toml2docs:none-default
 cert_path = ""
 
 ## Private key file path.
-## +toml2docs:none-default
+## @toml2docs:none-default
 key_path = ""
 
 ## Watch for Certificate and key file change and auto reload
@@ -139,7 +139,7 @@ provider = "raft_engine"
 
 ## The directory to store the WAL files.
 ## **It's only used when the provider is `raft_engine`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 dir = "/tmp/greptimedb/wal"
 
 ## The size of the WAL segment file.
@@ -320,83 +320,83 @@ type = "File"
 
 ## Cache configuration for object storage such as 'S3' etc.
 ## The local file cache directory.
-## +toml2docs:none-default
+## @toml2docs:none-default
 cache_path = "/path/local_cache"
 
 ## The local file cache capacity in bytes.
-## +toml2docs:none-default
+## @toml2docs:none-default
 cache_capacity = "256MB"
 
 ## The S3 bucket name.
 ## **It's only used when the storage type is `S3`, `Oss` and `Gcs`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 bucket = "greptimedb"
 
 ## The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.
 ## **It's only used when the storage type is `S3`, `Oss` and `Azblob`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 root = "greptimedb"
 
 ## The access key id of the aws account.
 ## It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.
 ## **It's only used when the storage type is `S3` and `Oss`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 access_key_id = "test"
 
 ## The secret access key of the aws account.
 ## It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.
 ## **It's only used when the storage type is `S3`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 secret_access_key = "test"
 
 ## The secret access key of the aliyun account.
 ## **It's only used when the storage type is `Oss`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 access_key_secret = "test"
 
 ## The account key of the azure account.
 ## **It's only used when the storage type is `Azblob`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 account_name = "test"
 
 ## The account key of the azure account.
 ## **It's only used when the storage type is `Azblob`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 account_key = "test"
 
 ## The scope of the google cloud storage.
 ## **It's only used when the storage type is `Gcs`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 scope = "test"
 
 ## The credential path of the google cloud storage.
 ## **It's only used when the storage type is `Gcs`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 credential_path = "test"
 
 ## The credential of the google cloud storage.
 ## **It's only used when the storage type is `Gcs`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 credential = "base64-credential"
 
 ## The container of the azure account.
 ## **It's only used when the storage type is `Azblob`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 container = "greptimedb"
 
 ## The sas token of the azure account.
 ## **It's only used when the storage type is `Azblob`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 sas_token = ""
 
 ## The endpoint of the S3 service.
 ## **It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 endpoint = "https://s3.amazonaws.com"
 
 ## The region of the S3 service.
 ## **It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**.
-## +toml2docs:none-default
+## @toml2docs:none-default
 region = "us-west-2"
 
 # Custom storage options
@@ -426,7 +426,7 @@ region = "us-west-2"
 [region_engine.mito]
 
 ## Number of region workers.
-num_workers = 8
+#+ num_workers = 8
 
 ## Request channel size of each worker.
 worker_channel_size = 128
@@ -447,26 +447,32 @@ max_background_jobs = 4
 auto_flush_interval = "1h"
 
 ## Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
-global_write_buffer_size = "1GB"
+## @toml2docs:none-default="Auto"
+#+ global_write_buffer_size = "1GB"
 
-## Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`
-global_write_buffer_reject_size = "2GB"
+## Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`.
+## @toml2docs:none-default="Auto"
+#+ global_write_buffer_reject_size = "2GB"
 
 ## Cache size for SST metadata. Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
-sst_meta_cache_size = "128MB"
+## @toml2docs:none-default="Auto"
+#+ sst_meta_cache_size = "128MB"
 
 ## Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
-vector_cache_size = "512MB"
+## @toml2docs:none-default="Auto"
+#+ vector_cache_size = "512MB"
 
 ## Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/8 of OS memory.
-page_cache_size = "512MB"
+## @toml2docs:none-default="Auto"
+#+ page_cache_size = "512MB"
 
 ## Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
-selector_result_cache_size = "512MB"
+## @toml2docs:none-default="Auto"
+#+ selector_result_cache_size = "512MB"
 
 ## Whether to enable the experimental write cache.
 enable_experimental_write_cache = false
@@ -478,7 +484,7 @@ experimental_write_cache_path = ""
 experimental_write_cache_size = "512MB"
 
 ## TTL for write cache.
-## +toml2docs:none-default
+## @toml2docs:none-default
 experimental_write_cache_ttl = "8h"
 
 ## Buffer size for SST writing.
@@ -600,7 +606,7 @@ fork_dictionary_bytes = "1GiB"
 dir = "/tmp/greptimedb/logs"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
-## +toml2docs:none-default
+## @toml2docs:none-default
 level = "info"
 
 ## Enable OTLP tracing.
@@ -631,10 +637,10 @@ enable = false
 ## The interval of export metrics.
 write_interval = "30s"
 
-## For `standalone` mode, `self_import` is recommend to collect metrics generated by itself
+## For `standalone` mode, `self_import` is recommended to collect metrics generated by itself
 ## You must create the database before enabling it.
 [export_metrics.self_import]
-## +toml2docs:none-default
+## @toml2docs:none-default
 db = "greptime_metrics"
 
 [export_metrics.remote_write]
@@ -647,5 +653,5 @@ headers = { }
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
 [tracing]
 ## The tokio console address.
-## +toml2docs:none-default
+## @toml2docs:none-default
 tokio_console_addr = "127.0.0.1"

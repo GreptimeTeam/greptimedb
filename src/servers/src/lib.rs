@@ -18,8 +18,8 @@
 #![feature(let_chains)]
 #![feature(if_let_guard)]
 
+use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
-use query::plan::LogicalPlan;
 
 pub mod addrs;
 pub mod configurator;
@@ -54,4 +54,20 @@ pub struct SqlPlan {
     query: String,
     plan: Option<LogicalPlan>,
     schema: Option<Schema>,
+}
+
+/// Install the ring crypto provider for rustls process-wide. see:
+///
+///  https://docs.rs/rustls/latest/rustls/crypto/struct.CryptoProvider.html#using-the-per-process-default-cryptoprovider
+///
+/// for more information.
+pub fn install_ring_crypto_provider() -> Result<(), String> {
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+        .map_err(|ret| {
+            format!(
+                "CryptoProvider already installed as: {:?}, but providing {:?}",
+                rustls::crypto::CryptoProvider::get_default(),
+                ret
+            )
+        })
 }

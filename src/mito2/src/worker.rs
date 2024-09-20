@@ -670,6 +670,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         // The channel is disconnected.
                         break;
                     } else {
+                        // Also flush this worker if other workers trigger flush as this worker may have
+                        // a large memtable to flush. We may not have chance to flush that memtable if we
+                        // never write to this worker. So only flushing other workers may not release enough
+                        // memory.
+                        self.maybe_flush_worker();
                         // A flush job is finished, handles stalled requests.
                         self.handle_stalled_requests().await;
                         continue;

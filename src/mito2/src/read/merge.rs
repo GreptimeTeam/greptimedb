@@ -89,6 +89,9 @@ impl Drop for MergeReader {
         READ_STAGE_ELAPSED
             .with_label_values(&["merge"])
             .observe(self.metrics.scan_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["merge_fetch"])
+            .observe(self.metrics.fetch_cost.as_secs_f64());
     }
 }
 

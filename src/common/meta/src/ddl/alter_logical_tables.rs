@@ -39,7 +39,7 @@ use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::find_leaders;
-use crate::{cache_invalidator, metrics, ClusterId};
+use crate::{metrics, ClusterId};
 
 pub struct AlterLogicalTablesProcedure {
     pub context: DdlContext,
@@ -170,12 +170,11 @@ impl AlterLogicalTablesProcedure {
     }
 
     pub(crate) async fn on_invalidate_table_cache(&mut self) -> Result<Status> {
-        let ctx = cache_invalidator::Context::default();
         let to_invalidate = self.build_table_cache_keys_to_invalidate();
 
         self.context
             .cache_invalidator
-            .invalidate(&ctx, &to_invalidate)
+            .invalidate(&Default::default(), &to_invalidate)
             .await?;
         Ok(Status::done())
     }

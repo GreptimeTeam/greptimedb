@@ -47,6 +47,7 @@ common-version = { workspace = true, features = ["codec"] }
 dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
+datafusion-expr.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures = "0.3"
@@ -66,10 +67,12 @@ notify.workspace = true
 object-pool = "0.5"
 once_cell.workspace = true
 openmetrics-parser = "0.4"
-opensrv-mysql = "0.7.0"
+# use crates.io version after current revision is merged in next release
+# opensrv-mysql = "0.7.0"
+opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "6bbc3b65e6b19212c4f7fc4f40c20daf6f452deb" }
 opentelemetry-proto.workspace = true
 parking_lot = "0.12"
-pgwire = "0.20"
+pgwire = { version = "0.22", default-features = false, features = ["server-api-ring"] }
 pin-project = "1.0"
 pipeline.workspace = true
 postgres-types = { version = "0.2", features = ["with-chrono-0_4", "with-serde_json-1"] }
@@ -86,7 +89,7 @@ rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rust-embed = { version = "6.6", features = ["debug-embed"] }
-rustls = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
 schemars.workspace = true
@@ -99,7 +102,7 @@ sql.workspace = true
 strum.workspace = true
 table.workspace = true
 tokio.workspace = true
-tokio-rustls = "0.25"
+tokio-rustls = "0.26"
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 tonic.workspace = true
@@ -131,11 +134,16 @@ session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tempfile = "3.0.0"
 tokio-postgres = "0.7"
-tokio-postgres-rustls = "0.11"
+tokio-postgres-rustls = "0.12"
 tokio-test = "0.4"
 
 [target.'cfg(not(windows))'.dev-dependencies]
 pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
+
+[target.'cfg(windows)'.dependencies]
+aws-lc-sys = { version = "0.21.0", features = [
+    "prebuilt-nasm",
+] } # use prebuilt nasm on windows per https://github.com/aws/aws-lc-rs/blob/main/aws-lc-sys/README.md#use-of-prebuilt-nasm-objects
 
 [build-dependencies]
 common-version.workspace = true

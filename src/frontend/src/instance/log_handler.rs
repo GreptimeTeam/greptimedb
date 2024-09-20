@@ -20,7 +20,10 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
 use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion};
-use servers::error::{AuthSnafu, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult};
+use servers::error::{
+    AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult,
+};
+use servers::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use servers::query_handler::LogHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -39,6 +42,12 @@ impl LogHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::LogWrite)
             .context(AuthSnafu)?;
+
+        let log = self
+            .plugins
+            .get::<LogIngestInterceptorRef<ServerError>>()
+            .as_ref()
+            .pre_ingest(log, ctx.clone())?;
 
         self.handle_log_inserts(log, ctx).await
     }

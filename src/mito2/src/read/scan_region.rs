@@ -14,6 +14,7 @@
 
 //! Scans a region according to the scan request.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,6 +25,7 @@ use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datafusion::physical_plan::DisplayFormatType;
+use datafusion_expr::utils::expr_to_columns;
 use smallvec::SmallVec;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
@@ -295,6 +297,9 @@ impl ScanRegion {
             self.version.options.append_mode,
         );
 
+        // Remove field filters for LastNonNull mode after logging the request.
+        self.maybe_remove_field_filters();
+
         let inverted_index_applier = self.build_invereted_index_applier();
         let fulltext_index_applier = self.build_fulltext_index_applier();
         let predicate = Predicate::new(self.request.filters.clone());
@@ -321,7 +326,7 @@ impl ScanRegion {
         Ok(input)
     }
 
-    /// Build time range predicate from filters.
+    /// Build time range predicate from filters, also remove time filters from request.
     fn build_time_range_predicate(&mut self) -> TimestampRange {
         let time_index = self.version.metadata.time_index_column();
         let unit = time_index
@@ -335,6 +340,38 @@ impl ScanRegion {
             unit,
             &mut self.request.filters,
         )
+    }
+
+    /// Remove field filters if the merge mode is [MergeMode::LastNonNull].
+    fn maybe_remove_field_filters(&mut self) {
+        if self.version.options.merge_mode() != MergeMode::LastNonNull {
+            return;
+        }
+
+        // TODO(yingwen): We can ignore field filters only when there are multiple sources in the same time window.
+        let field_columns = self
+            .version
+            .metadata
+            .field_columns()
+            .map(|col| &col.column_schema.name)
+            .collect::<HashSet<_>>();
+        // Columns in the expr.
+        let mut columns = HashSet::new();
+
+        self.request.filters.retain(|expr| {
+            columns.clear();
+            // `expr_to_columns` won't return error.
+            if expr_to_columns(expr, &mut columns).is_err() {
+                return false;
+            }
+            for column in &columns {
+                if field_columns.contains(&column.name) {
+                    // This expr uses the field column.
+                    return false;
+                }
+            }
+            true
+        });
     }
 
     /// Use the latest schema to build the inveretd index applier.
@@ -901,10 +938,21 @@ impl ScanPartList {
         })
     }
 
+    /// Returns the number of files.
+    pub(crate) fn num_files(&self) -> usize {
+        self.0.as_ref().map_or(0, |parts| {
+            parts.iter().map(|part| part.file_ranges.len()).sum()
+        })
+    }
+
     /// Returns the number of file ranges.
     pub(crate) fn num_file_ranges(&self) -> usize {
         self.0.as_ref().map_or(0, |parts| {
-            parts.iter().map(|part| part.file_ranges.len()).sum()
+            parts
+                .iter()
+                .flat_map(|part| part.file_ranges.iter())
+                .map(|ranges| ranges.len())
+                .sum()
         })
     }
 }
@@ -947,9 +995,10 @@ impl StreamContext {
             Ok(inner) => match t {
                 DisplayFormatType::Default => write!(
                     f,
-                    "partition_count={} ({} memtable ranges, {} file ranges)",
+                    "partition_count={} ({} memtable ranges, {} file {} ranges)",
                     inner.0.len(),
                     inner.0.num_mem_ranges(),
+                    inner.0.num_files(),
                     inner.0.num_file_ranges()
                 )?,
                 DisplayFormatType::Verbose => write!(f, "{:?}", inner.0)?,

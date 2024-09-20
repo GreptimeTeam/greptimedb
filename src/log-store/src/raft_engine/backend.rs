@@ -264,9 +264,8 @@ impl KvBackend for RaftEngineBackend {
         let mut response = BatchGetResponse {
             kvs: Vec::with_capacity(req.keys.len()),
         };
-        let engine = self.engine.read().unwrap();
         for key in req.keys {
-            let Some(value) = engine.get(SYSTEM_NAMESPACE, &key) else {
+            let Some(value) = self.engine.read().unwrap().get(SYSTEM_NAMESPACE, &key) else {
                 continue;
             };
             response.kvs.push(KeyValue { key, value });

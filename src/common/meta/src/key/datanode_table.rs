@@ -167,7 +167,8 @@ impl DatanodeTableManager {
             req,
             DEFAULT_PAGE_SIZE,
             Arc::new(datanode_table_value_decoder),
-        );
+        )
+        .into_stream();
 
         Box::pin(stream)
     }

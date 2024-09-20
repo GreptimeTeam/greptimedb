@@ -15,10 +15,11 @@
 #![doc = include_str!("../../../../README.md")]
 
 use clap::{Parser, Subcommand};
-use cmd::error::Result;
+use cmd::error::{InitTlsProviderSnafu, Result};
 use cmd::options::GlobalOptions;
 use cmd::{cli, datanode, flownode, frontend, metasrv, standalone, App};
 use common_version::version;
+use servers::install_ring_crypto_provider;
 
 #[derive(Parser)]
 #[command(name = "greptime", author, version, long_version = version(), about)]
@@ -94,6 +95,7 @@ async fn main() -> Result<()> {
 
 async fn main_body() -> Result<()> {
     setup_human_panic();
+    install_ring_crypto_provider().map_err(|msg| InitTlsProviderSnafu { msg }.build())?;
     start(Command::parse()).await
 }
 

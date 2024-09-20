@@ -967,7 +967,7 @@ impl BinaryFunc {
             | Self::DivUInt32
             | Self::DivUInt64
             | Self::DivFloat32
-            | Self::DivFloat64 => arrow::compute::kernels::numeric::mul(&left, &right)
+            | Self::DivFloat64 => arrow::compute::kernels::numeric::div(&left, &right)
                 .context(ArrowSnafu { context: "div" })?,
 
             Self::ModInt16
@@ -1280,119 +1280,183 @@ where
     Ok(Value::from(left % right))
 }
 
-#[test]
-fn test_num_ops() {
-    let left = Value::from(10);
-    let right = Value::from(3);
-    let res = add::<i32>(left.clone(), right.clone()).unwrap();
-    assert_eq!(res, Value::from(13));
-    let res = sub::<i32>(left.clone(), right.clone()).unwrap();
-    assert_eq!(res, Value::from(7));
-    let res = mul::<i32>(left.clone(), right.clone()).unwrap();
-    assert_eq!(res, Value::from(30));
-    let res = div::<i32>(left.clone(), right.clone()).unwrap();
-    assert_eq!(res, Value::from(3));
-    let res = rem::<i32>(left, right).unwrap();
-    assert_eq!(res, Value::from(1));
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
 
-    let values = vec![Value::from(true), Value::from(false)];
-    let exprs = vec![ScalarExpr::Column(0), ScalarExpr::Column(1)];
-    let res = and(&values, &exprs).unwrap();
-    assert_eq!(res, Value::from(false));
-    let res = or(&values, &exprs).unwrap();
-    assert_eq!(res, Value::from(true));
-}
+    use common_time::Interval;
+    use datatypes::vectors::Vector;
+    use pretty_assertions::assert_eq;
 
-/// test if the binary function specialization works
-/// whether from direct type or from the expression that is literal
-#[test]
-fn test_binary_func_spec() {
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
-            &[
-                Some(ConcreteDataType::int32_datatype()),
-                Some(ConcreteDataType::int32_datatype())
-            ]
-        )
-        .unwrap(),
-        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
-    );
+    use super::*;
 
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
-            &[Some(ConcreteDataType::int32_datatype()), None]
-        )
-        .unwrap(),
-        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
-    );
+    #[test]
+    fn test_tumble_batch() {
+        let datetime_vector = DateTimeVector::from_vec(vec![1, 2, 10, 13, 14, 20, 25]);
+        let tumble_start = UnaryFunc::TumbleWindowFloor {
+            window_size: Interval::from_day_time(0, 10),
+            start_time: None,
+        };
+        let tumble_end = UnaryFunc::TumbleWindowCeiling {
+            window_size: Interval::from_day_time(0, 10),
+            start_time: None,
+        };
 
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
-            &[Some(ConcreteDataType::int32_datatype()), None]
-        )
-        .unwrap(),
-        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
-    );
+        let len = datetime_vector.len();
+        let batch = Batch::try_new(vec![Arc::new(datetime_vector)], len).unwrap();
+        let arg = ScalarExpr::Column(0);
 
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
-            &[Some(ConcreteDataType::int32_datatype()), None]
-        )
-        .unwrap(),
-        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
-    );
+        let start = tumble_start.eval_batch(&batch, &arg).unwrap();
+        let end = tumble_end.eval_batch(&batch, &arg).unwrap();
+        assert_eq!(
+            start.to_arrow_array().as_ref(),
+            TimestampMillisecondVector::from_vec(vec![0, 0, 10, 10, 10, 20, 20])
+                .to_arrow_array()
+                .as_ref()
+        );
 
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[
-                ScalarExpr::Literal(Value::from(1i32), ConcreteDataType::int32_datatype()),
-                ScalarExpr::Column(0)
-            ],
-            &[None, None]
-        )
-        .unwrap(),
-        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
-    );
+        assert_eq!(
+            end.to_arrow_array().as_ref(),
+            TimestampMillisecondVector::from_vec(vec![10, 10, 20, 20, 20, 30, 30])
+                .to_arrow_array()
+                .as_ref()
+        );
 
-    // this testcase make sure the specialization can find actual type from expression and fill in signature
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "equal",
-            &[
-                ScalarExpr::Literal(Value::from(1i32), ConcreteDataType::int32_datatype()),
-                ScalarExpr::Column(0)
-            ],
-            &[None, None]
-        )
-        .unwrap(),
-        (
-            BinaryFunc::Eq,
-            Signature {
-                input: smallvec![
-                    ConcreteDataType::int32_datatype(),
-                    ConcreteDataType::int32_datatype()
+        let ts_ms_vector = TimestampMillisecondVector::from_vec(vec![1, 2, 10, 13, 14, 20, 25]);
+        let batch = Batch::try_new(vec![Arc::new(ts_ms_vector)], len).unwrap();
+
+        let start = tumble_start.eval_batch(&batch, &arg).unwrap();
+        let end = tumble_end.eval_batch(&batch, &arg).unwrap();
+
+        assert_eq!(
+            start.to_arrow_array().as_ref(),
+            TimestampMillisecondVector::from_vec(vec![0, 0, 10, 10, 10, 20, 20])
+                .to_arrow_array()
+                .as_ref()
+        );
+
+        assert_eq!(
+            end.to_arrow_array().as_ref(),
+            TimestampMillisecondVector::from_vec(vec![10, 10, 20, 20, 20, 30, 30])
+                .to_arrow_array()
+                .as_ref()
+        );
+    }
+
+    #[test]
+    fn test_num_ops() {
+        let left = Value::from(10);
+        let right = Value::from(3);
+        let res = add::<i32>(left.clone(), right.clone()).unwrap();
+        assert_eq!(res, Value::from(13));
+        let res = sub::<i32>(left.clone(), right.clone()).unwrap();
+        assert_eq!(res, Value::from(7));
+        let res = mul::<i32>(left.clone(), right.clone()).unwrap();
+        assert_eq!(res, Value::from(30));
+        let res = div::<i32>(left.clone(), right.clone()).unwrap();
+        assert_eq!(res, Value::from(3));
+        let res = rem::<i32>(left, right).unwrap();
+        assert_eq!(res, Value::from(1));
+
+        let values = vec![Value::from(true), Value::from(false)];
+        let exprs = vec![ScalarExpr::Column(0), ScalarExpr::Column(1)];
+        let res = and(&values, &exprs).unwrap();
+        assert_eq!(res, Value::from(false));
+        let res = or(&values, &exprs).unwrap();
+        assert_eq!(res, Value::from(true));
+    }
+
+    /// test if the binary function specialization works
+    /// whether from direct type or from the expression that is literal
+    #[test]
+    fn test_binary_func_spec() {
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+                &[
+                    Some(ConcreteDataType::int32_datatype()),
+                    Some(ConcreteDataType::int32_datatype())
+                ]
+            )
+            .unwrap(),
+            (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
+        );
+
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+                &[Some(ConcreteDataType::int32_datatype()), None]
+            )
+            .unwrap(),
+            (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
+        );
+
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+                &[Some(ConcreteDataType::int32_datatype()), None]
+            )
+            .unwrap(),
+            (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
+        );
+
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+                &[Some(ConcreteDataType::int32_datatype()), None]
+            )
+            .unwrap(),
+            (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
+        );
+
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[
+                    ScalarExpr::Literal(Value::from(1i32), ConcreteDataType::int32_datatype()),
+                    ScalarExpr::Column(0)
                 ],
-                output: ConcreteDataType::boolean_datatype(),
-                generic_fn: GenericFn::Eq
-            }
-        )
-    );
+                &[None, None]
+            )
+            .unwrap(),
+            (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
+        );
 
-    matches!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
-            &[None, None]
-        ),
-        Err(Error::InvalidQuery { .. })
-    );
+        // this testcase make sure the specialization can find actual type from expression and fill in signature
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "equal",
+                &[
+                    ScalarExpr::Literal(Value::from(1i32), ConcreteDataType::int32_datatype()),
+                    ScalarExpr::Column(0)
+                ],
+                &[None, None]
+            )
+            .unwrap(),
+            (
+                BinaryFunc::Eq,
+                Signature {
+                    input: smallvec![
+                        ConcreteDataType::int32_datatype(),
+                        ConcreteDataType::int32_datatype()
+                    ],
+                    output: ConcreteDataType::boolean_datatype(),
+                    generic_fn: GenericFn::Eq
+                }
+            )
+        );
+
+        matches!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+                &[None, None]
+            ),
+            Err(Error::InvalidQuery { .. })
+        );
+    }
 }

@@ -15,14 +15,14 @@
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
-use axum::extract::{FromRequestParts, RawBody, State};
+use axum::extract::{FromRequestParts, State};
 use axum::http::header::HeaderValue;
 use axum::http::request::Parts;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::{async_trait, Extension};
+use bytes::Bytes;
 use common_telemetry::tracing;
-use hyper::Body;
 use opentelemetry_proto::tonic::collector::logs::v1::{
     ExportLogsServiceRequest, ExportLogsServiceResponse,
 };
@@ -46,7 +46,8 @@ use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineWay};
 pub async fn metrics(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(mut query_ctx): Extension<QueryContext>,
-    RawBody(body): RawBody,
+
+    bytes: Bytes,
 ) -> Result<OtlpResponse<ExportMetricsServiceResponse>> {
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
@@ -54,7 +55,8 @@ pub async fn metrics(
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
-    let request = parse_metrics_body(body).await?;
+    let request =
+        ExportMetricsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
 
     handler
         .metrics(request, query_ctx)
@@ -67,21 +69,12 @@ pub async fn metrics(
         })
 }
 
-async fn parse_metrics_body(body: Body) -> Result<ExportMetricsServiceRequest> {
-    hyper::body::to_bytes(body)
-        .await
-        .context(error::HyperSnafu)
-        .and_then(|buf| {
-            ExportMetricsServiceRequest::decode(&buf[..]).context(error::DecodeOtlpRequestSnafu)
-        })
-}
-
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "traces"))]
 pub async fn traces(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(mut query_ctx): Extension<QueryContext>,
-    RawBody(body): RawBody,
+    bytes: Bytes,
 ) -> Result<OtlpResponse<ExportTraceServiceResponse>> {
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
@@ -89,7 +82,8 @@ pub async fn traces(
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
-    let request = parse_traces_body(body).await?;
+    let request =
+        ExportTraceServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
     handler
         .traces(request, query_ctx)
         .await
@@ -98,15 +92,6 @@ pub async fn traces(
                 partial_success: None,
             },
             write_cost: o.meta.cost,
-        })
-}
-
-async fn parse_traces_body(body: Body) -> Result<ExportTraceServiceRequest> {
-    hyper::body::to_bytes(body)
-        .await
-        .context(error::HyperSnafu)
-        .and_then(|buf| {
-            ExportTraceServiceRequest::decode(&buf[..]).context(error::DecodeOtlpRequestSnafu)
         })
 }
 
@@ -185,7 +170,7 @@ pub async fn logs(
     Extension(mut query_ctx): Extension<QueryContext>,
     pipeline_info: PipelineInfo,
     table_info: TableInfo,
-    RawBody(body): RawBody,
+    bytes: Bytes,
 ) -> Result<OtlpResponse<ExportLogsServiceResponse>> {
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
@@ -193,7 +178,7 @@ pub async fn logs(
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
-    let request = parse_logs_body(body).await?;
+    let request = ExportLogsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
 
     let pipeline_way;
     if pipeline_info.pipeline_name == "identity" {
@@ -229,15 +214,6 @@ pub async fn logs(
                 partial_success: None,
             },
             write_cost: o.meta.cost,
-        })
-}
-
-async fn parse_logs_body(body: Body) -> Result<ExportLogsServiceRequest> {
-    hyper::body::to_bytes(body)
-        .await
-        .context(error::HyperSnafu)
-        .and_then(|buf| {
-            ExportLogsServiceRequest::decode(&buf[..]).context(error::DecodeOtlpRequestSnafu)
         })
 }
 

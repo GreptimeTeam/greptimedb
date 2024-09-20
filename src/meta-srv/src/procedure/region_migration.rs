@@ -232,7 +232,7 @@ impl Context {
                 .table_metadata_manager
                 .table_route_manager()
                 .table_route_storage()
-                .get_raw(table_id)
+                .get_with_raw_bytes(table_id)
                 .await
                 .context(error::TableMetadataManagerSnafu)
                 .map_err(BoxedError::new)

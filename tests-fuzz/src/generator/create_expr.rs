@@ -243,12 +243,20 @@ pub struct CreatePhysicalTableExprGenerator<R: Rng + 'static> {
     name_generator: Box<dyn Random<Ident, R>>,
     #[builder(default = "false")]
     if_not_exists: bool,
+    #[builder(default, setter(into))]
+    with_clause: HashMap<String, String>,
 }
 
 impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExprGenerator<R> {
     type Error = Error;
 
     fn generate(&self, rng: &mut R) -> Result<CreateTableExpr> {
+        let mut options = HashMap::with_capacity(self.with_clause.len() + 1);
+        options.insert("physical_metric_table".to_string(), Value::from(""));
+        for (key, value) in &self.with_clause {
+            options.insert(key.to_string(), Value::from(value.to_string()));
+        }
+
         Ok(CreateTableExpr {
             table_name: self.name_generator.gen(rng),
             columns: vec![
@@ -266,7 +274,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExpr
             if_not_exists: self.if_not_exists,
             partition: None,
             engine: "metric".to_string(),
-            options: [("physical_metric_table".to_string(), "".into())].into(),
+            options,
             primary_keys: vec![],
         })
     }

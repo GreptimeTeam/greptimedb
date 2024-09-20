@@ -398,13 +398,6 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to get param types"))]
-    GetPreparedStmtParams {
-        source: query::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("{}", reason))]
     UnexpectedResult {
         reason: String,
@@ -448,13 +441,6 @@ pub enum Error {
     DataFrame {
         #[snafu(source)]
         error: datafusion::error::DataFusionError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to replace params with values in prepared statement"))]
-    ReplacePreparedStmtParams {
-        source: query::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -643,9 +629,7 @@ impl ErrorExt for Error {
 
             InvalidUtf8Value { .. } => StatusCode::InvalidArguments,
 
-            ReplacePreparedStmtParams { source, .. }
-            | GetPreparedStmtParams { source, .. }
-            | ParsePromQL { source, .. } => source.status_code(),
+            ParsePromQL { source, .. } => source.status_code(),
             Other { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,

@@ -13,9 +13,9 @@
 // limitations under the License.
 
 pub mod bit_vec;
-pub mod buffer;
 pub mod bytes;
 pub mod plugins;
+pub mod range_read;
 #[allow(clippy::all)]
 pub mod readable_size;
 pub mod secrets;

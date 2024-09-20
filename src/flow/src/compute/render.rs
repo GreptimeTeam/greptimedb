@@ -49,6 +49,14 @@ pub struct Context<'referred, 'df> {
     ///
     /// TODO(discord9): consider if use Vec<(LocalId, CollectionBundle)> instead
     pub local_scope: Vec<BTreeMap<LocalId, CollectionBundle>>,
+    /// a list of all collections being used in the operator
+    ///
+    /// TODO(discord9): remove extra clone by counting usage and remove it on last usage?
+    pub input_collection_batch: BTreeMap<GlobalId, CollectionBundle<Batch>>,
+    /// used by `Get`/`Let` Plan for getting/setting local variables
+    ///
+    /// TODO(discord9): consider if use Vec<(LocalId, CollectionBundle)> instead
+    pub local_scope_batch: Vec<BTreeMap<LocalId, CollectionBundle<Batch>>>,
     // Collect all errors in this operator's evaluation
     pub err_collector: ErrCollector,
 }
@@ -59,6 +67,19 @@ impl<'referred, 'df> Drop for Context<'referred, 'df> {
             .into_values()
             .chain(
                 std::mem::take(&mut self.local_scope)
+                    .into_iter()
+                    .flat_map(|v| v.into_iter())
+                    .map(|(_k, v)| v),
+            )
+        {
+            bundle.collection.into_inner().drop(self.df);
+            drop(bundle.arranged);
+        }
+
+        for bundle in std::mem::take(&mut self.input_collection_batch)
+            .into_values()
+            .chain(
+                std::mem::take(&mut self.local_scope_batch)
                     .into_iter()
                     .flat_map(|v| v.into_iter())
                     .map(|(_k, v)| v),
@@ -84,6 +105,19 @@ impl<'referred, 'df> Context<'referred, 'df> {
             self.local_scope.push(first);
         }
     }
+
+    pub fn insert_global_batch(&mut self, id: GlobalId, collection: CollectionBundle<Batch>) {
+        self.input_collection_batch.insert(id, collection);
+    }
+
+    pub fn insert_local_batch(&mut self, id: LocalId, collection: CollectionBundle<Batch>) {
+        if let Some(last) = self.local_scope_batch.last_mut() {
+            last.insert(id, collection);
+        } else {
+            let first = BTreeMap::from([(id, collection)]);
+            self.local_scope_batch.push(first);
+        }
+    }
 }
 
 impl<'referred, 'df> Context<'referred, 'df> {
@@ -91,14 +125,8 @@ impl<'referred, 'df> Context<'referred, 'df> {
     pub fn render_plan_batch(&mut self, plan: TypedPlan) -> Result<CollectionBundle<Batch>, Error> {
         match plan.plan {
             Plan::Constant { rows } => Ok(self.render_constant_batch(rows)),
-            Plan::Get { .. } => NotImplementedSnafu {
-                reason: "Get is still WIP in batchmode",
-            }
-            .fail(),
-            Plan::Let { .. } => NotImplementedSnafu {
-                reason: "Let is still WIP in batchmode",
-            }
-            .fail(),
+            Plan::Get { id } => self.get_batch_by_id(id),
+            Plan::Let { id, value, body } => self.eval_batch_let(id, value, body),
             Plan::Mfp { input, mfp } => self.render_mfp_batch(input, mfp),
             Plan::Reduce {
                 input,
@@ -225,6 +253,32 @@ impl<'referred, 'df> Context<'referred, 'df> {
         CollectionBundle::from_collection(Collection::from_port(recv_port))
     }
 
+    pub fn get_batch_by_id(&mut self, id: expr::Id) -> Result<CollectionBundle<Batch>, Error> {
+        let ret = match id {
+            expr::Id::Local(local) => {
+                let bundle = self
+                    .local_scope_batch
+                    .iter()
+                    .rev()
+                    .find_map(|scope| scope.get(&local))
+                    .with_context(|| InvalidQuerySnafu {
+                        reason: format!("Local variable {:?} not found", local),
+                    })?;
+                bundle.clone(self.df)
+            }
+            expr::Id::Global(id) => {
+                let bundle =
+                    self.input_collection_batch
+                        .get(&id)
+                        .with_context(|| InvalidQuerySnafu {
+                            reason: format!("Collection {:?} not found", id),
+                        })?;
+                bundle.clone(self.df)
+            }
+        };
+        Ok(ret)
+    }
+
     pub fn get_by_id(&mut self, id: expr::Id) -> Result<CollectionBundle, Error> {
         let ret = match id {
             expr::Id::Local(local) => {
@@ -252,6 +306,21 @@ impl<'referred, 'df> Context<'referred, 'df> {
     }
 
     /// Eval `Let` operator, useful for assigning a value to a local variable
+    pub fn eval_batch_let(
+        &mut self,
+        id: LocalId,
+        value: Box<TypedPlan>,
+        body: Box<TypedPlan>,
+    ) -> Result<CollectionBundle<Batch>, Error> {
+        let value = self.render_plan_batch(*value)?;
+
+        self.local_scope_batch.push(Default::default());
+        self.insert_local_batch(id, value);
+        let ret = self.render_plan_batch(*body)?;
+        Ok(ret)
+    }
+
+    /// Eval `Let` operator, useful for assigning a value to a local variable
     pub fn eval_let(
         &mut self,
         id: LocalId,
@@ -268,11 +337,11 @@ impl<'referred, 'df> Context<'referred, 'df> {
 }
 
 /// The Common argument for all `Subgraph` in the render process
-struct SubgraphArg<'a> {
+struct SubgraphArg<'a, T = Toff> {
     now: repr::Timestamp,
     err_collector: &'a ErrCollector,
     scheduler: &'a Scheduler,
-    send: &'a PortCtx<SEND, Toff>,
+    send: &'a PortCtx<SEND, T>,
 }
 
 #[cfg(test)]
@@ -345,6 +414,8 @@ mod test {
             compute_state: state,
             input_collection: BTreeMap::new(),
             local_scope: Default::default(),
+            input_collection_batch: BTreeMap::new(),
+            local_scope_batch: Default::default(),
             err_collector,
         }
     }
