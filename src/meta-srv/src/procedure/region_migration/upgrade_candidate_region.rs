@@ -18,7 +18,7 @@ use std::time::Duration;
 use api::v1::meta::MailboxMessage;
 use common_meta::instruction::{Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply};
 use common_procedure::Status;
-use common_telemetry::warn;
+use common_telemetry::error;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::time::{sleep, Instant};
@@ -196,10 +196,14 @@ impl UpgradeCandidateRegion {
             if let Err(err) = self.upgrade_region(ctx).await {
                 retry += 1;
                 ctx.update_operations_elapsed(timer);
-                if err.is_retryable() && retry < self.optimistic_retry {
-                    warn!("Failed to upgrade region, error: {err:?}, retry later");
+                if matches!(err, error::Error::ExceededDeadline { .. }) {
+                    error!("Failed to upgrade region, exceeded deadline");
+                    break;
+                } else if err.is_retryable() && retry < self.optimistic_retry {
+                    error!("Failed to upgrade region, error: {err:?}, retry later");
                     sleep(self.retry_initial_interval).await;
                 } else {
+                    error!("Failed to upgrade region, error: {err:?}");
                     break;
                 }
             } else {
