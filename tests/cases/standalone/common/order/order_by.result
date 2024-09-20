@@ -286,6 +286,7 @@ select tag from t where num > 6 order by ts;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 explain analyze select tag from t where num > 6 order by ts desc limit 2;
 
 +-+-+-+
@@ -302,7 +303,7 @@ explain analyze select tag from t where num > 6 order by ts desc limit 2;
 |_|_|_ProjectionExec: expr=[tag@0 as tag, ts@1 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: num@2 > 6 REDACTED
-|_|_|_RepartitionExec: partitioning=RoundRobinBatch(32), input_partitions=1 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 | 1_| 1_|_GlobalLimitExec: skip=0, fetch=2 REDACTED
@@ -311,7 +312,7 @@ explain analyze select tag from t where num > 6 order by ts desc limit 2;
 |_|_|_ProjectionExec: expr=[tag@0 as tag, ts@1 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: num@2 > 6 REDACTED
-|_|_|_RepartitionExec: partitioning=RoundRobinBatch(32), input_partitions=1 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
