@@ -22,7 +22,7 @@ use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 /// Index to access a row group.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct RowGroupIndex {
     /// Index to the file.
     pub(crate) file_index: usize,
@@ -37,12 +37,12 @@ pub(crate) struct RangeMeta {
     /// The time range of the range.
     pub(crate) time_range: FileTimeRange,
     /// Indices to memtables.
-    mem_indices: SmallVec<[usize; 2]>,
+    pub(crate) mem_indices: SmallVec<[usize; 2]>,
     /// Indices to files. It contains the indices to all the files in `row_group_indices`.
     file_indices: SmallVec<[usize; 4]>,
     /// Indices to file row groups that this range scans.
     /// An empty vec indicates all row groups. (Some file metas don't have row group number).
-    row_group_indices: SmallVec<[RowGroupIndex; 2]>,
+    pub(crate) row_group_indices: SmallVec<[RowGroupIndex; 2]>,
     /// Estimated number of rows in the range. This can be 0 if the statistics are not available.
     pub(crate) num_rows: usize,
 }

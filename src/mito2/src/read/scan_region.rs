@@ -973,9 +973,10 @@ pub(crate) struct StreamContext {
     /// The mutex is used to ensure the parts are only built once.
     pub(crate) parts: Mutex<(ScanPartList, Duration)>,
     /// Metadata for partition ranges.
-    ranges: Vec<RangeMeta>,
+    pub(crate) ranges: Vec<RangeMeta>,
     /// Lists of range builders.
     range_builders: RangeBuilderList,
+    // FIXME(yingwen): Support mem range.
 
     // Metrics:
     /// The start time of the query.
@@ -1101,6 +1102,7 @@ impl RangeBuilderList {
     }
 }
 
+// FIXME(yingwen): Support range builder for mem.
 /// Builder to create file ranges.
 #[derive(Default)]
 struct RangeBuilder {

@@ -125,6 +125,106 @@ impl UnorderedScan {
 
         Ok(Some(record_batch))
     }
+
+    fn scan_part(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
+        let mut metrics = ScannerMetrics {
+            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
+            ..Default::default()
+        };
+        let stream_ctx = self.stream_ctx.clone();
+        let ranges_opt = self.properties.partitions.get(partition).cloned();
+
+        let stream = try_stream! {
+            let first_poll = stream_ctx.query_start.elapsed();
+            let Some(part_ranges) = ranges_opt else {
+                return;
+            };
+
+            let input = &stream_ctx.input;
+            let mapper = &stream_ctx.input.mapper;
+            let cache = stream_ctx.input.cache_manager.as_deref();
+            // TODO(yingwen): Only count ranges read.
+            let num_ranges = part_ranges.len();
+            // Scans each part.
+            for part_range in part_ranges {
+                // Gets range meta.
+                let range_meta = &stream_ctx.ranges[part_range.identifier];
+                // Scans memtables first.
+                for mem_index in &range_meta.mem_indices {
+                    let build_reader_start = Instant::now();
+                    let mem = &input.memtables[*mem_index];
+                    let mem_ranges = mem.ranges(Some(mapper.column_ids()), input.predicate.clone());
+                    assert!(mem_ranges.len() == 1);
+                    let iter = mem_ranges[0]
+                        .build_iter()
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                    metrics.build_reader_cost = build_reader_start.elapsed();
+
+                    let mut source = Source::Iter(iter);
+                    while let Some(batch) =
+                        Self::fetch_from_source(&mut source, mapper, cache, None, &mut metrics).await?
+                    {
+                        metrics.num_batches += 1;
+                        metrics.num_rows += batch.num_rows();
+                        let yield_start = Instant::now();
+                        yield batch;
+                        metrics.yield_cost += yield_start.elapsed();
+                    }
+                }
+
+                // Scans row groups.
+                let mut reader_metrics = ReaderMetrics::default();
+                for index in &range_meta.row_group_indices {
+                    let Some(file_range) = stream_ctx
+                        .build_file_range(*index, &mut reader_metrics)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?
+                    else {
+                        continue;
+                    };
+
+                    let build_reader_start = Instant::now();
+                    let reader = file_range
+                        .reader(None)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                    metrics.build_reader_cost += build_reader_start.elapsed();
+                    let compat_batch = file_range.compat_batch();
+                    let mut source = Source::PruneReader(reader);
+                    while let Some(batch) =
+                        Self::fetch_from_source(&mut source, mapper, cache, compat_batch, &mut metrics)
+                            .await?
+                    {
+                        metrics.num_batches += 1;
+                        metrics.num_rows += batch.num_rows();
+                        let yield_start = Instant::now();
+                        yield batch;
+                        metrics.yield_cost += yield_start.elapsed();
+                    }
+                    if let Source::PruneReader(mut reader) = source {
+                        reader_metrics.merge_from(reader.metrics());
+                    }
+                }
+
+                reader_metrics.observe_rows("unordered_scan_files");
+                metrics.total_cost = stream_ctx.query_start.elapsed();
+                metrics.observe_metrics_on_finish();
+                debug!(
+                    "Unordered scan partition {} finished, region_id: {}, metrics: {:?}, reader_metrics: {:?}, first_poll: {:?}, ranges: {}",
+                    partition, mapper.metadata().region_id, metrics, reader_metrics, first_poll, num_ranges,
+                );
+            }
+        };
+        let stream = Box::pin(RecordBatchStreamWrapper::new(
+            self.stream_ctx.input.mapper.output_schema(),
+            Box::pin(stream),
+        ));
+
+        Ok(stream)
+    }
 }
 
 impl RegionScanner for UnorderedScan {
@@ -142,89 +242,7 @@ impl RegionScanner for UnorderedScan {
     }
 
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
-        let mut metrics = ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
-            ..Default::default()
-        };
-        let stream_ctx = self.stream_ctx.clone();
-        let parallelism = self.properties.num_partitions();
-        let stream = try_stream! {
-            let first_poll = stream_ctx.query_start.elapsed();
-            let part = {
-                let mut parts = stream_ctx.parts.lock().await;
-                maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics, parallelism)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?;
-                // Clone the part and releases the lock.
-                // TODO(yingwen): We might wrap the part in an Arc in the future if cloning is too expensive.
-                let Some(part) = parts.0.get_part(partition).cloned() else {
-                    return;
-                };
-                part
-            };
-
-            let build_reader_start = Instant::now();
-            let mapper = &stream_ctx.input.mapper;
-            let memtable_sources = part
-                .memtable_ranges
-                .iter()
-                .map(|mem| {
-                    let iter = mem.build_iter()?;
-                    Ok(Source::Iter(iter))
-                })
-                .collect::<Result<Vec<_>>>()
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            metrics.build_reader_cost = build_reader_start.elapsed();
-
-            let query_start = stream_ctx.query_start;
-            let cache = stream_ctx.input.cache_manager.as_deref();
-            // Scans memtables first.
-            for mut source in memtable_sources {
-                while let Some(batch) = Self::fetch_from_source(&mut source, mapper, cache, None, &mut metrics).await? {
-                    metrics.num_batches += 1;
-                    metrics.num_rows += batch.num_rows();
-                    let yield_start = Instant::now();
-                    yield batch;
-                    metrics.yield_cost += yield_start.elapsed();
-                }
-            }
-            // Then scans file ranges.
-            let mut reader_metrics = ReaderMetrics::default();
-            // Safety: UnorderedDistributor::build_parts() ensures this.
-            for file_range in &part.file_ranges[0] {
-                let build_reader_start = Instant::now();
-                let reader = file_range.reader(None).await.map_err(BoxedError::new).context(ExternalSnafu)?;
-                metrics.build_reader_cost += build_reader_start.elapsed();
-                let compat_batch = file_range.compat_batch();
-                let mut source = Source::PruneReader(reader);
-                while let Some(batch) = Self::fetch_from_source(&mut source, mapper, cache, compat_batch, &mut metrics).await? {
-                    metrics.num_batches += 1;
-                    metrics.num_rows += batch.num_rows();
-                    let yield_start = Instant::now();
-                    yield batch;
-                    metrics.yield_cost += yield_start.elapsed();
-                }
-                if let Source::PruneReader(mut reader) = source {
-                    reader_metrics.merge_from(reader.metrics());
-                }
-            }
-
-            reader_metrics.observe_rows("unordered_scan_files");
-            metrics.total_cost = query_start.elapsed();
-            metrics.observe_metrics_on_finish();
-            debug!(
-                "Unordered scan partition {} finished, region_id: {}, metrics: {:?}, reader_metrics: {:?}, first_poll: {:?}, ranges: {}",
-                partition, mapper.metadata().region_id, metrics, reader_metrics, first_poll, part.file_ranges[0].len(),
-            );
-        };
-        let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.stream_ctx.input.mapper.output_schema(),
-            Box::pin(stream),
-        ));
-
-        Ok(stream)
+        self.scan_part(partition)
     }
 
     fn has_predicate(&self) -> bool {
