@@ -68,15 +68,14 @@ impl State for DowngradeLeaderRegion {
             }
             Err(err) => {
                 error!(err; "Occurs non-retryable error");
+                if let Some(deadline) = ctx.volatile_ctx.leader_region_lease_deadline.as_ref() {
+                    info!(
+                        "Running into the downgrade leader slow path, sleep until {:?}",
+                        deadline
+                    );
+                    tokio::time::sleep_until(*deadline).await;
+                }
             }
-        }
-
-        if let Some(deadline) = ctx.volatile_ctx.leader_region_lease_deadline.as_ref() {
-            info!(
-                "Running into the downgrade leader slow path, sleep until {:?}",
-                deadline
-            );
-            tokio::time::sleep_until(*deadline).await;
         }
 
         Ok((
