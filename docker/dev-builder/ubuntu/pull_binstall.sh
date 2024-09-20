@@ -3,7 +3,7 @@
 set -euxo pipefail
 
 cd "$(mktemp -d)"
-# Fix version to v1.10.5, this is different than the latest version in original install script in
+# Fix version to v1.6.6, this is different than the latest version in original install script in
 # https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh
 base_url="https://github.com/cargo-bins/cargo-binstall/releases/download/v1.6.6/cargo-binstall-"
 
