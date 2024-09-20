@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::meta::ProcedureDetailResponse;
 use common_telemetry::tracing_context::W3cTrace;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
@@ -82,6 +83,8 @@ pub trait ProcedureExecutor: Send + Sync {
         ctx: &ExecutorContext,
         pid: &str,
     ) -> Result<ProcedureStateResponse>;
+
+    async fn list_procedures(&self, ctx: &ExecutorContext) -> Result<ProcedureDetailResponse>;
 }
 
 pub type ProcedureExecutorRef = Arc<dyn ProcedureExecutor>;

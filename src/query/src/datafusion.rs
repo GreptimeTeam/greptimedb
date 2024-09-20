@@ -36,7 +36,7 @@ use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
-use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
+use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WriteOp};
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
@@ -50,14 +50,13 @@ use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::error::{
-    CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu, MissingTableMutationHandlerSnafu,
-    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
-    TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
+    CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
+    MissingTableMutationHandlerSnafu, MissingTimestampColumnSnafu, QueryExecutionSnafu, Result,
+    TableMutationSnafu, TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
-use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
 use crate::{metrics, QueryEngine};
@@ -119,7 +118,7 @@ impl DatafusionQueryEngine {
         let table = self.find_table(&table_name, &query_ctx).await?;
 
         let output = self
-            .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()), query_ctx.clone())
+            .exec_query_plan((*dml.input).clone(), query_ctx.clone())
             .await?;
         let mut stream = match output.data {
             OutputData::RecordBatches(batches) => batches.as_stream(),
@@ -265,52 +264,48 @@ impl DatafusionQueryEngine {
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
-        match logical_plan {
-            LogicalPlan::DfPlan(df_plan) => {
-                let state = ctx.state();
+        let state = ctx.state();
 
-                // special handle EXPLAIN plan
-                if matches!(df_plan, DfLogicalPlan::Explain(_)) {
-                    return state
-                        .create_physical_plan(df_plan)
-                        .await
-                        .context(error::DatafusionSnafu)
-                        .map_err(BoxedError::new)
-                        .context(QueryExecutionSnafu);
-                }
-
-                // analyze first
-                let analyzed_plan = state
-                    .analyzer()
-                    .execute_and_check(df_plan.clone(), state.config_options(), |_, _| {})
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
-                // skip optimize for MergeScan
-                let optimized_plan = if let DfLogicalPlan::Extension(ext) = &analyzed_plan
-                    && ext.node.name() == MergeScanLogicalPlan::name()
-                {
-                    analyzed_plan.clone()
-                } else {
-                    state
-                        .optimizer()
-                        .optimize(analyzed_plan, state, |_, _| {})
-                        .context(error::DatafusionSnafu)
-                        .map_err(BoxedError::new)
-                        .context(QueryExecutionSnafu)?
-                };
-
-                let physical_plan = state
-                    .query_planner()
-                    .create_physical_plan(&optimized_plan, state)
-                    .await
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
-
-                Ok(physical_plan)
-            }
+        // special handle EXPLAIN plan
+        if matches!(logical_plan, DfLogicalPlan::Explain(_)) {
+            return state
+                .create_physical_plan(logical_plan)
+                .await
+                .context(error::DatafusionSnafu)
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu);
         }
+
+        // analyze first
+        let analyzed_plan = state
+            .analyzer()
+            .execute_and_check(logical_plan.clone(), state.config_options(), |_, _| {})
+            .context(error::DatafusionSnafu)
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)?;
+        // skip optimize for MergeScan
+        let optimized_plan = if let DfLogicalPlan::Extension(ext) = &analyzed_plan
+            && ext.node.name() == MergeScanLogicalPlan::name()
+        {
+            analyzed_plan.clone()
+        } else {
+            state
+                .optimizer()
+                .optimize(analyzed_plan, state, |_, _| {})
+                .context(error::DatafusionSnafu)
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?
+        };
+
+        let physical_plan = state
+            .query_planner()
+            .create_physical_plan(&optimized_plan, state)
+            .await
+            .context(error::DatafusionSnafu)
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)?;
+
+        Ok(physical_plan)
     }
 
     #[tracing::instrument(skip_all)]
@@ -320,28 +315,25 @@ impl DatafusionQueryEngine {
         plan: &LogicalPlan,
     ) -> Result<LogicalPlan> {
         let _timer = metrics::OPTIMIZE_LOGICAL_ELAPSED.start_timer();
-        match plan {
-            LogicalPlan::DfPlan(df_plan) => {
-                // Optimized by extension rules
-                let optimized_plan = self
-                    .state
-                    .optimize_by_extension_rules(df_plan.clone(), context)
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
 
-                // Optimized by datafusion optimizer
-                let optimized_plan = self
-                    .state
-                    .session_state()
-                    .optimize(&optimized_plan)
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
+        // Optimized by extension rules
+        let optimized_plan = self
+            .state
+            .optimize_by_extension_rules(plan.clone(), context)
+            .context(error::DatafusionSnafu)
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)?;
 
-                Ok(LogicalPlan::DfPlan(optimized_plan))
-            }
-        }
+        // Optimized by datafusion optimizer
+        let optimized_plan = self
+            .state
+            .session_state()
+            .optimize(&optimized_plan)
+            .context(error::DatafusionSnafu)
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)?;
+
+        Ok(optimized_plan)
     }
 
     #[tracing::instrument(skip_all)]
@@ -398,18 +390,34 @@ impl QueryEngine for DatafusionQueryEngine {
         query_ctx: QueryContextRef,
     ) -> Result<DescribeResult> {
         let ctx = self.engine_context(query_ctx);
-        let optimised_plan = self.optimize(&ctx, &plan)?;
-        Ok(DescribeResult {
-            schema: optimised_plan.schema()?,
-            logical_plan: optimised_plan,
-        })
+        if let Ok(optimised_plan) = self.optimize(&ctx, &plan) {
+            let schema = optimised_plan
+                .schema()
+                .clone()
+                .try_into()
+                .context(ConvertSchemaSnafu)?;
+            Ok(DescribeResult {
+                schema,
+                logical_plan: optimised_plan,
+            })
+        } else {
+            // Table's like those in information_schema cannot be optimized when
+            // it contains parameters. So we fallback to original plans.
+            let schema = plan
+                .schema()
+                .clone()
+                .try_into()
+                .context(ConvertSchemaSnafu)?;
+            Ok(DescribeResult {
+                schema,
+                logical_plan: plan,
+            })
+        }
     }
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         match plan {
-            LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => {
-                self.exec_dml_statement(dml, query_ctx).await
-            }
+            LogicalPlan::Dml(dml) => self.exec_dml_statement(dml, query_ctx).await,
             _ => self.exec_query_plan(plan, query_ctx).await,
         }
     }
@@ -569,10 +577,10 @@ mod tests {
         // TODO(sunng87): do not rely on to_string for compare
         assert_eq!(
             format!("{plan:?}"),
-            r#"DfPlan(Limit: skip=0, fetch=20
+            r#"Limit: skip=0, fetch=20
   Projection: SUM(numbers.number)
     Aggregate: groupBy=[[]], aggr=[[SUM(numbers.number)]]
-      TableScan: numbers)"#
+      TableScan: numbers"#
         );
     }
 

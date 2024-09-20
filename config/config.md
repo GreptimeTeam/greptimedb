@@ -14,7 +14,7 @@
 | --- | -----| ------- | ----------- |
 | `mode` | String | `standalone` | The running mode of the datanode. It can be `standalone` or `distributed`. |
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
-| `default_timezone` | String | `None` | The default timezone of the server. |
+| `default_timezone` | String | Unset | The default timezone of the server. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
 | `runtime` | -- | -- | The runtime options. |
@@ -29,8 +29,8 @@
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
-| `grpc.tls.cert_path` | String | `None` | Certificate file path. |
-| `grpc.tls.key_path` | String | `None` | Private key file path. |
+| `grpc.tls.cert_path` | String | Unset | Certificate file path. |
+| `grpc.tls.key_path` | String | Unset | Private key file path. |
 | `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
 | `mysql` | -- | -- | MySQL server options. |
 | `mysql.enable` | Bool | `true` | Whether to enable. |
@@ -38,8 +38,8 @@
 | `mysql.runtime_size` | Integer | `2` | The number of server worker threads. |
 | `mysql.tls` | -- | -- | -- |
 | `mysql.tls.mode` | String | `disable` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- `disable` (default value)<br/>- `prefer`<br/>- `require`<br/>- `verify-ca`<br/>- `verify-full` |
-| `mysql.tls.cert_path` | String | `None` | Certificate file path. |
-| `mysql.tls.key_path` | String | `None` | Private key file path. |
+| `mysql.tls.cert_path` | String | Unset | Certificate file path. |
+| `mysql.tls.key_path` | String | Unset | Private key file path. |
 | `mysql.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload |
 | `postgres` | -- | -- | PostgresSQL server options. |
 | `postgres.enable` | Bool | `true` | Whether to enable |
@@ -47,8 +47,8 @@
 | `postgres.runtime_size` | Integer | `2` | The number of server worker threads. |
 | `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql.tls` section. |
 | `postgres.tls.mode` | String | `disable` | TLS mode. |
-| `postgres.tls.cert_path` | String | `None` | Certificate file path. |
-| `postgres.tls.key_path` | String | `None` | Private key file path. |
+| `postgres.tls.cert_path` | String | Unset | Certificate file path. |
+| `postgres.tls.key_path` | String | Unset | Private key file path. |
 | `postgres.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload |
 | `opentsdb` | -- | -- | OpenTSDB protocol options. |
 | `opentsdb.enable` | Bool | `true` | Whether to enable OpenTSDB put in HTTP API. |
@@ -59,7 +59,7 @@
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
 | `wal` | -- | -- | The WAL options. |
 | `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka. |
-| `wal.dir` | String | `None` | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
+| `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.file_size` | String | `256MB` | The size of the WAL segment file.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.purge_threshold` | String | `4GB` | The threshold of the WAL size to trigger a flush.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.purge_interval` | String | `10m` | The interval to trigger a flush.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -91,22 +91,22 @@
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `/tmp/greptimedb/` | The working home directory. |
 | `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS. |
-| `storage.cache_path` | String | `None` | Cache configuration for object storage such as 'S3' etc.<br/>The local file cache directory. |
-| `storage.cache_capacity` | String | `None` | The local file cache capacity in bytes. |
-| `storage.bucket` | String | `None` | The S3 bucket name.<br/>**It's only used when the storage type is `S3`, `Oss` and `Gcs`**. |
-| `storage.root` | String | `None` | The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.<br/>**It's only used when the storage type is `S3`, `Oss` and `Azblob`**. |
-| `storage.access_key_id` | String | `None` | The access key id of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3` and `Oss`**. |
-| `storage.secret_access_key` | String | `None` | The secret access key of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3`**. |
-| `storage.access_key_secret` | String | `None` | The secret access key of the aliyun account.<br/>**It's only used when the storage type is `Oss`**. |
-| `storage.account_name` | String | `None` | The account key of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
-| `storage.account_key` | String | `None` | The account key of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
-| `storage.scope` | String | `None` | The scope of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
-| `storage.credential_path` | String | `None` | The credential path of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
-| `storage.credential` | String | `None` | The credential of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
-| `storage.container` | String | `None` | The container of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
-| `storage.sas_token` | String | `None` | The sas token of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
-| `storage.endpoint` | String | `None` | The endpoint of the S3 service.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**. |
-| `storage.region` | String | `None` | The region of the S3 service.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**. |
+| `storage.cache_path` | String | Unset | Cache configuration for object storage such as 'S3' etc.<br/>The local file cache directory. |
+| `storage.cache_capacity` | String | Unset | The local file cache capacity in bytes. |
+| `storage.bucket` | String | Unset | The S3 bucket name.<br/>**It's only used when the storage type is `S3`, `Oss` and `Gcs`**. |
+| `storage.root` | String | Unset | The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.<br/>**It's only used when the storage type is `S3`, `Oss` and `Azblob`**. |
+| `storage.access_key_id` | String | Unset | The access key id of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3` and `Oss`**. |
+| `storage.secret_access_key` | String | Unset | The secret access key of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3`**. |
+| `storage.access_key_secret` | String | Unset | The secret access key of the aliyun account.<br/>**It's only used when the storage type is `Oss`**. |
+| `storage.account_name` | String | Unset | The account key of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
+| `storage.account_key` | String | Unset | The account key of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
+| `storage.scope` | String | Unset | The scope of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
+| `storage.credential_path` | String | Unset | The credential path of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
+| `storage.credential` | String | Unset | The credential of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
+| `storage.container` | String | Unset | The container of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
+| `storage.sas_token` | String | Unset | The sas token of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
+| `storage.endpoint` | String | Unset | The endpoint of the S3 service.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**. |
+| `storage.region` | String | Unset | The region of the S3 service.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**. |
 | `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines. |
 | `region_engine.mito` | -- | -- | The Mito engine options. |
 | `region_engine.mito.num_workers` | Integer | `8` | Number of region workers. |
@@ -116,16 +116,16 @@
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.max_background_jobs` | Integer | `4` | Max number of running background jobs |
 | `region_engine.mito.auto_flush_interval` | String | `1h` | Interval to auto flush a region if it has not flushed yet. |
-| `region_engine.mito.global_write_buffer_size` | String | `1GB` | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
-| `region_engine.mito.global_write_buffer_reject_size` | String | `2GB` | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size` |
-| `region_engine.mito.sst_meta_cache_size` | String | `128MB` | Cache size for SST metadata. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/32 of OS memory with a max limitation of 128MB. |
-| `region_engine.mito.vector_cache_size` | String | `512MB` | Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
-| `region_engine.mito.page_cache_size` | String | `512MB` | Cache size for pages of SST row groups. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/8 of OS memory. |
-| `region_engine.mito.selector_result_cache_size` | String | `512MB` | Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
+| `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
+| `region_engine.mito.global_write_buffer_reject_size` | String | Auto | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`. |
+| `region_engine.mito.sst_meta_cache_size` | String | Auto | Cache size for SST metadata. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/32 of OS memory with a max limitation of 128MB. |
+| `region_engine.mito.vector_cache_size` | String | Auto | Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
+| `region_engine.mito.page_cache_size` | String | Auto | Cache size for pages of SST row groups. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/8 of OS memory. |
+| `region_engine.mito.selector_result_cache_size` | String | Auto | Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
 | `region_engine.mito.enable_experimental_write_cache` | Bool | `false` | Whether to enable the experimental write cache. |
 | `region_engine.mito.experimental_write_cache_path` | String | `""` | File system path for write cache, defaults to `{data_home}/write_cache`. |
 | `region_engine.mito.experimental_write_cache_size` | String | `512MB` | Capacity for write cache. |
-| `region_engine.mito.experimental_write_cache_ttl` | String | `None` | TTL for write cache. |
+| `region_engine.mito.experimental_write_cache_ttl` | String | Unset | TTL for write cache. |
 | `region_engine.mito.sst_write_buffer_size` | String | `8MB` | Buffer size for SST writing. |
 | `region_engine.mito.scan_parallelism` | Integer | `0` | Parallelism to scan a region (default: 1/4 of cpu cores).<br/>- `0`: using the default value (1/4 of cpu cores).<br/>- `1`: scan in current thread.<br/>- `n`: scan in parallelism n. |
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
@@ -155,7 +155,7 @@
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
-| `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
+| `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
@@ -165,13 +165,13 @@
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
-| `export_metrics.self_import` | -- | -- | For `standalone` mode, `self_import` is recommend to collect metrics generated by itself<br/>You must create the database before enabling it. |
-| `export_metrics.self_import.db` | String | `None` | -- |
+| `export_metrics.self_import` | -- | -- | For `standalone` mode, `self_import` is recommended to collect metrics generated by itself<br/>You must create the database before enabling it. |
+| `export_metrics.self_import.db` | String | Unset | -- |
 | `export_metrics.remote_write` | -- | -- | -- |
 | `export_metrics.remote_write.url` | String | `""` | The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=greptime_metrics`. |
 | `export_metrics.remote_write.headers` | InlineTable | -- | HTTP headers of Prometheus remote-write carry. |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
-| `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
+| `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 
 
 ## Distributed Mode
@@ -180,7 +180,7 @@
 
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
-| `default_timezone` | String | `None` | The default timezone of the server. |
+| `default_timezone` | String | Unset | The default timezone of the server. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
@@ -197,8 +197,8 @@
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
-| `grpc.tls.cert_path` | String | `None` | Certificate file path. |
-| `grpc.tls.key_path` | String | `None` | Private key file path. |
+| `grpc.tls.cert_path` | String | Unset | Certificate file path. |
+| `grpc.tls.key_path` | String | Unset | Private key file path. |
 | `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
 | `mysql` | -- | -- | MySQL server options. |
 | `mysql.enable` | Bool | `true` | Whether to enable. |
@@ -206,8 +206,8 @@
 | `mysql.runtime_size` | Integer | `2` | The number of server worker threads. |
 | `mysql.tls` | -- | -- | -- |
 | `mysql.tls.mode` | String | `disable` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- `disable` (default value)<br/>- `prefer`<br/>- `require`<br/>- `verify-ca`<br/>- `verify-full` |
-| `mysql.tls.cert_path` | String | `None` | Certificate file path. |
-| `mysql.tls.key_path` | String | `None` | Private key file path. |
+| `mysql.tls.cert_path` | String | Unset | Certificate file path. |
+| `mysql.tls.key_path` | String | Unset | Private key file path. |
 | `mysql.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload |
 | `postgres` | -- | -- | PostgresSQL server options. |
 | `postgres.enable` | Bool | `true` | Whether to enable |
@@ -215,8 +215,8 @@
 | `postgres.runtime_size` | Integer | `2` | The number of server worker threads. |
 | `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql.tls` section. |
 | `postgres.tls.mode` | String | `disable` | TLS mode. |
-| `postgres.tls.cert_path` | String | `None` | Certificate file path. |
-| `postgres.tls.key_path` | String | `None` | Private key file path. |
+| `postgres.tls.cert_path` | String | Unset | Certificate file path. |
+| `postgres.tls.key_path` | String | Unset | Private key file path. |
 | `postgres.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload |
 | `opentsdb` | -- | -- | OpenTSDB protocol options. |
 | `opentsdb.enable` | Bool | `true` | Whether to enable OpenTSDB put in HTTP API. |
@@ -241,7 +241,7 @@
 | `datanode.client.tcp_nodelay` | Bool | `true` | -- |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
-| `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
+| `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
@@ -252,12 +252,12 @@
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
 | `export_metrics.self_import` | -- | -- | For `standalone` mode, `self_import` is recommend to collect metrics generated by itself<br/>You must create the database before enabling it. |
-| `export_metrics.self_import.db` | String | `None` | -- |
+| `export_metrics.self_import.db` | String | Unset | -- |
 | `export_metrics.remote_write` | -- | -- | -- |
 | `export_metrics.remote_write.url` | String | `""` | The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=greptime_metrics`. |
 | `export_metrics.remote_write.headers` | InlineTable | -- | HTTP headers of Prometheus remote-write carry. |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
-| `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
+| `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 
 
 ### Metasrv
@@ -306,7 +306,7 @@
 | `wal.backoff_deadline` | String | `5mins` | Stop reconnecting if the total wait time reaches the deadline. If this config is missing, the reconnecting won't terminate. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
-| `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
+| `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
@@ -317,12 +317,12 @@
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
 | `export_metrics.self_import` | -- | -- | For `standalone` mode, `self_import` is recommend to collect metrics generated by itself<br/>You must create the database before enabling it. |
-| `export_metrics.self_import.db` | String | `None` | -- |
+| `export_metrics.self_import.db` | String | Unset | -- |
 | `export_metrics.remote_write` | -- | -- | -- |
 | `export_metrics.remote_write.url` | String | `""` | The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=greptime_metrics`. |
 | `export_metrics.remote_write.headers` | InlineTable | -- | HTTP headers of Prometheus remote-write carry. |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
-| `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
+| `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 
 
 ### Datanode
@@ -330,16 +330,16 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `mode` | String | `standalone` | The running mode of the datanode. It can be `standalone` or `distributed`. |
-| `node_id` | Integer | `None` | The datanode identifier and should be unique in the cluster. |
+| `node_id` | Integer | Unset | The datanode identifier and should be unique in the cluster. |
 | `require_lease_before_startup` | Bool | `false` | Start services after regions have obtained leases.<br/>It will block the datanode start if it can't receive leases in the heartbeat from metasrv. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
-| `rpc_addr` | String | `None` | Deprecated, use `grpc.addr` instead. |
-| `rpc_hostname` | String | `None` | Deprecated, use `grpc.hostname` instead. |
-| `rpc_runtime_size` | Integer | `None` | Deprecated, use `grpc.runtime_size` instead. |
-| `rpc_max_recv_message_size` | String | `None` | Deprecated, use `grpc.rpc_max_recv_message_size` instead. |
-| `rpc_max_send_message_size` | String | `None` | Deprecated, use `grpc.rpc_max_send_message_size` instead. |
+| `rpc_addr` | String | Unset | Deprecated, use `grpc.addr` instead. |
+| `rpc_hostname` | String | Unset | Deprecated, use `grpc.hostname` instead. |
+| `rpc_runtime_size` | Integer | Unset | Deprecated, use `grpc.runtime_size` instead. |
+| `rpc_max_recv_message_size` | String | Unset | Deprecated, use `grpc.rpc_max_recv_message_size` instead. |
+| `rpc_max_send_message_size` | String | Unset | Deprecated, use `grpc.rpc_max_send_message_size` instead. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `30s` | HTTP request timeout. Set to 0 to disable timeout. |
@@ -352,8 +352,8 @@
 | `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
-| `grpc.tls.cert_path` | String | `None` | Certificate file path. |
-| `grpc.tls.key_path` | String | `None` | Private key file path. |
+| `grpc.tls.cert_path` | String | Unset | Certificate file path. |
+| `grpc.tls.key_path` | String | Unset | Private key file path. |
 | `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
@@ -373,7 +373,7 @@
 | `meta_client.metadata_cache_tti` | String | `5m` | -- |
 | `wal` | -- | -- | The WAL options. |
 | `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka. |
-| `wal.dir` | String | `None` | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
+| `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.file_size` | String | `256MB` | The size of the WAL segment file.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.purge_threshold` | String | `4GB` | The threshold of the WAL size to trigger a flush.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.purge_interval` | String | `10m` | The interval to trigger a flush.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -395,22 +395,22 @@
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `/tmp/greptimedb/` | The working home directory. |
 | `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS. |
-| `storage.cache_path` | String | `None` | Cache configuration for object storage such as 'S3' etc.<br/>The local file cache directory. |
-| `storage.cache_capacity` | String | `None` | The local file cache capacity in bytes. |
-| `storage.bucket` | String | `None` | The S3 bucket name.<br/>**It's only used when the storage type is `S3`, `Oss` and `Gcs`**. |
-| `storage.root` | String | `None` | The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.<br/>**It's only used when the storage type is `S3`, `Oss` and `Azblob`**. |
-| `storage.access_key_id` | String | `None` | The access key id of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3` and `Oss`**. |
-| `storage.secret_access_key` | String | `None` | The secret access key of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3`**. |
-| `storage.access_key_secret` | String | `None` | The secret access key of the aliyun account.<br/>**It's only used when the storage type is `Oss`**. |
-| `storage.account_name` | String | `None` | The account key of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
-| `storage.account_key` | String | `None` | The account key of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
-| `storage.scope` | String | `None` | The scope of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
-| `storage.credential_path` | String | `None` | The credential path of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
-| `storage.credential` | String | `None` | The credential of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
-| `storage.container` | String | `None` | The container of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
-| `storage.sas_token` | String | `None` | The sas token of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
-| `storage.endpoint` | String | `None` | The endpoint of the S3 service.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**. |
-| `storage.region` | String | `None` | The region of the S3 service.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**. |
+| `storage.cache_path` | String | Unset | Cache configuration for object storage such as 'S3' etc.<br/>The local file cache directory. |
+| `storage.cache_capacity` | String | Unset | The local file cache capacity in bytes. |
+| `storage.bucket` | String | Unset | The S3 bucket name.<br/>**It's only used when the storage type is `S3`, `Oss` and `Gcs`**. |
+| `storage.root` | String | Unset | The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.<br/>**It's only used when the storage type is `S3`, `Oss` and `Azblob`**. |
+| `storage.access_key_id` | String | Unset | The access key id of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3` and `Oss`**. |
+| `storage.secret_access_key` | String | Unset | The secret access key of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3`**. |
+| `storage.access_key_secret` | String | Unset | The secret access key of the aliyun account.<br/>**It's only used when the storage type is `Oss`**. |
+| `storage.account_name` | String | Unset | The account key of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
+| `storage.account_key` | String | Unset | The account key of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
+| `storage.scope` | String | Unset | The scope of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
+| `storage.credential_path` | String | Unset | The credential path of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
+| `storage.credential` | String | Unset | The credential of the google cloud storage.<br/>**It's only used when the storage type is `Gcs`**. |
+| `storage.container` | String | Unset | The container of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
+| `storage.sas_token` | String | Unset | The sas token of the azure account.<br/>**It's only used when the storage type is `Azblob`**. |
+| `storage.endpoint` | String | Unset | The endpoint of the S3 service.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**. |
+| `storage.region` | String | Unset | The region of the S3 service.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**. |
 | `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines. |
 | `region_engine.mito` | -- | -- | The Mito engine options. |
 | `region_engine.mito.num_workers` | Integer | `8` | Number of region workers. |
@@ -420,16 +420,16 @@
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.max_background_jobs` | Integer | `4` | Max number of running background jobs |
 | `region_engine.mito.auto_flush_interval` | String | `1h` | Interval to auto flush a region if it has not flushed yet. |
-| `region_engine.mito.global_write_buffer_size` | String | `1GB` | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
-| `region_engine.mito.global_write_buffer_reject_size` | String | `2GB` | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size` |
-| `region_engine.mito.sst_meta_cache_size` | String | `128MB` | Cache size for SST metadata. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/32 of OS memory with a max limitation of 128MB. |
-| `region_engine.mito.vector_cache_size` | String | `512MB` | Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
-| `region_engine.mito.page_cache_size` | String | `512MB` | Cache size for pages of SST row groups. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/8 of OS memory. |
-| `region_engine.mito.selector_result_cache_size` | String | `512MB` | Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
+| `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
+| `region_engine.mito.global_write_buffer_reject_size` | String | Auto | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size` |
+| `region_engine.mito.sst_meta_cache_size` | String | Auto | Cache size for SST metadata. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/32 of OS memory with a max limitation of 128MB. |
+| `region_engine.mito.vector_cache_size` | String | Auto | Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
+| `region_engine.mito.page_cache_size` | String | Auto | Cache size for pages of SST row groups. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/8 of OS memory. |
+| `region_engine.mito.selector_result_cache_size` | String | Auto | Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
 | `region_engine.mito.enable_experimental_write_cache` | Bool | `false` | Whether to enable the experimental write cache. |
 | `region_engine.mito.experimental_write_cache_path` | String | `""` | File system path for write cache, defaults to `{data_home}/write_cache`. |
 | `region_engine.mito.experimental_write_cache_size` | String | `512MB` | Capacity for write cache. |
-| `region_engine.mito.experimental_write_cache_ttl` | String | `None` | TTL for write cache. |
+| `region_engine.mito.experimental_write_cache_ttl` | String | Unset | TTL for write cache. |
 | `region_engine.mito.sst_write_buffer_size` | String | `8MB` | Buffer size for SST writing. |
 | `region_engine.mito.scan_parallelism` | Integer | `0` | Parallelism to scan a region (default: 1/4 of cpu cores).<br/>- `0`: using the default value (1/4 of cpu cores).<br/>- `1`: scan in current thread.<br/>- `n`: scan in parallelism n. |
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
@@ -457,7 +457,7 @@
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
-| `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
+| `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
@@ -468,12 +468,12 @@
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
 | `export_metrics.self_import` | -- | -- | For `standalone` mode, `self_import` is recommend to collect metrics generated by itself<br/>You must create the database before enabling it. |
-| `export_metrics.self_import.db` | String | `None` | -- |
+| `export_metrics.self_import.db` | String | Unset | -- |
 | `export_metrics.remote_write` | -- | -- | -- |
 | `export_metrics.remote_write.url` | String | `""` | The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=greptime_metrics`. |
 | `export_metrics.remote_write.headers` | InlineTable | -- | HTTP headers of Prometheus remote-write carry. |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
-| `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
+| `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 
 
 ### Flownode
@@ -481,7 +481,7 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `mode` | String | `distributed` | The running mode of the flownode. It can be `standalone` or `distributed`. |
-| `node_id` | Integer | `None` | The flownode identifier and should be unique in the cluster. |
+| `node_id` | Integer | Unset | The flownode identifier and should be unique in the cluster. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:6800` | The address to bind the gRPC server. |
 | `grpc.hostname` | String | `127.0.0.1` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |
@@ -503,7 +503,7 @@
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
-| `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
+| `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
@@ -511,4 +511,4 @@
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
-| `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
+| `tracing.tokio_console_addr` | String | Unset | The tokio console address. |

@@ -163,7 +163,6 @@ mod test {
     use itertools::Itertools;
     use prost::Message;
     use query::parser::QueryLanguageParser;
-    use query::plan::LogicalPlan;
     use query::query_engine::DefaultSerializer;
     use query::QueryEngine;
     use session::context::QueryContext;
@@ -274,7 +273,6 @@ mod test {
             .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
-        let LogicalPlan::DfPlan(plan) = plan;
         let plan = apply_df_optimizer(plan).await.unwrap();
 
         // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
@@ -297,7 +295,6 @@ mod test {
             .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
-        let LogicalPlan::DfPlan(plan) = plan;
         let plan = apply_df_optimizer(plan).await;
 
         assert!(plan.is_err());

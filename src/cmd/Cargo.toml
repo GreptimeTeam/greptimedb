@@ -70,6 +70,7 @@ serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true
 session.workspace = true
+similar-asserts.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 substrait.workspace = true

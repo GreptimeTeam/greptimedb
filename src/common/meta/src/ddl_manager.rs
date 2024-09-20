@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::v1::meta::ProcedureDetailResponse;
 use common_procedure::{
     watcher, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId,
 };
@@ -441,11 +442,9 @@ async fn handle_alter_table_task(
         .table_metadata_manager()
         .table_route_manager()
         .table_route_storage()
-        .get_raw(table_id)
+        .get(table_id)
         .await?
-        .context(TableRouteNotFoundSnafu { table_id })?
-        .into_inner();
-
+        .context(TableRouteNotFoundSnafu { table_id })?;
     ensure!(
         table_route_value.is_physical(),
         UnexpectedLogicalRouteTableSnafu {
@@ -826,6 +825,15 @@ impl ProcedureExecutor for DdlManager {
             })?;
 
         Ok(procedure::procedure_state_to_pb_response(&state))
+    }
+
+    async fn list_procedures(&self, _ctx: &ExecutorContext) -> Result<ProcedureDetailResponse> {
+        let metas = self
+            .procedure_manager
+            .list_procedures()
+            .await
+            .context(QueryProcedureSnafu)?;
+        Ok(procedure::procedure_details_to_pb_response(metas))
     }
 }
 

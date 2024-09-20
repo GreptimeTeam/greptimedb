@@ -482,6 +482,7 @@ impl StartCommand {
             None,
             kv_backend.clone(),
             layered_cache_registry.clone(),
+            Some(procedure_manager.clone()),
         );
 
         let table_metadata_manager =

@@ -843,7 +843,7 @@ impl RegionServerInner {
 
         let result = self
             .query_engine
-            .execute(request.plan.into(), query_ctx)
+            .execute(request.plan, query_ctx)
             .await
             .context(ExecuteLogicalPlanSnafu)?;
 

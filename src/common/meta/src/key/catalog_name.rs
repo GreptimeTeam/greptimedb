@@ -147,7 +147,8 @@ impl CatalogManager {
             req,
             DEFAULT_PAGE_SIZE,
             Arc::new(catalog_decoder),
-        );
+        )
+        .into_stream();
 
         Box::pin(stream)
     }

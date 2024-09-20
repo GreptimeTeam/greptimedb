@@ -24,6 +24,12 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to install ring crypto provider: {}", msg))]
+    InitTlsProvider {
+        #[snafu(implicit)]
+        location: Location,
+        msg: String,
+    },
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
         #[snafu(implicit)]
@@ -369,9 +375,10 @@ impl ErrorExt for Error {
             }
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
 
-            Error::SerdeJson { .. } | Error::FileIo { .. } | Error::SpawnThread { .. } => {
-                StatusCode::Unexpected
-            }
+            Error::SerdeJson { .. }
+            | Error::FileIo { .. }
+            | Error::SpawnThread { .. }
+            | Error::InitTlsProvider { .. } => StatusCode::Unexpected,
 
             Error::Other { source, .. } => source.status_code(),
 

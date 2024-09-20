@@ -21,8 +21,9 @@ use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_query::Output;
+use datafusion_expr::LogicalPlan;
 use query::parser::PromQuery;
-use query::plan::LogicalPlan;
+use serde_json::Value;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
@@ -394,6 +395,64 @@ impl<E: ErrorExt> PromStoreProtocolInterceptor for Option<PromStoreProtocolInter
             this.pre_read(read_req, ctx)
         } else {
             Ok(())
+        }
+    }
+}
+
+/// LogIngestInterceptor can track life cycle of a log ingestion request
+/// and customize or abort its execution at given point.
+pub trait LogIngestInterceptor {
+    type Error: ErrorExt;
+
+    /// Called before pipeline execution.
+    fn pre_pipeline(
+        &self,
+        values: Vec<Value>,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Vec<Value>, Self::Error> {
+        Ok(values)
+    }
+
+    /// Called before insertion.
+    fn pre_ingest(
+        &self,
+        request: RowInsertRequests,
+        _query_ctx: QueryContextRef,
+    ) -> Result<RowInsertRequests, Self::Error> {
+        Ok(request)
+    }
+}
+
+pub type LogIngestInterceptorRef<E> =
+    Arc<dyn LogIngestInterceptor<Error = E> + Send + Sync + 'static>;
+
+impl<E> LogIngestInterceptor for Option<&LogIngestInterceptorRef<E>>
+where
+    E: ErrorExt,
+{
+    type Error = E;
+
+    fn pre_pipeline(
+        &self,
+        values: Vec<Value>,
+        query_ctx: QueryContextRef,
+    ) -> Result<Vec<Value>, Self::Error> {
+        if let Some(this) = self {
+            this.pre_pipeline(values, query_ctx)
+        } else {
+            Ok(values)
+        }
+    }
+
+    fn pre_ingest(
+        &self,
+        request: RowInsertRequests,
+        query_ctx: QueryContextRef,
+    ) -> Result<RowInsertRequests, Self::Error> {
+        if let Some(this) = self {
+            this.pre_ingest(request, query_ctx)
+        } else {
+            Ok(request)
         }
     }
 }

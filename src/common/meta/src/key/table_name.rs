@@ -259,7 +259,8 @@ impl TableNameManager {
             req,
             DEFAULT_PAGE_SIZE,
             Arc::new(table_decoder),
-        );
+        )
+        .into_stream();
 
         Box::pin(stream)
     }

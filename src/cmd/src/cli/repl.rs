@@ -35,7 +35,6 @@ use either::Either;
 use meta_client::client::MetaClientBuilder;
 use query::datafusion::DatafusionQueryEngine;
 use query::parser::QueryLanguageParser;
-use query::plan::LogicalPlan;
 use query::query_engine::{DefaultSerializer, QueryEngineState};
 use query::QueryEngine;
 use rustyline::error::ReadlineError;
@@ -179,7 +178,7 @@ impl Repl {
                 .await
                 .context(PlanStatementSnafu)?;
 
-            let LogicalPlan::DfPlan(plan) = query_engine
+            let plan = query_engine
                 .optimize(&query_engine.engine_context(query_ctx), &plan)
                 .context(PlanStatementSnafu)?;
 
@@ -281,6 +280,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         Some(meta_client.clone()),
         cached_meta_backend.clone(),
         layered_cache_registry,
+        None,
     );
     let plugins: Plugins = Default::default();
     let state = Arc::new(QueryEngineState::new(

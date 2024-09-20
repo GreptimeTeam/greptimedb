@@ -18,8 +18,9 @@ use std::time::Duration;
 
 use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{
-    DdlTaskRequest, DdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse, ProcedureId,
-    ProcedureStateResponse, QueryProcedureRequest, ResponseHeader, Role,
+    DdlTaskRequest, DdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse,
+    ProcedureDetailRequest, ProcedureDetailResponse, ProcedureId, ProcedureStateResponse,
+    QueryProcedureRequest, ResponseHeader, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::tracing_context::TracingContext;
@@ -88,6 +89,11 @@ impl Client {
         inner
             .migrate_region(region_id, from_peer, to_peer, timeout)
             .await
+    }
+
+    pub async fn list_procedures(&self) -> Result<ProcedureDetailResponse> {
+        let inner = self.inner.read().await;
+        inner.list_procedures().await
     }
 }
 
@@ -276,6 +282,25 @@ impl Inner {
                 async move { client.ddl(req).await.map(|res| res.into_inner()) }
             },
             |resp: &DdlTaskResponse| &resp.header,
+        )
+        .await
+    }
+
+    async fn list_procedures(&self) -> Result<ProcedureDetailResponse> {
+        let mut req = ProcedureDetailRequest::default();
+        req.set_header(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
+
+        self.with_retry(
+            "list procedure",
+            move |mut client| {
+                let req = req.clone();
+                async move { client.details(req).await.map(|res| res.into_inner()) }
+            },
+            |resp: &ProcedureDetailResponse| &resp.header,
         )
         .await
     }

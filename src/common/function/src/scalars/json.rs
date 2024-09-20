@@ -13,11 +13,17 @@
 // limitations under the License.
 
 use std::sync::Arc;
+mod json_get;
+mod json_is;
 mod json_to_string;
-mod to_json;
+mod parse_json;
 
+use json_get::{JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString};
+use json_is::{
+    JsonIsArray, JsonIsBool, JsonIsFloat, JsonIsInt, JsonIsNull, JsonIsObject, JsonIsString,
+};
 use json_to_string::JsonToStringFunction;
-use to_json::ToJsonFunction;
+use parse_json::ParseJsonFunction;
 
 use crate::function_registry::FunctionRegistry;
 
@@ -26,6 +32,19 @@ pub(crate) struct JsonFunction;
 impl JsonFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(JsonToStringFunction));
-        registry.register(Arc::new(ToJsonFunction));
+        registry.register(Arc::new(ParseJsonFunction));
+
+        registry.register(Arc::new(JsonGetInt));
+        registry.register(Arc::new(JsonGetFloat));
+        registry.register(Arc::new(JsonGetString));
+        registry.register(Arc::new(JsonGetBool));
+
+        registry.register(Arc::new(JsonIsNull));
+        registry.register(Arc::new(JsonIsInt));
+        registry.register(Arc::new(JsonIsFloat));
+        registry.register(Arc::new(JsonIsString));
+        registry.register(Arc::new(JsonIsBool));
+        registry.register(Arc::new(JsonIsArray));
+        registry.register(Arc::new(JsonIsObject));
     }
 }

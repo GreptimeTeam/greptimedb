@@ -14,6 +14,7 @@
 
 #![no_main]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arbitrary::{Arbitrary, Unstructured};
@@ -71,6 +72,10 @@ enum AlterTableOption {
 fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTableExpr> {
     let max_columns = get_gt_fuzz_input_max_columns();
     let columns = rng.gen_range(2..max_columns);
+    let mut with_clause = HashMap::new();
+    if rng.gen_bool(0.5) {
+        with_clause.insert("append_mode".to_string(), "true".to_string());
+    }
     let create_table_generator = CreateTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,
@@ -78,6 +83,7 @@ fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTab
         )))
         .columns(columns)
         .engine("mito")
+        .with_clause(with_clause)
         .build()
         .unwrap();
     create_table_generator.generate(rng)

@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::SeekFrom;
-
-use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
+use common_base::range_read::RangeReader;
 use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
 use prost::Message;
 use snafu::{ensure, ResultExt};
 
 use crate::inverted_index::error::{
-    DecodeProtoSnafu, ReadSnafu, Result, SeekSnafu, UnexpectedFooterPayloadSizeSnafu,
+    CommonIoSnafu, DecodeProtoSnafu, Result, UnexpectedFooterPayloadSizeSnafu,
     UnexpectedOffsetSizeSnafu, UnexpectedZeroSegmentRowCountSnafu,
 };
 use crate::inverted_index::format::FOOTER_PAYLOAD_SIZE_SIZE;
@@ -37,7 +35,7 @@ impl<R> InvertedIndeFooterReader<R> {
     }
 }
 
-impl<R: AsyncRead + AsyncSeek + Unpin> InvertedIndeFooterReader<R> {
+impl<R: RangeReader> InvertedIndeFooterReader<R> {
     pub async fn metadata(&mut self) -> Result<InvertedIndexMetas> {
         let payload_size = self.read_payload_size().await?;
         let metas = self.read_payload(payload_size).await?;
@@ -45,26 +43,26 @@ impl<R: AsyncRead + AsyncSeek + Unpin> InvertedIndeFooterReader<R> {
     }
 
     async fn read_payload_size(&mut self) -> Result<u64> {
-        let size_offset = SeekFrom::Start(self.blob_size - FOOTER_PAYLOAD_SIZE_SIZE);
-        self.source.seek(size_offset).await.context(SeekSnafu)?;
-        let size_buf = &mut [0u8; FOOTER_PAYLOAD_SIZE_SIZE as usize];
-        self.source.read_exact(size_buf).await.context(ReadSnafu)?;
+        let mut size_buf = [0u8; FOOTER_PAYLOAD_SIZE_SIZE as usize];
+        let end = self.blob_size;
+        let start = end - FOOTER_PAYLOAD_SIZE_SIZE;
+        self.source
+            .read_into(start..end, &mut &mut size_buf[..])
+            .await
+            .context(CommonIoSnafu)?;
 
-        let payload_size = u32::from_le_bytes(*size_buf) as u64;
+        let payload_size = u32::from_le_bytes(size_buf) as u64;
         self.validate_payload_size(payload_size)?;
 
         Ok(payload_size)
     }
 
     async fn read_payload(&mut self, payload_size: u64) -> Result<InvertedIndexMetas> {
-        let payload_offset =
-            SeekFrom::Start(self.blob_size - FOOTER_PAYLOAD_SIZE_SIZE - payload_size);
-        self.source.seek(payload_offset).await.context(SeekSnafu)?;
+        let end = self.blob_size - FOOTER_PAYLOAD_SIZE_SIZE;
+        let start = end - payload_size;
+        let bytes = self.source.read(start..end).await.context(CommonIoSnafu)?;
 
-        let payload = &mut vec![0u8; payload_size as usize];
-        self.source.read_exact(payload).await.context(ReadSnafu)?;
-
-        let metas = InvertedIndexMetas::decode(&payload[..]).context(DecodeProtoSnafu)?;
+        let metas = InvertedIndexMetas::decode(&*bytes).context(DecodeProtoSnafu)?;
         self.validate_metas(&metas, payload_size)?;
 
         Ok(metas)
@@ -115,6 +113,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> InvertedIndeFooterReader<R> {
 
 #[cfg(test)]
 mod tests {
+    use common_base::range_read::RangeReaderAdapter;
     use futures::io::Cursor;
     use prost::Message;
 
@@ -144,7 +143,8 @@ mod tests {
 
         let payload_buf = create_test_payload(meta);
         let blob_size = payload_buf.len() as u64;
-        let mut reader = InvertedIndeFooterReader::new(Cursor::new(payload_buf), blob_size);
+        let cursor = RangeReaderAdapter(Cursor::new(payload_buf));
+        let mut reader = InvertedIndeFooterReader::new(cursor, blob_size);
 
         let payload_size = reader.read_payload_size().await.unwrap();
         let metas = reader.read_payload(payload_size).await.unwrap();
@@ -164,7 +164,8 @@ mod tests {
         let mut payload_buf = create_test_payload(meta);
         payload_buf.push(0xff); // Add an extra byte to corrupt the footer
         let blob_size = payload_buf.len() as u64;
-        let mut reader = InvertedIndeFooterReader::new(Cursor::new(payload_buf), blob_size);
+        let cursor = RangeReaderAdapter(Cursor::new(payload_buf));
+        let mut reader = InvertedIndeFooterReader::new(cursor, blob_size);
 
         let payload_size_result = reader.read_payload_size().await;
         assert!(payload_size_result.is_err());
@@ -181,7 +182,8 @@ mod tests {
 
         let payload_buf = create_test_payload(meta);
         let blob_size = payload_buf.len() as u64;
-        let mut reader = InvertedIndeFooterReader::new(Cursor::new(payload_buf), blob_size);
+        let cursor = RangeReaderAdapter(Cursor::new(payload_buf));
+        let mut reader = InvertedIndeFooterReader::new(cursor, blob_size);
 
         let payload_size = reader.read_payload_size().await.unwrap();
         let payload_result = reader.read_payload(payload_size).await;

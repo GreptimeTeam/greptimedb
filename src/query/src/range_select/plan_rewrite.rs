@@ -556,7 +556,6 @@ mod test {
 
     use super::*;
     use crate::parser::QueryLanguageParser;
-    use crate::plan::LogicalPlan as GreptimeLogicalPlan;
     use crate::{QueryEngineFactory, QueryEngineRef};
 
     async fn create_test_engine() -> QueryEngineRef {
@@ -611,14 +610,14 @@ mod test {
         QueryEngineFactory::new(catalog_list, None, None, None, None, false).query_engine()
     }
 
-    async fn do_query(sql: &str) -> Result<crate::plan::LogicalPlan> {
+    async fn do_query(sql: &str) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_test_engine().await;
         engine.planner().plan(stmt, QueryContext::arc()).await
     }
 
     async fn query_plan_compare(sql: &str, expected: String) {
-        let GreptimeLogicalPlan::DfPlan(plan) = do_query(sql).await.unwrap();
+        let plan = do_query(sql).await.unwrap();
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
 

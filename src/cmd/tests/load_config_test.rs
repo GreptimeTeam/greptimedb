@@ -16,12 +16,10 @@ use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
 use cmd::standalone::StandaloneOptions;
-use common_base::readable_size::ReadableSize;
 use common_config::Configurable;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
-use common_runtime::global::RuntimeOptions;
 use common_telemetry::logging::{LoggingOptions, DEFAULT_OTLP_ENDPOINT};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
@@ -45,10 +43,6 @@ fn test_load_datanode_example_config() {
             .unwrap();
 
     let expected = GreptimeOptions::<DatanodeOptions> {
-        runtime: RuntimeOptions {
-            global_rt_size: 8,
-            compact_rt_size: 4,
-        },
         component: DatanodeOptions {
             node_id: Some(42),
             meta_client: Some(MetaClientOptions {
@@ -74,16 +68,8 @@ fn test_load_datanode_example_config() {
             },
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    num_workers: 8,
                     auto_flush_interval: Duration::from_secs(3600),
                     scan_parallelism: 0,
-                    global_write_buffer_size: ReadableSize::gb(1),
-                    global_write_buffer_reject_size: ReadableSize::gb(2),
-                    sst_meta_cache_size: ReadableSize::mb(128),
-                    vector_cache_size: ReadableSize::mb(512),
-                    page_cache_size: ReadableSize::mb(512),
-                    selector_result_cache_size: ReadableSize::mb(512),
-                    max_background_jobs: 4,
                     experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
                 }),
@@ -108,9 +94,10 @@ fn test_load_datanode_example_config() {
             rpc_max_send_message_size: Some(DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE),
             ..Default::default()
         },
+        ..Default::default()
     };
 
-    assert_eq!(options, expected);
+    similar_asserts::assert_eq!(options, expected);
 }
 
 #[test]
@@ -120,10 +107,6 @@ fn test_load_frontend_example_config() {
         GreptimeOptions::<FrontendOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
     let expected = GreptimeOptions::<FrontendOptions> {
-        runtime: RuntimeOptions {
-            global_rt_size: 8,
-            compact_rt_size: 4,
-        },
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
             meta_client: Some(MetaClientOptions {
@@ -156,8 +139,9 @@ fn test_load_frontend_example_config() {
             },
             ..Default::default()
         },
+        ..Default::default()
     };
-    assert_eq!(options, expected);
+    similar_asserts::assert_eq!(options, expected);
 }
 
 #[test]
@@ -167,10 +151,6 @@ fn test_load_metasrv_example_config() {
         GreptimeOptions::<MetasrvOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
     let expected = GreptimeOptions::<MetasrvOptions> {
-        runtime: RuntimeOptions {
-            global_rt_size: 8,
-            compact_rt_size: 4,
-        },
         component: MetasrvOptions {
             selector: SelectorType::default(),
             data_home: "/tmp/metasrv/".to_string(),
@@ -188,8 +168,9 @@ fn test_load_metasrv_example_config() {
             },
             ..Default::default()
         },
+        ..Default::default()
     };
-    assert_eq!(options, expected);
+    similar_asserts::assert_eq!(options, expected);
 }
 
 #[test]
@@ -199,10 +180,6 @@ fn test_load_standalone_example_config() {
         GreptimeOptions::<StandaloneOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
     let expected = GreptimeOptions::<StandaloneOptions> {
-        runtime: RuntimeOptions {
-            global_rt_size: 8,
-            compact_rt_size: 4,
-        },
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
@@ -213,17 +190,9 @@ fn test_load_standalone_example_config() {
             }),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    num_workers: 8,
                     auto_flush_interval: Duration::from_secs(3600),
-                    scan_parallelism: 0,
-                    global_write_buffer_size: ReadableSize::gb(1),
-                    global_write_buffer_reject_size: ReadableSize::gb(2),
-                    sst_meta_cache_size: ReadableSize::mb(128),
-                    vector_cache_size: ReadableSize::mb(512),
-                    page_cache_size: ReadableSize::mb(512),
-                    selector_result_cache_size: ReadableSize::mb(512),
-                    max_background_jobs: 4,
                     experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
+                    scan_parallelism: 0,
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(EngineConfig {}),
@@ -245,6 +214,7 @@ fn test_load_standalone_example_config() {
             },
             ..Default::default()
         },
+        ..Default::default()
     };
-    assert_eq!(options, expected);
+    similar_asserts::assert_eq!(options, expected);
 }

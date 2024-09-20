@@ -44,6 +44,12 @@ impl From<Vec<u8>> for Bytes {
     }
 }
 
+impl From<Bytes> for Vec<u8> {
+    fn from(bytes: Bytes) -> Vec<u8> {
+        bytes.0.into()
+    }
+}
+
 impl Deref for Bytes {
     type Target = [u8];
 

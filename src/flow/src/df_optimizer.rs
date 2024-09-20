@@ -41,7 +41,6 @@ use datafusion_expr::{
     BinaryExpr, Expr, Operator, Projection, ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
 use query::parser::QueryLanguageParser;
-use query::plan::LogicalPlan;
 use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
 use snafu::ResultExt;
@@ -111,7 +110,6 @@ pub async fn sql_to_flow_plan(
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-    let LogicalPlan::DfPlan(plan) = plan;
 
     let opted_plan = apply_df_optimizer(plan).await?;
 

@@ -82,6 +82,33 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to get procedure client in {mode} mode"))]
+    GetProcedureClient {
+        mode: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to list procedures"))]
+    ListProcedures {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Procedure id not found"))]
+    ProcedureIdNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("convert proto data error"))]
+    ConvertProtoData {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to re-compile script due to internal error"))]
     CompileScriptInternal {
         #[snafu(implicit)]
@@ -266,7 +293,9 @@ impl ErrorExt for Error {
             | Error::FindRegionRoutes { .. }
             | Error::CacheNotFound { .. }
             | Error::CastManager { .. }
-            | Error::Json { .. } => StatusCode::Unexpected,
+            | Error::Json { .. }
+            | Error::GetProcedureClient { .. }
+            | Error::ProcedureIdNotFound { .. } => StatusCode::Unexpected,
 
             Error::ViewPlanColumnsChanged { .. } => StatusCode::InvalidArguments,
 
@@ -283,7 +312,9 @@ impl ErrorExt for Error {
             | Error::ListNodes { source, .. }
             | Error::ListSchemas { source, .. }
             | Error::ListTables { source, .. }
-            | Error::ListFlows { source, .. } => source.status_code(),
+            | Error::ListFlows { source, .. }
+            | Error::ListProcedures { source, .. }
+            | Error::ConvertProtoData { source, .. } => source.status_code(),
 
             Error::CreateTable { source, .. } => source.status_code(),
 

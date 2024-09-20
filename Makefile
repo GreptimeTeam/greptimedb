@@ -8,7 +8,7 @@ CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
 IMAGE_TAG ?= latest
-DEV_BUILDER_IMAGE_TAG ?= 2024-06-06-b4b105ad-20240827021230
+DEV_BUILDER_IMAGE_TAG ?= 2024-06-06-1acda74c-20240919113454
 BUILDX_MULTI_PLATFORM_BUILD ?= false
 BUILDX_BUILDER_NAME ?= gtbuilder
 BASE_IMAGE ?= ubuntu
@@ -221,7 +221,7 @@ config-docs: ## Generate configuration documentation from toml files.
 	docker run --rm \
     -v ${PWD}:/greptimedb \
     -w /greptimedb/config \
-    toml2docs/toml2docs:v0.1.1 \
+    toml2docs/toml2docs:v0.1.3 \
     -p '##' \
     -t ./config-docs-template.md \
     -o ./config.md
