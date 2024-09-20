@@ -207,6 +207,7 @@ impl Memtable for PartitionTreeMemtable {
                 estimated_bytes,
                 time_range: None,
                 num_rows: 0,
+                num_ranges: 0,
             };
         }
 
@@ -225,6 +226,7 @@ impl Memtable for PartitionTreeMemtable {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
             num_rows: self.num_rows.load(Ordering::Relaxed),
+            num_ranges: 1,
         }
     }
 

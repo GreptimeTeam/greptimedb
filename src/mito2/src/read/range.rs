@@ -24,8 +24,8 @@ use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 /// Index to access a row group.
 #[derive(Clone, Copy)]
 pub(crate) struct RowGroupIndex {
-    /// Index to the file.
-    pub(crate) file_index: usize,
+    /// Index to the memtable/file.
+    pub(crate) index: usize,
     /// Row group index in the file.
     pub(crate) row_group_index: usize,
 }
@@ -36,11 +36,9 @@ pub(crate) struct RowGroupIndex {
 pub(crate) struct RangeMeta {
     /// The time range of the range.
     pub(crate) time_range: FileTimeRange,
-    /// Indices to memtables.
-    pub(crate) mem_indices: SmallVec<[usize; 2]>,
-    /// Indices to files. It contains the indices to all the files in `row_group_indices`.
-    file_indices: SmallVec<[usize; 4]>,
-    /// Indices to file row groups that this range scans.
+    /// Indices to memtables or files.
+    indices: SmallVec<[usize; 2]>,
+    /// Indices to memtable/file row groups that this range scans.
     /// An empty vec indicates all row groups. (Some file metas don't have row group number).
     pub(crate) row_group_indices: SmallVec<[RowGroupIndex; 2]>,
     /// Estimated number of rows in the range. This can be 0 if the statistics are not available.
@@ -51,8 +49,8 @@ impl RangeMeta {
     /// Creates a list of ranges from the `input` for seq scan.
     pub(crate) fn seq_scan_ranges(input: &ScanInput) -> Vec<RangeMeta> {
         let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
-        Self::push_mem_ranges(&input.memtables, &mut ranges);
-        Self::push_seq_file_ranges(&input.files, &mut ranges);
+        Self::push_seq_mem_ranges(&input.memtables, &mut ranges);
+        Self::push_seq_file_ranges(input.memtables.len(), &input.files, &mut ranges);
 
         let ranges = group_ranges_for_seq_scan(ranges);
         maybe_split_ranges_for_seq_scan(ranges)
@@ -61,8 +59,8 @@ impl RangeMeta {
     /// Creates a list of ranges from the `input` for unordered scan.
     pub(crate) fn unordered_scan_ranges(input: &ScanInput) -> Vec<RangeMeta> {
         let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
-        Self::push_mem_ranges(&input.memtables, &mut ranges);
-        Self::push_unordered_file_ranges(&input.files, &mut ranges);
+        Self::push_unordered_mem_ranges(&input.memtables, &mut ranges);
+        Self::push_unordered_file_ranges(input.memtables.len(), &input.files, &mut ranges);
 
         ranges
     }
@@ -79,8 +77,7 @@ impl RangeMeta {
             self.time_range.0.min(other.time_range.0),
             self.time_range.1.max(other.time_range.1),
         );
-        self.mem_indices.append(&mut other.mem_indices);
-        self.file_indices.append(&mut other.file_indices);
+        self.indices.append(&mut other.indices);
         self.row_group_indices.append(&mut other.row_group_indices);
         self.num_rows += other.num_rows;
     }
@@ -88,24 +85,22 @@ impl RangeMeta {
     /// Returns true if we can split the range into multiple smaller ranges and
     /// still preserve the order for [SeqScan].
     pub(crate) fn can_split_preserve_order(&self) -> bool {
-        // No memtable, only one file, and multiple row groups.
-        self.mem_indices.is_empty()
-            && self.file_indices.len() == 1
-            && self.row_group_indices.len() > 1
+        // Only one source and multiple row groups.
+        self.indices.len() == 1 && self.row_group_indices.len() > 1
     }
 
     /// Splits the range if it can preserve the order.
     pub(crate) fn maybe_split(self, output: &mut Vec<RangeMeta>) {
         if self.can_split_preserve_order() {
             output.reserve(self.row_group_indices.len());
+            let num_rows = self.num_rows / self.row_group_indices.len();
             // Splits by row group.
             for index in self.row_group_indices {
                 output.push(RangeMeta {
                     time_range: self.time_range,
-                    mem_indices: SmallVec::new(),
-                    file_indices: self.file_indices.clone(),
+                    indices: self.indices.clone(),
                     row_group_indices: smallvec![index],
-                    num_rows: DEFAULT_ROW_GROUP_SIZE,
+                    num_rows,
                 });
             }
         } else {
@@ -113,40 +108,46 @@ impl RangeMeta {
         }
     }
 
-    // FIXME(yingwen): Replaces memtables by mem ranges.
-    fn push_mem_ranges(memtables: &[MemtableRef], ranges: &mut Vec<RangeMeta>) {
-        for (i, memtable) in memtables.iter().enumerate() {
+    fn push_unordered_mem_ranges(memtables: &[MemtableRef], ranges: &mut Vec<RangeMeta>) {
+        // For append mode, we can parallelize reading memtables.
+        for (memtable_index, memtable) in memtables.iter().enumerate() {
             let stats = memtable.stats();
             let Some(time_range) = stats.time_range() else {
                 continue;
             };
-            ranges.push(RangeMeta {
-                time_range,
-                mem_indices: smallvec![i],
-                file_indices: SmallVec::new(),
-                row_group_indices: SmallVec::new(),
-                num_rows: stats.num_rows(),
-            });
+            for row_group_index in 0..stats.num_ranges() {
+                let num_rows = stats.num_rows() / stats.num_ranges();
+                ranges.push(RangeMeta {
+                    time_range,
+                    indices: smallvec![memtable_index],
+                    row_group_indices: smallvec![RowGroupIndex {
+                        index: memtable_index,
+                        row_group_index,
+                    }],
+                    num_rows,
+                });
+            }
         }
     }
 
-    fn push_unordered_file_ranges(files: &[FileHandle], ranges: &mut Vec<RangeMeta>) {
+    fn push_unordered_file_ranges(
+        num_memtables: usize,
+        files: &[FileHandle],
+        ranges: &mut Vec<RangeMeta>,
+    ) {
         // For append mode, we can parallelize reading row groups.
-        for (file_index, file) in files.iter().enumerate() {
+        for (i, file) in files.iter().enumerate() {
+            let file_index = num_memtables + i;
             if file.meta_ref().num_row_groups > 0 {
                 // Scans each row group.
                 for row_group_index in 0..file.meta_ref().num_row_groups {
                     ranges.push(RangeMeta {
                         time_range: file.time_range(),
-                        mem_indices: SmallVec::new(),
-                        file_indices: smallvec![file_index],
-                        row_group_indices: SmallVec::from_elem(
-                            RowGroupIndex {
-                                file_index,
-                                row_group_index: row_group_index as usize,
-                            },
-                            1,
-                        ),
+                        indices: smallvec![file_index],
+                        row_group_indices: smallvec![RowGroupIndex {
+                            index: file_index,
+                            row_group_index: row_group_index as usize,
+                        }],
                         num_rows: DEFAULT_ROW_GROUP_SIZE,
                     });
                 }
@@ -154,8 +155,7 @@ impl RangeMeta {
                 // If we don't known the number of row groups in advance, scan all row groups.
                 ranges.push(RangeMeta {
                     time_range: file.time_range(),
-                    mem_indices: SmallVec::new(),
-                    file_indices: smallvec![file_index],
+                    indices: smallvec![file_index],
                     row_group_indices: SmallVec::new(),
                     // This may be 0.
                     num_rows: file.meta_ref().num_rows as usize,
@@ -164,13 +164,35 @@ impl RangeMeta {
         }
     }
 
-    fn push_seq_file_ranges(files: &[FileHandle], ranges: &mut Vec<RangeMeta>) {
+    fn push_seq_mem_ranges(memtables: &[MemtableRef], ranges: &mut Vec<RangeMeta>) {
+        // For non append-only mode, each range only contains one memtable.
+        for (i, memtable) in memtables.iter().enumerate() {
+            let stats = memtable.stats();
+            let Some(time_range) = stats.time_range() else {
+                continue;
+            };
+            ranges.push(RangeMeta {
+                time_range,
+                indices: smallvec![i],
+                // Empty for all row groups:
+                row_group_indices: SmallVec::new(),
+                num_rows: stats.num_rows(),
+            });
+        }
+    }
+
+    fn push_seq_file_ranges(
+        num_memtables: usize,
+        files: &[FileHandle],
+        ranges: &mut Vec<RangeMeta>,
+    ) {
         // For non append-only mode, each range only contains one file.
-        for (file_index, file) in files.iter().enumerate() {
+        for (i, file) in files.iter().enumerate() {
+            let file_index = num_memtables + i;
             ranges.push(RangeMeta {
                 time_range: file.time_range(),
-                mem_indices: SmallVec::new(),
-                file_indices: smallvec![file_index],
+                indices: smallvec![file_index],
+                // Empty for all row groups:
                 row_group_indices: SmallVec::new(),
                 num_rows: file.meta_ref().num_rows as usize,
             });

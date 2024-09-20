@@ -175,7 +175,7 @@ impl UnorderedScan {
 
                 // Scans row groups.
                 let mut reader_metrics = ReaderMetrics::default();
-                for index in &range_meta.row_group_indices {
+                for index in &range_meta.file_row_group_indices {
                     let Some(file_range) = stream_ctx
                         .build_file_range(*index, &mut reader_metrics)
                         .await

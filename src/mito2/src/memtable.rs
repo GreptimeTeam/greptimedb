@@ -71,6 +71,8 @@ pub struct MemtableStats {
     time_range: Option<(Timestamp, Timestamp)>,
     /// Total rows in memtable
     num_rows: usize,
+    /// Total number of ranges in the memtable.
+    num_ranges: usize,
 }
 
 impl MemtableStats {
@@ -94,6 +96,11 @@ impl MemtableStats {
     /// Returns the num of total rows in memtable.
     pub fn num_rows(&self) -> usize {
         self.num_rows
+    }
+
+    /// Returns the number of ranges in the memtable.
+    pub fn num_ranges(&self) -> usize {
+        self.num_ranges
     }
 }
 

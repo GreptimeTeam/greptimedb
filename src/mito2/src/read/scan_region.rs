@@ -1089,11 +1089,11 @@ impl RangeBuilderList {
         index: RowGroupIndex,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<Option<FileRange>> {
-        let mut builder_opt = self.builders[index.file_index].lock().await;
+        let mut builder_opt = self.builders[index.index].lock().await;
         match &mut *builder_opt {
             Some(builder) => Ok(builder.build_reader(index.row_group_index)),
             None => {
-                let builder = input.prune_file(index.file_index, reader_metrics).await?;
+                let builder = input.prune_file(index.index, reader_metrics).await?;
                 let range = builder.build_reader(index.row_group_index);
                 *builder_opt = Some(builder);
                 Ok(range)
