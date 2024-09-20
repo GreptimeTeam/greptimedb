@@ -14,6 +14,7 @@ testing = []
 workspace = true
 
 [dependencies]
+ahash = "0.8"
 aide = { version = "0.9", features = ["axum"] }
 api.workspace = true
 arrow.workspace = true

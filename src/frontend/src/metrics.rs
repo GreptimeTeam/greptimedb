@@ -41,16 +41,28 @@ lazy_static! {
         .with_label_values(&["insert"]);
     pub static ref EXECUTE_SCRIPT_ELAPSED: Histogram = HANDLE_SCRIPT_ELAPSED
         .with_label_values(&["execute"]);
+
+    /// The number of OpenTelemetry metrics send by frontend node.
     pub static ref OTLP_METRICS_ROWS: IntCounter = register_int_counter!(
         "greptime_frontend_otlp_metrics_rows",
         "frontend otlp metrics rows"
     )
     .unwrap();
+
+    /// The number of OpenTelemetry traces send by frontend node.
     pub static ref OTLP_TRACES_ROWS: IntCounter = register_int_counter!(
         "greptime_frontend_otlp_traces_rows",
         "frontend otlp traces rows"
     )
     .unwrap();
+
+    /// The number of OpenTelemetry logs send by frontend node.
+    pub static ref OTLP_LOGS_ROWS: IntCounter = register_int_counter!(
+        "greptime_frontend_otlp_logs_rows",
+        "frontend otlp logs rows"
+    )
+    .unwrap();
+
     /// The number of heartbeats send by frontend node.
     pub static ref HEARTBEAT_SENT_COUNT: IntCounter = register_int_counter!(
         "greptime_frontend_heartbeat_send_count",
