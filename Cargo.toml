@@ -90,7 +90,7 @@ aquamarine = "0.3"
 arrow = { version = "51.0.0", features = ["prettyprint"] }
 arrow-array = { version = "51.0.0", default-features = false, features = ["chrono-tz"] }
 arrow-flight = "51.0"
-arrow-ipc = { version = "51.0.0", default-features = false, features = ["lz4"] }
+arrow-ipc = { version = "51.0.0", default-features = false, features = ["lz4", "zstd"] }
 arrow-schema = { version = "51.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
@@ -99,7 +99,7 @@ base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
 bytemuck = "1.12"
-bytes = { version = "1.5", features = ["serde"] }
+bytes = { version = "1.7", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
@@ -120,11 +120,11 @@ etcd-client = { version = "0.13" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "973f49cde88a582fb65755cc572ebcf6fb93ccf7" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "36334744c7020734dcb4a6b8d24d52ae7ed53fe1" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
-jsonb = { git = "https://github.com/CookiePieWw/jsonb.git", rev = "d0166c130fce903bf6c58643417a3173a6172d31", default-features = false }
+jsonb = { git = "https://github.com/datafuselabs/jsonb.git", rev = "46ad50fc71cf75afbf98eec455f7892a6387c1fc", default-features = false }
 lazy_static = "1.4"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd" }
 mockall = "0.11.4"

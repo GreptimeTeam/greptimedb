@@ -37,11 +37,13 @@ use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result, UnsupportedContentTypeSnafu,
+    Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result,
+    UnsupportedContentTypeSnafu,
 };
 use crate::http::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
+use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_INGESTION_COUNTER, METRIC_HTTP_LOGS_INGESTION_ELAPSED,
     METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
@@ -378,6 +380,11 @@ pub async fn log_ingester(
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
 
+    let value = log_state
+        .ingest_interceptor
+        .as_ref()
+        .pre_pipeline(value, query_ctx.clone())?;
+
     ingest_logs_inner(
         handler,
         pipeline_name,
@@ -506,6 +513,7 @@ pub type LogValidatorRef = Arc<dyn LogValidator + 'static>;
 pub struct LogState {
     pub log_handler: LogHandlerRef,
     pub log_validator: Option<LogValidatorRef>,
+    pub ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
 }
 
 #[cfg(test)]

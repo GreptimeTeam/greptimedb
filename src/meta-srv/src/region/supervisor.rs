@@ -402,7 +402,7 @@ impl RegionSupervisor {
             region_id,
             from_peer,
             to_peer,
-            replay_timeout: Duration::from_secs(60),
+            timeout: Duration::from_secs(60),
         };
 
         if let Err(err) = self.region_migration_manager.submit_procedure(task).await {

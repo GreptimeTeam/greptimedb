@@ -24,8 +24,8 @@ use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_runtime::Runtime;
+use datafusion_expr::LogicalPlan;
 use query::dataframe::DataFrame;
-use query::plan::LogicalPlan;
 use query::planner::LogicalPlanner;
 use query::query_engine::{DescribeResult, QueryEngineState};
 use query::{QueryEngine, QueryEngineContext};
@@ -103,10 +103,14 @@ pub fn mock_region_server() -> RegionServer {
 pub type MockRequestHandler =
     Box<dyn Fn(RegionId, RegionRequest) -> Result<AffectedRows, Error> + Send + Sync>;
 
+pub type MockSetReadonlyGracefullyHandler =
+    Box<dyn Fn(RegionId) -> Result<SetReadonlyResponse, Error> + Send + Sync>;
+
 pub struct MockRegionEngine {
     sender: Sender<(RegionId, RegionRequest)>,
     pub(crate) handle_request_delay: Option<Duration>,
     pub(crate) handle_request_mock_fn: Option<MockRequestHandler>,
+    pub(crate) handle_set_readonly_gracefully_mock_fn: Option<MockSetReadonlyGracefullyHandler>,
     pub(crate) mock_role: Option<Option<RegionRole>>,
     engine: String,
 }
@@ -120,6 +124,7 @@ impl MockRegionEngine {
                 handle_request_delay: None,
                 sender: tx,
                 handle_request_mock_fn: None,
+                handle_set_readonly_gracefully_mock_fn: None,
                 mock_role: None,
                 engine: engine.to_string(),
             }),
@@ -138,6 +143,7 @@ impl MockRegionEngine {
                 handle_request_delay: None,
                 sender: tx,
                 handle_request_mock_fn: Some(mock_fn),
+                handle_set_readonly_gracefully_mock_fn: None,
                 mock_role: None,
                 engine: engine.to_string(),
             }),
@@ -157,6 +163,7 @@ impl MockRegionEngine {
             handle_request_delay: None,
             sender: tx,
             handle_request_mock_fn: None,
+            handle_set_readonly_gracefully_mock_fn: None,
             mock_role: None,
             engine: engine.to_string(),
         };
@@ -217,9 +224,13 @@ impl RegionEngine for MockRegionEngine {
 
     async fn set_readonly_gracefully(
         &self,
-        _region_id: RegionId,
+        region_id: RegionId,
     ) -> Result<SetReadonlyResponse, BoxedError> {
-        unimplemented!()
+        if let Some(mock_fn) = &self.handle_set_readonly_gracefully_mock_fn {
+            return mock_fn(region_id).map_err(BoxedError::new);
+        };
+
+        unreachable!()
     }
 
     fn role(&self, _region_id: RegionId) -> Option<RegionRole> {

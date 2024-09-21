@@ -18,8 +18,9 @@ use std::time::Duration;
 
 use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{
-    DdlTaskRequest, DdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse, ProcedureId,
-    ProcedureStateResponse, QueryProcedureRequest, ResponseHeader, Role,
+    DdlTaskRequest, DdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse,
+    ProcedureDetailRequest, ProcedureDetailResponse, ProcedureId, ProcedureStateResponse,
+    QueryProcedureRequest, ResponseHeader, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::tracing_context::TracingContext;
@@ -76,18 +77,23 @@ impl Client {
     /// - `region_id`:  the migrated region id
     /// - `from_peer`:  the source datanode id
     /// - `to_peer`:  the target datanode id
-    /// - `replay_timeout`: replay WAL timeout after migration.
+    /// - `timeout`: timeout for downgrading region and upgrading region operations
     pub async fn migrate_region(
         &self,
         region_id: u64,
         from_peer: u64,
         to_peer: u64,
-        replay_timeout: Duration,
+        timeout: Duration,
     ) -> Result<MigrateRegionResponse> {
         let inner = self.inner.read().await;
         inner
-            .migrate_region(region_id, from_peer, to_peer, replay_timeout)
+            .migrate_region(region_id, from_peer, to_peer, timeout)
             .await
+    }
+
+    pub async fn list_procedures(&self) -> Result<ProcedureDetailResponse> {
+        let inner = self.inner.read().await;
+        inner.list_procedures().await
     }
 }
 
@@ -210,13 +216,13 @@ impl Inner {
         region_id: u64,
         from_peer: u64,
         to_peer: u64,
-        replay_timeout: Duration,
+        timeout: Duration,
     ) -> Result<MigrateRegionResponse> {
         let mut req = MigrateRegionRequest {
             region_id,
             from_peer,
             to_peer,
-            replay_timeout_secs: replay_timeout.as_secs() as u32,
+            timeout_secs: timeout.as_secs() as u32,
             ..Default::default()
         };
 
@@ -276,6 +282,25 @@ impl Inner {
                 async move { client.ddl(req).await.map(|res| res.into_inner()) }
             },
             |resp: &DdlTaskResponse| &resp.header,
+        )
+        .await
+    }
+
+    async fn list_procedures(&self) -> Result<ProcedureDetailResponse> {
+        let mut req = ProcedureDetailRequest::default();
+        req.set_header(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
+
+        self.with_retry(
+            "list procedure",
+            move |mut client| {
+                let req = req.clone();
+                async move { client.details(req).await.map(|res| res.into_inner()) }
+            },
+            |resp: &ProcedureDetailResponse| &resp.header,
         )
         .await
     }

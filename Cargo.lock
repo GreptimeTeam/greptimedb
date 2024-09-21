@@ -443,6 +443,7 @@ dependencies = [
  "arrow-schema",
  "flatbuffers",
  "lz4_flex 0.11.3",
+ "zstd 0.13.1",
 ]
 
 [[package]]
@@ -812,6 +813,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-lc-rs"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f95446d919226d587817a7d21379e6eb099b97b45110a7f272a444ca5c54070"
+dependencies = [
+ "aws-lc-sys",
+ "mirai-annotations",
+ "paste",
+ "zeroize",
+]
+
+[[package]]
+name = "aws-lc-sys"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5055edc4a9a1b2a917a818258cdfb86a535947feebd9981adc99667a062c6f85"
+dependencies = [
+ "bindgen",
+ "cc",
+ "cmake",
+ "dunce",
+ "fs_extra",
+ "libc",
+ "paste",
+]
+
+[[package]]
 name = "axum"
 version = "0.6.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -989,12 +1017,15 @@ dependencies = [
  "itertools 0.12.1",
  "lazy_static",
  "lazycell",
+ "log",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
  "rustc-hash 1.1.0",
  "shlex",
  "syn 2.0.66",
+ "which",
 ]
 
 [[package]]
@@ -1247,9 +1278,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.6.0"
+version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "514de17de45fdb8dc022b1a7975556c53c86f9f0aa5f534b98977b171857c2c9"
+checksum = "8318a53db07bb3f8dca91a600466bdb3f2eaadeedfdbcf02e1accbad9271ba50"
 dependencies = [
  "serde",
 ]
@@ -1348,8 +1379,10 @@ dependencies = [
  "common-error",
  "common-macro",
  "common-meta",
+ "common-procedure",
  "common-query",
  "common-recordbatch",
+ "common-runtime",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -1377,6 +1410,7 @@ dependencies = [
  "store-api",
  "table",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
@@ -1390,13 +1424,13 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.0.99"
+version = "1.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96c51067fd44124faa7f870b4b1c969379ad32b2ba805aa959430ceaa384f695"
+checksum = "45bcde016d64c21da4be18b655631e5ab6d3107607e71a73a9f53eb48aae23fb"
 dependencies = [
  "jobserver",
  "libc",
- "once_cell",
+ "shlex",
 ]
 
 [[package]]
@@ -1964,6 +1998,7 @@ dependencies = [
  "common-version",
  "datafusion",
  "datatypes",
+ "derive_more",
  "geohash",
  "h3o",
  "jsonb",
@@ -2078,6 +2113,7 @@ dependencies = [
  "anymap2",
  "api",
  "async-recursion",
+ "async-stream",
  "async-trait",
  "base64 0.21.7",
  "bytes",
@@ -2144,6 +2180,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
+ "common-time",
  "futures",
  "futures-util",
  "humantime-serde",
@@ -3380,6 +3417,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "derive_more"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a9b99b9cbbe49445b21764dc0625032a89b145a2642e67603e1c936f5458d05"
+dependencies = [
+ "derive_more-impl",
+]
+
+[[package]]
+name = "derive_more-impl"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb7330aeadfbe296029522e6c40f315320aba36fc43a5b3632f3795348f3bd22"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.66",
+ "unicode-xid",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3526,6 +3584,12 @@ name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "duration-str"
@@ -3979,6 +4043,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-version",
+ "datafusion-expr",
  "datanode",
  "datatypes",
  "futures",
@@ -4084,6 +4149,12 @@ dependencies = [
  "rustix",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "fs_extra"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "fsevent-sys"
@@ -4325,7 +4396,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=973f49cde88a582fb65755cc572ebcf6fb93ccf7#973f49cde88a582fb65755cc572ebcf6fb93ccf7"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=36334744c7020734dcb4a6b8d24d52ae7ed53fe1#36334744c7020734dcb4a6b8d24d52ae7ed53fe1"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -5435,7 +5506,7 @@ dependencies = [
 [[package]]
 name = "jsonb"
 version = "0.4.1"
-source = "git+https://github.com/CookiePieWw/jsonb.git?rev=d0166c130fce903bf6c58643417a3173a6172d31#d0166c130fce903bf6c58643417a3173a6172d31"
+source = "git+https://github.com/datafuselabs/jsonb.git?rev=46ad50fc71cf75afbf98eec455f7892a6387c1fc#46ad50fc71cf75afbf98eec455f7892a6387c1fc"
 dependencies = [
  "byteorder",
  "fast-float",
@@ -6404,6 +6475,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirai-annotations"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9be0862c1b3f26a88803c4a49de6889c10e608b3ee9344e6ef5b45fb37ad3d1"
+
+[[package]]
 name = "mito2"
 version = "0.9.3"
 dependencies = [
@@ -7153,17 +7230,17 @@ dependencies = [
 [[package]]
 name = "opensrv-mysql"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4148ab944991b0a33be74d2636a815268974578812a9e4cf7dc785325e858154"
+source = "git+https://github.com/datafuselabs/opensrv?rev=6bbc3b65e6b19212c4f7fc4f40c20daf6f452deb#6bbc3b65e6b19212c4f7fc4f40c20daf6f452deb"
 dependencies = [
  "async-trait",
  "byteorder",
+ "bytes",
  "chrono",
  "mysql_common 0.32.4",
  "nom",
  "pin-project-lite",
  "tokio",
- "tokio-rustls 0.25.0",
+ "tokio-rustls 0.26.0",
 ]
 
 [[package]]
@@ -7779,29 +7856,24 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.20.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c00492c52bb65e0421211b7f4c5d9de7586e53786a3b244efb00f74851206bf6"
+checksum = "3770f56e1e8a608c6de40011b9a00c6b669c14d121024411701b4bc3b2a5be99"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
  "bytes",
  "chrono",
  "derive-new 0.6.0",
  "futures",
  "hex",
- "log",
  "md5",
  "postgres-types",
  "rand",
  "ring 0.17.8",
- "stringprep",
  "thiserror",
- "time",
  "tokio",
- "tokio-rustls 0.25.0",
+ "tokio-rustls 0.26.0",
  "tokio-util",
- "x509-certificate",
 ]
 
 [[package]]
@@ -9568,6 +9640,7 @@ version = "0.23.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05cff451f60db80f490f3c182b77c35260baace73209e9cdbbe526bfe3a4d402"
 dependencies = [
+ "aws-lc-rs",
  "log",
  "once_cell",
  "ring 0.17.8",
@@ -9631,6 +9704,7 @@ version = "0.102.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff448f7e92e913c4b7d4c6d8e4540a1724b319b4152b8aef6d4cf8339712b33e"
 dependencies = [
+ "aws-lc-rs",
  "ring 0.17.8",
  "rustls-pki-types",
  "untrusted 0.9.0",
@@ -10403,6 +10477,7 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "auth",
+ "aws-lc-sys",
  "axum",
  "axum-macros",
  "base64 0.21.7",
@@ -10430,6 +10505,7 @@ dependencies = [
  "dashmap",
  "datafusion",
  "datafusion-common",
+ "datafusion-expr",
  "datatypes",
  "derive_builder 0.12.0",
  "futures",
@@ -10467,7 +10543,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rust-embed",
- "rustls 0.22.4",
+ "rustls 0.23.10",
  "rustls-pemfile 2.1.2",
  "rustls-pki-types",
  "schemars",
@@ -10485,7 +10561,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
- "tokio-rustls 0.25.0",
+ "tokio-rustls 0.26.0",
  "tokio-stream",
  "tokio-test",
  "tokio-util",
@@ -12143,16 +12219,15 @@ dependencies = [
 
 [[package]]
 name = "tokio-postgres-rustls"
-version = "0.11.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ea13f22eda7127c827983bdaf0d7fff9df21c8817bab02815ac277a21143677"
+checksum = "04fb792ccd6bbcd4bba408eb8a292f70fc4a3589e5d793626f45190e6454b6ab"
 dependencies = [
- "futures",
  "ring 0.17.8",
- "rustls 0.22.4",
+ "rustls 0.23.10",
  "tokio",
  "tokio-postgres",
- "tokio-rustls 0.25.0",
+ "tokio-rustls 0.26.0",
  "x509-certificate",
 ]
 

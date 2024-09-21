@@ -25,6 +25,8 @@ use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_telemetry::{debug, error, tracing, warn};
+use datafusion_common::ParamValues;
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
 use opensrv_mysql::{
@@ -32,7 +34,6 @@ use opensrv_mysql::{
     StatementMetaWriter, ValueInner,
 };
 use parking_lot::RwLock;
-use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use rand::RngCore;
 use session::context::{Channel, QueryContextRef};
@@ -43,7 +44,7 @@ use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
-use crate::error::{self, InvalidPrepareStatementSnafu, Result};
+use crate::error::{self, DataFrameSnafu, InvalidPrepareStatementSnafu, Result};
 use crate::metrics::METRIC_AUTH_FAILURE;
 use crate::mysql::helper::{
     self, format_placeholder, replace_placeholders, transform_placeholders,
@@ -175,8 +176,11 @@ impl MysqlInstanceShim {
         let params = if let Some(plan) = &plan {
             prepared_params(
                 &plan
-                    .get_param_types()
-                    .context(error::GetPreparedStmtParamsSnafu)?,
+                    .get_parameter_types()
+                    .context(DataFrameSnafu)?
+                    .into_iter()
+                    .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+                    .collect(),
             )?
         } else {
             dummy_params(param_num)?
@@ -323,8 +327,11 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let outputs = match sql_plan.plan {
             Some(plan) => {
                 let param_types = plan
-                    .get_param_types()
-                    .context(error::GetPreparedStmtParamsSnafu)?;
+                    .get_parameter_types()
+                    .context(DataFrameSnafu)?
+                    .into_iter()
+                    .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+                    .collect::<HashMap<_, _>>();
 
                 if params.len() != param_types.len() {
                     return error::InternalSnafu {
@@ -436,8 +443,11 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     let outputs = match sql_plan.plan {
                         Some(plan) => {
                             let param_types = plan
-                                .get_param_types()
-                                .context(error::GetPreparedStmtParamsSnafu)?;
+                                .get_parameter_types()
+                                .context(DataFrameSnafu)?
+                                .into_iter()
+                                .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+                                .collect::<HashMap<_, _>>();
 
                             if params.len() != param_types.len() {
                                 writer
@@ -618,8 +628,9 @@ fn replace_params_with_values(
         }
     }
 
-    plan.replace_params_with_values(&values)
-        .context(error::ReplacePreparedStmtParamsSnafu)
+    plan.clone()
+        .replace_params_with_values(&ParamValues::List(values.clone()))
+        .context(DataFrameSnafu)
 }
 
 fn replace_params_with_exprs(
@@ -645,8 +656,9 @@ fn replace_params_with_exprs(
         }
     }
 
-    plan.replace_params_with_values(&values)
-        .context(error::ReplacePreparedStmtParamsSnafu)
+    plan.clone()
+        .replace_params_with_values(&ParamValues::List(values.clone()))
+        .context(DataFrameSnafu)
 }
 
 async fn validate_query(query: &str) -> Result<Statement> {

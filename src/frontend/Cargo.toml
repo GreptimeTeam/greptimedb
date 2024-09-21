@@ -37,6 +37,7 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-version.workspace = true
+datafusion-expr.workspace = true
 datanode.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true

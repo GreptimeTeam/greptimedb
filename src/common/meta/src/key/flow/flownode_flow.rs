@@ -180,7 +180,8 @@ impl FlownodeFlowManager {
             req,
             DEFAULT_PAGE_SIZE,
             Arc::new(flownode_flow_key_decoder),
-        );
+        )
+        .into_stream();
 
         Box::pin(stream.map_ok(|key| (key.flow_id(), key.partition_id())))
     }
