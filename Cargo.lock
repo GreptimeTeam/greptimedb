@@ -3461,6 +3461,7 @@ checksum = "4abae7035bf79b9877b779505d8cf3749285b80c43941eda66604841889451dc"
 dependencies = [
  "derive_builder_core 0.20.1",
  "syn 2.0.77",
+<<<<<<< HEAD
 ]
 
 [[package]]
@@ -3482,6 +3483,8 @@ dependencies = [
  "quote",
  "syn 2.0.77",
  "unicode-xid",
+=======
+>>>>>>> 34b0bfa35f (fix: cargo lock conflict)
 ]
 
 [[package]]
@@ -4994,7 +4997,12 @@ dependencies = [
 [[package]]
 name = "hyper-rustls"
 version = "0.27.3"
+<<<<<<< HEAD
 source = "git+https://github.com/GreptimeTeam/hyper-rustls#a951e03fb914f1830e244400472814d38775118d"
+=======
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08afdbb5c31130e3034af566421053ab03787c640246a446327f550d11bcb333"
+>>>>>>> 34b0bfa35f (fix: cargo lock conflict)
 dependencies = [
  "futures-util",
  "http 1.1.0",
@@ -5717,6 +5725,7 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
 name = "lazy-regex"
 version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5745,6 +5754,13 @@ version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 dependencies = [
+=======
+name = "lazy_static"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+dependencies = [
+>>>>>>> 34b0bfa35f (fix: cargo lock conflict)
  "spin 0.9.8",
 ]
 
@@ -6468,6 +6484,21 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.0.2"
+<<<<<<< HEAD
+=======
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80e04d1dcff3aae0704555fe5fee3bcfaf3d1fdf8a7e521d5b9d2b42acb52cec"
+dependencies = [
+ "hermit-abi 0.3.9",
+ "libc",
+ "wasi",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "mirai-annotations"
+version = "1.12.0"
+>>>>>>> 34b0bfa35f (fix: cargo lock conflict)
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80e04d1dcff3aae0704555fe5fee3bcfaf3d1fdf8a7e521d5b9d2b42acb52cec"
 dependencies = [
@@ -8592,12 +8623,21 @@ dependencies = [
 
 [[package]]
 name = "prost"
+<<<<<<< HEAD
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b0487d90e047de87f984913713b85c601c05609aad5b0df4b4573fbf69aa13f"
 dependencies = [
  "bytes",
  "prost-derive 0.13.3",
+=======
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b2ecbe40f08db5c006b5764a2645f7f3f141ce756412ac9e1dd6087e6d32995"
+dependencies = [
+ "bytes",
+ "prost-derive 0.13.2",
+>>>>>>> 34b0bfa35f (fix: cargo lock conflict)
 ]
 
 [[package]]
@@ -8623,9 +8663,15 @@ dependencies = [
 
 [[package]]
 name = "prost-build"
+<<<<<<< HEAD
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c1318b19085f08681016926435853bbf7858f9c082d0999b80550ff5d9abe15"
+=======
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8650aabb6c35b860610e9cff5dc1af886c9e25073b7b1712a68972af4281302"
+>>>>>>> 34b0bfa35f (fix: cargo lock conflict)
 dependencies = [
  "bytes",
  "heck 0.5.0",
@@ -8634,8 +8680,13 @@ dependencies = [
  "multimap",
  "once_cell",
  "petgraph",
+<<<<<<< HEAD
  "prost 0.13.3",
  "prost-types 0.13.3",
+=======
+ "prost 0.13.2",
+ "prost-types 0.13.2",
+>>>>>>> 34b0bfa35f (fix: cargo lock conflict)
  "regex",
  "tempfile",
 ]
@@ -8668,9 +8719,15 @@ dependencies = [
 
 [[package]]
 name = "prost-derive"
+<<<<<<< HEAD
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9552f850d5f0964a4e4d0bf306459ac29323ddfbae05e35a7c0d35cb0803cc5"
+=======
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acf0c195eebb4af52c752bec4f52f645da98b6e92077a04110c7f349477ae5ac"
+>>>>>>> 34b0bfa35f (fix: cargo lock conflict)
 dependencies = [
  "anyhow",
  "itertools 0.13.0",
@@ -8699,11 +8756,19 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
+<<<<<<< HEAD
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4759aa0d3a6232fb8dbdb97b61de2c20047c68aca932c7ed76da9d788508d670"
 dependencies = [
  "prost 0.13.3",
+=======
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60caa6738c7369b940c3d49246a8d1749323674c65cb13010134f5c9bad5b519"
+dependencies = [
+ "prost 0.13.2",
+>>>>>>> 34b0bfa35f (fix: cargo lock conflict)
 ]
 
 [[package]]
@@ -9828,7 +9893,12 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.13"
+<<<<<<< HEAD
 source = "git+https://github.com/GreptimeTeam/rustls#e0917109155435821c4416d699babe749b597a03"
+=======
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2dabaac7466917e566adb06783a81ca48944c6898a1b08b9374106dd671f4c8"
+>>>>>>> 34b0bfa35f (fix: cargo lock conflict)
 dependencies = [
  "log",
  "once_cell",
@@ -11599,9 +11669,15 @@ checksum = "9ec889155c56a34200d2c5aee147b8d29545fa7cce7f68b38d927f5d24ced8ef"
 dependencies = [
  "heck 0.5.0",
  "prettyplease",
+<<<<<<< HEAD
  "prost 0.13.3",
  "prost-build 0.13.3",
  "prost-types 0.13.3",
+=======
+ "prost 0.13.2",
+ "prost-build 0.13.2",
+ "prost-types 0.13.2",
+>>>>>>> 34b0bfa35f (fix: cargo lock conflict)
  "schemars",
  "semver",
  "serde",
