@@ -240,7 +240,11 @@ impl CompactionScheduler {
         request: CompactionRequest,
         options: compact_request::Options,
     ) -> Result<()> {
-        let picker = new_picker(options.clone(), &request.current_version.options.compaction);
+        let picker = new_picker(
+            &options,
+            &request.current_version.options.compaction,
+            request.current_version.options.append_mode,
+        );
         let region_id = request.region_id();
         let CompactionRequest {
             engine_config,

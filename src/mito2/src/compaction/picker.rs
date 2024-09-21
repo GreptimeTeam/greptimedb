@@ -119,10 +119,11 @@ impl PickerOutput {
 
 /// Create a new picker based on the compaction request options and compaction options.
 pub fn new_picker(
-    compact_request_options: compact_request::Options,
+    compact_request_options: &compact_request::Options,
     compaction_options: &CompactionOptions,
+    append_mode: bool,
 ) -> Arc<dyn Picker> {
-    if let compact_request::Options::StrictWindow(window) = &compact_request_options {
+    if let compact_request::Options::StrictWindow(window) = compact_request_options {
         let window = if window.window_seconds == 0 {
             None
         } else {
@@ -138,6 +139,7 @@ pub fn new_picker(
                 max_inactive_window_files: twcs_opts.max_inactive_window_files,
                 time_window_seconds: twcs_opts.time_window_seconds(),
                 max_output_file_size: twcs_opts.max_output_file_size.map(|r| r.as_bytes()),
+                append_mode,
             }) as Arc<_>,
         }
     }

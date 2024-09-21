@@ -370,12 +370,7 @@ impl<'a> ParserContext<'a> {
             .map(parse_option_string)
             .collect::<Result<HashMap<String, String>>>()?;
         for key in options.keys() {
-            ensure!(
-                validate_table_option(key),
-                InvalidTableOptionSnafu {
-                    key: key.to_string()
-                }
-            );
+            ensure!(validate_table_option(key), InvalidTableOptionSnafu { key });
         }
         Ok(options.into())
     }

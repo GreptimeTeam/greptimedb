@@ -47,6 +47,8 @@ pub struct TwcsPicker {
     pub time_window_seconds: Option<i64>,
     /// Max allowed compaction output file size.
     pub max_output_file_size: Option<u64>,
+    // Whether the target region is in append mode.
+    pub append_mode: bool,
 }
 
 impl TwcsPicker {
@@ -75,14 +77,33 @@ impl TwcsPicker {
 
             // we only remove deletion markers once no file in current window overlaps with any other window.
             let found_runs = sorted_runs.len();
-            let filter_deleted = !files.overlapping && (found_runs == 1 || max_runs == 1);
+            let mut filter_deleted = !files.overlapping && (found_runs == 1 || max_runs == 1);
+            if self.append_mode {
+                // Skip filtering deleted rows once append mode is set.
+                filter_deleted = false;
+            }
 
             if found_runs > max_runs {
                 let files_to_compact = reduce_runs(sorted_runs, max_runs);
                 let files_to_compact_len = files_to_compact.len();
-                info!("Building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, output size: {}, remove deletion markers: {}", active_window, *window,max_runs, found_runs, files_to_compact_len, filter_deleted);
+                info!(
+                    "Building compaction output, active window: {:?}, \
+                        current window: {}, \
+                        max runs: {}, \
+                        found runs: {}, \
+                        output size: {}, \
+                        max output size: {:?}, \
+                        remove deletion markers: {}",
+                    active_window,
+                    *window,
+                    max_runs,
+                    found_runs,
+                    files_to_compact_len,
+                    self.max_output_file_size,
+                    filter_deleted
+                );
 
-                let maybe_enforce_max_output_size = if filter_deleted
+                let maybe_enforce_max_output_size = if !filter_deleted
                     && let Some(max_output_file_size) = self.max_output_file_size
                 {
                     let enforce_max_output_size =
@@ -96,25 +117,29 @@ impl TwcsPicker {
                 };
 
                 for inputs in maybe_enforce_max_output_size {
-                    output.push(CompactionOutput {
-                        output_file_id: FileId::random(),
-                        output_level: LEVEL_COMPACTED, // always compact to l1
-                        inputs,
-                        filter_deleted,
-                        output_time_range: None, // we do not enforce output time range in twcs compactions.
-                    });
+                    if inputs.len() > 1 {
+                        output.push(CompactionOutput {
+                            output_file_id: FileId::random(),
+                            output_level: LEVEL_COMPACTED, // always compact to l1
+                            inputs,
+                            filter_deleted,
+                            output_time_range: None, // we do not enforce output time range in twcs compactions.
+                        });
+                    }
                 }
             } else if files.files.len() > max_files {
-                debug!(
-                    "Enforcing max file num in window: {}, active: {:?}, max: {}, current: {}",
+                info!(
+                    "Enforcing max file num in window: {}, active: {:?}, max: {}, current: {}, max output size: {:?}, filter delete: {}",
                     *window,
                     active_window,
                     max_files,
-                    files.files.len()
+                    files.files.len(),
+                    self.max_output_file_size,
+                    filter_deleted,
                 );
                 // Files in window exceeds file num limit
                 let to_merge = enforce_file_num(&files.files, max_files);
-                let inputs = if filter_deleted
+                let inputs = if !filter_deleted
                     && let Some(max_output_file_size) = self.max_output_file_size
                 {
                     let maybe_split = enforce_max_output_size(vec![to_merge], max_output_file_size);
@@ -126,13 +151,15 @@ impl TwcsPicker {
                     vec![to_merge]
                 };
                 for input in inputs {
-                    output.push(CompactionOutput {
-                        output_file_id: FileId::random(),
-                        output_level: LEVEL_COMPACTED, // always compact to l1
-                        inputs: input,
-                        filter_deleted,
-                        output_time_range: None,
-                    });
+                    if input.len() > 1 {
+                        output.push(CompactionOutput {
+                            output_file_id: FileId::random(),
+                            output_level: LEVEL_COMPACTED, // always compact to l1
+                            inputs: input,
+                            filter_deleted,
+                            output_time_range: None,
+                        });
+                    }
                 }
             } else {
                 debug!("Skip building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, ", active_window, *window, max_runs, found_runs);
@@ -163,12 +190,12 @@ fn enforce_max_output_size(
             let mut new_input = vec![];
             let mut new_input_size = 0;
             for f in input {
-                new_input_size += f.size();
-                new_input.push(f);
-                if new_input_size >= max_output_file_size {
+                if new_input_size + f.size() > max_output_file_size {
                     splits.push(std::mem::take(&mut new_input));
                     new_input_size = 0;
                 }
+                new_input_size += f.size();
+                new_input.push(f);
             }
             if !new_input.is_empty() {
                 splits.push(new_input);
@@ -589,6 +616,7 @@ mod tests {
                 max_inactive_window_files: usize::MAX,
                 time_window_seconds: None,
                 max_output_file_size: None,
+                append_mode: false,
             }
             .build_output(&mut windows, active_window);
 
