@@ -96,7 +96,7 @@ pub async fn traces(
 }
 
 pub struct PipelineInfo {
-    pub pipeline_name: String,
+    pub pipeline_name: Option<String>,
     pub pipeline_version: Option<String>,
 }
 
@@ -124,15 +124,15 @@ where
         let pipeline_version = parts.headers.get("X-Pipeline-Version");
         match (pipeline_name, pipeline_version) {
             (Some(name), Some(version)) => Ok(PipelineInfo {
-                pipeline_name: pipeline_header_error(name)?,
+                pipeline_name: Some(pipeline_header_error(name)?),
                 pipeline_version: Some(pipeline_header_error(version)?),
             }),
-            (None, _) => Err((
-                StatusCode::BAD_REQUEST,
-                "`X-Pipeline-Name` header is missing",
-            )),
+            (None, _) => Ok(PipelineInfo {
+                pipeline_name: None,
+                pipeline_version: None,
+            }),
             (Some(name), None) => Ok(PipelineInfo {
-                pipeline_name: pipeline_header_error(name)?,
+                pipeline_name: Some(pipeline_header_error(name)?),
                 pipeline_version: None,
             }),
         }
@@ -175,15 +175,13 @@ pub async fn logs(
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
     let query_ctx = Arc::new(query_ctx);
-    let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
+    let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
     let request = ExportLogsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
 
     let pipeline_way;
-    if pipeline_info.pipeline_name == "identity" {
-        pipeline_way = PipelineWay::Identity;
-    } else {
+    if let Some(pipeline_name) = &pipeline_info.pipeline_name {
         let pipeline_version =
             to_pipeline_version(pipeline_info.pipeline_version).map_err(|_| {
                 error::InvalidParameterSnafu {
@@ -192,11 +190,7 @@ pub async fn logs(
                 .build()
             })?;
         let pipeline = match handler
-            .get_pipeline(
-                &pipeline_info.pipeline_name,
-                pipeline_version,
-                query_ctx.clone(),
-            )
+            .get_pipeline(pipeline_name, pipeline_version, query_ctx.clone())
             .await
         {
             Ok(p) => p,
@@ -205,7 +199,10 @@ pub async fn logs(
             }
         };
         pipeline_way = PipelineWay::Custom(pipeline);
+    } else {
+        pipeline_way = PipelineWay::Identity;
     }
+
     handler
         .logs(request, pipeline_way, table_info.table_name, query_ctx)
         .await
