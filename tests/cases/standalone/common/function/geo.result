@@ -158,11 +158,11 @@ SELECT geohash(37.76938, -122.3889, 11);
 
 SELECT geohash(37.76938, -122.3889, 100);
 
-Error: 3001(EngineExecuteQuery), Geohash error: Invalid length specified: 100. Accepted values are between 1 and 12, inclusive
+Error: 3001(EngineExecuteQuery), Invalid geohash resolution 100, expect value: [1, 12]
 
 SELECT geohash(37.76938, -122.3889, -1);
 
-Error: 3001(EngineExecuteQuery), Geohash error: Invalid length specified: 18446744073709551615. Accepted values are between 1 and 12, inclusive
+Error: 3001(EngineExecuteQuery), Invalid geohash resolution -1, expect value: [1, 12]
 
 SELECT geohash(37.76938, -122.3889, 11::Int8);
 
@@ -227,4 +227,12 @@ SELECT geohash(37.76938, -122.3889, 11::UInt64);
 +------------------------------------------------------------------------------------+
 | 9q8yygxneft                                                                        |
 +------------------------------------------------------------------------------------+
+
+SELECT geohash_neighbours(37.76938, -122.3889, 11);
+
++----------------------------------------------------------------------------------------------------------+
+| geohash_neighbours(Float64(37.76938),Float64(-122.3889),Int64(11))                                       |
++----------------------------------------------------------------------------------------------------------+
+| [9q8yygxnefv, 9q8yygxnefu, 9q8yygxnefs, 9q8yygxnefk, 9q8yygxnefm, 9q8yygxnefq, 9q8yygxnefw, 9q8yygxnefy] |
++----------------------------------------------------------------------------------------------------------+
 

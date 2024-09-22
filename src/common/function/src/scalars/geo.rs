@@ -16,7 +16,7 @@ use std::sync::Arc;
 mod geohash;
 mod h3;
 
-use geohash::GeohashFunction;
+use geohash::{GeohashFunction, GeohashNeighboursFunction};
 
 use crate::function_registry::FunctionRegistry;
 
@@ -26,6 +26,7 @@ impl GeoFunctions {
     pub fn register(registry: &FunctionRegistry) {
         // geohash
         registry.register(Arc::new(GeohashFunction));
+        registry.register(Arc::new(GeohashNeighboursFunction));
         // h3 family
         registry.register(Arc::new(h3::H3LatLngToCell));
         registry.register(Arc::new(h3::H3LatLngToCellString));

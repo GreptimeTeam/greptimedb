@@ -19,10 +19,10 @@ use postgres_types::{IsNull, ToSql, Type};
 use session::session_config::{PGDateOrder, PGDateTimeStyle};
 
 #[derive(Debug)]
-pub struct StylingDate<'a>(pub &'a NaiveDate, pub PGDateTimeStyle, pub PGDateOrder);
+pub struct StylingDate(pub NaiveDate, pub PGDateTimeStyle, pub PGDateOrder);
 
 #[derive(Debug)]
-pub struct StylingDateTime<'a>(pub &'a NaiveDateTime, pub PGDateTimeStyle, pub PGDateOrder);
+pub struct StylingDateTime(pub NaiveDateTime, pub PGDateTimeStyle, pub PGDateOrder);
 
 fn date_format_string(style: PGDateTimeStyle, order: PGDateOrder) -> &'static str {
     match style {
@@ -53,7 +53,7 @@ fn datetime_format_string(style: PGDateTimeStyle, order: PGDateOrder) -> &'stati
         },
     }
 }
-impl ToSqlText for StylingDate<'_> {
+impl ToSqlText for StylingDate {
     fn to_sql_text(
         &self,
         ty: &Type,
@@ -78,7 +78,7 @@ impl ToSqlText for StylingDate<'_> {
     }
 }
 
-impl ToSqlText for StylingDateTime<'_> {
+impl ToSqlText for StylingDateTime {
     fn to_sql_text(
         &self,
         ty: &Type,
@@ -112,7 +112,7 @@ impl ToSqlText for StylingDateTime<'_> {
 
 macro_rules! delegate_to_sql {
     ($delegator:ident, $delegatee:ident) => {
-        impl ToSql for $delegator<'_> {
+        impl ToSql for $delegator {
             fn to_sql(
                 &self,
                 ty: &Type,
@@ -148,7 +148,7 @@ mod tests {
         let naive_date = NaiveDate::from_ymd_opt(1997, 12, 17).unwrap();
 
         {
-            let styling_date = StylingDate(&naive_date, PGDateTimeStyle::ISO, PGDateOrder::MDY);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::ISO, PGDateOrder::MDY);
             let expected = "1997-12-17";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -157,7 +157,7 @@ mod tests {
         }
 
         {
-            let styling_date = StylingDate(&naive_date, PGDateTimeStyle::ISO, PGDateOrder::YMD);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::ISO, PGDateOrder::YMD);
             let expected = "1997-12-17";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -166,7 +166,7 @@ mod tests {
         }
 
         {
-            let styling_date = StylingDate(&naive_date, PGDateTimeStyle::ISO, PGDateOrder::DMY);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::ISO, PGDateOrder::DMY);
             let expected = "1997-12-17";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -175,7 +175,7 @@ mod tests {
         }
 
         {
-            let styling_date = StylingDate(&naive_date, PGDateTimeStyle::German, PGDateOrder::MDY);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::German, PGDateOrder::MDY);
             let expected = "17.12.1997";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -184,7 +184,7 @@ mod tests {
         }
 
         {
-            let styling_date = StylingDate(&naive_date, PGDateTimeStyle::German, PGDateOrder::YMD);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::German, PGDateOrder::YMD);
             let expected = "17.12.1997";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -193,7 +193,7 @@ mod tests {
         }
 
         {
-            let styling_date = StylingDate(&naive_date, PGDateTimeStyle::German, PGDateOrder::DMY);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::German, PGDateOrder::DMY);
             let expected = "17.12.1997";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -202,8 +202,7 @@ mod tests {
         }
 
         {
-            let styling_date =
-                StylingDate(&naive_date, PGDateTimeStyle::Postgres, PGDateOrder::MDY);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::Postgres, PGDateOrder::MDY);
             let expected = "12-17-1997";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -212,8 +211,7 @@ mod tests {
         }
 
         {
-            let styling_date =
-                StylingDate(&naive_date, PGDateTimeStyle::Postgres, PGDateOrder::YMD);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::Postgres, PGDateOrder::YMD);
             let expected = "12-17-1997";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -222,8 +220,7 @@ mod tests {
         }
 
         {
-            let styling_date =
-                StylingDate(&naive_date, PGDateTimeStyle::Postgres, PGDateOrder::DMY);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::Postgres, PGDateOrder::DMY);
             let expected = "17-12-1997";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -232,7 +229,7 @@ mod tests {
         }
 
         {
-            let styling_date = StylingDate(&naive_date, PGDateTimeStyle::SQL, PGDateOrder::MDY);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::SQL, PGDateOrder::MDY);
             let expected = "12/17/1997";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -241,7 +238,7 @@ mod tests {
         }
 
         {
-            let styling_date = StylingDate(&naive_date, PGDateTimeStyle::SQL, PGDateOrder::YMD);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::SQL, PGDateOrder::YMD);
             let expected = "12/17/1997";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -250,7 +247,7 @@ mod tests {
         }
 
         {
-            let styling_date = StylingDate(&naive_date, PGDateTimeStyle::SQL, PGDateOrder::DMY);
+            let styling_date = StylingDate(naive_date, PGDateTimeStyle::SQL, PGDateOrder::DMY);
             let expected = "17/12/1997";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
@@ -266,7 +263,7 @@ mod tests {
                 .unwrap();
 
         {
-            let styling_datetime = StylingDateTime(&input, PGDateTimeStyle::ISO, PGDateOrder::MDY);
+            let styling_datetime = StylingDateTime(input, PGDateTimeStyle::ISO, PGDateOrder::MDY);
             let expected = "2021-09-01 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
@@ -277,7 +274,7 @@ mod tests {
         }
 
         {
-            let styling_datetime = StylingDateTime(&input, PGDateTimeStyle::ISO, PGDateOrder::YMD);
+            let styling_datetime = StylingDateTime(input, PGDateTimeStyle::ISO, PGDateOrder::YMD);
             let expected = "2021-09-01 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
@@ -288,7 +285,7 @@ mod tests {
         }
 
         {
-            let styling_datetime = StylingDateTime(&input, PGDateTimeStyle::ISO, PGDateOrder::DMY);
+            let styling_datetime = StylingDateTime(input, PGDateTimeStyle::ISO, PGDateOrder::DMY);
             let expected = "2021-09-01 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
@@ -300,7 +297,7 @@ mod tests {
 
         {
             let styling_datetime =
-                StylingDateTime(&input, PGDateTimeStyle::German, PGDateOrder::MDY);
+                StylingDateTime(input, PGDateTimeStyle::German, PGDateOrder::MDY);
             let expected = "01.09.2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
@@ -312,7 +309,7 @@ mod tests {
 
         {
             let styling_datetime =
-                StylingDateTime(&input, PGDateTimeStyle::German, PGDateOrder::YMD);
+                StylingDateTime(input, PGDateTimeStyle::German, PGDateOrder::YMD);
             let expected = "01.09.2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
@@ -324,7 +321,7 @@ mod tests {
 
         {
             let styling_datetime =
-                StylingDateTime(&input, PGDateTimeStyle::German, PGDateOrder::DMY);
+                StylingDateTime(input, PGDateTimeStyle::German, PGDateOrder::DMY);
             let expected = "01.09.2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
@@ -336,7 +333,7 @@ mod tests {
 
         {
             let styling_datetime =
-                StylingDateTime(&input, PGDateTimeStyle::Postgres, PGDateOrder::MDY);
+                StylingDateTime(input, PGDateTimeStyle::Postgres, PGDateOrder::MDY);
             let expected = "Wed Sep 01 12:34:56.789012 2021";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
@@ -348,7 +345,7 @@ mod tests {
 
         {
             let styling_datetime =
-                StylingDateTime(&input, PGDateTimeStyle::Postgres, PGDateOrder::YMD);
+                StylingDateTime(input, PGDateTimeStyle::Postgres, PGDateOrder::YMD);
             let expected = "Wed Sep 01 12:34:56.789012 2021";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
@@ -360,7 +357,7 @@ mod tests {
 
         {
             let styling_datetime =
-                StylingDateTime(&input, PGDateTimeStyle::Postgres, PGDateOrder::DMY);
+                StylingDateTime(input, PGDateTimeStyle::Postgres, PGDateOrder::DMY);
             let expected = "Wed 01 Sep 12:34:56.789012 2021";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
@@ -371,7 +368,7 @@ mod tests {
         }
 
         {
-            let styling_datetime = StylingDateTime(&input, PGDateTimeStyle::SQL, PGDateOrder::MDY);
+            let styling_datetime = StylingDateTime(input, PGDateTimeStyle::SQL, PGDateOrder::MDY);
             let expected = "09/01/2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
@@ -382,7 +379,7 @@ mod tests {
         }
 
         {
-            let styling_datetime = StylingDateTime(&input, PGDateTimeStyle::SQL, PGDateOrder::YMD);
+            let styling_datetime = StylingDateTime(input, PGDateTimeStyle::SQL, PGDateOrder::YMD);
             let expected = "09/01/2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
@@ -393,7 +390,7 @@ mod tests {
         }
 
         {
-            let styling_datetime = StylingDateTime(&input, PGDateTimeStyle::SQL, PGDateOrder::DMY);
+            let styling_datetime = StylingDateTime(input, PGDateTimeStyle::SQL, PGDateOrder::DMY);
             let expected = "01/09/2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
