@@ -141,6 +141,13 @@ lazy_static! {
             &[METRIC_DB_LABEL]
         )
         .unwrap();
+    pub static ref METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED: HistogramVec =
+    register_histogram_vec!(
+        "greptime_servers_http_otlp_logs_elapsed",
+        "servers http otlp logs elapsed",
+        &[METRIC_DB_LABEL]
+    )
+    .unwrap();
     pub static ref METRIC_HTTP_LOGS_INGESTION_COUNTER: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_http_logs_ingestion_counter",
         "servers http logs ingestion counter",
