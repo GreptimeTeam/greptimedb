@@ -15,6 +15,8 @@
 use std::ops::Deref;
 use std::str::FromStr;
 
+use super::error::{EmptyInputFieldSnafu, MissingInputFieldSnafu};
+use crate::etl::error::{Error, Result};
 use crate::etl::find_key_index;
 
 /// Information about the input field including the name and index in intermediate keys.
@@ -56,7 +58,7 @@ impl OneInputOneOutputField {
         intermediate_keys: &[String],
         input_field: &str,
         target_field: &str,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let input_index = find_key_index(intermediate_keys, input_field, processor_kind)?;
 
         let input_field_info = InputFieldInfo::new(input_field, input_index);
@@ -145,19 +147,19 @@ pub struct Field {
 }
 
 impl FromStr for Field {
-    type Err = String;
+    type Err = Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         let mut parts = s.split(',');
         let input_field = parts
             .next()
-            .ok_or("input field is missing")?
+            .ok_or(MissingInputFieldSnafu.build())?
             .trim()
             .to_string();
         let target_field = parts.next().map(|x| x.trim().to_string());
 
         if input_field.is_empty() {
-            return Err("input field is empty".to_string());
+            return EmptyInputFieldSnafu.fail();
         }
 
         Ok(Field {

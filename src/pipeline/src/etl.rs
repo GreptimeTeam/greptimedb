@@ -14,6 +14,7 @@
 
 #![allow(dead_code)]
 
+mod error;
 pub mod field;
 pub mod processor;
 pub mod transform;
@@ -21,11 +22,14 @@ pub mod value;
 
 use ahash::HashSet;
 use common_telemetry::debug;
+use error::IntermediateKeyIndexSnafu;
 use itertools::Itertools;
 use processor::{Processor, ProcessorBuilder, Processors};
 use transform::{TransformBuilders, Transformer, Transforms};
 use value::Value;
 use yaml_rust::YamlLoader;
+
+use crate::etl::error::{Error, Result};
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
@@ -37,7 +41,7 @@ pub enum Content {
     Yaml(String),
 }
 
-pub fn parse<T>(input: &Content) -> Result<Pipeline<T>, String>
+pub fn parse<T>(input: &Content) -> Result<Pipeline<T>>
 where
     T: Transformer,
 {
@@ -274,18 +278,14 @@ where
     }
 }
 
-pub(crate) fn find_key_index(
-    intermediate_keys: &[String],
-    key: &str,
-    kind: &str,
-) -> Result<usize, String> {
-    intermediate_keys
-        .iter()
-        .position(|k| k == key)
-        .ok_or(format!(
-            "{} processor.{} not found in intermediate keys",
-            kind, key
-        ))
+pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str) -> Result<usize> {
+    intermediate_keys.iter().position(|k| k == key).ok_or(
+        IntermediateKeyIndexSnafu {
+            kind: kind.to_string(),
+            key: key.to_string(),
+        }
+        .build(),
+    )
 }
 
 #[cfg(test)]

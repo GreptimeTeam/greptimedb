@@ -17,6 +17,7 @@ use std::ops::Deref;
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use itertools::Itertools;
 
+use crate::etl::error::{Error, Result};
 use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
 use crate::etl::find_key_index;
 use crate::etl::processor::{
@@ -290,9 +291,9 @@ impl std::ops::DerefMut for PatternInfo {
 }
 
 impl std::str::FromStr for PatternInfo {
-    type Err = String;
+    type Err = Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         let mut parts = vec![];
         let mut cursor = PartInfo::empty_split();
 
@@ -545,13 +546,13 @@ impl DissectProcessorBuilder {
     fn pattern_info_to_pattern(
         pattern_info: PatternInfo,
         intermediate_keys: &[String],
-    ) -> Result<Pattern, String> {
+    ) -> Result<Pattern> {
         let original = pattern_info.origin;
         let pattern = pattern_info
             .parts
             .into_iter()
             .map(|part_info| Self::part_info_to_part(part_info, intermediate_keys))
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>>>()?;
         Ok(Pattern {
             origin: original,
             parts: pattern,
@@ -561,7 +562,7 @@ impl DissectProcessorBuilder {
     fn build_patterns_from_pattern_infos(
         patterns: Vec<PatternInfo>,
         intermediate_keys: &[String],
-    ) -> Result<Vec<Pattern>, String> {
+    ) -> Result<Vec<Pattern>> {
         patterns
             .into_iter()
             .map(|pattern_info| Self::pattern_info_to_pattern(pattern_info, intermediate_keys))
@@ -610,11 +611,7 @@ pub struct DissectProcessor {
 }
 
 impl DissectProcessor {
-    fn process_pattern(
-        &self,
-        chs: &[char],
-        pattern: &Pattern,
-    ) -> Result<Vec<(usize, Value)>, String> {
+    fn process_pattern(&self, chs: &[char], pattern: &Pattern) -> Result<Vec<(usize, Value)>> {
         let mut map = Vec::new();
         let mut pos = 0;
 
@@ -809,7 +806,7 @@ impl Processor for DissectProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
