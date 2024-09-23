@@ -22,6 +22,7 @@ use common_meta::instruction::{
 };
 use common_procedure::Status;
 use common_telemetry::{error, info, warn};
+use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tokio::time::{sleep, Instant};
@@ -95,12 +96,14 @@ impl DowngradeLeaderRegion {
         &self,
         ctx: &Context,
         flush_timeout: Duration,
+        reject_write: bool,
     ) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
         Instruction::DowngradeRegion(DowngradeRegion {
             region_id,
             flush_timeout: Some(flush_timeout),
+            reject_write,
         })
     }
 
@@ -118,16 +121,30 @@ impl DowngradeLeaderRegion {
     /// - [ExceededDeadline](error::Error::ExceededDeadline)
     /// - Invalid JSON.
     async fn downgrade_region(&self, ctx: &mut Context) -> Result<()> {
-        let pc = &ctx.persistent_ctx;
-        let region_id = pc.region_id;
-        let leader = &pc.from_peer;
+        let region_id = ctx.persistent_ctx.region_id;
         let operation_timeout =
             ctx.next_operation_timeout()
                 .context(error::ExceededDeadlineSnafu {
                     operation: "Downgrade region",
                 })?;
-        let downgrade_instruction = self.build_downgrade_region_instruction(ctx, operation_timeout);
 
+        let datanode_table_value = ctx.get_from_peer_datanode_table_value().await?;
+        let reject_write = if let Some(wal_option) = datanode_table_value
+            .region_info
+            .region_wal_options
+            .get(&region_id.region_number())
+        {
+            let options: WalOptions = serde_json::from_str(wal_option)
+                .with_context(|_| error::DeserializeFromJsonSnafu { input: wal_option })?;
+            matches!(options, WalOptions::RaftEngine)
+        } else {
+            true
+        };
+
+        let downgrade_instruction =
+            self.build_downgrade_region_instruction(ctx, operation_timeout, reject_write);
+
+        let leader = &ctx.persistent_ctx.from_peer;
         let msg = MailboxMessage::json_message(
             &format!("Downgrade leader region: {}", region_id),
             &format!("Meta@{}", ctx.server_addr()),

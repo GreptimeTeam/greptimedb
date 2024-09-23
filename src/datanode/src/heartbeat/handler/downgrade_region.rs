@@ -24,8 +24,34 @@ use crate::heartbeat::handler::HandlerContext;
 use crate::heartbeat::task_tracker::WaitResult;
 
 impl HandlerContext {
-    async fn set_readonly_gracefully(&self, region_id: RegionId) -> InstructionReply {
-        match self.region_server.set_readonly_gracefully(region_id).await {
+    async fn downgrade_region_gracefully(&self, region_id: RegionId) -> Option<InstructionReply> {
+        match self
+            .region_server
+            .downgrade_region_gracefully(region_id)
+            .await
+        {
+            Ok(SetRegionRoleStateResponse::Success { .. }) => None,
+            Ok(SetRegionRoleStateResponse::NotFound) => {
+                Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    last_entry_id: None,
+                    exists: false,
+                    error: None,
+                }))
+            }
+            Err(err) => Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                last_entry_id: None,
+                exists: true,
+                error: Some(format!("{err:?}")),
+            })),
+        }
+    }
+
+    async fn become_follower_gracefully(&self, region_id: RegionId) -> InstructionReply {
+        match self
+            .region_server
+            .become_follower_gracefully(region_id)
+            .await
+        {
             Ok(SetRegionRoleStateResponse::Success { last_entry_id }) => {
                 InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id,
@@ -53,6 +79,7 @@ impl HandlerContext {
         DowngradeRegion {
             region_id,
             flush_timeout,
+            reject_write,
         }: DowngradeRegion,
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
@@ -66,11 +93,17 @@ impl HandlerContext {
 
             // Ignores flush request
             if !writable {
-                return self.set_readonly_gracefully(region_id).await;
+                return self.become_follower_gracefully(region_id).await;
             }
 
             let region_server_moved = self.region_server.clone();
             if let Some(flush_timeout) = flush_timeout {
+                if reject_write {
+                    if let Some(reply) = self.downgrade_region_gracefully(region_id).await {
+                        return reply;
+                    }
+                }
+
                 let register_result = self
                     .downgrade_tasks
                     .try_register(
@@ -108,7 +141,7 @@ impl HandlerContext {
                             )),
                         })
                     }
-                    WaitResult::Finish(Ok(_)) => self.set_readonly_gracefully(region_id).await,
+                    WaitResult::Finish(Ok(_)) => self.become_follower_gracefully(region_id).await,
                     WaitResult::Finish(Err(err)) => {
                         InstructionReply::DowngradeRegion(DowngradeRegionReply {
                             last_entry_id: None,
@@ -118,7 +151,7 @@ impl HandlerContext {
                     }
                 }
             } else {
-                self.set_readonly_gracefully(region_id).await
+                self.become_follower_gracefully(region_id).await
             }
         })
     }
@@ -155,6 +188,7 @@ mod tests {
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
                     flush_timeout,
+                    reject_write: false,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -196,6 +230,7 @@ mod tests {
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
                     flush_timeout,
+                    reject_write: false,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -229,6 +264,7 @@ mod tests {
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
                 flush_timeout: Some(flush_timeout),
+                reject_write: false,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -266,6 +302,7 @@ mod tests {
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
                     flush_timeout,
+                    reject_write: false,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -280,6 +317,7 @@ mod tests {
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
                 flush_timeout: Some(Duration::from_millis(500)),
+                reject_write: false,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -325,6 +363,7 @@ mod tests {
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
                     flush_timeout,
+                    reject_write: false,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -339,6 +378,7 @@ mod tests {
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
                 flush_timeout: Some(Duration::from_millis(500)),
+                reject_write: false,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -369,6 +409,7 @@ mod tests {
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
                 flush_timeout: None,
+                reject_write: false,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -400,6 +441,7 @@ mod tests {
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
                 flush_timeout: None,
+                reject_write: false,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));

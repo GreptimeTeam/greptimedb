@@ -275,12 +275,6 @@ impl MitoRegion {
         )
     }
 
-    /// Converts leader to follower.
-    /// You should call this method in the worker loop.
-    pub(crate) fn become_follower(&self) -> Result<()> {
-        self.compare_exchange_state(RegionLeaderState::Writable, RegionRoleState::Follower)
-    }
-
     /// Sets the region to readonly gracefully. This acquires the manifest write lock.
     pub(crate) async fn set_state_gracefully(&self, state: SettableRegionRoleState) {
         let _manager = self.manifest_ctx.manifest_manager.write().await;
@@ -288,11 +282,7 @@ impl MitoRegion {
         // Then we change the state.
         match state {
             SettableRegionRoleState::Follower => {
-                if self.manifest_ctx.state.load() != RegionRoleState::Follower {
-                    if let Err(err) = self.become_follower() {
-                        error!(err; "Failed to convert leader to follower, expect state is {:?}", RegionLeaderState::Writable);
-                    }
-                }
+                self.manifest_ctx.state.store(RegionRoleState::Follower);
             }
             SettableRegionRoleState::DowngradingLeader => {
                 if self.manifest_ctx.state.load()

@@ -214,6 +214,7 @@ mod tests {
         let instruction = Instruction::DowngradeRegion(DowngradeRegion {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
+            reject_write: false,
         });
         assert!(heartbeat_handler
             .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
@@ -414,6 +415,7 @@ mod tests {
             let instruction = Instruction::DowngradeRegion(DowngradeRegion {
                 region_id,
                 flush_timeout: Some(Duration::from_secs(1)),
+                reject_write: false,
             });
 
             let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
@@ -436,6 +438,7 @@ mod tests {
         let instruction = Instruction::DowngradeRegion(DowngradeRegion {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
+            reject_write: false,
         });
         let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
