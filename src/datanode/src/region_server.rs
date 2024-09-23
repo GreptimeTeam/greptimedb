@@ -316,8 +316,8 @@ impl RegionServer {
 
     /// Set region to downgrading gracefully.
     ///
-    /// After the call
-    /// returns, the engine ensures no more write operations will succeed in the region.
+    /// After the call returns,
+    /// the engine ensures no more write operations will succeed in the region.
     pub async fn downgrade_region_gracefully(
         &self,
         region_id: RegionId,
