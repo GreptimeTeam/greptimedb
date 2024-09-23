@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
@@ -26,23 +26,17 @@ use common_telemetry::debug;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
-use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
-use store_api::storage::ColumnId;
-use table::predicate::Predicate;
 
 use crate::cache::CacheManager;
 use crate::error::Result;
-use crate::memtable::{MemtableRange, MemtableRef};
+use crate::memtable::MemtableRange;
 use crate::read::compat::CompatBatch;
 use crate::read::projection::ProjectionMapper;
 use crate::read::range::RowGroupIndex;
-use crate::read::scan_region::{
-    FileRangeCollector, ScanInput, ScanPart, ScanPartList, StreamContext,
-};
+use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::{ScannerMetrics, Source};
-use crate::sst::file::FileMeta;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::ReaderMetrics;
 
@@ -333,119 +327,5 @@ impl UnorderedScan {
     /// Returns the input.
     pub(crate) fn input(&self) -> &ScanInput {
         &self.stream_ctx.input
-    }
-}
-
-/// Initializes parts if they are not built yet.
-async fn maybe_init_parts(
-    input: &ScanInput,
-    part_list: &mut (ScanPartList, Duration),
-    metrics: &mut ScannerMetrics,
-    parallelism: usize,
-) -> Result<()> {
-    if part_list.0.is_none() {
-        let now = Instant::now();
-        let mut distributor = UnorderedDistributor::default();
-        let reader_metrics = input.prune_file_ranges(&mut distributor).await?;
-        distributor.append_mem_ranges(
-            &input.memtables,
-            Some(input.mapper.column_ids()),
-            input.predicate.clone(),
-        );
-        part_list.0.set_parts(distributor.build_parts(parallelism));
-        let build_part_cost = now.elapsed();
-        part_list.1 = build_part_cost;
-
-        metrics.observe_init_part(build_part_cost, &reader_metrics);
-    } else {
-        // Updates the cost of building parts.
-        metrics.build_parts_cost = part_list.1;
-    }
-    Ok(())
-}
-
-/// Builds [ScanPart]s without preserving order. It distributes file ranges and memtables
-/// across partitions. Each partition scans a subset of memtables and file ranges. There
-/// is no output ordering guarantee of each partition.
-#[derive(Default)]
-struct UnorderedDistributor {
-    mem_ranges: Vec<MemtableRange>,
-    file_ranges: Vec<FileRange>,
-}
-
-impl FileRangeCollector for UnorderedDistributor {
-    fn append_file_ranges(
-        &mut self,
-        _file_meta: &FileMeta,
-        file_ranges: impl Iterator<Item = FileRange>,
-    ) {
-        self.file_ranges.extend(file_ranges);
-    }
-}
-
-impl UnorderedDistributor {
-    /// Appends memtable ranges to the distributor.
-    fn append_mem_ranges(
-        &mut self,
-        memtables: &[MemtableRef],
-        projection: Option<&[ColumnId]>,
-        predicate: Option<Predicate>,
-    ) {
-        for mem in memtables {
-            let mem_ranges = mem.ranges(projection, predicate.clone());
-            if mem_ranges.is_empty() {
-                continue;
-            }
-            self.mem_ranges.extend(mem_ranges.into_values());
-        }
-    }
-
-    /// Distributes file ranges and memtables across partitions according to the `parallelism`.
-    /// The output number of parts may be `<= parallelism`.
-    ///
-    /// [ScanPart] created by this distributor only contains one group of file ranges.
-    fn build_parts(self, parallelism: usize) -> Vec<ScanPart> {
-        if parallelism <= 1 {
-            // Returns a single part.
-            let part = ScanPart {
-                memtable_ranges: self.mem_ranges.clone(),
-                file_ranges: smallvec![self.file_ranges],
-                time_range: None,
-            };
-            return vec![part];
-        }
-
-        let mems_per_part = ((self.mem_ranges.len() + parallelism - 1) / parallelism).max(1);
-        let ranges_per_part = ((self.file_ranges.len() + parallelism - 1) / parallelism).max(1);
-        debug!(
-            "Parallel scan is enabled, parallelism: {}, {} mem_ranges, {} file_ranges, mems_per_part: {}, ranges_per_part: {}",
-            parallelism,
-            self.mem_ranges.len(),
-            self.file_ranges.len(),
-            mems_per_part,
-            ranges_per_part
-        );
-        let mut scan_parts = self
-            .mem_ranges
-            .chunks(mems_per_part)
-            .map(|mems| ScanPart {
-                memtable_ranges: mems.to_vec(),
-                file_ranges: smallvec![Vec::new()], // Ensures there is always one group.
-                time_range: None,
-            })
-            .collect::<Vec<_>>();
-        for (i, ranges) in self.file_ranges.chunks(ranges_per_part).enumerate() {
-            if i == scan_parts.len() {
-                scan_parts.push(ScanPart {
-                    memtable_ranges: Vec::new(),
-                    file_ranges: smallvec![ranges.to_vec()],
-                    time_range: None,
-                });
-            } else {
-                scan_parts[i].file_ranges = smallvec![ranges.to_vec()];
-            }
-        }
-
-        scan_parts
     }
 }
