@@ -131,6 +131,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     ) -> Result<BoxedBatchIterator>;
 
     /// Returns the ranges in the memtable.
+    /// The returned map contains the range id and the range after applying the predicate.
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,

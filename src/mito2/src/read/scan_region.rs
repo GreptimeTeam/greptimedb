@@ -983,7 +983,6 @@ pub(crate) struct StreamContext {
     pub(crate) ranges: Vec<RangeMeta>,
     /// Lists of range builders.
     range_builders: RangeBuilderList,
-    // FIXME(yingwen): Support mem range.
 
     // Metrics:
     /// The start time of the query.
@@ -995,7 +994,6 @@ impl StreamContext {
     pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
-        // TODO(yingwen): Find a better place to put it.
         READ_SST_COUNT.observe(input.files.len() as f64);
         let range_builders = RangeBuilderList::new(input.memtables.len(), input.files.len());
 
