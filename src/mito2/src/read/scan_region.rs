@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
@@ -645,12 +645,19 @@ impl ScanInput {
         Ok(sources)
     }
 
-    /// Prunes a file to scan and returns the builder to build reader.
+    /// Prunes a memtable to scan and returns the builder to build readers.
+    fn prune_memtable(&self, mem_index: usize) -> MemRangeBuilder {
+        let memtable = &self.memtables[mem_index];
+        let row_groups = memtable.ranges(Some(self.mapper.column_ids()), self.predicate.clone());
+        MemRangeBuilder { row_groups }
+    }
+
+    /// Prunes a file to scan and returns the builder to build readers.
     async fn prune_file(
         &self,
         file_index: usize,
         reader_metrics: &mut ReaderMetrics,
-    ) -> Result<RangeBuilder> {
+    ) -> Result<FileRangeBuilder> {
         let file = &self.files[file_index];
         let res = self
             .access_layer
@@ -669,7 +676,7 @@ impl ScanInput {
             Err(e) => {
                 if e.is_object_not_found() && self.ignore_file_not_found {
                     error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
-                    return Ok(RangeBuilder::default());
+                    return Ok(FileRangeBuilder::default());
                 } else {
                     return Err(e);
                 }
@@ -687,7 +694,7 @@ impl ScanInput {
             )?;
             file_range_ctx.set_compat_batch(Some(compat));
         }
-        Ok(RangeBuilder {
+        Ok(FileRangeBuilder {
             context: Some(Arc::new(file_range_ctx)),
             row_groups,
         })
@@ -990,7 +997,7 @@ impl StreamContext {
         let ranges = RangeMeta::seq_scan_ranges(&input);
         // TODO(yingwen): Find a better place to put it.
         READ_SST_COUNT.observe(input.files.len() as f64);
-        let range_builders = RangeBuilderList::new(input.files.len());
+        let range_builders = RangeBuilderList::new(input.memtables.len(), input.files.len());
 
         Self {
             input,
@@ -1006,7 +1013,7 @@ impl StreamContext {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::unordered_scan_ranges(&input);
         READ_SST_COUNT.observe(input.files.len() as f64);
-        let range_builders = RangeBuilderList::new(input.files.len());
+        let range_builders = RangeBuilderList::new(input.memtables.len(), input.files.len());
 
         Self {
             input,
@@ -1017,15 +1024,27 @@ impl StreamContext {
         }
     }
 
-    /// Creates a file range to scan.
-    pub(crate) async fn build_file_range(
+    /// Returns true if the index refers to a memtable.
+    pub(crate) fn is_mem_range_index(&self, index: RowGroupIndex) -> bool {
+        self.input.memtables.len() > index.index
+    }
+
+    /// Creates file ranges to scan.
+    pub(crate) async fn build_file_ranges(
         &self,
         index: RowGroupIndex,
+        ranges: &mut Vec<FileRange>,
         reader_metrics: &mut ReaderMetrics,
-    ) -> Result<Option<FileRange>> {
+    ) -> Result<()> {
         self.range_builders
-            .build_range(&self.input, index, reader_metrics)
+            .build_file_ranges(&self.input, index, ranges, reader_metrics)
             .await
+    }
+
+    /// Creates memtable ranges to scan.
+    pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex, ranges: &mut Vec<MemtableRange>) {
+        self.range_builders
+            .build_mem_ranges(&self.input, index, ranges)
     }
 
     /// Retrieves the partition ranges.
@@ -1071,41 +1090,64 @@ impl StreamContext {
 
 /// List to manages the builders to create file ranges.
 struct RangeBuilderList {
-    builders: Vec<Mutex<Option<RangeBuilder>>>,
+    mem_builders: Vec<StdMutex<Option<MemRangeBuilder>>>,
+    file_builders: Vec<Mutex<Option<FileRangeBuilder>>>,
 }
 
 impl RangeBuilderList {
-    /// Creates a new [ReaderBuilderList] with the given number of files.
-    fn new(num_files: usize) -> Self {
-        let builders = (0..num_files).map(|_| Mutex::new(None)).collect();
-        Self { builders }
+    /// Creates a new [ReaderBuilderList] with the given number of memtables and files.
+    fn new(num_memtables: usize, num_files: usize) -> Self {
+        let mem_builders = (0..num_memtables).map(|_| StdMutex::new(None)).collect();
+        let file_builders = (0..num_files).map(|_| Mutex::new(None)).collect();
+        Self {
+            mem_builders,
+            file_builders,
+        }
     }
 
-    /// Builds file range to read the row group at `index`.
-    /// Returns None if nothing to read at this row group.
-    async fn build_range(
+    /// Builds file ranges to read the row group at `index`.
+    async fn build_file_ranges(
         &self,
         input: &ScanInput,
         index: RowGroupIndex,
+        ranges: &mut Vec<FileRange>,
         reader_metrics: &mut ReaderMetrics,
-    ) -> Result<Option<FileRange>> {
-        let mut builder_opt = self.builders[index.index].lock().await;
+    ) -> Result<()> {
+        let file_index = index.index - self.mem_builders.len();
+        let mut builder_opt = self.file_builders[file_index].lock().await;
         match &mut *builder_opt {
-            Some(builder) => Ok(builder.build_reader(index.row_group_index)),
+            Some(builder) => builder.build_ranges(index.row_group_index, ranges),
             None => {
-                let builder = input.prune_file(index.index, reader_metrics).await?;
-                let range = builder.build_reader(index.row_group_index);
+                let builder = input.prune_file(file_index, reader_metrics).await?;
+                builder.build_ranges(index.row_group_index, ranges);
                 *builder_opt = Some(builder);
-                Ok(range)
+            }
+        }
+        Ok(())
+    }
+
+    /// Builds mem ranges to read the row group at `index`.
+    fn build_mem_ranges(
+        &self,
+        input: &ScanInput,
+        index: RowGroupIndex,
+        ranges: &mut Vec<MemtableRange>,
+    ) {
+        let mut builder_opt = self.mem_builders[index.index].lock().unwrap();
+        match &mut *builder_opt {
+            Some(builder) => builder.build_ranges(index.row_group_index, ranges),
+            None => {
+                let builder = input.prune_memtable(index.index);
+                builder.build_ranges(index.row_group_index, ranges);
+                *builder_opt = Some(builder);
             }
         }
     }
 }
 
-// FIXME(yingwen): Support range builder for mem.
 /// Builder to create file ranges.
 #[derive(Default)]
-struct RangeBuilder {
+struct FileRangeBuilder {
     /// Context for the file.
     /// None indicates nothing to read.
     context: Option<FileRangeContextRef>,
@@ -1114,12 +1156,56 @@ struct RangeBuilder {
     row_groups: BTreeMap<usize, Option<RowSelection>>,
 }
 
-impl RangeBuilder {
-    /// Builds a file range to read the row group.
-    /// Returns None if we don't need to read the row group.
-    fn build_reader(&self, row_group_index: usize) -> Option<FileRange> {
-        let context = self.context.clone()?;
-        let row_selection = self.row_groups.get(&row_group_index).cloned()?;
-        Some(FileRange::new(context, row_group_index, row_selection))
+impl FileRangeBuilder {
+    /// Builds file ranges to read.
+    /// Negative `row_group_index` indicates all row groups.
+    fn build_ranges(&self, row_group_index: i64, ranges: &mut Vec<FileRange>) {
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        if row_group_index >= 0 {
+            let row_group_index = row_group_index as usize;
+            // Scans one row group.
+            let Some(row_selection) = self.row_groups.get(&row_group_index) else {
+                return;
+            };
+            ranges.push(FileRange::new(
+                context,
+                row_group_index,
+                row_selection.clone(),
+            ));
+        } else {
+            // Scans all row groups.
+            ranges.extend(
+                self.row_groups
+                    .iter()
+                    .map(|(row_group_index, row_selection)| {
+                        FileRange::new(context.clone(), *row_group_index, row_selection.clone())
+                    }),
+            );
+        }
+    }
+}
+
+/// Builder to create mem ranges.
+struct MemRangeBuilder {
+    /// Ranges of a memtable.
+    row_groups: BTreeMap<usize, MemtableRange>,
+}
+
+impl MemRangeBuilder {
+    /// Builds mem ranges to read in the memtable.
+    /// Negative `row_group_index` indicates all row groups.
+    fn build_ranges(&self, row_group_index: i64, ranges: &mut Vec<MemtableRange>) {
+        if row_group_index >= 0 {
+            let row_group_index = row_group_index as usize;
+            // Scans one row group.
+            let Some(range) = self.row_groups.get(&row_group_index) else {
+                return;
+            };
+            ranges.push(range.clone());
+        } else {
+            ranges.extend(self.row_groups.values().cloned());
+        }
     }
 }

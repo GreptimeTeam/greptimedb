@@ -593,7 +593,7 @@ impl SeqDistributor {
                 continue;
             }
             let part = ScanPart {
-                memtable_ranges: mem_ranges,
+                memtable_ranges: mem_ranges.into_values().collect(),
                 file_ranges: smallvec![],
                 time_range: stats.time_range(),
             };

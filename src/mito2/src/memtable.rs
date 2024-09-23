@@ -14,6 +14,7 @@
 
 //! Memtables are write buffers for regions.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -134,7 +135,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> Vec<MemtableRange>;
+    ) -> BTreeMap<usize, MemtableRange>;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
@@ -339,7 +340,6 @@ impl MemtableRangeContext {
 pub struct MemtableRange {
     /// Shared context.
     context: MemtableRangeContextRef,
-    // TODO(yingwen): Id to identify the range in the memtable.
 }
 
 impl MemtableRange {

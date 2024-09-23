@@ -287,7 +287,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> Vec<MemtableRange> {
+    ) -> BTreeMap<usize, MemtableRange> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -305,7 +305,7 @@ impl Memtable for TimeSeriesMemtable {
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder));
 
-        vec![MemtableRange::new(context)]
+        [(0, MemtableRange::new(context))].into()
     }
 
     fn is_empty(&self) -> bool {

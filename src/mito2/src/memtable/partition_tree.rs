@@ -24,6 +24,7 @@ mod shard;
 mod shard_builder;
 mod tree;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -176,7 +177,7 @@ impl Memtable for PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> Vec<MemtableRange> {
+    ) -> BTreeMap<usize, MemtableRange> {
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
@@ -185,7 +186,7 @@ impl Memtable for PartitionTreeMemtable {
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder));
 
-        vec![MemtableRange::new(context)]
+        [(0, MemtableRange::new(context))].into()
     }
 
     fn is_empty(&self) -> bool {

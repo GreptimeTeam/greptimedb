@@ -21,13 +21,16 @@ use crate::read::scan_region::ScanInput;
 use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
+const ALL_ROW_GROUPS: i64 = -1;
+
 /// Index to access a row group.
 #[derive(Clone, Copy)]
 pub(crate) struct RowGroupIndex {
     /// Index to the memtable/file.
     pub(crate) index: usize,
     /// Row group index in the file.
-    pub(crate) row_group_index: usize,
+    /// Negative index indicates all row groups.
+    pub(crate) row_group_index: i64,
 }
 
 /// Meta data of a partition range.
@@ -39,7 +42,6 @@ pub(crate) struct RangeMeta {
     /// Indices to memtables or files.
     indices: SmallVec<[usize; 2]>,
     /// Indices to memtable/file row groups that this range scans.
-    /// An empty vec indicates all row groups. (Some file metas don't have row group number).
     pub(crate) row_group_indices: SmallVec<[RowGroupIndex; 2]>,
     /// Estimated number of rows in the range. This can be 0 if the statistics are not available.
     pub(crate) num_rows: usize,
@@ -122,7 +124,7 @@ impl RangeMeta {
                     indices: smallvec![memtable_index],
                     row_group_indices: smallvec![RowGroupIndex {
                         index: memtable_index,
-                        row_group_index,
+                        row_group_index: row_group_index as i64,
                     }],
                     num_rows,
                 });
@@ -146,7 +148,7 @@ impl RangeMeta {
                         indices: smallvec![file_index],
                         row_group_indices: smallvec![RowGroupIndex {
                             index: file_index,
-                            row_group_index: row_group_index as usize,
+                            row_group_index: row_group_index as i64,
                         }],
                         num_rows: DEFAULT_ROW_GROUP_SIZE,
                     });
@@ -156,7 +158,10 @@ impl RangeMeta {
                 ranges.push(RangeMeta {
                     time_range: file.time_range(),
                     indices: smallvec![file_index],
-                    row_group_indices: SmallVec::new(),
+                    row_group_indices: smallvec![RowGroupIndex {
+                        index: file_index,
+                        row_group_index: ALL_ROW_GROUPS,
+                    }],
                     // This may be 0.
                     num_rows: file.meta_ref().num_rows as usize,
                 });
@@ -174,8 +179,10 @@ impl RangeMeta {
             ranges.push(RangeMeta {
                 time_range,
                 indices: smallvec![i],
-                // Empty for all row groups:
-                row_group_indices: SmallVec::new(),
+                row_group_indices: smallvec![RowGroupIndex {
+                    index: i,
+                    row_group_index: ALL_ROW_GROUPS,
+                }],
                 num_rows: stats.num_rows(),
             });
         }
@@ -192,8 +199,10 @@ impl RangeMeta {
             ranges.push(RangeMeta {
                 time_range: file.time_range(),
                 indices: smallvec![file_index],
-                // Empty for all row groups:
-                row_group_indices: SmallVec::new(),
+                row_group_indices: smallvec![RowGroupIndex {
+                    index: file_index,
+                    row_group_index: ALL_ROW_GROUPS,
+                }],
                 num_rows: file.meta_ref().num_rows as usize,
             });
         }
