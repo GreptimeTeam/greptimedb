@@ -18,7 +18,6 @@ use std::fmt;
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
 use common_time::interval::IntervalUnit;
 use common_time::{Date, DateTime};
-use num::NumCast;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
@@ -30,27 +29,6 @@ use crate::types::boolean_type::bool_to_numeric;
 use crate::types::{DateTimeType, DateType};
 use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
-
-/// Data types that can be used as arrow's native type.
-pub trait NativeType: ArrowNativeType + NumCast {}
-
-macro_rules! impl_native_type {
-    ($Type: ident) => {
-        impl NativeType for $Type {}
-    };
-}
-
-impl_native_type!(u8);
-impl_native_type!(u16);
-impl_native_type!(u32);
-impl_native_type!(u64);
-impl_native_type!(i8);
-impl_native_type!(i16);
-impl_native_type!(i32);
-impl_native_type!(i64);
-impl_native_type!(i128);
-impl_native_type!(f32);
-impl_native_type!(f64);
 
 /// Represents the wrapper type that wraps a native type using the `newtype pattern`,
 /// such as [Date](`common_time::Date`) is a wrapper type for the underlying native
@@ -70,7 +48,7 @@ pub trait WrapperType:
     /// Logical primitive type that this wrapper type belongs to.
     type LogicalType: LogicalPrimitiveType<Wrapper = Self, Native = Self::Native>;
     /// The underlying native type.
-    type Native: NativeType;
+    type Native: ArrowNativeType;
 
     /// Convert native type into this wrapper type.
     fn from_native(value: Self::Native) -> Self;
@@ -84,7 +62,7 @@ pub trait LogicalPrimitiveType: 'static + Sized {
     /// Arrow primitive type of this logical type.
     type ArrowPrimitive: ArrowPrimitiveType<Native = Self::Native>;
     /// Native (physical) type of this logical type.
-    type Native: NativeType;
+    type Native: ArrowNativeType;
     /// Wrapper type that the vector returns.
     type Wrapper: WrapperType<LogicalType = Self, Native = Self::Native>
         + for<'a> Scalar<VectorType = PrimitiveVector<Self>, RefType<'a> = Self::Wrapper>
@@ -107,7 +85,7 @@ pub trait LogicalPrimitiveType: 'static + Sized {
 
 /// A new type for [WrapperType], complement the `Ord` feature for it. Wrapping non ordered
 /// primitive types like `f32` and `f64` in `OrdPrimitive` can make them be used in places that
-/// require `Ord`. For example, in `Median` or `Percentile` UDAFs.
+/// require `Ord`. For example, in `Median` UDAFs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrdPrimitive<T: WrapperType>(pub T);
 
