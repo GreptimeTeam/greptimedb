@@ -1,12 +1,20 @@
 -- SQLNESS PROTOCOL MYSQL
-SHOW @@tx_isolation;
+SELECt @@tx_isolation;
 
-Failed to execute query, err: MySqlError { ERROR 1235 (42000): (Unsupported): SQL statement is not supported, keyword: @@tx_isolation }
++-----------------+
+| @@tx_isolation; |
++-----------------+
+| 0               |
++-----------------+
 
 -- SQLNESS PROTOCOL MYSQL
-SHOW @@version_comment;
+SELECT @@version_comment;
 
-Failed to execute query, err: MySqlError { ERROR 1235 (42000): (Unsupported): SQL statement is not supported, keyword: @@version_comment }
++--------------------+
+| @@version_comment; |
++--------------------+
+| 0                  |
++--------------------+
 
 -- SQLNESS PROTOCOL MYSQL
 SHOW DATABASES;

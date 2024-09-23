@@ -1,8 +1,8 @@
 -- SQLNESS PROTOCOL MYSQL
-SHOW @@tx_isolation;
+SELECt @@tx_isolation;
 
 -- SQLNESS PROTOCOL MYSQL
-SHOW @@version_comment;
+SELECT @@version_comment;
 
 -- SQLNESS PROTOCOL MYSQL
 SHOW DATABASES;
