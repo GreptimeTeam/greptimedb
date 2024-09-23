@@ -291,19 +291,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_datanode_is_unreachable() {
-        let state = DowngradeLeaderRegion::default();
-        let persistent_context = new_persistent_context();
-        let env = TestingEnv::new();
-        let mut ctx = env.context_factory().new_context(persistent_context);
-
-        let err = state.downgrade_region(&mut ctx).await.unwrap_err();
-
-        assert_matches!(err, Error::PusherNotFound { .. });
-        assert!(!err.is_retryable());
-    }
-
     async fn prepare_table_metadata(ctx: &Context, wal_options: HashMap<u32, String>) {
         let table_info =
             new_test_table_info(ctx.persistent_ctx.region_id.table_id(), vec![1]).into();
@@ -321,6 +308,19 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_datanode_is_unreachable() {
+        let state = DowngradeLeaderRegion::default();
+        let persistent_context = new_persistent_context();
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
+        let err = state.downgrade_region(&mut ctx).await.unwrap_err();
+
+        assert_matches!(err, Error::PusherNotFound { .. });
+        assert!(!err.is_retryable());
     }
 
     #[tokio::test]
