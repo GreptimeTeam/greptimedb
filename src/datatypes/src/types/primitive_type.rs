@@ -18,7 +18,6 @@ use std::fmt;
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
 use common_time::interval::IntervalUnit;
 use common_time::{Date, DateTime};
-use num::NumCast;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
@@ -32,7 +31,7 @@ use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
 /// Data types that can be used as arrow's native type.
-pub trait NativeType: ArrowNativeType + NumCast {}
+pub trait NativeType: ArrowNativeType {}
 
 macro_rules! impl_native_type {
     ($Type: ident) => {
@@ -107,7 +106,7 @@ pub trait LogicalPrimitiveType: 'static + Sized {
 
 /// A new type for [WrapperType], complement the `Ord` feature for it. Wrapping non ordered
 /// primitive types like `f32` and `f64` in `OrdPrimitive` can make them be used in places that
-/// require `Ord`. For example, in `Median` or `Percentile` UDAFs.
+/// require `Ord`. For example, in `Median` UDAFs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrdPrimitive<T: WrapperType>(pub T);
 

@@ -382,21 +382,6 @@ approx_median(values)"#,
         input: {
             "values": Var(
                 ty: Float64,
-                value: IntVec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-            )
-        },
-        script: r#"
-from greptime import *
-approx_percentile_cont(values, 0.6)"#,
-        expect: Ok((
-            value: Int(6),
-            ty: Float64
-        ))
-    ),
-    TestCase(
-        input: {
-            "values": Var(
-                ty: Float64,
                 value: FloatVec([1.0, 2.0, 3.0])
             )
         },
@@ -974,25 +959,6 @@ argmin(p)"#,
         expect: Ok((
             ty: Int64,
             value: Int(0)
-        ))
-    ),
-    TestCase(
-        input: {
-            "x": Var(
-                ty: Float64,
-                value: FloatVec([-1.0, 2.0, 3.0])
-            ),
-            "p": Var(
-                ty: Float64,
-                value: FloatVec([0.5, 0.5, 0.5])
-            )
-        },
-        script: r#"
-from greptime import *
-percentile(x, p)"#,
-        expect: Ok((
-            ty: Float64,
-            value: Float(-0.97)
         ))
     ),
     TestCase(

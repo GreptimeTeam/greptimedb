@@ -345,7 +345,7 @@ fn run_builtin_fn_testcases() {
                     match case.expect{
                         Ok(v) => {
                             error!("\nError:\n{err_res}");
-                            panic!("Expect Ok: {v:?}, found Error");
+                            panic!("Expect Ok: {v:?}, found Error in case {}", case.script);
                         },
                         Err(err) => {
                             if !err_res.contains(&err){
