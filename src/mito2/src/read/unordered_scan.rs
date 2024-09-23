@@ -159,8 +159,8 @@ impl UnorderedScan {
         try_stream! {
             let mapper = &stream_ctx.input.mapper;
             let cache = stream_ctx.input.cache_manager.as_deref();
-            ranges.clear();
             stream_ctx.build_mem_ranges(index, ranges);
+            metrics.num_mem_ranges += ranges.len();
             for range in &*ranges {
                 let build_reader_start = Instant::now();
                 let iter = range.build_iter().map_err(BoxedError::new).context(ExternalSnafu)?;
@@ -191,12 +191,12 @@ impl UnorderedScan {
         try_stream! {
             let mapper = &stream_ctx.input.mapper;
             let cache = stream_ctx.input.cache_manager.as_deref();
-            ranges.clear();
             stream_ctx
                 .build_file_ranges(index, ranges, reader_metrics)
                 .await
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
+            metrics.num_file_ranges += ranges.len();
             for range in ranges {
                 let build_reader_start = Instant::now();
                 let reader = range
@@ -241,8 +241,6 @@ impl UnorderedScan {
                 return;
             };
 
-            // TODO(yingwen): Only count ranges read.
-            let num_ranges = part_ranges.len();
             let mut mem_ranges = Vec::new();
             let mut file_ranges = Vec::new();
             let mut reader_metrics = ReaderMetrics::default();
@@ -266,8 +264,8 @@ impl UnorderedScan {
             metrics.observe_metrics_on_finish();
             let mapper = &stream_ctx.input.mapper;
             debug!(
-                "Unordered scan partition {} finished, region_id: {}, metrics: {:?}, reader_metrics: {:?}, first_poll: {:?}, ranges: {}",
-                partition, mapper.metadata().region_id, metrics, reader_metrics, first_poll, num_ranges,
+                "Unordered scan partition {} finished, region_id: {}, metrics: {:?}, reader_metrics: {:?}, first_poll: {:?}",
+                partition, mapper.metadata().region_id, metrics, reader_metrics, first_poll,
             );
         };
         let stream = Box::pin(RecordBatchStreamWrapper::new(

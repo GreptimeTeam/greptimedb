@@ -754,6 +754,10 @@ pub(crate) struct ScannerMetrics {
     num_batches: usize,
     /// Number of rows returned.
     num_rows: usize,
+    /// Number of mem ranges scanned.
+    num_mem_ranges: usize,
+    /// Number of file ranges scanned.
+    num_file_ranges: usize,
     /// Filter related metrics for readers.
     filter_metrics: ReaderFilterMetrics,
 }

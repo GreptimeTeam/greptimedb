@@ -1034,6 +1034,7 @@ impl StreamContext {
         ranges: &mut Vec<FileRange>,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<()> {
+        ranges.clear();
         self.range_builders
             .build_file_ranges(&self.input, index, ranges, reader_metrics)
             .await
@@ -1041,6 +1042,7 @@ impl StreamContext {
 
     /// Creates memtable ranges to scan.
     pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex, ranges: &mut Vec<MemtableRange>) {
+        ranges.clear();
         self.range_builders
             .build_mem_ranges(&self.input, index, ranges)
     }
