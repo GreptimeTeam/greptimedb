@@ -32,7 +32,8 @@ use query::{QueryEngine, QueryEngineContext};
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetReadonlyResponse,
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
+    SettableRegionRoleState,
 };
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
@@ -106,7 +107,7 @@ pub type MockRequestHandler =
     Box<dyn Fn(RegionId, RegionRequest) -> Result<AffectedRows, Error> + Send + Sync>;
 
 pub type MockSetReadonlyGracefullyHandler =
-    Box<dyn Fn(RegionId) -> Result<SetReadonlyResponse, Error> + Send + Sync>;
+    Box<dyn Fn(RegionId) -> Result<SetRegionRoleStateResponse, Error> + Send + Sync>;
 
 pub struct MockRegionEngine {
     sender: Sender<(RegionId, RegionRequest)>,
@@ -224,10 +225,11 @@ impl RegionEngine for MockRegionEngine {
         Ok(())
     }
 
-    async fn set_readonly_gracefully(
+    async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
-    ) -> Result<SetReadonlyResponse, BoxedError> {
+        _region_role_state: SettableRegionRoleState,
+    ) -> Result<SetRegionRoleStateResponse, BoxedError> {
         if let Some(mock_fn) = &self.handle_set_readonly_gracefully_mock_fn {
             return mock_fn(region_id).map_err(BoxedError::new);
         };

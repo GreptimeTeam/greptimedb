@@ -26,8 +26,8 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetReadonlyResponse,
-    SinglePartitionScanner,
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
+    SettableRegionRoleState, SinglePartitionScanner,
 };
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
@@ -119,16 +119,17 @@ impl RegionEngine for FileRegionEngine {
             .map_err(BoxedError::new)
     }
 
-    async fn set_readonly_gracefully(
+    async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
-    ) -> Result<SetReadonlyResponse, BoxedError> {
+        _region_role_state: SettableRegionRoleState,
+    ) -> Result<SetRegionRoleStateResponse, BoxedError> {
         let exists = self.inner.get_region(region_id).await.is_some();
 
         if exists {
-            Ok(SetReadonlyResponse::success(None))
+            Ok(SetRegionRoleStateResponse::success(None))
         } else {
-            Ok(SetReadonlyResponse::NotFound)
+            Ok(SetRegionRoleStateResponse::NotFound)
         }
     }
 

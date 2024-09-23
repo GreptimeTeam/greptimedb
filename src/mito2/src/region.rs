@@ -29,7 +29,7 @@ use smallvec::{smallvec, SmallVec};
 use snafu::{ensure, OptionExt};
 use store_api::logstore::provider::Provider;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::RegionStatistic;
+use store_api::region_engine::{RegionStatistic, SettableRegionRoleState};
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
@@ -263,11 +263,45 @@ impl MitoRegion {
         )
     }
 
+    /// Sets the downgrading state.
+    /// You should call this method in the worker loop.
+    pub(crate) fn set_downgrading(&self) -> Result<()> {
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::Downgrading),
+        )
+    }
+
+    /// Converts leader to follower.
+    /// You should call this method in the worker loop.
+    pub(crate) fn become_follower(&self) -> Result<()> {
+        self.compare_exchange_state(RegionLeaderState::Writable, RegionRoleState::Follower)
+    }
+
     /// Sets the region to readonly gracefully. This acquires the manifest write lock.
-    pub(crate) async fn set_readonly_gracefully(&self) {
+    pub(crate) async fn set_state_gracefully(&self, state: SettableRegionRoleState) {
         let _manager = self.manifest_ctx.manifest_manager.write().await;
         // We acquires the write lock of the manifest manager to ensure that no one is updating the manifest.
         // Then we change the state.
+        match state {
+            SettableRegionRoleState::Follower => {
+                if self.manifest_ctx.state.load() != RegionRoleState::Follower {
+                    if let Err(err) = self.become_follower() {
+                        error!(err; "Failed to convert leader to follower, expect state is {:?}", RegionLeaderState::Writable);
+                    }
+                }
+            }
+            SettableRegionRoleState::DowngradingLeader => {
+                if self.manifest_ctx.state.load()
+                    != RegionRoleState::Leader(RegionLeaderState::Downgrading)
+                {
+                    if let Err(err) = self.set_downgrading() {
+                        error!(err; "Failed to downgrade leader, expect state is {:?}", RegionLeaderState::Writable);
+                    }
+                }
+            }
+        }
+
         self.set_writable(false);
     }
 

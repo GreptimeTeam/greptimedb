@@ -37,7 +37,8 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetReadonlyResponse,
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
+    SettableRegionRoleState,
 };
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
@@ -217,11 +218,15 @@ impl RegionEngine for MetricEngine {
         Ok(())
     }
 
-    async fn set_readonly_gracefully(
+    async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
-    ) -> std::result::Result<SetReadonlyResponse, BoxedError> {
-        self.inner.mito.set_readonly_gracefully(region_id).await
+        region_role_state: SettableRegionRoleState,
+    ) -> std::result::Result<SetRegionRoleStateResponse, BoxedError> {
+        self.inner
+            .mito
+            .set_region_role_state_gracefully(region_id, region_role_state)
+            .await
     }
 
     /// Returns the physical region role.

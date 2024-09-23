@@ -16,7 +16,7 @@ use common_meta::instruction::{DowngradeRegion, DowngradeRegionReply, Instructio
 use common_telemetry::tracing::info;
 use common_telemetry::warn;
 use futures_util::future::BoxFuture;
-use store_api::region_engine::SetReadonlyResponse;
+use store_api::region_engine::SetRegionRoleStateResponse;
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -26,14 +26,14 @@ use crate::heartbeat::task_tracker::WaitResult;
 impl HandlerContext {
     async fn set_readonly_gracefully(&self, region_id: RegionId) -> InstructionReply {
         match self.region_server.set_readonly_gracefully(region_id).await {
-            Ok(SetReadonlyResponse::Success { last_entry_id }) => {
+            Ok(SetRegionRoleStateResponse::Success { last_entry_id }) => {
                 InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id,
                     exists: true,
                     error: None,
                 })
             }
-            Ok(SetReadonlyResponse::NotFound) => {
+            Ok(SetRegionRoleStateResponse::NotFound) => {
                 InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id: None,
                     exists: false,
@@ -131,7 +131,7 @@ mod tests {
 
     use common_meta::instruction::{DowngradeRegion, InstructionReply};
     use mito2::engine::MITO_ENGINE_NAME;
-    use store_api::region_engine::{RegionRole, SetReadonlyResponse};
+    use store_api::region_engine::{RegionRole, SetRegionRoleStateResponse};
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
     use tokio::time::Instant;
@@ -182,8 +182,9 @@ mod tests {
 
                     Ok(0)
                 }));
-                region_engine.handle_set_readonly_gracefully_mock_fn =
-                    Some(Box::new(|_| Ok(SetReadonlyResponse::success(Some(1024)))))
+                region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
+                    Ok(SetRegionRoleStateResponse::success(Some(1024)))
+                }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
@@ -215,8 +216,9 @@ mod tests {
             MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
                 region_engine.mock_role = Some(Some(RegionRole::Leader));
                 region_engine.handle_request_delay = Some(Duration::from_secs(100));
-                region_engine.handle_set_readonly_gracefully_mock_fn =
-                    Some(Box::new(|_| Ok(SetReadonlyResponse::success(Some(1024)))))
+                region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
+                    Ok(SetRegionRoleStateResponse::success(Some(1024)))
+                }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
@@ -246,8 +248,9 @@ mod tests {
             MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
                 region_engine.mock_role = Some(Some(RegionRole::Leader));
                 region_engine.handle_request_delay = Some(Duration::from_millis(300));
-                region_engine.handle_set_readonly_gracefully_mock_fn =
-                    Some(Box::new(|_| Ok(SetReadonlyResponse::success(Some(1024)))))
+                region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
+                    Ok(SetRegionRoleStateResponse::success(Some(1024)))
+                }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
@@ -304,8 +307,9 @@ mod tests {
                     }
                     .fail()
                 }));
-                region_engine.handle_set_readonly_gracefully_mock_fn =
-                    Some(Box::new(|_| Ok(SetReadonlyResponse::success(Some(1024)))))
+                region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
+                    Ok(SetRegionRoleStateResponse::success(Some(1024)))
+                }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
@@ -356,7 +360,7 @@ mod tests {
             MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
                 region_engine.mock_role = Some(Some(RegionRole::Leader));
                 region_engine.handle_set_readonly_gracefully_mock_fn =
-                    Some(Box::new(|_| Ok(SetReadonlyResponse::NotFound)));
+                    Some(Box::new(|_| Ok(SetRegionRoleStateResponse::NotFound)));
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);

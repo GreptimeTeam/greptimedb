@@ -36,9 +36,21 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{RegionOpenRequest, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
 
-/// The result of setting readonly for the region.
 #[derive(Debug, PartialEq, Eq)]
-pub enum SetReadonlyResponse {
+pub enum SettableRegionRoleState {
+    Follower,
+    DowngradingLeader,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct SetRegionRoleStateRequest {
+    region_id: RegionId,
+    region_role_state: SettableRegionRoleState,
+}
+
+/// The response of setting region role state.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SetRegionRoleStateResponse {
     Success {
         /// Returns `last_entry_id` of the region if available(e.g., It's not available in file engine).
         last_entry_id: Option<entry::Id>,
@@ -46,8 +58,8 @@ pub enum SetReadonlyResponse {
     NotFound,
 }
 
-impl SetReadonlyResponse {
-    /// Returns a [SetReadonlyResponse::Success] with the `last_entry_id`.
+impl SetRegionRoleStateResponse {
+    /// Returns a [SetRegionRoleStateResponse::Success] with the `last_entry_id`.
     pub fn success(last_entry_id: Option<entry::Id>) -> Self {
         Self::Success { last_entry_id }
     }
@@ -338,13 +350,14 @@ pub trait RegionEngine: Send + Sync {
     /// take effect.
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError>;
 
-    /// Sets readonly for a region gracefully.
+    /// Sets region role state gracefully.
     ///
     /// After the call returns, the engine ensures no more write operations will succeed in the region.
-    async fn set_readonly_gracefully(
+    async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
-    ) -> Result<SetReadonlyResponse, BoxedError>;
+        region_role_state: SettableRegionRoleState,
+    ) -> Result<SetRegionRoleStateResponse, BoxedError>;
 
     /// Indicates region role.
     ///

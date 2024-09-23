@@ -15,7 +15,7 @@
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use store_api::region_engine::{RegionEngine, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{RegionPutRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -36,18 +36,24 @@ async fn test_set_readonly_gracefully() {
         .await
         .unwrap();
 
-    let result = engine.set_readonly_gracefully(region_id).await.unwrap();
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
     assert_eq!(
-        SetReadonlyResponse::Success {
+        SetRegionRoleStateResponse::Success {
             last_entry_id: Some(0)
         },
         result
     );
 
     // set readonly again.
-    let result = engine.set_readonly_gracefully(region_id).await.unwrap();
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
     assert_eq!(
-        SetReadonlyResponse::Success {
+        SetRegionRoleStateResponse::Success {
             last_entry_id: Some(0)
         },
         result
@@ -72,10 +78,13 @@ async fn test_set_readonly_gracefully() {
 
     put_rows(&engine, region_id, rows).await;
 
-    let result = engine.set_readonly_gracefully(region_id).await.unwrap();
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
 
     assert_eq!(
-        SetReadonlyResponse::Success {
+        SetRegionRoleStateResponse::Success {
             last_entry_id: Some(1)
         },
         result
@@ -91,8 +100,8 @@ async fn test_set_readonly_gracefully_not_exist() {
 
     // For fast-path.
     let result = engine
-        .set_readonly_gracefully(non_exist_region_id)
+        .set_region_role_state_gracefully(non_exist_region_id, SettableRegionRoleState::Follower)
         .await
         .unwrap();
-    assert_eq!(SetReadonlyResponse::NotFound, result);
+    assert_eq!(SetRegionRoleStateResponse::NotFound, result);
 }
