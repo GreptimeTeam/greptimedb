@@ -66,7 +66,6 @@ RUN rustup toolchain install ${RUST_TOOLCHAIN}
 
 # Install cargo-binstall with a specific version to adapt the current rust toolchain.
 # Note: if we use the latest version, we may encounter the following `use of unstable library feature 'io_error_downcast'` error.
-# RUN cargo install cargo-binstall --version 1.6.6 --locked
 # compile from source take too long, so we use the precompiled binary instead
 COPY $DOCKER_BUILD_ROOT/docker/dev-builder/binstall/pull_binstall.sh /usr/local/bin/pull_binstall.sh
 RUN chmod +x /usr/local/bin/pull_binstall.sh && /usr/local/bin/pull_binstall.sh
