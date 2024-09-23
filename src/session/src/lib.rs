@@ -45,6 +45,7 @@ pub(crate) struct MutableInner {
     schema: String,
     user_info: UserInfoRef,
     timezone: Timezone,
+    warning: Option<String>,
 }
 
 impl Default for MutableInner {
@@ -53,6 +54,7 @@ impl Default for MutableInner {
             schema: DEFAULT_SCHEMA_NAME.into(),
             user_info: auth::userinfo_by_name(None),
             timezone: get_timezone(None).clone(),
+            warning: None,
         }
     }
 }

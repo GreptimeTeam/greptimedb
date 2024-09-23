@@ -257,6 +257,14 @@ impl QueryContext {
     pub fn set_channel(&mut self, channel: Channel) {
         self.channel = channel;
     }
+
+    pub fn warning(&self) -> Option<String> {
+        self.mutable_inner.read().unwrap().warning.clone()
+    }
+
+    pub fn set_warning(&self, msg: String) {
+        self.mutable_inner.write().unwrap().warning = Some(msg);
+    }
 }
 
 impl QueryContextBuilder {
