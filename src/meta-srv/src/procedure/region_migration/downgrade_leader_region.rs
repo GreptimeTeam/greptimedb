@@ -257,8 +257,12 @@ impl DowngradeLeaderRegion {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
 
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
+    use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::storage::RegionId;
     use tokio::time::Instant;
 
@@ -294,6 +298,25 @@ mod tests {
         assert!(!err.is_retryable());
     }
 
+    async fn prepare_table_metadata(ctx: &Context) {
+        let table_info =
+            new_test_table_info(ctx.persistent_ctx.region_id.table_id(), vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(ctx.persistent_ctx.region_id),
+            leader_peer: Some(ctx.persistent_ctx.from_peer.clone()),
+            follower_peers: vec![ctx.persistent_ctx.to_peer.clone()],
+            ..Default::default()
+        }];
+        ctx.table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_pusher_dropped() {
         let state = DowngradeLeaderRegion::default();
@@ -302,6 +325,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx).await;
         let mailbox_ctx = env.mailbox_context();
 
         let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -324,6 +348,7 @@ mod tests {
         let persistent_context = new_persistent_context();
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx).await;
         ctx.volatile_ctx.operations_elapsed = ctx.persistent_ctx.timeout + Duration::from_secs(1);
 
         let err = state.downgrade_region(&mut ctx).await.unwrap_err();
@@ -347,6 +372,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx).await;
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
@@ -373,6 +399,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx).await;
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
@@ -400,6 +427,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx).await;
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
@@ -433,6 +461,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx).await;
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
@@ -525,6 +554,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx).await;
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
