@@ -99,6 +99,7 @@ impl HandlerContext {
             let region_server_moved = self.region_server.clone();
             if let Some(flush_timeout) = flush_timeout {
                 if reject_write {
+                    // Sets region to downgrading, the downgrading region will reject all write requests.
                     if let Some(reply) = self.downgrade_region_gracefully(region_id).await {
                         return reply;
                     }
