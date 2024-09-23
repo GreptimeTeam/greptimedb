@@ -25,6 +25,7 @@ use std::sync::{Arc, RwLock};
 
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
+use smallvec::{smallvec, SmallVec};
 use snafu::{ensure, OptionExt};
 use store_api::logstore::provider::Provider;
 use store_api::metadata::RegionMetadataRef;
@@ -71,6 +72,8 @@ pub enum RegionLeaderState {
     Truncating,
     /// The region is handling a region edit.
     Editing,
+    /// The region is stepping down.
+    Downgrading,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +179,15 @@ impl MitoRegion {
     /// Returns whether the region is writable.
     pub(crate) fn is_writable(&self) -> bool {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable)
+    }
+
+    /// Returns whether the region is flushable.
+    pub(crate) fn is_flushable(&self) -> bool {
+        matches!(
+            self.manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+                | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        )
     }
 
     /// Returns whether the region is readonly.
@@ -308,7 +320,7 @@ impl MitoRegion {
                 RegionLeaderStateSnafu {
                     region_id: self.region_id,
                     state: actual,
-                    expect,
+                    expect: smallvec![expect],
                 }
                 .build()
             })?;
@@ -341,7 +353,7 @@ impl ManifestContext {
     /// Updates the manifest if current state is `expect_state`.
     pub(crate) async fn update_manifest(
         &self,
-        expect_state: RegionLeaderState,
+        expect_states: SmallVec<[RegionLeaderState; 2]>,
         action_list: RegionMetaActionList,
     ) -> Result<()> {
         // Acquires the write lock of the manifest manager.
@@ -351,12 +363,15 @@ impl ManifestContext {
         // Checks state inside the lock. This is to ensure that we won't update the manifest
         // after `set_readonly_gracefully()` is called.
         let current_state = self.state.load();
+        let expected = expect_states
+            .iter()
+            .any(|expect_state| current_state == RegionRoleState::Leader(*expect_state));
         ensure!(
-            current_state == RegionRoleState::Leader(expect_state),
+            expected,
             RegionLeaderStateSnafu {
                 region_id: manifest.metadata.region_id,
                 state: current_state,
-                expect: expect_state,
+                expect: expect_states,
             }
         );
 
@@ -457,7 +472,7 @@ impl RegionMap {
             RegionLeaderStateSnafu {
                 region_id,
                 state: region.state(),
-                expect: RegionLeaderState::Writable,
+                expect: smallvec![RegionLeaderState::Writable],
             }
         );
         Ok(region)
@@ -472,6 +487,41 @@ impl RegionMap {
         cb: &mut F,
     ) -> Option<MitoRegionRef> {
         match self.writable_region(region_id) {
+            Ok(region) => Some(region),
+            Err(e) => {
+                cb.on_failure(e);
+                None
+            }
+        }
+    }
+
+    /// Gets flushable region by region id.
+    ///
+    /// Returns error if the region does not exist or is not operable.
+    fn flushable_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        ensure!(
+            region.is_flushable(),
+            RegionLeaderStateSnafu {
+                region_id,
+                state: region.state(),
+                expect: smallvec![RegionLeaderState::Writable, RegionLeaderState::Downgrading],
+            }
+        );
+        Ok(region)
+    }
+
+    /// Gets flushable region by region id.
+    ///
+    /// Calls the callback if the region does not exist or is not operable.
+    pub(crate) fn flushable_region_or<F: OnFailure>(
+        &self,
+        region_id: RegionId,
+        cb: &mut F,
+    ) -> Option<MitoRegionRef> {
+        match self.flushable_region(region_id) {
             Ok(region) => Some(region),
             Err(e) => {
                 cb.on_failure(e);

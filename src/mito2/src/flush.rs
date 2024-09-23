@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::{debug, error, info};
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::IntoStaticStr;
@@ -410,7 +410,10 @@ impl RegionFlushTask {
         // We will leak files if the manifest update fails, but we ignore them for simplicity. We can
         // add a cleanup job to remove them later.
         self.manifest_ctx
-            .update_manifest(RegionLeaderState::Writable, action_list)
+            .update_manifest(
+                smallvec![RegionLeaderState::Writable, RegionLeaderState::Downgrading],
+                action_list,
+            )
             .await?;
 
         Ok(edit)

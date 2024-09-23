@@ -19,6 +19,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use common_telemetry::{info, warn};
+use smallvec::smallvec;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -199,7 +200,7 @@ impl<S> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
 
             let result = manifest_ctx
-                .update_manifest(RegionLeaderState::Truncating, action_list)
+                .update_manifest(smallvec![RegionLeaderState::Truncating], action_list)
                 .await;
 
             // Sends the result back to the request sender.
@@ -241,7 +242,7 @@ impl<S> RegionWorkerLoop<S> {
 
             let result = region
                 .manifest_ctx
-                .update_manifest(RegionLeaderState::Altering, action_list)
+                .update_manifest(smallvec![RegionLeaderState::Altering], action_list)
                 .await;
             let notify = WorkerRequest::Background {
                 region_id: region.region_id,
@@ -338,6 +339,6 @@ async fn edit_region(
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
     region
         .manifest_ctx
-        .update_manifest(RegionLeaderState::Editing, action_list)
+        .update_manifest(smallvec![RegionLeaderState::Editing], action_list)
         .await
 }

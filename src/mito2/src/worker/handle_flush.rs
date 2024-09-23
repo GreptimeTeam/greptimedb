@@ -36,7 +36,7 @@ impl<S> RegionWorkerLoop<S> {
         request: RegionFlushRequest,
         mut sender: OptionOutputTx,
     ) {
-        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
+        let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
             return;
         };
 
