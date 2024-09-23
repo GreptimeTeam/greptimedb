@@ -32,7 +32,7 @@ use store_api::region_engine::RegionStatistic;
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result};
+use crate::error::{RegionLeaderStateSnafu, RegionNotFoundSnafu, RegionTruncatedSnafu, Result};
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
@@ -59,11 +59,8 @@ impl RegionUsage {
     }
 }
 
-/// State of the region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegionState {
-    /// The region is opened but is still read-only.
-    ReadOnly,
+pub enum RegionLeaderState {
     /// The region is opened and is writable.
     Writable,
     /// The region is altering.
@@ -74,6 +71,12 @@ pub enum RegionState {
     Truncating,
     /// The region is handling a region edit.
     Editing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionRoleState {
+    Leader(RegionLeaderState),
+    Follower,
 }
 
 /// Metadata and runtime status of a region.
@@ -172,16 +175,16 @@ impl MitoRegion {
 
     /// Returns whether the region is writable.
     pub(crate) fn is_writable(&self) -> bool {
-        self.manifest_ctx.state.load() == RegionState::Writable
+        self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable)
     }
 
     /// Returns whether the region is readonly.
-    pub(crate) fn is_readonly(&self) -> bool {
-        self.manifest_ctx.state.load() == RegionState::ReadOnly
+    pub(crate) fn is_follower(&self) -> bool {
+        self.manifest_ctx.state.load() == RegionRoleState::Follower
     }
 
     /// Returns the state of the region.
-    pub(crate) fn state(&self) -> RegionState {
+    pub(crate) fn state(&self) -> RegionRoleState {
         self.manifest_ctx.state.load()
     }
 
@@ -190,17 +193,16 @@ impl MitoRegion {
         if writable {
             // Only sets the region to writable if it is read only.
             // This prevents others updating the manifest.
-            match self
-                .manifest_ctx
-                .state
-                .compare_exchange(RegionState::ReadOnly, RegionState::Writable)
-            {
+            match self.manifest_ctx.state.compare_exchange(
+                RegionRoleState::Follower,
+                RegionRoleState::Leader(RegionLeaderState::Writable),
+            ) {
                 Ok(state) => info!(
                     "Set region {} to writable, previous state: {:?}",
                     self.region_id, state
                 ),
                 Err(state) => {
-                    if state != RegionState::Writable {
+                    if state != RegionRoleState::Leader(RegionLeaderState::Writable) {
                         warn!(
                             "Failed to set region {} to writable, current state: {:?}",
                             self.region_id, state
@@ -209,32 +211,44 @@ impl MitoRegion {
                 }
             }
         } else {
-            self.manifest_ctx.state.store(RegionState::ReadOnly);
+            self.manifest_ctx.state.store(RegionRoleState::Follower);
         }
     }
 
     /// Sets the altering state.
     /// You should call this method in the worker loop.
     pub(crate) fn set_altering(&self) -> Result<()> {
-        self.compare_exchange_state(RegionState::Writable, RegionState::Altering)
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::Altering),
+        )
     }
 
     /// Sets the dropping state.
     /// You should call this method in the worker loop.
     pub(crate) fn set_dropping(&self) -> Result<()> {
-        self.compare_exchange_state(RegionState::Writable, RegionState::Dropping)
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::Dropping),
+        )
     }
 
     /// Sets the truncating state.
     /// You should call this method in the worker loop.
     pub(crate) fn set_truncating(&self) -> Result<()> {
-        self.compare_exchange_state(RegionState::Writable, RegionState::Truncating)
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::Truncating),
+        )
     }
 
     /// Sets the editing state.
     /// You should call this method in the worker loop.
     pub(crate) fn set_editing(&self) -> Result<()> {
-        self.compare_exchange_state(RegionState::Writable, RegionState::Editing)
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::Editing),
+        )
     }
 
     /// Sets the region to readonly gracefully. This acquires the manifest write lock.
@@ -247,8 +261,10 @@ impl MitoRegion {
 
     /// Switches the region state to `RegionState::Writable` if the current state is `expect`.
     /// Otherwise, logs an error.
-    pub(crate) fn switch_state_to_writable(&self, expect: RegionState) {
-        if let Err(e) = self.compare_exchange_state(expect, RegionState::Writable) {
+    pub(crate) fn switch_state_to_writable(&self, expect: RegionLeaderState) {
+        if let Err(e) = self
+            .compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Writable))
+        {
             error!(e; "failed to switch region state to writable, expect state is {:?}", expect);
         }
     }
@@ -280,12 +296,16 @@ impl MitoRegion {
 
     /// Sets the state of the region to given state if the current state equals to
     /// the expected.
-    fn compare_exchange_state(&self, expect: RegionState, state: RegionState) -> Result<()> {
+    fn compare_exchange_state(
+        &self,
+        expect: RegionLeaderState,
+        state: RegionRoleState,
+    ) -> Result<()> {
         self.manifest_ctx
             .state
-            .compare_exchange(expect, state)
+            .compare_exchange(RegionRoleState::Leader(expect), state)
             .map_err(|actual| {
-                RegionStateSnafu {
+                RegionLeaderStateSnafu {
                     region_id: self.region_id,
                     state: actual,
                     expect,
@@ -303,11 +323,11 @@ pub(crate) struct ManifestContext {
     manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
     /// The state of the region. The region checks the state before updating
     /// manifest.
-    state: AtomicCell<RegionState>,
+    state: AtomicCell<RegionRoleState>,
 }
 
 impl ManifestContext {
-    pub(crate) fn new(manager: RegionManifestManager, state: RegionState) -> Self {
+    pub(crate) fn new(manager: RegionManifestManager, state: RegionRoleState) -> Self {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
@@ -321,7 +341,7 @@ impl ManifestContext {
     /// Updates the manifest if current state is `expect_state`.
     pub(crate) async fn update_manifest(
         &self,
-        expect_state: RegionState,
+        expect_state: RegionLeaderState,
         action_list: RegionMetaActionList,
     ) -> Result<()> {
         // Acquires the write lock of the manifest manager.
@@ -332,8 +352,8 @@ impl ManifestContext {
         // after `set_readonly_gracefully()` is called.
         let current_state = self.state.load();
         ensure!(
-            current_state == expect_state,
-            RegionStateSnafu {
+            current_state == RegionRoleState::Leader(expect_state),
+            RegionLeaderStateSnafu {
                 region_id: manifest.metadata.region_id,
                 state: current_state,
                 expect: expect_state,
@@ -380,9 +400,9 @@ impl ManifestContext {
             |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
         )?;
 
-        if self.state.load() == RegionState::ReadOnly {
+        if self.state.load() == RegionRoleState::Follower {
             warn!(
-                "Region {} becomes read-only while updating manifest which may cause inconsistency",
+                "Region {} becomes follower while updating manifest which may cause inconsistency",
                 manifest.metadata.region_id
             );
         }
@@ -434,10 +454,10 @@ impl RegionMap {
             .context(RegionNotFoundSnafu { region_id })?;
         ensure!(
             region.is_writable(),
-            RegionStateSnafu {
+            RegionLeaderStateSnafu {
                 region_id,
                 state: region.state(),
-                expect: RegionState::Writable,
+                expect: RegionLeaderState::Writable,
             }
         );
         Ok(region)
@@ -550,10 +570,10 @@ impl ManifestStats {
 mod tests {
     use crossbeam_utils::atomic::AtomicCell;
 
-    use crate::region::RegionState;
+    use crate::region::RegionRoleState;
 
     #[test]
     fn test_region_state_lock_free() {
-        assert!(AtomicCell::<RegionState>::is_lock_free());
+        assert!(AtomicCell::<RegionRoleState>::is_lock_free());
     }
 }
