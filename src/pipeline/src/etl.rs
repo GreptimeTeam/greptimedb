@@ -214,16 +214,19 @@ where
         match val {
             Value::Map(map) => {
                 let mut search_from = 0;
+                // because of the key in the json map is ordered
                 for (payload_key, payload_value) in map.values.into_iter() {
                     if search_from >= self.required_keys.len() {
                         break;
                     }
 
+                    // because of map key is ordered, required_keys is ordered too
                     if let Some(pos) = self.required_keys[search_from..]
                         .iter()
                         .position(|k| k == &payload_key)
                     {
                         result[search_from + pos] = payload_value;
+                        // next search from is always after the current key
                         search_from += pos;
                     }
                 }

@@ -14,7 +14,6 @@
 
 use std::collections::{BTreeMap, HashMap as StdHashMap};
 
-use ahash::{HashMap, HashMapExt};
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{
@@ -144,7 +143,7 @@ fn log_to_pipeline_value(
     let log_attrs = PipelineValue::Map(Map {
         values: key_value_to_map(log.attributes),
     });
-    let mut map = HashMap::new();
+    let mut map = BTreeMap::new();
     map.insert(
         "Timestamp".to_string(),
         PipelineValue::Uint64(log.time_unix_nano),
@@ -485,8 +484,8 @@ fn any_value_to_pipeline_value(value: any_value::Value) -> PipelineValue {
 }
 
 // convert otlp keyValue vec to map
-fn key_value_to_map(key_values: Vec<KeyValue>) -> HashMap<String, PipelineValue> {
-    let mut map = HashMap::new();
+fn key_value_to_map(key_values: Vec<KeyValue>) -> BTreeMap<String, PipelineValue> {
+    let mut map = BTreeMap::new();
     for kv in key_values {
         let value = match kv.value {
             Some(value) => match value.value {
