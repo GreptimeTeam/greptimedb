@@ -47,7 +47,7 @@ use servers::server::ServerHandlers;
 use servers::Mode;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::path_utils::{region_dir, WAL_DIR};
-use store_api::region_engine::RegionEngineRef;
+use store_api::region_engine::{RegionEngineRef, RegionRole};
 use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
 use tokio::fs;
@@ -546,9 +546,9 @@ async fn open_all_regions(
 
     for region_id in open_regions {
         if open_with_writable {
-            if let Err(e) = region_server.set_writable(region_id, true) {
+            if let Err(e) = region_server.set_region_role(region_id, RegionRole::Leader) {
                 error!(
-                    e; "failed to set writable for region {region_id}"
+                    e; "failed to convert region {region_id} to leader"
                 );
             }
         }

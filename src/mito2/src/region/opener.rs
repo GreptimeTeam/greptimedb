@@ -28,6 +28,7 @@ use snafu::{ensure, OptionExt};
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::region_engine::RegionRole;
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
@@ -171,8 +172,8 @@ impl RegionOpener {
                     &expect.column_metadatas,
                     &expect.primary_key,
                 )?;
-                // To keep consistence with Create behavior, set the opened Region writable.
-                region.set_writable(true);
+                // To keep consistence with Create behavior, set the opened Region to RegionRole::Leader.
+                region.set_region_role(RegionRole::Leader);
                 return Ok(region);
             }
             Ok(None) => {

@@ -15,7 +15,9 @@
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use store_api::region_engine::{RegionEngine, SetRegionRoleStateResponse, SettableRegionRoleState};
+use store_api::region_engine::{
+    RegionEngine, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState,
+};
 use store_api::region_request::{RegionPutRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -74,7 +76,9 @@ async fn test_set_readonly_gracefully() {
 
     assert_eq!(error.status_code(), StatusCode::RegionNotReady);
 
-    engine.set_writable(region_id, true).unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
 
     put_rows(&engine, region_id, rows).await;
 

@@ -56,7 +56,7 @@ impl HandlerContext {
         }: DowngradeRegion,
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
-            let Some(writable) = self.region_server.is_writable(region_id) else {
+            let Some(writable) = self.region_server.is_region_leader(region_id) else {
                 return InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id: None,
                     exists: false,

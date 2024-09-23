@@ -19,7 +19,7 @@ use api::v1::{ColumnSchema, Rows};
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::TimestampMillisecondVector;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     RegionCompactRequest, RegionDeleteRequest, RegionFlushRequest, RegionRequest,
 };
@@ -302,8 +302,10 @@ async fn test_readonly_during_compaction() {
     // Waits until the engine receives compaction finished request.
     listener.wait_handle_finished().await;
 
-    // Sets the region to read only mode.
-    engine.set_writable(region_id, false).unwrap();
+    // Converts region to follower.
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
     // Wakes up the listener.
     listener.wake();
 

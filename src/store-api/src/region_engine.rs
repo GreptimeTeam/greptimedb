@@ -343,12 +343,12 @@ pub trait RegionEngine: Send + Sync {
     /// Stops the engine
     async fn stop(&self) -> Result<(), BoxedError>;
 
-    /// Sets writable mode for a region.
+    /// Sets [RegionRole] for a region.
     ///
     /// The engine checks whether the region is writable before writing to the region. Setting
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError>;
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
 
     /// Sets region role state gracefully.
     ///

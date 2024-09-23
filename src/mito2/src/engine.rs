@@ -436,14 +436,14 @@ impl EngineInner {
         Ok(scan_region)
     }
 
-    /// Set writable mode for a region.
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<()> {
+    /// Converts the [`RegionRole`].
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self
             .workers
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
 
-        region.set_writable(writable);
+        region.set_region_role(role);
         Ok(())
     }
 
@@ -552,9 +552,9 @@ impl RegionEngine for MitoEngine {
         self.get_region_statistic(region_id)
     }
 
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError> {
         self.inner
-            .set_writable(region_id, writable)
+            .set_region_role(region_id, role)
             .map_err(BoxedError::new)
     }
 

@@ -113,9 +113,9 @@ impl RegionEngine for FileRegionEngine {
         None
     }
 
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError> {
         self.inner
-            .set_writable(region_id, writable)
+            .set_region_role(region_id, role)
             .map_err(BoxedError::new)
     }
 
@@ -190,7 +190,7 @@ impl EngineInner {
         Ok(())
     }
 
-    fn set_writable(&self, _region_id: RegionId, _writable: bool) -> EngineResult<()> {
+    fn set_region_role(&self, _region_id: RegionId, _region_role: RegionRole) -> EngineResult<()> {
         // TODO(zhongzc): Improve the semantics and implementation of this API.
         Ok(())
     }

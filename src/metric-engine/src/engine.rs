@@ -202,14 +202,14 @@ impl RegionEngine for MetricEngine {
         Ok(())
     }
 
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError> {
         // ignore the region not found error
         for x in [
             utils::to_metadata_region_id(region_id),
             utils::to_data_region_id(region_id),
             region_id,
         ] {
-            if let Err(e) = self.inner.mito.set_writable(x, writable)
+            if let Err(e) = self.inner.mito.set_region_role(x, role)
                 && e.status_code() != StatusCode::RegionNotFound
             {
                 return Err(e);

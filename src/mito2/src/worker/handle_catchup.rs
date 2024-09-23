@@ -20,6 +20,7 @@ use common_telemetry::info;
 use common_telemetry::tracing::warn;
 use snafu::ensure;
 use store_api::logstore::LogStore;
+use store_api::region_engine::RegionRole;
 use store_api::region_request::{AffectedRows, RegionCatchupRequest};
 use store_api::storage::RegionId;
 use tokio::time::Instant;
@@ -112,7 +113,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if request.set_writable {
-            region.set_writable(true);
+            region.set_region_role(RegionRole::Leader);
         }
 
         Ok(0)

@@ -221,7 +221,7 @@ impl RegionEngine for MockRegionEngine {
         Ok(())
     }
 
-    fn set_writable(&self, _region_id: RegionId, _writable: bool) -> Result<(), BoxedError> {
+    fn set_region_role(&self, _region_id: RegionId, _role: RegionRole) -> Result<(), BoxedError> {
         Ok(())
     }
 

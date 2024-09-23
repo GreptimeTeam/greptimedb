@@ -29,7 +29,7 @@ use smallvec::{smallvec, SmallVec};
 use snafu::{ensure, OptionExt};
 use store_api::logstore::provider::Provider;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionStatistic, SettableRegionRoleState};
+use store_api::region_engine::{RegionRole, RegionStatistic, SettableRegionRoleState};
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
@@ -200,30 +200,33 @@ impl MitoRegion {
         self.manifest_ctx.state.load()
     }
 
-    /// Sets the writable state.
-    pub(crate) fn set_writable(&self, writable: bool) {
-        if writable {
-            // Only sets the region to writable if it is read only.
-            // This prevents others updating the manifest.
-            match self.manifest_ctx.state.compare_exchange(
-                RegionRoleState::Follower,
-                RegionRoleState::Leader(RegionLeaderState::Writable),
-            ) {
-                Ok(state) => info!(
-                    "Set region {} to writable, previous state: {:?}",
-                    self.region_id, state
-                ),
-                Err(state) => {
-                    if state != RegionRoleState::Leader(RegionLeaderState::Writable) {
-                        warn!(
-                            "Failed to set region {} to writable, current state: {:?}",
-                            self.region_id, state
-                        )
+    /// Sets the [`RegionRole`].
+    pub(crate) fn set_region_role(&self, next_role: RegionRole) {
+        match next_role {
+            RegionRole::Follower => {
+                self.manifest_ctx.state.store(RegionRoleState::Follower);
+            }
+            RegionRole::Leader => {
+                // Only sets the region to writable if it is read only.
+                // This prevents others updating the manifest.
+                match self.manifest_ctx.state.compare_exchange(
+                    RegionRoleState::Follower,
+                    RegionRoleState::Leader(RegionLeaderState::Writable),
+                ) {
+                    Ok(state) => info!(
+                        "Convert region {} to leader, previous role state: {:?}",
+                        self.region_id, state
+                    ),
+                    Err(state) => {
+                        if state != RegionRoleState::Leader(RegionLeaderState::Writable) {
+                            warn!(
+                                "Failed to convert region {} to leader, current role state: {:?}",
+                                self.region_id, state
+                            )
+                        }
                     }
                 }
             }
-        } else {
-            self.manifest_ctx.state.store(RegionRoleState::Follower);
         }
     }
 
@@ -301,8 +304,6 @@ impl MitoRegion {
                 }
             }
         }
-
-        self.set_writable(false);
     }
 
     /// Switches the region state to `RegionState::Writable` if the current state is `expect`.

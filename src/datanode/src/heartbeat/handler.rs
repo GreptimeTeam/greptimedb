@@ -153,6 +153,7 @@ mod tests {
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
     use store_api::path_utils::region_dir;
+    use store_api::region_engine::RegionRole;
     use store_api::region_request::{RegionCloseRequest, RegionRequest};
     use store_api::storage::RegionId;
     use tokio::sync::mpsc::{self, Receiver};
@@ -295,7 +296,9 @@ mod tests {
             }
 
             assert_matches!(
-                region_server.set_writable(region_id, true).unwrap_err(),
+                region_server
+                    .set_region_role(region_id, RegionRole::Leader)
+                    .unwrap_err(),
                 error::Error::RegionNotFound { .. }
             );
         }

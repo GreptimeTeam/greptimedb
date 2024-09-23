@@ -22,7 +22,7 @@ use common_recordbatch::RecordBatches;
 use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
 use rstest::rstest;
 use rstest_reuse::{self, apply};
-use store_api::region_engine::{RegionEngine, SetRegionRoleStateResponse};
+use store_api::region_engine::{RegionEngine, RegionRole, SetRegionRoleStateResponse};
 use store_api::region_request::{RegionCatchupRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -247,7 +247,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
     assert_matches!(err, error::Error::UnexpectedReplay { .. });
 
     // It should ignore requests to writable regions.
-    region.set_writable(true);
+    region.set_region_role(RegionRole::Leader);
     let resp = follower_engine
         .handle_request(
             region_id,

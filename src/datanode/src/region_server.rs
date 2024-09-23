@@ -277,8 +277,7 @@ impl RegionServer {
             .collect()
     }
 
-    pub fn is_writable(&self, region_id: RegionId) -> Option<bool> {
-        // TODO(weny): Finds a better way.
+    pub fn is_region_leader(&self, region_id: RegionId) -> Option<bool> {
         self.inner.region_map.get(&region_id).and_then(|engine| {
             engine.role(region_id).map(|role| match role {
                 RegionRole::Follower => false,
@@ -287,14 +286,14 @@ impl RegionServer {
         })
     }
 
-    pub fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<()> {
+    pub fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let engine = self
             .inner
             .region_map
             .get(&region_id)
             .with_context(|| RegionNotFoundSnafu { region_id })?;
         engine
-            .set_writable(region_id, writable)
+            .set_region_role(region_id, role)
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
@@ -845,7 +844,7 @@ impl RegionServerInner {
                 info!("Region {region_id} is deregistered from engine {engine_type}");
                 self.region_map
                     .remove(&region_id)
-                    .map(|(id, engine)| engine.set_writable(id, false));
+                    .map(|(id, engine)| engine.set_region_role(id, RegionRole::Follower));
                 self.event_listener.on_region_deregistered(region_id);
             }
             RegionChange::Catchup => {
