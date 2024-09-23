@@ -402,7 +402,8 @@ impl Processor for CmcdProcessor {
 
 #[cfg(test)]
 mod tests {
-    use ahash::HashMap;
+    use std::collections::BTreeMap;
+
     use urlencoding::decode;
 
     use super::{CmcdProcessorBuilder, CMCD_KEYS};
@@ -563,14 +564,14 @@ mod tests {
             let values = vec
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
-                .collect::<HashMap<String, Value>>();
+                .collect::<BTreeMap<String, Value>>();
             let expected = Map { values };
 
             let actual = processor.parse(0, &decoded).unwrap();
             let actual = actual
                 .into_iter()
                 .map(|(index, value)| (intermediate_keys[index].clone(), value))
-                .collect::<HashMap<String, Value>>();
+                .collect::<BTreeMap<String, Value>>();
             let actual = Map { values: actual };
             assert_eq!(actual, expected);
         }
