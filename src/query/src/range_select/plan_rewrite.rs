@@ -22,7 +22,7 @@ use catalog::table_source::DfTableSourceProvider;
 use chrono::Utc;
 use common_time::interval::{MS_PER_DAY, NANOS_PER_MILLI};
 use common_time::timestamp::TimeUnit;
-use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp, Timezone};
+use common_time::{IntervalDayTime, IntervalMonthDayNano, Timestamp, Timezone};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::prelude::Column;
 use datafusion::scalar::ScalarValue;
@@ -549,6 +549,7 @@ mod test {
     use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_time::IntervalYearMonth;
     use datafusion_expr::{BinaryExpr, Operator};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -825,11 +826,11 @@ mod test {
         // test evaluate expr
         let args = vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(0, 10).to_i32(),
+                IntervalDayTime::new(0, 10).to_i64(),
             )))),
             op: Operator::Plus,
             right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(0, 10).to_i32(),
+                IntervalDayTime::new(0, 10).to_i64(),
             )))),
         })];
         assert_eq!(
@@ -837,12 +838,12 @@ mod test {
             Duration::from_millis(20)
         );
         let args = vec![Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                IntervalDayTime::new(0, 10).to_i32(),
+            left: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(0, 10).to_i64(),
             )))),
             op: Operator::Minus,
-            right: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                IntervalDayTime::new(0, 10).to_i32(),
+            right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(0, 10).to_i64(),
             )))),
         })];
         // test zero interval error
@@ -904,11 +905,11 @@ mod test {
         // test evaluate expr
         let args = vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(0, 10).to_i32(),
+                IntervalDayTime::new(0, 10).to_i64(),
             )))),
             op: Operator::Plus,
             right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(0, 10).to_i32(),
+                IntervalDayTime::new(0, 10).to_i64(),
             )))),
         })];
         assert_eq!(parse_align_to(&args, 0, None).unwrap(), 20);

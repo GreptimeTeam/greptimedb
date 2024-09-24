@@ -16,9 +16,10 @@ use bytes::Buf;
 use common_base::bytes::Bytes;
 use common_decimal::Decimal128;
 use common_time::time::Time;
-use common_time::{Date, Duration, Interval};
+use common_time::{Date, Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Value;
+use datatypes::types::IntervalType;
 use datatypes::value::ValueRef;
 use memcomparable::{Deserializer, Serializer};
 use paste::paste;
@@ -117,6 +118,24 @@ impl SortField {
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
                     }
+                    ConcreteDataType::Interval(IntervalType::YearMonth(_)) => {
+                        let interval = value.as_interval_year_month().context(FieldTypeMismatchSnafu)?;
+                        interval.map(|i| i.to_i32())
+                            .serialize($serializer)
+                            .context(SerializeFieldSnafu)?;
+                    }
+                    ConcreteDataType::Interval(IntervalType::DayTime(_)) => {
+                        let interval = value.as_interval_day_time().context(FieldTypeMismatchSnafu)?;
+                        interval.map(|i| i.to_i64())
+                            .serialize($serializer)
+                            .context(SerializeFieldSnafu)?;
+                    }
+                    ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => {
+                        let interval = value.as_interval_month_day_nano().context(FieldTypeMismatchSnafu)?;
+                        interval.map(|i| i.to_i128())
+                            .serialize($serializer)
+                            .context(SerializeFieldSnafu)?;
+                    }
                     ConcreteDataType::List(_) |
                     ConcreteDataType::Dictionary(_) |
                     ConcreteDataType::Null(_) => {
@@ -144,7 +163,6 @@ impl SortField {
             Date, date,
             DateTime, datetime,
             Time, time,
-            Interval, interval,
             Duration, duration,
             Decimal128, decimal128,
             Json, binary
@@ -181,6 +199,24 @@ impl SortField {
                             .map(|t|ty.create_timestamp(t));
                         Ok(Value::from(timestamp))
                     }
+                    ConcreteDataType::Interval(IntervalType::YearMonth(_)) => {
+                        let interval = Option::<i32>::deserialize(deserializer)
+                            .context(error::DeserializeFieldSnafu)?
+                            .map(IntervalYearMonth::from_i32);
+                        Ok(Value::from(interval))
+                    }
+                    ConcreteDataType::Interval(IntervalType::DayTime(_)) => {
+                        let interval = Option::<i64>::deserialize(deserializer)
+                            .context(error::DeserializeFieldSnafu)?
+                            .map(IntervalDayTime::from_i64);
+                        Ok(Value::from(interval))
+                    }
+                    ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => {
+                        let interval = Option::<i128>::deserialize(deserializer)
+                            .context(error::DeserializeFieldSnafu)?
+                            .map(IntervalMonthDayNano::from_i128);
+                        Ok(Value::from(interval))
+                    }
                     ConcreteDataType::List(l) => NotSupportedFieldSnafu {
                         data_type: ConcreteDataType::List(l.clone()),
                     }
@@ -212,7 +248,6 @@ impl SortField {
             Date, Date,
             Time, Time,
             DateTime, DateTime,
-            Interval, Interval,
             Duration, Duration,
             Decimal128, Decimal128
         )
@@ -387,7 +422,9 @@ impl RowCodec for McmpRowCodec {
 #[cfg(test)]
 mod tests {
     use common_base::bytes::StringBytes;
-    use common_time::{DateTime, Timestamp};
+    use common_time::{
+        DateTime, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp,
+    };
     use datatypes::value::Value;
 
     use super::*;
@@ -563,6 +600,8 @@ mod tests {
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 ConcreteDataType::time_millisecond_datatype(),
                 ConcreteDataType::duration_millisecond_datatype(),
+                ConcreteDataType::interval_year_month_datatype(),
+                ConcreteDataType::interval_day_time_datatype(),
                 ConcreteDataType::interval_month_day_nano_datatype(),
                 ConcreteDataType::decimal128_default_datatype(),
             ],
@@ -585,7 +624,9 @@ mod tests {
                 Value::Timestamp(Timestamp::new_millisecond(12)),
                 Value::Time(Time::new_millisecond(13)),
                 Value::Duration(Duration::new_millisecond(14)),
-                Value::Interval(Interval::from_month_day_nano(1, 1, 15)),
+                Value::IntervalYearMonth(IntervalYearMonth::new(1)),
+                Value::IntervalDayTime(IntervalDayTime::new(1, 15)),
+                Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 15)),
                 Value::Decimal128(Decimal128::from(16)),
             ],
         );

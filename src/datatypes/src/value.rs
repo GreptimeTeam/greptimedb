@@ -1172,6 +1172,21 @@ impl<'a> ValueRef<'a> {
         impl_as_for_value_ref!(self, Duration)
     }
 
+    /// Cast itself to [IntervalYearMonth].
+    pub fn as_interval_year_month(&self) -> Result<Option<IntervalYearMonth>> {
+        impl_as_for_value_ref!(self, IntervalYearMonth)
+    }
+
+    /// Cast itself to [IntervalDayTime].
+    pub fn as_interval_day_time(&self) -> Result<Option<IntervalDayTime>> {
+        impl_as_for_value_ref!(self, IntervalDayTime)
+    }
+
+    /// Cast itself to [IntervalMonthDayNano].
+    pub fn as_interval_month_day_nano(&self) -> Result<Option<IntervalMonthDayNano>> {
+        impl_as_for_value_ref!(self, IntervalMonthDayNano)
+    }
+
     // /// Cast itself to [Interval].
     // pub fn as_interval(&self) -> Result<Option<Interval>> {
     //     impl_as_for_value_ref!(self, Interval)
