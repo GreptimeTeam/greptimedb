@@ -325,15 +325,11 @@ pub fn interval_day_time_to_month_day_nano(interval: IntervalDayTime) -> Interva
     }
 }
 
-// Nanosecond convert to other time unit
-pub const NANOS_PER_SEC: i64 = 1_000_000_000;
+// Millisecond convert to other time unit
+pub const MS_PER_SEC: i64 = 1_000;
+pub const MS_PER_HOUR: i64 = 60 * 60 * MS_PER_SEC;
+pub const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
 pub const NANOS_PER_MILLI: i64 = 1_000_000;
-pub const NANOS_PER_MICRO: i64 = 1_000;
-pub const NANOS_PER_HOUR: i64 = 60 * 60 * NANOS_PER_SEC;
-pub const NANOS_PER_DAY: i64 = 24 * NANOS_PER_HOUR;
-pub const NANOS_PER_MONTH: i64 = 30 * NANOS_PER_DAY;
-
-pub const DAYS_PER_MONTH: i64 = 30;
 
 // impl Interval {
 //     /// Creates a new interval from months, days and nanoseconds.

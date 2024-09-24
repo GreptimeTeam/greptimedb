@@ -20,9 +20,9 @@ use arrow_schema::DataType;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use chrono::Utc;
-use common_time::interval::NANOS_PER_MILLI;
+use common_time::interval::{MS_PER_DAY, NANOS_PER_MILLI};
 use common_time::timestamp::TimeUnit;
-use common_time::{Interval, Timestamp, Timezone};
+use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp, Timezone};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::prelude::Column;
 use datafusion::scalar::ScalarValue;
@@ -145,8 +145,6 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize, interval_only: bool) ->
     }
     let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
     let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(DFSchema::empty()));
-    let interval_to_ms =
-        |interval: Interval| -> i64 { (interval.to_nanosecond() / NANOS_PER_MILLI as i128) as i64 };
     let simplify_expr = ExprSimplifier::new(info).simplify(expr.clone())?;
     match simplify_expr {
         Expr::Literal(ScalarValue::TimestampNanosecond(ts_nanos, _))
@@ -161,15 +159,19 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize, interval_only: bool) ->
         | Expr::Literal(ScalarValue::DurationMillisecond(ts_millis)) => ts_millis,
         Expr::Literal(ScalarValue::TimestampSecond(ts_secs, _))
         | Expr::Literal(ScalarValue::DurationSecond(ts_secs)) => ts_secs.map(|v| v * 1_000),
-        Expr::Literal(ScalarValue::IntervalYearMonth(interval)) => {
-            interval.map(|v| interval_to_ms(Interval::from_i32(v)))
-        }
-        Expr::Literal(ScalarValue::IntervalDayTime(interval)) => {
-            interval.map(|v| interval_to_ms(Interval::from_i64(v)))
-        }
-        Expr::Literal(ScalarValue::IntervalMonthDayNano(interval)) => {
-            interval.map(|v| interval_to_ms(Interval::from_i128(v)))
-        }
+        // We don't support interval with months as days in a month is unclear.
+        Expr::Literal(ScalarValue::IntervalDayTime(interval)) => interval.map(|v| {
+            let interval = IntervalDayTime::from_i64(v);
+            interval.days as i64 * MS_PER_DAY + interval.milliseconds as i64
+        }),
+        Expr::Literal(ScalarValue::IntervalMonthDayNano(interval)) => interval.and_then(|v| {
+            let interval = IntervalMonthDayNano::from_i128(v);
+            if interval.months != 0 {
+                return None;
+            }
+
+            Some(interval.days as i64 * MS_PER_DAY + interval.nanoseconds / NANOS_PER_MILLI)
+        }),
         _ => None,
     }
     .ok_or_else(|| {
@@ -788,35 +790,29 @@ mod test {
 
     #[test]
     fn test_parse_duration_expr() {
-        let interval_to_ms = |interval: Interval| -> u128 {
-            (interval.to_nanosecond() / NANOS_PER_MILLI as i128) as u128
-        };
         // test IntervalYearMonth
-        let interval = Interval::from_year_month(10);
+        let interval = IntervalYearMonth::new(10);
         let args = vec![Expr::Literal(ScalarValue::IntervalYearMonth(Some(
             interval.to_i32(),
         )))];
-        assert_eq!(
-            parse_duration_expr(&args, 0).unwrap().as_millis(),
-            interval_to_ms(interval)
-        );
+        assert!(parse_duration_expr(&args, 0).is_err(),);
         // test IntervalDayTime
-        let interval = Interval::from_day_time(10, 10);
+        let interval = IntervalDayTime::new(10, 10);
         let args = vec![Expr::Literal(ScalarValue::IntervalDayTime(Some(
             interval.to_i64(),
         )))];
         assert_eq!(
-            parse_duration_expr(&args, 0).unwrap().as_millis(),
-            interval_to_ms(interval)
+            parse_duration_expr(&args, 0).unwrap().as_millis() as i64,
+            interval.days as i64 * MS_PER_DAY + interval.milliseconds as i64
         );
         // test IntervalMonthDayNano
-        let interval = Interval::from_month_day_nano(10, 10, 10);
+        let interval = IntervalMonthDayNano::new(0, 10, 10);
         let args = vec![Expr::Literal(ScalarValue::IntervalMonthDayNano(Some(
             interval.to_i128(),
         )))];
         assert_eq!(
-            parse_duration_expr(&args, 0).unwrap().as_millis(),
-            interval_to_ms(interval)
+            parse_duration_expr(&args, 0).unwrap().as_millis() as i64,
+            interval.days as i64 * MS_PER_DAY + interval.nanoseconds / NANOS_PER_MILLI,
         );
         // test Duration
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some("1y4w".into())))];
@@ -828,25 +824,25 @@ mod test {
         assert!(parse_duration_expr(&args, 10).is_err());
         // test evaluate expr
         let args = vec![Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                Interval::from_year_month(10).to_i32(),
+            left: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(0, 10).to_i32(),
             )))),
             op: Operator::Plus,
-            right: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                Interval::from_year_month(10).to_i32(),
+            right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(0, 10).to_i32(),
             )))),
         })];
         assert_eq!(
-            parse_duration_expr(&args, 0).unwrap().as_millis(),
-            interval_to_ms(Interval::from_year_month(20))
+            parse_duration_expr(&args, 0).unwrap(),
+            Duration::from_millis(20)
         );
         let args = vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                Interval::from_year_month(10).to_i32(),
+                IntervalDayTime::new(0, 10).to_i32(),
             )))),
             op: Operator::Minus,
             right: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                Interval::from_year_month(10).to_i32(),
+                IntervalDayTime::new(0, 10).to_i32(),
             )))),
         })];
         // test zero interval error
@@ -854,7 +850,7 @@ mod test {
         // test must all be interval
         let args = vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                Interval::from_year_month(10).to_i32(),
+                IntervalYearMonth::new(10).to_i32(),
             )))),
             op: Operator::Minus,
             right: Box::new(Expr::Literal(ScalarValue::Time64Microsecond(Some(0)))),
@@ -907,19 +903,15 @@ mod test {
         );
         // test evaluate expr
         let args = vec![Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                Interval::from_year_month(10).to_i32(),
+            left: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(0, 10).to_i32(),
             )))),
             op: Operator::Plus,
-            right: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                Interval::from_year_month(10).to_i32(),
+            right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(0, 10).to_i32(),
             )))),
         })];
-        assert_eq!(
-            parse_align_to(&args, 0, None).unwrap(),
-            // 20 month
-            20 * 30 * 24 * 60 * 60 * 1000
-        );
+        assert_eq!(parse_align_to(&args, 0, None).unwrap(), 20);
     }
 
     #[test]
@@ -927,18 +919,18 @@ mod test {
         let expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Literal(ScalarValue::DurationMillisecond(Some(20)))),
             op: Operator::Minus,
-            right: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                Interval::from_year_month(10).to_i32(),
+            right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(10, 0).to_i64(),
             )))),
         });
         assert!(!interval_only_in_expr(&expr));
         let expr = Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                Interval::from_year_month(10).to_i32(),
+            left: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(10, 0).to_i64(),
             )))),
             op: Operator::Minus,
-            right: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
-                Interval::from_year_month(10).to_i32(),
+            right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(10, 0).to_i64(),
             )))),
         });
         assert!(interval_only_in_expr(&expr));

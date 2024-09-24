@@ -14,13 +14,12 @@
 
 use std::fmt;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
+use common_query::error::{ArrowComputeSnafu, IntoVectorSnafu, InvalidFuncArgsSnafu, Result};
 use common_query::prelude::Signature;
-use datatypes::data_type::DataType;
+use datatypes::arrow::compute::kernels::numeric;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::value::ValueRef;
-use datatypes::vectors::VectorRef;
-use snafu::ensure;
+use datatypes::vectors::{Helper, VectorRef};
+use snafu::{ensure, ResultExt};
 
 use crate::function::{Function, FunctionContext};
 use crate::helper;
@@ -69,64 +68,14 @@ impl Function for DateAddFunction {
             }
         );
 
-        let left = &columns[0];
-        let right = &columns[1];
+        let left = columns[0].to_arrow_array();
+        let right = columns[1].to_arrow_array();
 
-        let size = left.len();
-        let left_datatype = columns[0].data_type();
-        match left_datatype {
-            ConcreteDataType::Timestamp(_) => {
-                let mut result = left_datatype.create_mutable_vector(size);
-                for i in 0..size {
-                    let ts = left.get(i).as_timestamp();
-                    let interval = right.get(i).as_interval();
-
-                    let new_ts = match (ts, interval) {
-                        (Some(ts), Some(interval)) => ts.add_interval(interval),
-                        _ => ts,
-                    };
-
-                    result.push_value_ref(ValueRef::from(new_ts));
-                }
-
-                Ok(result.to_vector())
-            }
-            ConcreteDataType::Date(_) => {
-                let mut result = left_datatype.create_mutable_vector(size);
-                for i in 0..size {
-                    let date = left.get(i).as_date();
-                    let interval = right.get(i).as_interval();
-                    let new_date = match (date, interval) {
-                        (Some(date), Some(interval)) => date.add_interval(interval),
-                        _ => date,
-                    };
-
-                    result.push_value_ref(ValueRef::from(new_date));
-                }
-
-                Ok(result.to_vector())
-            }
-            ConcreteDataType::DateTime(_) => {
-                let mut result = left_datatype.create_mutable_vector(size);
-                for i in 0..size {
-                    let datetime = left.get(i).as_datetime();
-                    let interval = right.get(i).as_interval();
-                    let new_datetime = match (datetime, interval) {
-                        (Some(datetime), Some(interval)) => datetime.add_interval(interval),
-                        _ => datetime,
-                    };
-
-                    result.push_value_ref(ValueRef::from(new_datetime));
-                }
-
-                Ok(result.to_vector())
-            }
-            _ => UnsupportedInputDataTypeSnafu {
-                function: NAME,
-                datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-            }
-            .fail(),
-        }
+        let result = numeric::add(&left, &right).context(ArrowComputeSnafu)?;
+        let arrow_type = result.data_type().clone();
+        Helper::try_into_vector(result).context(IntoVectorSnafu {
+            data_type: arrow_type,
+        })
     }
 }
 
