@@ -541,9 +541,9 @@ impl Inserter {
             AutoCreateTableType::Physical
             | AutoCreateTableType::Log
             | AutoCreateTableType::LastNonNull => {
-                for req in create_tables {
+                for create_table in create_tables {
                     let table = self
-                        .create_physical_table(req, ctx, statement_executor)
+                        .create_physical_table(create_table, ctx, statement_executor)
                         .await?;
                     let table_info = table.table_info();
                     table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
