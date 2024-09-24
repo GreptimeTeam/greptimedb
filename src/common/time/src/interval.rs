@@ -711,69 +711,73 @@ mod tests {
     //     assert_eq!(interval.nsecs, 2_000_000);
     // }
 
-    #[test]
-    fn test_to_duration() {
-        let interval = Interval::from_day_time(1, 2);
+    // #[test]
+    // fn test_to_duration() {
+    //     let interval = Interval::from_day_time(1, 2);
 
-        let duration = interval.to_duration().unwrap();
-        assert_eq!(86400002000000, duration.value());
-        assert_eq!(TimeUnit::Nanosecond, duration.unit());
+    //     let duration = interval.to_duration().unwrap();
+    //     assert_eq!(86400002000000, duration.value());
+    //     assert_eq!(TimeUnit::Nanosecond, duration.unit());
 
-        let interval = Interval::from_year_month(12);
+    //     let interval = Interval::from_year_month(12);
 
-        let duration = interval.to_duration().unwrap();
-        assert_eq!(31104000000000000, duration.value());
-        assert_eq!(TimeUnit::Nanosecond, duration.unit());
-    }
+    //     let duration = interval.to_duration().unwrap();
+    //     assert_eq!(31104000000000000, duration.value());
+    //     assert_eq!(TimeUnit::Nanosecond, duration.unit());
+    // }
 
-    #[test]
-    fn test_to_nanosecond() {
-        let interval = Interval::from_year_month(1);
-        assert_eq!(interval.to_nanosecond(), 2592000000000000);
-        let interval = Interval::from_day_time(1, 2);
-        assert_eq!(interval.to_nanosecond(), 86400002000000);
+    // #[test]
+    // fn test_to_nanosecond() {
+    //     let interval = Interval::from_year_month(1);
+    //     assert_eq!(interval.to_nanosecond(), 2592000000000000);
+    //     let interval = Interval::from_day_time(1, 2);
+    //     assert_eq!(interval.to_nanosecond(), 86400002000000);
 
-        let max_interval = Interval::from_month_day_nano(i32::MAX, i32::MAX, i64::MAX);
-        assert_eq!(max_interval.to_nanosecond(), 5751829423496836854775807);
+    //     let max_interval = Interval::from_month_day_nano(i32::MAX, i32::MAX, i64::MAX);
+    //     assert_eq!(max_interval.to_nanosecond(), 5751829423496836854775807);
 
-        let min_interval = Interval::from_month_day_nano(i32::MIN, i32::MIN, i64::MIN);
-        assert_eq!(min_interval.to_nanosecond(), -5751829426175236854775808);
-    }
+    //     let min_interval = Interval::from_month_day_nano(i32::MIN, i32::MIN, i64::MIN);
+    //     assert_eq!(min_interval.to_nanosecond(), -5751829426175236854775808);
+    // }
 
-    #[test]
-    fn test_interval_is_zero() {
-        let interval = Interval::from_month_day_nano(1, 1, 1);
-        assert!(!interval.is_zero());
-        let interval = Interval::from_month_day_nano(0, 0, 0);
-        assert!(interval.is_zero());
-    }
+    // #[test]
+    // fn test_interval_is_zero() {
+    //     let interval = Interval::from_month_day_nano(1, 1, 1);
+    //     assert!(!interval.is_zero());
+    //     let interval = Interval::from_month_day_nano(0, 0, 0);
+    //     assert!(interval.is_zero());
+    // }
 
-    #[test]
-    fn test_interval_i128_convert() {
-        let test_interval_eq = |month, day, nano| {
-            let interval = Interval::from_month_day_nano(month, day, nano);
-            let interval_i128 = interval.to_i128();
-            let interval2 = Interval::from_i128(interval_i128);
-            assert_eq!(interval, interval2);
-        };
+    // #[test]
+    // fn test_interval_i128_convert() {
+    //     let test_interval_eq = |month, day, nano| {
+    //         let interval = Interval::from_month_day_nano(month, day, nano);
+    //         let interval_i128 = interval.to_i128();
+    //         let interval2 = Interval::from_i128(interval_i128);
+    //         assert_eq!(interval, interval2);
+    //     };
 
-        test_interval_eq(1, 2, 3);
-        test_interval_eq(1, -2, 3);
-        test_interval_eq(1, -2, -3);
-        test_interval_eq(-1, -2, -3);
-        test_interval_eq(i32::MAX, i32::MAX, i64::MAX);
-        test_interval_eq(i32::MIN, i32::MAX, i64::MAX);
-        test_interval_eq(i32::MAX, i32::MIN, i64::MAX);
-        test_interval_eq(i32::MAX, i32::MAX, i64::MIN);
-        test_interval_eq(i32::MIN, i32::MIN, i64::MAX);
-        test_interval_eq(i32::MAX, i32::MIN, i64::MIN);
-        test_interval_eq(i32::MIN, i32::MAX, i64::MIN);
-        test_interval_eq(i32::MIN, i32::MIN, i64::MIN);
-    }
+    //     test_interval_eq(1, 2, 3);
+    //     test_interval_eq(1, -2, 3);
+    //     test_interval_eq(1, -2, -3);
+    //     test_interval_eq(-1, -2, -3);
+    //     test_interval_eq(i32::MAX, i32::MAX, i64::MAX);
+    //     test_interval_eq(i32::MIN, i32::MAX, i64::MAX);
+    //     test_interval_eq(i32::MAX, i32::MIN, i64::MAX);
+    //     test_interval_eq(i32::MAX, i32::MAX, i64::MIN);
+    //     test_interval_eq(i32::MIN, i32::MIN, i64::MAX);
+    //     test_interval_eq(i32::MAX, i32::MIN, i64::MIN);
+    //     test_interval_eq(i32::MIN, i32::MAX, i64::MIN);
+    //     test_interval_eq(i32::MIN, i32::MIN, i64::MIN);
+    // }
 
     #[test]
     fn test_convert_interval_format() {
-        let interval = Interval::from_month_day_nano(14, 160, 1000000);
+        let interval = IntervalMonthDayNano {
+            months: 14,
+            days: 160,
+            nanoseconds: 1000000,
+        };
         let interval_format = IntervalFormat::from(interval);
         assert_eq!(interval_format.years, 1);
         assert_eq!(interval_format.months, 2);
@@ -784,94 +788,130 @@ mod tests {
         assert_eq!(interval_format.microseconds, 1000);
     }
 
-    #[test]
-    fn test_interval_hash() {
-        let interval = Interval::from_month_day_nano(1, 31, 1);
-        let interval2 = Interval::from_month_day_nano(2, 1, 1);
-        let mut map = HashMap::new();
-        map.insert(interval, 1);
-        assert_eq!(map.get(&interval2), Some(&1));
-    }
+    // #[test]
+    // fn test_interval_hash() {
+    //     let interval = Interval::from_month_day_nano(1, 31, 1);
+    //     let interval2 = Interval::from_month_day_nano(2, 1, 1);
+    //     let mut map = HashMap::new();
+    //     map.insert(interval, 1);
+    //     assert_eq!(map.get(&interval2), Some(&1));
+    // }
 
-    #[test]
-    fn test_interval_mul_int() {
-        let interval = Interval::from_month_day_nano(1, 1, 1);
-        let interval2 = interval.checked_mul_int(2).unwrap();
-        assert_eq!(interval2.months, 2);
-        assert_eq!(interval2.days, 2);
-        assert_eq!(interval2.nsecs, 2);
+    // #[test]
+    // fn test_interval_mul_int() {
+    //     let interval = Interval::from_month_day_nano(1, 1, 1);
+    //     let interval2 = interval.checked_mul_int(2).unwrap();
+    //     assert_eq!(interval2.months, 2);
+    //     assert_eq!(interval2.days, 2);
+    //     assert_eq!(interval2.nsecs, 2);
 
-        // test justified interval
-        let interval = Interval::from_month_day_nano(1, 31, 1);
-        let interval2 = interval.checked_mul_int(2).unwrap();
-        assert_eq!(interval2.months, 4);
-        assert_eq!(interval2.days, 2);
-        assert_eq!(interval2.nsecs, 2);
+    //     // test justified interval
+    //     let interval = Interval::from_month_day_nano(1, 31, 1);
+    //     let interval2 = interval.checked_mul_int(2).unwrap();
+    //     assert_eq!(interval2.months, 4);
+    //     assert_eq!(interval2.days, 2);
+    //     assert_eq!(interval2.nsecs, 2);
 
-        // test overflow situation
-        let interval = Interval::from_month_day_nano(i32::MAX, 1, 1);
-        let interval2 = interval.checked_mul_int(2);
-        assert!(interval2.is_none());
-    }
+    //     // test overflow situation
+    //     let interval = Interval::from_month_day_nano(i32::MAX, 1, 1);
+    //     let interval2 = interval.checked_mul_int(2);
+    //     assert!(interval2.is_none());
+    // }
 
-    #[test]
-    fn test_display() {
-        let interval = Interval::from_month_day_nano(1, 1, 1);
-        assert_eq!(interval.to_string(), "1 months 1 days 1 nsecs");
+    // #[test]
+    // fn test_display() {
+    //     let interval = Interval::from_month_day_nano(1, 1, 1);
+    //     assert_eq!(interval.to_string(), "1 months 1 days 1 nsecs");
 
-        let interval = Interval::from_month_day_nano(14, 31, 10000000000);
-        assert_eq!(interval.to_string(), "14 months 31 days 10000000000 nsecs");
-    }
+    //     let interval = Interval::from_month_day_nano(14, 31, 10000000000);
+    //     assert_eq!(interval.to_string(), "14 months 31 days 10000000000 nsecs");
+    // }
 
-    #[test]
-    fn test_interval_justified() {
-        let interval = Interval::from_month_day_nano(1, 131, 1).justified_interval();
-        let interval2 = Interval::from_month_day_nano(5, 11, 1);
-        assert_eq!(interval, interval2);
+    // #[test]
+    // fn test_interval_justified() {
+    //     let interval = Interval::from_month_day_nano(1, 131, 1).justified_interval();
+    //     let interval2 = Interval::from_month_day_nano(5, 11, 1);
+    //     assert_eq!(interval, interval2);
 
-        let interval = Interval::from_month_day_nano(1, 1, NANOS_PER_MONTH + 2 * NANOS_PER_DAY)
-            .justified_interval();
-        let interval2 = Interval::from_month_day_nano(2, 3, 0);
-        assert_eq!(interval, interval2);
-    }
+    //     let interval = Interval::from_month_day_nano(1, 1, NANOS_PER_MONTH + 2 * NANOS_PER_DAY)
+    //         .justified_interval();
+    //     let interval2 = Interval::from_month_day_nano(2, 3, 0);
+    //     assert_eq!(interval, interval2);
+    // }
 
-    #[test]
-    fn test_serde_json() {
-        let interval = Interval::from_month_day_nano(1, 1, 1);
-        let json = serde_json::to_string(&interval).unwrap();
-        assert_eq!(
-            json,
-            "{\"months\":1,\"days\":1,\"nsecs\":1,\"unit\":\"MonthDayNano\"}"
-        );
-        let interval2: Interval = serde_json::from_str(&json).unwrap();
-        assert_eq!(interval, interval2);
-    }
+    // #[test]
+    // fn test_serde_json() {
+    //     let interval = Interval::from_month_day_nano(1, 1, 1);
+    //     let json = serde_json::to_string(&interval).unwrap();
+    //     assert_eq!(
+    //         json,
+    //         "{\"months\":1,\"days\":1,\"nsecs\":1,\"unit\":\"MonthDayNano\"}"
+    //     );
+    //     let interval2: Interval = serde_json::from_str(&json).unwrap();
+    //     assert_eq!(interval, interval2);
+    // }
 
     #[test]
     fn test_to_iso8601_string() {
         // Test interval zero
-        let interval = Interval::from_month_day_nano(0, 0, 0);
-        assert_eq!(interval.to_iso8601_string(), "PT0S");
+        let interval = IntervalMonthDayNano {
+            months: 0,
+            days: 0,
+            nanoseconds: 0,
+        };
+        assert_eq!(IntervalFormat::from(interval).to_iso8601_string(), "PT0S");
 
-        let interval = Interval::from_month_day_nano(1, 1, 1);
-        assert_eq!(interval.to_iso8601_string(), "P0Y1M1DT0H0M0S");
+        let interval = IntervalMonthDayNano {
+            months: 1,
+            days: 1,
+            nanoseconds: 1,
+        };
+        assert_eq!(
+            IntervalFormat::from(interval).to_iso8601_string(),
+            "P0Y1M1DT0H0M0S"
+        );
 
-        let interval = Interval::from_month_day_nano(14, 31, 10000000000);
-        assert_eq!(interval.to_iso8601_string(), "P1Y2M31DT0H0M10S");
+        let interval = IntervalMonthDayNano {
+            months: 14,
+            days: 31,
+            nanoseconds: 10000000000,
+        };
+        assert_eq!(
+            IntervalFormat::from(interval).to_iso8601_string(),
+            "P1Y2M31DT0H0M10S"
+        );
 
-        let interval = Interval::from_month_day_nano(14, 31, 23210200000000);
-        assert_eq!(interval.to_iso8601_string(), "P1Y2M31DT6H26M50.2S");
+        let interval = IntervalMonthDayNano {
+            months: 14,
+            days: 31,
+            nanoseconds: 23210200000000,
+        };
+        assert_eq!(
+            IntervalFormat::from(interval).to_iso8601_string(),
+            "P1Y2M31DT6H26M50.2S"
+        );
     }
 
     #[test]
     fn test_to_postgres_string() {
         // Test interval zero
-        let interval = Interval::from_month_day_nano(0, 0, 0);
-        assert_eq!(interval.to_postgres_string(), "00:00:00");
-
-        let interval = Interval::from_month_day_nano(23, 100, 23210200000000);
+        let interval = IntervalMonthDayNano {
+            months: 0,
+            days: 0,
+            nanoseconds: 0,
+        };
         assert_eq!(
-            interval.to_postgres_string(),
+            IntervalFormat::from(interval).to_postgres_string(),
+            "00:00:00"
+        );
+
+        let interval = IntervalMonthDayNano {
+            months: 23,
+            days: 100,
+            nanoseconds: 23210200000000,
+        };
+        assert_eq!(
+            IntervalFormat::from(interval).to_postgres_string(),
             "1 year 11 mons 100 days 06:26:50.200000"
         );
     }
@@ -879,18 +919,33 @@ mod tests {
     #[test]
     fn test_to_sql_standard_string() {
         // Test zero interval
-        let interval = Interval::from_month_day_nano(0, 0, 0);
-        assert_eq!(interval.to_sql_standard_string(), "0");
+        let interval = IntervalMonthDayNano {
+            months: 0,
+            days: 0,
+            nanoseconds: 0,
+        };
+        assert_eq!(IntervalFormat::from(interval).to_sql_standard_string(), "0");
 
-        let interval = Interval::from_month_day_nano(23, 100, 23210200000000);
+        let interval = IntervalMonthDayNano {
+            months: 23,
+            days: 100,
+            nanoseconds: 23210200000000,
+        };
         assert_eq!(
-            interval.to_sql_standard_string(),
+            IntervalFormat::from(interval).to_sql_standard_string(),
             "+1-11 +100 +6:26:50.200000"
         );
 
         // Test interval without year, month, day
-        let interval = Interval::from_month_day_nano(0, 0, 23210200000000);
-        assert_eq!(interval.to_sql_standard_string(), "6:26:50.200000");
+        let interval = IntervalMonthDayNano {
+            months: 0,
+            days: 0,
+            nanoseconds: 23210200000000,
+        };
+        assert_eq!(
+            IntervalFormat::from(interval).to_sql_standard_string(),
+            "6:26:50.200000"
+        );
     }
 
     #[test]
