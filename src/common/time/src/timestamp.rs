@@ -761,10 +761,7 @@ mod tests {
     fn test_add_sub_interval() {
         let ts = Timestamp::new(1000, TimeUnit::Millisecond);
 
-        let interval = IntervalDayTime {
-            days: 1,
-            milliseconds: 200,
-        };
+        let interval = IntervalDayTime::new(1, 200);
 
         let new_ts = ts.add_day_time(interval).unwrap();
         assert_eq!(new_ts.unit(), TimeUnit::Millisecond);

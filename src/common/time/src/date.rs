@@ -306,7 +306,7 @@ mod tests {
     fn test_add_sub_interval() {
         let date = Date::new(1000);
 
-        let interval = IntervalYearMonth { months: 3 };
+        let interval = IntervalYearMonth::new(3);
 
         let new_date = date.add_year_month(interval).unwrap();
         assert_eq!(new_date.val(), 1091);

@@ -76,11 +76,20 @@ impl From<ArrowIntervalUnit> for IntervalUnit {
 //     unit: IntervalUnit,
 // }
 
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+// The `Value` type requires Serialize, Deserialize.
+#[derive(
+    Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize,
+)]
 #[repr(C)]
 pub struct IntervalYearMonth {
     /// Number of months
     pub months: i32,
+}
+
+impl IntervalYearMonth {
+    pub fn new(months: i32) -> Self {
+        Self { months }
+    }
 }
 
 impl From<IntervalYearMonth> for IntervalFormat {
@@ -93,7 +102,9 @@ impl From<IntervalYearMonth> for IntervalFormat {
     }
 }
 
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(
+    Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize,
+)]
 #[repr(C)]
 pub struct IntervalDayTime {
     /// Number of days
@@ -133,7 +144,9 @@ impl From<IntervalDayTime> for IntervalFormat {
     }
 }
 
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(
+    Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize,
+)]
 #[repr(C)]
 pub struct IntervalMonthDayNano {
     /// Number of months
@@ -693,10 +706,7 @@ fn get_time_part(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
-    use crate::timestamp::TimeUnit;
 
     // #[test]
     // fn test_from_year_month() {
@@ -854,38 +864,22 @@ mod tests {
     #[test]
     fn test_to_iso8601_string() {
         // Test interval zero
-        let interval = IntervalMonthDayNano {
-            months: 0,
-            days: 0,
-            nanoseconds: 0,
-        };
+        let interval = IntervalMonthDayNano::new(0, 0, 0);
         assert_eq!(IntervalFormat::from(interval).to_iso8601_string(), "PT0S");
 
-        let interval = IntervalMonthDayNano {
-            months: 1,
-            days: 1,
-            nanoseconds: 1,
-        };
+        let interval = IntervalMonthDayNano::new(1, 1, 1);
         assert_eq!(
             IntervalFormat::from(interval).to_iso8601_string(),
             "P0Y1M1DT0H0M0S"
         );
 
-        let interval = IntervalMonthDayNano {
-            months: 14,
-            days: 31,
-            nanoseconds: 10000000000,
-        };
+        let interval = IntervalMonthDayNano::new(14, 31, 10000000000);
         assert_eq!(
             IntervalFormat::from(interval).to_iso8601_string(),
             "P1Y2M31DT0H0M10S"
         );
 
-        let interval = IntervalMonthDayNano {
-            months: 14,
-            days: 31,
-            nanoseconds: 23210200000000,
-        };
+        let interval = IntervalMonthDayNano::new(14, 31, 23210200000000);
         assert_eq!(
             IntervalFormat::from(interval).to_iso8601_string(),
             "P1Y2M31DT6H26M50.2S"
@@ -895,21 +889,13 @@ mod tests {
     #[test]
     fn test_to_postgres_string() {
         // Test interval zero
-        let interval = IntervalMonthDayNano {
-            months: 0,
-            days: 0,
-            nanoseconds: 0,
-        };
+        let interval = IntervalMonthDayNano::new(0, 0, 0);
         assert_eq!(
             IntervalFormat::from(interval).to_postgres_string(),
             "00:00:00"
         );
 
-        let interval = IntervalMonthDayNano {
-            months: 23,
-            days: 100,
-            nanoseconds: 23210200000000,
-        };
+        let interval = IntervalMonthDayNano::new(23, 100, 23210200000000);
         assert_eq!(
             IntervalFormat::from(interval).to_postgres_string(),
             "1 year 11 mons 100 days 06:26:50.200000"
@@ -919,29 +905,17 @@ mod tests {
     #[test]
     fn test_to_sql_standard_string() {
         // Test zero interval
-        let interval = IntervalMonthDayNano {
-            months: 0,
-            days: 0,
-            nanoseconds: 0,
-        };
+        let interval = IntervalMonthDayNano::new(0, 0, 0);
         assert_eq!(IntervalFormat::from(interval).to_sql_standard_string(), "0");
 
-        let interval = IntervalMonthDayNano {
-            months: 23,
-            days: 100,
-            nanoseconds: 23210200000000,
-        };
+        let interval = IntervalMonthDayNano::new(23, 100, 23210200000000);
         assert_eq!(
             IntervalFormat::from(interval).to_sql_standard_string(),
             "+1-11 +100 +6:26:50.200000"
         );
 
         // Test interval without year, month, day
-        let interval = IntervalMonthDayNano {
-            months: 0,
-            days: 0,
-            nanoseconds: 23210200000000,
-        };
+        let interval = IntervalMonthDayNano::new(0, 0, 23210200000000);
         assert_eq!(
             IntervalFormat::from(interval).to_sql_standard_string(),
             "6:26:50.200000"

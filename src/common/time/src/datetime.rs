@@ -294,10 +294,7 @@ mod tests {
     fn test_add_sub_interval() {
         let datetime = DateTime::new(1000);
 
-        let interval = IntervalDayTime {
-            days: 1,
-            milliseconds: 200,
-        };
+        let interval = IntervalDayTime::new(1, 200);
 
         let new_datetime = datetime.add_day_time(interval).unwrap();
         assert_eq!(new_datetime.val(), 1000 + 3600 * 24 * 1000 + 200);
