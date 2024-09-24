@@ -20,6 +20,10 @@ use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 
+use crate::etl::error::{
+    Result, TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
+    TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
+};
 use crate::etl::field::{InputFieldInfo, OneInputOneOutputField};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transformer, Transforms};
@@ -71,7 +75,7 @@ impl GreptimeTransformer {
     }
 
     /// Generate the schema for the GreptimeTransformer
-    fn schemas(transforms: &Transforms) -> Result<Vec<ColumnSchema>, String> {
+    fn schemas(transforms: &Transforms) -> Result<Vec<ColumnSchema>> {
         let mut schema = vec![];
         for transform in transforms.iter() {
             schema.extend(coerce_columns(transform)?);
@@ -90,9 +94,9 @@ impl Transformer for GreptimeTransformer {
     type Output = Rows;
     type VecOutput = Row;
 
-    fn new(mut transforms: Transforms) -> Result<Self, String> {
+    fn new(mut transforms: Transforms) -> Result<Self> {
         if transforms.is_empty() {
-            return Err("transform cannot be empty".to_string());
+            return TransformEmptySnafu.fail();
         }
 
         let mut column_names_set = HashSet::new();
@@ -108,9 +112,7 @@ impl Transformer for GreptimeTransformer {
             let intersections: Vec<_> = column_names_set.intersection(&target_fields_set).collect();
             if !intersections.is_empty() {
                 let duplicates = intersections.iter().join(",");
-                return Err(format!(
-                    "column name must be unique, but got duplicated: {duplicates}"
-                ));
+                return TransformColumnNameMustBeUniqueSnafu { duplicates }.fail();
             }
 
             column_names_set.extend(target_fields_set);
@@ -121,10 +123,14 @@ impl Transformer for GreptimeTransformer {
                         1 => timestamp_columns
                             .push(transform.real_fields.first().unwrap().input_name()),
                         _ => {
-                            return Err(format!(
-                                "Illegal to set multiple timestamp Index columns, please set only one: {}",
-                                transform.real_fields.iter().map(|x|x.input_name()).join(", ")
-                            ))
+                            return TransformMultipleTimestampIndexSnafu {
+                                columns: transform
+                                    .real_fields
+                                    .iter()
+                                    .map(|x| x.input_name())
+                                    .join(", "),
+                            }
+                            .fail();
                         }
                     }
                 }
@@ -145,14 +151,12 @@ impl Transformer for GreptimeTransformer {
             _ => {
                 let columns: String = timestamp_columns.iter().map(|s| s.to_string()).join(", ");
                 let count = timestamp_columns.len();
-                Err(
-                    format!("transform must have exactly one field specified as timestamp Index, but got {count}: {columns}")
-                )
+                TransformTimestampIndexCountSnafu { count, columns }.fail()
             }
         }
     }
 
-    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput, String> {
+    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput> {
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         for transform in self.transforms.iter() {
             for field in transform.real_fields.iter() {
@@ -160,8 +164,7 @@ impl Transformer for GreptimeTransformer {
                 let output_index = field.output_index();
                 match val.get(index) {
                     Some(v) => {
-                        let value_data = coerce_value(v, transform)
-                            .map_err(|e| format!("{} processor: {}", field.input_name(), e))?;
+                        let value_data = coerce_value(v, transform)?;
                         // every transform fields has only one output field
                         values[output_index] = GreptimeValue { value_data };
                     }

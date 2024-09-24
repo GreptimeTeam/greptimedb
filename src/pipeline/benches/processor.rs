@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline};
+use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Result};
 use serde_json::{Deserializer, Value};
 
 fn processor_mut(
     pipeline: &Pipeline<GreptimeTransformer>,
     input_values: Vec<Value>,
-) -> Result<Vec<greptime_proto::v1::Row>, String> {
+) -> Result<Vec<greptime_proto::v1::Row>> {
     let mut payload = pipeline.init_intermediate_state();
     let mut result = Vec::with_capacity(input_values.len());
 
@@ -30,7 +30,7 @@ fn processor_mut(
         pipeline.reset_intermediate_state(&mut payload);
     }
 
-    Ok::<Vec<greptime_proto::v1::Row>, String>(result)
+    Ok(result)
 }
 
 fn prepare_pipeline() -> Pipeline<GreptimeTransformer> {
@@ -230,7 +230,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     let input_value_str = include_str!("./data.log");
     let input_value = Deserializer::from_str(input_value_str)
         .into_iter::<serde_json::Value>()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
     let pipeline = prepare_pipeline();
     let mut group = c.benchmark_group("pipeline");

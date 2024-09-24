@@ -40,7 +40,7 @@ use timestamp::{TimestampProcessor, TimestampProcessorBuilder};
 use urlencoding::{UrlEncodingProcessor, UrlEncodingProcessorBuilder};
 
 use super::error::{
-    FaildParseFieldFromStringSnafu, FieldMustBeTypeSnafu, ProcessorKeyMustBeStringSnafu,
+    FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, ProcessorKeyMustBeStringSnafu,
     ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu, UnsupportedProcessorSnafu,
 };
 use super::field::{Field, Fields};
@@ -312,10 +312,10 @@ pub(crate) fn yaml_bool(v: &yaml_rust::Yaml, field: &str) -> Result<bool> {
 pub(crate) fn yaml_parse_string<T>(v: &yaml_rust::Yaml, field: &str) -> Result<T>
 where
     T: std::str::FromStr,
-    T::Err: std::error::Error + 'static,
+    T::Err: std::error::Error + Send + Sync + 'static,
 {
     yaml_string(v, field)?.parse::<T>().map_err(|e| {
-        FaildParseFieldFromStringSnafu {
+        FailedParseFieldFromStringSnafu {
             error: Box::new(e),
             field: field.to_string(),
         }
@@ -326,13 +326,13 @@ where
 pub(crate) fn yaml_parse_strings<T>(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<T>>
 where
     T: std::str::FromStr,
-    T::Err: std::error::Error + 'static,
+    T::Err: std::error::Error + Send + Sync + 'static,
 {
     yaml_strings(v, field).and_then(|v| {
         v.into_iter()
             .map(|s| {
                 s.parse::<T>().map_err(|e| {
-                    FaildParseFieldFromStringSnafu {
+                    FailedParseFieldFromStringSnafu {
                         error: Box::new(e),
                         field: field.to_string(),
                     }

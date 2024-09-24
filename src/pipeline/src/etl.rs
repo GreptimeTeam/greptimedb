@@ -14,7 +14,7 @@
 
 #![allow(dead_code)]
 
-mod error;
+pub mod error;
 pub mod field;
 pub mod processor;
 pub mod transform;
@@ -22,14 +22,14 @@ pub mod value;
 
 use ahash::HashSet;
 use common_telemetry::debug;
-use error::IntermediateKeyIndexSnafu;
+use error::{IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, YamlLoadSnafu};
 use itertools::Itertools;
 use processor::{Processor, ProcessorBuilder, Processors};
 use transform::{TransformBuilders, Transformer, Transforms};
 use value::Value;
 use yaml_rust::YamlLoader;
 
-use crate::etl::error::{Error, Result};
+use crate::etl::error::Result;
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
@@ -47,7 +47,8 @@ where
 {
     match input {
         Content::Yaml(str) => {
-            let docs = YamlLoader::load_from_str(str).map_err(|e| e.to_string())?;
+            let docs =
+                YamlLoader::load_from_str(str).map_err(|e| YamlLoadSnafu { error: e }.build())?;
 
             let doc = &docs[0];
 
@@ -128,7 +129,7 @@ where
                 .processor_builders
                 .into_iter()
                 .map(|builder| builder.build(&final_intermediate_keys))
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>>>()?;
             let processors = Processors {
                 processors: processors_kind_list,
                 required_keys: processors_required_keys.clone(),
@@ -140,7 +141,7 @@ where
                 .builders
                 .into_iter()
                 .map(|builder| builder.build(&final_intermediate_keys, &output_keys))
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Result<Vec<_>>>()?;
 
             let transformers = Transforms {
                 transforms: transfor_list,
@@ -201,7 +202,7 @@ impl<T> Pipeline<T>
 where
     T: Transformer,
 {
-    pub fn exec_mut(&self, val: &mut Vec<Value>) -> Result<T::VecOutput, String> {
+    pub fn exec_mut(&self, val: &mut Vec<Value>) -> Result<T::VecOutput> {
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
         }
@@ -209,7 +210,7 @@ where
         self.transformer.transform_mut(val)
     }
 
-    pub fn prepare(&self, val: serde_json::Value, result: &mut [Value]) -> Result<(), String> {
+    pub fn prepare(&self, val: serde_json::Value, result: &mut [Value]) -> Result<()> {
         match val {
             serde_json::Value::Object(map) => {
                 let mut search_from = 0;
@@ -234,7 +235,7 @@ where
                 result[0] = val.try_into()?;
             }
             _ => {
-                return Err("expect object".to_string());
+                return PrepareValueMustBeObjectSnafu.fail();
             }
         }
         Ok(())

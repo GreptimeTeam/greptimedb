@@ -17,17 +17,22 @@ use api::v1::ColumnOptions;
 use datatypes::schema::FulltextOptions;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
+use snafu::ResultExt;
 
+use crate::etl::error::{
+    CoerceStringToTypeSnafu, CoerceUnsupportedEpochTypeSnafu, CoerceUnsupportedNullTypeSnafu,
+    CoerceUnsupportedNullTypeToSnafu, ColumnOptionsSnafu, Error, Result,
+};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{OnFailure, Transform};
 use crate::etl::value::{Timestamp, Value};
 
 impl TryFrom<Value> for ValueData {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
+    fn try_from(value: Value) -> Result<Self> {
         match value {
-            Value::Null => Err("Null type not supported".to_string()),
+            Value::Null => CoerceUnsupportedNullTypeSnafu.fail(),
 
             Value::Int8(v) => Ok(ValueData::I32Value(v as i32)),
             Value::Int16(v) => Ok(ValueData::I32Value(v as i32)),
@@ -63,7 +68,7 @@ impl TryFrom<Value> for ValueData {
 }
 
 // TODO(yuanbohan): add fulltext support in datatype_extension
-pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>, String> {
+pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>> {
     let mut columns = Vec::new();
 
     for field in transform.real_fields.iter() {
@@ -94,19 +99,19 @@ fn coerce_semantic_type(transform: &Transform) -> SemanticType {
     }
 }
 
-fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>, String> {
+fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
     if let Some(Index::Fulltext) = transform.index {
         options_from_fulltext(&FulltextOptions {
             enable: true,
             ..Default::default()
         })
-        .map_err(|e| e.to_string())
+        .context(ColumnOptionsSnafu)
     } else {
         Ok(None)
     }
 }
 
-fn coerce_type(transform: &Transform) -> Result<ColumnDataType, String> {
+fn coerce_type(transform: &Transform) -> Result<ColumnDataType> {
     match transform.type_ {
         Value::Int8(_) => Ok(ColumnDataType::Int8),
         Value::Int16(_) => Ok(ColumnDataType::Int16),
@@ -132,17 +137,14 @@ fn coerce_type(transform: &Transform) -> Result<ColumnDataType, String> {
         Value::Array(_) => unimplemented!("Array"),
         Value::Map(_) => unimplemented!("Object"),
 
-        Value::Null => Err(format!(
-            "Null type not supported when to coerce '{}' type",
-            transform.type_.to_str_type()
-        )),
+        Value::Null => CoerceUnsupportedNullTypeToSnafu {
+            ty: transform.type_.to_str_type(),
+        }
+        .fail(),
     }
 }
 
-pub(crate) fn coerce_value(
-    val: &Value,
-    transform: &Transform,
-) -> Result<Option<ValueData>, String> {
+pub(crate) fn coerce_value(val: &Value, transform: &Transform) -> Result<Option<ValueData>> {
     match val {
         Value::Null => match &transform.default {
             Some(default) => coerce_value(default, transform),
@@ -190,7 +192,7 @@ pub(crate) fn coerce_value(
     }
 }
 
-fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>, String> {
+fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>> {
     let val = match transform.type_ {
         Value::Int8(_) => ValueData::I8Value(b as i32),
         Value::Int16(_) => ValueData::I16Value(b as i32),
@@ -211,9 +213,11 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
         Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
-                return Err("default value not supported for Epoch".to_string())
+                return CoerceUnsupportedEpochTypeSnafu { ty: "Default" }.fail();
             }
-            None => return Err("Boolean type not supported for Epoch".to_string()),
+            None => {
+                return CoerceUnsupportedEpochTypeSnafu { ty: "Boolean" }.fail();
+            }
         },
 
         Value::Array(_) => unimplemented!("Array type not supported"),
@@ -225,7 +229,7 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
     Ok(Some(val))
 }
 
-fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>, String> {
+fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> {
     let val = match transform.type_ {
         Value::Int8(_) => ValueData::I8Value(n as i32),
         Value::Int16(_) => ValueData::I16Value(n as i32),
@@ -246,9 +250,11 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
-                return Err("default value not supported for Epoch".to_string())
+                return CoerceUnsupportedEpochTypeSnafu { ty: "Default" }.fail();
             }
-            None => return Err("Integer type not supported for Epoch".to_string()),
+            None => {
+                return CoerceUnsupportedEpochTypeSnafu { ty: "Integer" }.fail();
+            }
         },
 
         Value::Array(_) => unimplemented!("Array type not supported"),
@@ -260,7 +266,7 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>, 
     Ok(Some(val))
 }
 
-fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>, String> {
+fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>> {
     let val = match transform.type_ {
         Value::Int8(_) => ValueData::I8Value(n as i32),
         Value::Int16(_) => ValueData::I16Value(n as i32),
@@ -281,9 +287,11 @@ fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
-                return Err("default value not supported for Epoch".to_string())
+                return CoerceUnsupportedEpochTypeSnafu { ty: "Default" }.fail();
             }
-            None => return Err("Integer type not supported for Epoch".to_string()),
+            None => {
+                return CoerceUnsupportedEpochTypeSnafu { ty: "Integer" }.fail();
+            }
         },
 
         Value::Array(_) => unimplemented!("Array type not supported"),
@@ -295,7 +303,7 @@ fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>, 
     Ok(Some(val))
 }
 
-fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>, String> {
+fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>> {
     let val = match transform.type_ {
         Value::Int8(_) => ValueData::I8Value(n as i32),
         Value::Int16(_) => ValueData::I16Value(n as i32),
@@ -316,9 +324,11 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => return Ok(None),
             Some(OnFailure::Default) => {
-                return Err("default value not supported for Epoch".to_string())
+                return CoerceUnsupportedEpochTypeSnafu { ty: "Default" }.fail();
             }
-            None => return Err("Float type not supported for Epoch".to_string()),
+            None => {
+                return CoerceUnsupportedEpochTypeSnafu { ty: "Float" }.fail();
+            }
         },
 
         Value::Array(_) => unimplemented!("Array type not supported"),
@@ -340,17 +350,17 @@ macro_rules! coerce_string_value {
                     Some(default) => coerce_value(default, $transform),
                     None => coerce_value($transform.get_type_matched_default_val(), $transform),
                 },
-                None => Err(format!(
-                    "failed to coerce string value '{}' to type '{}'",
-                    $s,
-                    $transform.type_.to_str_type()
-                )),
+                None => CoerceStringToTypeSnafu {
+                    s: $s,
+                    ty: $transform.type_.to_str_type(),
+                }
+                .fail(),
             },
         }
     };
 }
 
-fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<ValueData>, String> {
+fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<ValueData>> {
     match transform.type_ {
         Value::Int8(_) => {
             coerce_string_value!(s, transform, i32, I8Value)
@@ -393,8 +403,8 @@ fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<Value
 
         Value::Timestamp(_) => match transform.on_failure {
             Some(OnFailure::Ignore) => Ok(None),
-            Some(OnFailure::Default) => Err("default value not supported for Epoch".to_string()),
-            None => Err("String type not supported for Epoch".to_string()),
+            Some(OnFailure::Default) => CoerceUnsupportedEpochTypeSnafu { ty: "Default" }.fail(),
+            None => CoerceUnsupportedEpochTypeSnafu { ty: "String" }.fail(),
         },
 
         Value::Array(_) => unimplemented!("Array type not supported"),

@@ -37,9 +37,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse pipeline: {}", reason))]
+    #[snafu(display("Failed to parse pipeline"))]
     CompilePipeline {
-        reason: String,
+        source: crate::etl::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -104,7 +104,7 @@ pub enum Error {
 
     #[snafu(display("Failed to execute pipeline, reason: {}", reason))]
     PipelineTransform {
-        reason: String,
+        reason: crate::etl::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
