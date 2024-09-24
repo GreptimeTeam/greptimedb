@@ -102,9 +102,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to execute pipeline, reason: {}", reason))]
+    #[snafu(display("Failed to execute pipeline"))]
     PipelineTransform {
-        reason: crate::etl::error::Error,
+        source: crate::etl::error::Error,
         #[snafu(implicit)]
         location: Location,
     },

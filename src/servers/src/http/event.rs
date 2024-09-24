@@ -272,11 +272,11 @@ pub async fn pipeline_dryrun(
     for v in value {
         pipeline
             .prepare(v, &mut intermediate_state)
-            .map_err(|reason| PipelineTransformSnafu { reason }.build())
+            .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
         let r = pipeline
             .exec_mut(&mut intermediate_state)
-            .map_err(|reason| PipelineTransformSnafu { reason }.build())
+            .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
         results.push(r);
         pipeline.reset_intermediate_state(&mut intermediate_state);
@@ -438,21 +438,21 @@ async fn ingest_logs_inner(
     for v in pipeline_data {
         pipeline
             .prepare(v, &mut intermediate_state)
-            .map_err(|reason| {
+            .inspect_err(|_| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
                     .observe(transform_timer.elapsed().as_secs_f64());
-                PipelineTransformSnafu { reason }.build()
             })
+            .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
         let r = pipeline
             .exec_mut(&mut intermediate_state)
-            .map_err(|reason| {
+            .inspect_err(|_| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
                     .observe(transform_timer.elapsed().as_secs_f64());
-                PipelineTransformSnafu { reason }.build()
             })
+            .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
         results.push(r);
         pipeline.reset_intermediate_state(&mut intermediate_state);
