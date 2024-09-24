@@ -245,6 +245,15 @@ store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
 
+[patch.crates-io]
+# change all rustls dependencies to use our fork to default to `ring` to make it "just work"
+hyper-rustls = { git = "https://github.com/GreptimeTeam/hyper-rustls" }
+rustls = { git = "https://github.com/GreptimeTeam/rustls" }
+tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls" }
+# This is commented, since we are not using aws-lc-sys, if we need to use it, we need to uncomment this line or use a release after this commit, or it wouldn't compile with gcc < 8.1
+# see https://github.com/aws/aws-lc-rs/pull/526
+# aws-lc-sys = { git ="https://github.com/aws/aws-lc-rs", rev = "556558441e3494af4b156ae95ebc07ebc2fd38aa" }
+
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd"
