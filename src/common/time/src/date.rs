@@ -134,6 +134,7 @@ impl Date {
         (self.0 as i64) * 24 * 3600
     }
 
+    // FIXME(yingwen): remove add/sub intervals later
     /// Adds given [IntervalYearMonth] to the current date.
     pub fn add_year_month(&self, interval: IntervalYearMonth) -> Option<Date> {
         let naive_date = self.to_chrono_date()?;

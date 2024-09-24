@@ -322,7 +322,9 @@ pub fn sql_value_to_value(
             | Value::Timestamp(_)
             | Value::Time(_)
             | Value::Duration(_)
-            | Value::Interval(_) => match unary_op {
+            | Value::IntervalYearMonth(_)
+            | Value::IntervalDayTime(_)
+            | Value::IntervalMonthDayNano(_) => match unary_op {
                 UnaryOperator::Plus => {}
                 UnaryOperator::Minus => {
                     value = value

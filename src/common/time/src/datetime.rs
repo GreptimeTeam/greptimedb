@@ -163,6 +163,7 @@ impl DateTime {
         })
     }
 
+    // FIXME(yingwen): remove add/sub intervals later
     /// Adds given [IntervalYearMonth] to the current datetime.
     pub fn add_year_month(&self, interval: IntervalYearMonth) -> Option<Self> {
         let naive_datetime = self.to_chrono_datetime()?;

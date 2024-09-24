@@ -90,6 +90,22 @@ impl IntervalYearMonth {
     pub fn new(months: i32) -> Self {
         Self { months }
     }
+
+    pub fn to_i32(&self) -> i32 {
+        self.months
+    }
+
+    pub fn from_i32(months: i32) -> Self {
+        Self { months }
+    }
+
+    pub fn negative(&self) -> Self {
+        Self::new(-self.months)
+    }
+
+    pub fn to_iso8601_string(&self) -> String {
+        IntervalFormat::from(*self).to_iso8601_string()
+    }
 }
 
 impl From<IntervalYearMonth> for IntervalFormat {
@@ -99,6 +115,24 @@ impl From<IntervalYearMonth> for IntervalFormat {
             months: interval.months % 12,
             ..Default::default()
         }
+    }
+}
+
+impl From<i32> for IntervalYearMonth {
+    fn from(v: i32) -> Self {
+        Self::from_i32(v)
+    }
+}
+
+impl From<IntervalYearMonth> for i32 {
+    fn from(v: IntervalYearMonth) -> Self {
+        v.to_i32()
+    }
+}
+
+impl From<IntervalYearMonth> for serde_json::Value {
+    fn from(v: IntervalYearMonth) -> Self {
+        serde_json::Value::from(v.to_i32())
     }
 }
 
@@ -128,6 +162,44 @@ impl IntervalDayTime {
 
     pub const fn new(days: i32, milliseconds: i32) -> Self {
         Self { days, milliseconds }
+    }
+
+    pub fn to_i64(&self) -> i64 {
+        let d = self.days as u64 & u32::MAX as u64;
+        let m = (self.milliseconds as u64 & u32::MAX as u64) << 32;
+        (d | m) as i64
+    }
+
+    pub fn from_i64(value: i64) -> Self {
+        let days = value as i32;
+        let milliseconds = (value >> 32) as i32;
+        Self { days, milliseconds }
+    }
+
+    pub fn negative(&self) -> Self {
+        Self::new(-self.days, -self.milliseconds)
+    }
+
+    pub fn to_iso8601_string(&self) -> String {
+        IntervalFormat::from(*self).to_iso8601_string()
+    }
+}
+
+impl From<i64> for IntervalDayTime {
+    fn from(v: i64) -> Self {
+        Self::from_i64(v)
+    }
+}
+
+impl From<IntervalDayTime> for i64 {
+    fn from(v: IntervalDayTime) -> Self {
+        v.to_i64()
+    }
+}
+
+impl From<IntervalDayTime> for serde_json::Value {
+    fn from(v: IntervalDayTime) -> Self {
+        serde_json::Value::from(v.to_i64())
     }
 }
 
@@ -176,6 +248,50 @@ impl IntervalMonthDayNano {
             days,
             nanoseconds,
         }
+    }
+
+    pub fn to_i128(&self) -> i128 {
+        let m = self.months as u128 & u32::MAX as u128;
+        let d = (self.days as u128 & u32::MAX as u128) << 32;
+        let n = (self.nanoseconds as u128 & u64::MAX as u128) << 64;
+        (m | d | n) as i128
+    }
+
+    pub fn from_i128(value: i128) -> Self {
+        let months = value as i32;
+        let days = (value >> 32) as i32;
+        let nanoseconds = (value >> 64) as i64;
+        Self {
+            months,
+            days,
+            nanoseconds,
+        }
+    }
+
+    pub fn negative(&self) -> Self {
+        Self::new(-self.months, -self.days, -self.nanoseconds)
+    }
+
+    pub fn to_iso8601_string(&self) -> String {
+        IntervalFormat::from(*self).to_iso8601_string()
+    }
+}
+
+impl From<i128> for IntervalMonthDayNano {
+    fn from(v: i128) -> Self {
+        Self::from_i128(v)
+    }
+}
+
+impl From<IntervalMonthDayNano> for i128 {
+    fn from(v: IntervalMonthDayNano) -> Self {
+        v.to_i128()
+    }
+}
+
+impl From<IntervalMonthDayNano> for serde_json::Value {
+    fn from(v: IntervalMonthDayNano) -> Self {
+        serde_json::Value::from(v.to_i128().to_string())
     }
 }
 
@@ -865,25 +981,16 @@ mod tests {
     fn test_to_iso8601_string() {
         // Test interval zero
         let interval = IntervalMonthDayNano::new(0, 0, 0);
-        assert_eq!(IntervalFormat::from(interval).to_iso8601_string(), "PT0S");
+        assert_eq!(interval.to_iso8601_string(), "PT0S");
 
         let interval = IntervalMonthDayNano::new(1, 1, 1);
-        assert_eq!(
-            IntervalFormat::from(interval).to_iso8601_string(),
-            "P0Y1M1DT0H0M0S"
-        );
+        assert_eq!(interval.to_iso8601_string(), "P0Y1M1DT0H0M0S");
 
         let interval = IntervalMonthDayNano::new(14, 31, 10000000000);
-        assert_eq!(
-            IntervalFormat::from(interval).to_iso8601_string(),
-            "P1Y2M31DT0H0M10S"
-        );
+        assert_eq!(interval.to_iso8601_string(), "P1Y2M31DT0H0M10S");
 
         let interval = IntervalMonthDayNano::new(14, 31, 23210200000000);
-        assert_eq!(
-            IntervalFormat::from(interval).to_iso8601_string(),
-            "P1Y2M31DT6H26M50.2S"
-        );
+        assert_eq!(interval.to_iso8601_string(), "P1Y2M31DT6H26M50.2S");
     }
 
     #[test]
