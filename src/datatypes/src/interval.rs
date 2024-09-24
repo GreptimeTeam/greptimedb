@@ -14,9 +14,8 @@
 
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use paste::paste;
-use serde::{Deserialize, Serialize};
 
-use crate::prelude::{Scalar, Value, ValueRef};
+use crate::prelude::Scalar;
 use crate::scalars::ScalarRef;
 use crate::types::{
     IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType, WrapperType,

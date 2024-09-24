@@ -14,14 +14,10 @@
 
 use std::fmt;
 
-use common_query::error::{
-    ArrowComputeSnafu, IntoVectorSnafu, InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu,
-};
+use common_query::error::{ArrowComputeSnafu, IntoVectorSnafu, InvalidFuncArgsSnafu, Result};
 use common_query::prelude::Signature;
 use datatypes::arrow::compute::kernels::numeric;
-use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::value::ValueRef;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::{ensure, ResultExt};
 

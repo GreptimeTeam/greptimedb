@@ -12,18 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::Ordering;
-use std::default::Default;
-use std::fmt::{self, Display, Formatter, Write};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 
 use arrow::datatypes::IntervalUnit as ArrowIntervalUnit;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use snafu::ResultExt;
-
-use crate::duration::Duration;
-use crate::error::{Result, TimestampOverflowSnafu};
 
 #[derive(
     Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,

@@ -16,7 +16,6 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
-use common_time::interval::IntervalUnit;
 use common_time::{Date, DateTime};
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
