@@ -46,7 +46,7 @@ use datafusion_expr::LogicalPlan;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
 use query::QueryEngineRef;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
@@ -338,10 +338,18 @@ impl StatementExecutor {
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             _ => {
-                return NotSupportedSnafu {
-                    feat: format!("Unsupported set variable {}", var_name),
+                // for postgres, we give unknown SET statements a warning with
+                //  success, this is prevent the SET call becoming a blocker
+                //  of connection establishment
+                //
+                if query_ctx.channel() == Channel::Postgres {
+                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
+                } else {
+                    return NotSupportedSnafu {
+                        feat: format!("Unsupported set variable {}", var_name),
+                    }
+                    .fail();
                 }
-                .fail()
             }
         }
         Ok(Output::new_with_affected_rows(0))

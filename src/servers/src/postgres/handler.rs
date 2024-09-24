@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -23,7 +24,7 @@ use common_telemetry::{debug, error, tracing};
 use datafusion_common::ParamValues;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use futures::{future, stream, Stream, StreamExt};
+use futures::{future, stream, Sink, SinkExt, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
@@ -32,6 +33,7 @@ use pgwire::api::results::{
 use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::messages::PgWireBackendMessage;
 use query::query_engine::DescribeResult;
 use session::context::QueryContextRef;
 use session::Session;
@@ -49,11 +51,13 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
     #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
     async fn do_query<'a, C>(
         &self,
-        _client: &mut C,
+        client: &mut C,
         query: &'a str,
     ) -> PgWireResult<Vec<Response<'a>>>
     where
-        C: ClientInfo + Unpin + Send + Sync,
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let query_ctx = self.session.new_query_context();
         let db = query_ctx.get_db_string();
@@ -67,6 +71,7 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         }
 
         if let Some(resps) = fixtures::process(query, query_ctx.clone()) {
+            send_warning_opt(client, query_ctx).await?;
             Ok(resps)
         } else {
             let outputs = self.query_handler.do_query(query, query_ctx.clone()).await;
@@ -79,9 +84,32 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
                 results.push(resp);
             }
 
+            send_warning_opt(client, query_ctx).await?;
             Ok(results)
         }
     }
+}
+
+async fn send_warning_opt<C>(client: &mut C, query_context: QueryContextRef) -> PgWireResult<()>
+where
+    C: Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+    C::Error: Debug,
+    PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+{
+    if let Some(warning) = query_context.warning() {
+        client
+            .feed(PgWireBackendMessage::NoticeResponse(
+                ErrorInfo::new(
+                    PgErrorSeverity::Warning.to_string(),
+                    PgErrorCode::Ec01000.code(),
+                    warning.to_string(),
+                )
+                .into(),
+            ))
+            .await?;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn output_to_query_response<'a>(
@@ -247,12 +275,14 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
     async fn do_query<'a, C>(
         &self,
-        _client: &mut C,
+        client: &mut C,
         portal: &'a Portal<Self::Statement>,
         _max_rows: usize,
     ) -> PgWireResult<Response<'a>>
     where
-        C: ClientInfo + Unpin + Send + Sync,
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let query_ctx = self.session.new_query_context();
         let db = query_ctx.get_db_string();
@@ -268,6 +298,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         }
 
         if let Some(mut resps) = fixtures::process(&sql_plan.query, query_ctx.clone()) {
+            send_warning_opt(client, query_ctx).await?;
             // if the statement matches our predefined rules, return it early
             return Ok(resps.remove(0));
         }
@@ -297,6 +328,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                 .remove(0)
         };
 
+        send_warning_opt(client, query_ctx.clone()).await?;
         output_to_query_response(query_ctx, output, &portal.result_column_format)
     }
 

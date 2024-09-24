@@ -37,7 +37,7 @@ use session::session_config::PGByteaOutputValue;
 
 use self::bytea::{EscapeOutputBytea, HexOutputBytea};
 use self::datetime::{StylingDate, StylingDateTime};
-pub use self::error::PgErrorCode;
+pub use self::error::{PgErrorCode, PgErrorSeverity};
 use self::interval::PgInterval;
 use crate::error::{self as server_error, Error, Result};
 use crate::SqlPlan;
