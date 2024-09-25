@@ -442,6 +442,13 @@ jobs:
             minio: true
             kafka: true
             values: "with-remote-wal.yaml"
+        include:
+          - target: "fuzz_migrate_mito_regions"
+            mode:
+              name: "Local WAL"
+              minio: true
+              kafka: false
+              values: "with-minio.yaml"
     steps:
       - name: Remove unused software
         run: |
@@ -530,7 +537,7 @@ jobs:
         with:
           image-registry: localhost:5001
           values-filename: ${{ matrix.mode.values }}
-          enable-region-failover: true
+          enable-region-failover: ${{ matrix.mode.kafka }}
       - name: Port forward (mysql)
         run: |
           kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
