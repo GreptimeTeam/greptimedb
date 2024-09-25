@@ -280,13 +280,16 @@ where
 }
 
 pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str) -> Result<usize> {
-    intermediate_keys.iter().position(|k| k == key).ok_or(
-        IntermediateKeyIndexSnafu {
-            kind: kind.to_string(),
-            key: key.to_string(),
-        }
-        .build(),
-    )
+    intermediate_keys
+        .iter()
+        .position(|k| k == key)
+        .ok_or_else(|| {
+            IntermediateKeyIndexSnafu {
+                kind: kind.to_string(),
+                key: key.to_string(),
+            }
+            .build()
+        })
 }
 
 #[cfg(test)]

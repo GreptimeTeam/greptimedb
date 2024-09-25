@@ -179,7 +179,7 @@ impl TimestampProcessor {
         if let Ok(dt) = DateTime::parse_from_str(val, fmt) {
             Ok(dt
                 .timestamp_nanos_opt()
-                .ok_or(DateFailedToGetTimestampSnafu.build())?)
+                .ok_or_else(|| DateFailedToGetTimestampSnafu.build())?)
         } else {
             let dt = NaiveDateTime::parse_from_str(val, fmt)
                 .map_err(|e| {
@@ -191,10 +191,10 @@ impl TimestampProcessor {
                 })?
                 .and_local_timezone(tz)
                 .single()
-                .ok_or(DateFailedToGetLocalTimezoneSnafu.build())?;
+                .ok_or_else(|| DateFailedToGetLocalTimezoneSnafu.build())?;
             Ok(dt
                 .timestamp_nanos_opt()
-                .ok_or(DateFailedToGetTimestampSnafu.build())?)
+                .ok_or_else(|| DateFailedToGetTimestampSnafu.build())?)
         }
     }
 
@@ -311,7 +311,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessorBuilder {
         for (k, v) in hash {
             let key = k
                 .as_str()
-                .ok_or(KeyMustBeStringSnafu { k: k.clone() }.build())?;
+                .ok_or_else(|| KeyMustBeStringSnafu { k: k.clone() }.build())?;
 
             match key {
                 FIELD_NAME => {

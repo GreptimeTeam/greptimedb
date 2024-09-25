@@ -156,7 +156,7 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for TransformBuilders {
         for doc in docs {
             let transform_builder: TransformBuilder = doc
                 .as_hash()
-                .ok_or(TransformElementMustBeMapSnafu.build())?
+                .ok_or_else(|| TransformElementMustBeMapSnafu.build())?
                 .try_into()?;
             let mut transform_output_keys = transform_builder
                 .fields
@@ -293,7 +293,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
         for (k, v) in hash {
             let key = k
                 .as_str()
-                .ok_or(KeyMustBeStringSnafu { k: k.clone() }.build())?;
+                .ok_or_else(|| KeyMustBeStringSnafu { k: k.clone() }.build())?;
             match key {
                 TRANSFORM_FIELD => {
                     fields = Fields::one(yaml_new_field(v, TRANSFORM_FIELD)?);

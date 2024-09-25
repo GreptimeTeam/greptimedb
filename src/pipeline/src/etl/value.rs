@@ -368,9 +368,9 @@ impl TryFrom<&yaml_rust::Yaml> for Value {
             yaml_rust::Yaml::Hash(v) => {
                 let mut values = HashMap::new();
                 for (k, v) in v {
-                    let key = k
-                        .as_str()
-                        .ok_or(ValueYamlKeyMustBeStringSnafu { value: v.clone() }.build())?;
+                    let key = k.as_str().ok_or_else(|| {
+                        ValueYamlKeyMustBeStringSnafu { value: v.clone() }.build()
+                    })?;
                     values.insert(key.to_string(), Value::try_from(v)?);
                 }
                 Ok(Value::Map(Map { values }))

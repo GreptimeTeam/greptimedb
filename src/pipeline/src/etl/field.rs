@@ -153,7 +153,7 @@ impl FromStr for Field {
         let mut parts = s.split(',');
         let input_field = parts
             .next()
-            .ok_or(MissingInputFieldSnafu.build())?
+            .ok_or_else(|| MissingInputFieldSnafu.build())?
             .trim()
             .to_string();
         let target_field = parts.next().map(|x| x.trim().to_string());

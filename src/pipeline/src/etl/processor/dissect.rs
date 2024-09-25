@@ -733,13 +733,13 @@ impl DissectProcessor {
 
                 // if Name part, and next part is Split, then find the matched value of the name
                 (Part::Name(name), Some(Part::Split(split))) => {
-                    let stop = split.chars().next().ok_or(
+                    let stop = split.chars().next().ok_or_else(|| {
                         DissectInvalidPatternSnafu {
                             s: pattern.origin.clone(),
                             detail: "Empty split is not allowed",
                         }
-                        .build(),
-                    )?; // this won't happen
+                        .build()
+                    })?; // this won't happen
                     let mut end = pos;
                     while end < chs.len() && chs[end] != stop {
                         end += 1;
@@ -802,7 +802,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessorBuilder {
         for (k, v) in value.iter() {
             let key = k
                 .as_str()
-                .ok_or(KeyMustBeStringSnafu { k: k.clone() }.build())?;
+                .ok_or_else(|| KeyMustBeStringSnafu { k: k.clone() }.build())?;
 
             match key {
                 FIELD_NAME => {

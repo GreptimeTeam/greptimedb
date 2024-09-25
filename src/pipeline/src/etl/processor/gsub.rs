@@ -151,7 +151,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
         for (k, v) in value.iter() {
             let key = k
                 .as_str()
-                .ok_or(KeyMustBeStringSnafu { k: k.clone() }.build())?;
+                .ok_or_else(|| KeyMustBeStringSnafu { k: k.clone() }.build())?;
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);

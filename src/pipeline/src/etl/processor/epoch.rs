@@ -174,7 +174,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessorBuilder {
         for (k, v) in hash {
             let key = k
                 .as_str()
-                .ok_or(KeyMustBeStringSnafu { k: k.clone() }.build())?;
+                .ok_or_else(|| KeyMustBeStringSnafu { k: k.clone() }.build())?;
 
             match key {
                 FIELD_NAME => {

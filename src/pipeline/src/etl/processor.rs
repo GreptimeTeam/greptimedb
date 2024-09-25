@@ -232,12 +232,14 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for ProcessorBuilderList {
 }
 
 fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorBuilders> {
-    let map = doc.as_hash().ok_or(ProcessorMustBeMapSnafu.build())?;
+    let map = doc
+        .as_hash()
+        .ok_or_else(|| ProcessorMustBeMapSnafu.build())?;
 
     let key = map
         .keys()
         .next()
-        .ok_or(ProcessorMustHaveStringKeySnafu.build())?;
+        .ok_or_else(|| ProcessorMustHaveStringKeySnafu.build())?;
 
     let value = map
         .get(key)
@@ -245,7 +247,9 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorBuilders> {
         .as_hash()
         .expect("processor value must be a map");
 
-    let str_key = key.as_str().ok_or(ProcessorKeyMustBeStringSnafu.build())?;
+    let str_key = key
+        .as_str()
+        .ok_or_else(|| ProcessorKeyMustBeStringSnafu.build())?;
 
     let processor = match str_key {
         cmcd::PROCESSOR_CMCD => ProcessorBuilders::Cmcd(CmcdProcessorBuilder::try_from(value)?),
@@ -274,25 +278,25 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorBuilders> {
 }
 
 pub(crate) fn yaml_string(v: &yaml_rust::Yaml, field: &str) -> Result<String> {
-    v.as_str().map(|s| s.to_string()).ok_or(
+    v.as_str().map(|s| s.to_string()).ok_or_else(|| {
         FieldMustBeTypeSnafu {
             field: field.to_string(),
             ty: "string".to_string(),
         }
-        .build(),
-    )
+        .build()
+    })
 }
 
 pub(crate) fn yaml_strings(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<String>> {
     let vec = v
         .as_vec()
-        .ok_or(
+        .ok_or_else(|| {
             FieldMustBeTypeSnafu {
                 field: field.to_string(),
                 ty: "list of string".to_string(),
             }
-            .build(),
-        )?
+            .build()
+        })?
         .iter()
         .map(|v| v.as_str().unwrap_or_default().into())
         .collect();
@@ -300,13 +304,13 @@ pub(crate) fn yaml_strings(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<Strin
 }
 
 pub(crate) fn yaml_bool(v: &yaml_rust::Yaml, field: &str) -> Result<bool> {
-    v.as_bool().ok_or(
+    v.as_bool().ok_or_else(|| {
         FieldMustBeTypeSnafu {
             field: field.to_string(),
             ty: "boolean".to_string(),
         }
-        .build(),
-    )
+        .build()
+    })
 }
 
 pub(crate) fn yaml_parse_string<T>(v: &yaml_rust::Yaml, field: &str) -> Result<T>
