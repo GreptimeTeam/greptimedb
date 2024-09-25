@@ -28,6 +28,7 @@ use crossbeam_utils::atomic::AtomicCell;
 use smallvec::{smallvec, SmallVec};
 use snafu::{ensure, OptionExt};
 use store_api::logstore::provider::Provider;
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionRole, RegionStatistic, SettableRegionRoleState};
 use store_api::storage::RegionId;
@@ -371,6 +372,14 @@ impl ManifestContext {
         }
     }
 
+    pub(crate) async fn manifest_version(&self) -> ManifestVersion {
+        self.manifest_manager
+            .read()
+            .await
+            .manifest()
+            .manifest_version
+    }
+
     pub(crate) async fn has_update(&self) -> Result<bool> {
         self.manifest_manager.read().await.has_update().await
     }
@@ -380,7 +389,7 @@ impl ManifestContext {
         &self,
         expect_states: SmallVec<[RegionLeaderState; 2]>,
         action_list: RegionMetaActionList,
-    ) -> Result<()> {
+    ) -> Result<ManifestVersion> {
         // Acquires the write lock of the manifest manager.
         let mut manager = self.manifest_manager.write().await;
         // Gets current manifest.
@@ -436,7 +445,7 @@ impl ManifestContext {
         }
 
         // Now we can update the manifest.
-        manager.update(action_list).await.inspect_err(
+        let version = manager.update(action_list).await.inspect_err(
             |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
         )?;
 
@@ -447,7 +456,7 @@ impl ManifestContext {
             );
         }
 
-        Ok(())
+        Ok(version)
     }
 }
 

@@ -48,7 +48,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Utilizes the short circuit evaluation.
         let region = if !is_mutable_empty || region.manifest_ctx.has_update().await? {
-            info!("Reopening the region: {region_id}, empty mutable: {is_mutable_empty}");
+            let manifest_version = region.manifest_ctx.manifest_version().await;
+            info!("Reopening the region: {region_id}, empty mutable: {is_mutable_empty}, manifest version: {manifest_version}");
             let reopened_region = Arc::new(
                 RegionOpener::new(
                     region_id,

@@ -365,9 +365,10 @@ impl RegionOpener {
         let version_control = Arc::new(VersionControl::new(version));
         if !self.skip_wal_replay {
             info!(
-                "Start replaying memtable at flushed_entry_id + 1 {} for region {}",
+                "Start replaying memtable at flushed_entry_id + 1: {} for region {}, manifest version: {}",
                 flushed_entry_id + 1,
-                region_id
+                region_id,
+                manifest.manifest_version
             );
             replay_memtable(
                 &provider,
@@ -380,7 +381,10 @@ impl RegionOpener {
             )
             .await?;
         } else {
-            info!("Skip the WAL replay for region: {}", region_id);
+            info!(
+                "Skip the WAL replay for region: {}, manifest version: {}",
+                region_id, manifest.manifest_version
+            );
         }
         let now = self.time_provider.current_time_millis();
 

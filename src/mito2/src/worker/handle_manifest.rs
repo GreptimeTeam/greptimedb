@@ -201,7 +201,8 @@ impl<S> RegionWorkerLoop<S> {
 
             let result = manifest_ctx
                 .update_manifest(smallvec![RegionLeaderState::Truncating], action_list)
-                .await;
+                .await
+                .map(|_| ());
 
             // Sends the result back to the request sender.
             let truncate_result = TruncateResult {
@@ -243,7 +244,8 @@ impl<S> RegionWorkerLoop<S> {
             let result = region
                 .manifest_ctx
                 .update_manifest(smallvec![RegionLeaderState::Altering], action_list)
-                .await;
+                .await
+                .map(|_| ());
             let notify = WorkerRequest::Background {
                 region_id: region.region_id,
                 notify: BackgroundNotify::RegionChange(RegionChangeResult {
@@ -341,4 +343,5 @@ async fn edit_region(
         .manifest_ctx
         .update_manifest(smallvec![RegionLeaderState::Editing], action_list)
         .await
+        .map(|_| ())
 }

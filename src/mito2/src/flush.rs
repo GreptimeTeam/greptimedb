@@ -409,12 +409,17 @@ impl RegionFlushTask {
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         // We will leak files if the manifest update fails, but we ignore them for simplicity. We can
         // add a cleanup job to remove them later.
-        self.manifest_ctx
+        let version = self
+            .manifest_ctx
             .update_manifest(
                 smallvec![RegionLeaderState::Writable, RegionLeaderState::Downgrading],
                 action_list,
             )
             .await?;
+        info!(
+            "Successfully update manifest version to {version}, region: {}",
+            self.region_id
+        );
 
         Ok(edit)
     }
