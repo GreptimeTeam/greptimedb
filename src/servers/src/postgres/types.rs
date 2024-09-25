@@ -1198,7 +1198,21 @@ mod test {
                 FieldFormat::Text,
             ),
             FieldInfo::new(
-                "intervals".into(),
+                "interval_year_month".into(),
+                None,
+                None,
+                Type::INTERVAL,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "interval_day_time".into(),
+                None,
+                None,
+                Type::INTERVAL,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "interval_month_day_nano".into(),
                 None,
                 None,
                 Type::INTERVAL,

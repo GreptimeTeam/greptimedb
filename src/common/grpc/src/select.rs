@@ -276,12 +276,12 @@ mod tests {
         let values = values(&[array]).unwrap();
 
         (0..3).for_each(|i| {
-            assert_eq!(values.interval_month_day_nano_values[i].months, 0);
-            assert_eq!(values.interval_month_day_nano_values[i].days, 0);
             assert_eq!(
-                values.interval_month_day_nano_values[i].nanoseconds,
-                i as i64 + 1
+                values.interval_month_day_nano_values[i].months,
+                i as i32 + 1
             );
+            assert_eq!(values.interval_month_day_nano_values[i].days, 0);
+            assert_eq!(values.interval_month_day_nano_values[i].nanoseconds, 0);
         })
     }
 

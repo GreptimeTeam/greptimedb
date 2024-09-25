@@ -27,9 +27,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::types::cast;
 use datatypes::value::Value;
-use datatypes::vectors::{
-    BooleanVector, DateTimeVector, Helper, TimestampMillisecondVector, VectorRef,
-};
+use datatypes::vectors::{BooleanVector, Helper, TimestampMillisecondVector, VectorRef};
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -64,6 +62,7 @@ impl UnmaterializableFunc {
         match self {
             Self::Now => Signature {
                 input: smallvec![],
+                // TODO(yingwen): Maybe return timestamp.
                 output: ConcreteDataType::datetime_datatype(),
                 generic_fn: GenericFn::Now,
             },
@@ -240,7 +239,7 @@ impl UnaryFunc {
             }
             Self::StepTimestamp => {
                 let timestamp_array = get_timestamp_array(&arg_col)?;
-                let date_array_ref = timestamp_array
+                let timestamp_array_ref = timestamp_array
                     .as_any()
                     .downcast_ref::<arrow::array::TimestampMillisecondArray>()
                     .context({
@@ -250,8 +249,8 @@ impl UnaryFunc {
                         }
                     })?;
 
-                let ret = arrow::compute::unary(date_array_ref, |arr| arr + 1);
-                let ret = DateTimeVector::from(ret);
+                let ret = arrow::compute::unary(timestamp_array_ref, |arr| arr + 1);
+                let ret = TimestampMillisecondVector::from(ret);
                 Ok(Arc::new(ret))
             }
             Self::Cast(to) => {
@@ -459,7 +458,7 @@ impl UnaryFunc {
                     Ok(Value::from(timestamp))
                 } else {
                     TypeMismatchSnafu {
-                        expected: ConcreteDataType::datetime_datatype(),
+                        expected: ConcreteDataType::timestamp_millisecond_datatype(),
                         actual: ty,
                     }
                     .fail()?
@@ -1297,7 +1296,7 @@ mod test {
 
     #[test]
     fn test_tumble_batch() {
-        let datetime_vector = DateTimeVector::from_vec(vec![1, 2, 10, 13, 14, 20, 25]);
+        let timestamp_vector = TimestampMillisecondVector::from_vec(vec![1, 2, 10, 13, 14, 20, 25]);
         let tumble_start = UnaryFunc::TumbleWindowFloor {
             window_size: Duration::from_millis(10),
             start_time: None,
@@ -1307,8 +1306,8 @@ mod test {
             start_time: None,
         };
 
-        let len = datetime_vector.len();
-        let batch = Batch::try_new(vec![Arc::new(datetime_vector)], len).unwrap();
+        let len = timestamp_vector.len();
+        let batch = Batch::try_new(vec![Arc::new(timestamp_vector)], len).unwrap();
         let arg = ScalarExpr::Column(0);
 
         let start = tumble_start.eval_batch(&batch, &arg).unwrap();

@@ -298,7 +298,9 @@ impl SortField {
             ConcreteDataType::Timestamp(_) => 9, // We treat timestamp as Option<i64>
             ConcreteDataType::Time(_) => 10,     // i64 and 1 byte time unit
             ConcreteDataType::Duration(_) => 10,
-            ConcreteDataType::Interval(_) => 18,
+            ConcreteDataType::Interval(IntervalType::YearMonth(_)) => 5,
+            ConcreteDataType::Interval(IntervalType::DayTime(_)) => 9,
+            ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => 17,
             ConcreteDataType::Decimal128(_) => 19,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)

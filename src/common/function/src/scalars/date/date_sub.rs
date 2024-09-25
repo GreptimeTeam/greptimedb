@@ -24,7 +24,9 @@ use snafu::{ensure, ResultExt};
 use crate::function::{Function, FunctionContext};
 use crate::helper;
 
-/// A function subtracts an interval value to Timestamp, Date or DateTime, and return the result.
+/// A function subtracts an interval value to Timestamp, Date, and return the result.
+/// The implementation of datetime type is based on Date64 which is incorrect so this function
+/// doesn't support the datetime type.
 #[derive(Clone, Debug, Default)]
 pub struct DateSubFunction;
 
@@ -43,7 +45,6 @@ impl Function for DateSubFunction {
         helper::one_of_sigs2(
             vec![
                 ConcreteDataType::date_datatype(),
-                ConcreteDataType::datetime_datatype(),
                 ConcreteDataType::timestamp_second_datatype(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 ConcreteDataType::timestamp_microsecond_datatype(),
@@ -93,8 +94,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
     use datatypes::vectors::{
-        DateTimeVector, DateVector, IntervalDayTimeVector, IntervalYearMonthVector,
-        TimestampSecondVector,
+        DateVector, IntervalDayTimeVector, IntervalYearMonthVector, TimestampSecondVector,
     };
 
     use super::{DateSubFunction, *};
@@ -122,11 +122,15 @@ mod tests {
             f.return_type(&[ConcreteDataType::datetime_datatype()])
                 .unwrap()
         );
-        assert!(matches!(f.signature(),
+        assert!(
+            matches!(f.signature(),
                          Signature {
                              type_signature: TypeSignature::OneOf(sigs),
                              volatility: Volatility::Immutable
-                         } if  sigs.len() == 18));
+                         } if  sigs.len() == 15),
+            "{:?}",
+            f.signature()
+        );
     }
 
     #[test]
@@ -192,44 +196,6 @@ mod tests {
             }
             match v {
                 Value::Date(date) => {
-                    assert_eq!(date.val(), result.unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    #[test]
-    fn test_datetime_date_sub() {
-        let f = DateSubFunction;
-        let millis_per_month = 3600 * 24 * 30 * 1000;
-
-        let dates = vec![
-            Some(123 * millis_per_month),
-            None,
-            Some(42 * millis_per_month),
-            None,
-        ];
-        // Intervals in months
-        let intervals = vec![1, 2, 3, 1];
-        let results = [Some(316137600000), None, Some(100915200000), None];
-
-        let date_vector = DateTimeVector::from(dates.clone());
-        let interval_vector = IntervalYearMonthVector::from_vec(intervals);
-        let args: Vec<VectorRef> = vec![Arc::new(date_vector), Arc::new(interval_vector)];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
-
-        assert_eq!(4, vector.len());
-        for (i, _t) in dates.iter().enumerate() {
-            let v = vector.get(i);
-            let result = results.get(i).unwrap();
-
-            if result.is_none() {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::DateTime(date) => {
                     assert_eq!(date.val(), result.unwrap());
                 }
                 _ => unreachable!(),

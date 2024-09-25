@@ -199,14 +199,21 @@ impl From<IntervalDayTime> for serde_json::Value {
     }
 }
 
+// Millisecond convert to other time unit
+pub const MS_PER_SEC: i64 = 1_000;
+pub const MS_PER_MINUTE: i64 = 60 * MS_PER_SEC;
+pub const MS_PER_HOUR: i64 = 60 * MS_PER_MINUTE;
+pub const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
+pub const NANOS_PER_MILLI: i64 = 1_000_000;
+
 impl From<IntervalDayTime> for IntervalFormat {
     fn from(interval: IntervalDayTime) -> Self {
         IntervalFormat {
             days: interval.days,
-            hours: interval.milliseconds as i64 / 3_600_000,
-            minutes: (interval.milliseconds as i64 % 3_600_000) / 60_000,
-            seconds: (interval.milliseconds as i64 % 60_000) / 1_000,
-            microseconds: (interval.milliseconds as i64 % 1_000) * 1_000,
+            hours: interval.milliseconds as i64 / MS_PER_HOUR,
+            minutes: (interval.milliseconds as i64 % MS_PER_HOUR) / MS_PER_MINUTE,
+            seconds: (interval.milliseconds as i64 % MS_PER_MINUTE) / MS_PER_SEC,
+            microseconds: (interval.milliseconds as i64 % MS_PER_SEC) * MS_PER_SEC,
             ..Default::default()
         }
     }
@@ -291,16 +298,22 @@ impl From<IntervalMonthDayNano> for serde_json::Value {
     }
 }
 
+// Nanosecond convert to other time unit
+pub const NS_PER_SEC: i64 = 1_000_000_000;
+pub const NS_PER_MINUTE: i64 = 60 * NS_PER_SEC;
+pub const NS_PER_HOUR: i64 = 60 * NS_PER_MINUTE;
+pub const NS_PER_DAY: i64 = 24 * NS_PER_HOUR;
+
 impl From<IntervalMonthDayNano> for IntervalFormat {
     fn from(interval: IntervalMonthDayNano) -> Self {
         IntervalFormat {
             years: interval.months / 12,
             months: interval.months % 12,
             days: interval.days,
-            hours: interval.nanoseconds / 3_600_000_000,
-            minutes: (interval.nanoseconds % 3_600_000_000) / 60_000_000,
-            seconds: (interval.nanoseconds % 60_000_000) / 1_000_000,
-            microseconds: (interval.nanoseconds % 1_000_000) / 1_000,
+            hours: interval.nanoseconds / NS_PER_HOUR,
+            minutes: (interval.nanoseconds % NS_PER_HOUR) / NS_PER_MINUTE,
+            seconds: (interval.nanoseconds % NS_PER_MINUTE) / NS_PER_SEC,
+            microseconds: (interval.nanoseconds % NS_PER_SEC) / 1_000,
         }
     }
 }
@@ -320,12 +333,6 @@ pub fn interval_day_time_to_month_day_nano(interval: IntervalDayTime) -> Interva
         nanoseconds: interval.milliseconds as i64 * NANOS_PER_MILLI,
     }
 }
-
-// Millisecond convert to other time unit
-pub const MS_PER_SEC: i64 = 1_000;
-pub const MS_PER_HOUR: i64 = 60 * 60 * MS_PER_SEC;
-pub const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
-pub const NANOS_PER_MILLI: i64 = 1_000_000;
 
 // impl Interval {
 //     /// Creates a new interval from months, days and nanoseconds.

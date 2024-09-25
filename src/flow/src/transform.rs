@@ -202,7 +202,7 @@ mod test {
             ];
             let schema = RelationType::new(vec![
                 ColumnType::new(CDT::uint32_datatype(), false),
-                ColumnType::new(CDT::datetime_datatype(), false),
+                ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
             ]);
             schemas.insert(
                 gid,
@@ -232,7 +232,11 @@ mod test {
 
         let schema = vec![
             datatypes::schema::ColumnSchema::new("number", CDT::uint32_datatype(), false),
-            datatypes::schema::ColumnSchema::new("ts", CDT::datetime_datatype(), false),
+            datatypes::schema::ColumnSchema::new(
+                "ts",
+                CDT::timestamp_millisecond_datatype(),
+                false,
+            ),
         ];
         let mut columns = vec![];
         let numbers = (1..=10).collect_vec();
