@@ -229,7 +229,7 @@ impl StatementExecutor {
         ensure!(
             NAME_PATTERN_REG.is_match(&create_table.table_name),
             InvalidTableNameSnafu {
-                table_name: create_table.table_name.clone(),
+                table_name: &create_table.table_name,
             }
         );
 
@@ -1516,6 +1516,12 @@ mod test {
         assert!(!NAME_PATTERN_REG.is_match("/adaf"));
         assert!(!NAME_PATTERN_REG.is_match("🈲"));
         assert!(NAME_PATTERN_REG.is_match("hello"));
+        assert!(NAME_PATTERN_REG.is_match("test@"));
+        assert!(!NAME_PATTERN_REG.is_match("@test"));
+        assert!(NAME_PATTERN_REG.is_match("test#"));
+        assert!(!NAME_PATTERN_REG.is_match("#test"));
+        assert!(!NAME_PATTERN_REG.is_match("@"));
+        assert!(!NAME_PATTERN_REG.is_match("#"));
     }
 
     #[tokio::test]
