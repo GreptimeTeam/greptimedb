@@ -21,6 +21,7 @@ pub(crate) const PROCESSOR_REGEX: &str = "regex";
 use ahash::{HashSet, HashSetExt};
 use lazy_static::lazy_static;
 use regex::Regex;
+use snafu::OptionExt;
 
 use crate::etl::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu,
@@ -203,9 +204,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessorBuilder {
         let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
-            let key = k
-                .as_str()
-                .ok_or_else(|| KeyMustBeStringSnafu { k: k.clone() }.build())?;
+            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);

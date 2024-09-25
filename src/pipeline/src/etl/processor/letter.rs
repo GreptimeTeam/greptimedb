@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use ahash::HashSet;
+use snafu::OptionExt;
 
 use crate::etl::error::{
     Error, KeyMustBeStringSnafu, LetterInvalidMethodSnafu, ProcessorExpectStringSnafu,
@@ -133,9 +134,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for LetterProcessorBuilder {
         let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
-            let key = k
-                .as_str()
-                .ok_or_else(|| KeyMustBeStringSnafu { k: k.clone() }.build())?;
+            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);

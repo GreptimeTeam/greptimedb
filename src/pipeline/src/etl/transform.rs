@@ -16,6 +16,7 @@ pub mod index;
 pub mod transformer;
 
 use itertools::Itertools;
+use snafu::OptionExt;
 
 use crate::etl::error::{Error, Result};
 use crate::etl::find_key_index;
@@ -156,7 +157,7 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for TransformBuilders {
         for doc in docs {
             let transform_builder: TransformBuilder = doc
                 .as_hash()
-                .ok_or_else(|| TransformElementMustBeMapSnafu.build())?
+                .context(TransformElementMustBeMapSnafu)?
                 .try_into()?;
             let mut transform_output_keys = transform_builder
                 .fields
@@ -291,9 +292,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
         let mut on_failure = None;
 
         for (k, v) in hash {
-            let key = k
-                .as_str()
-                .ok_or_else(|| KeyMustBeStringSnafu { k: k.clone() }.build())?;
+            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 TRANSFORM_FIELD => {
                     fields = Fields::one(yaml_new_field(v, TRANSFORM_FIELD)?);

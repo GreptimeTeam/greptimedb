@@ -18,6 +18,7 @@ use ahash::HashSet;
 use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
+use snafu::OptionExt;
 
 use crate::etl::error::{
     DateFailedToGetLocalTimezoneSnafu, DateFailedToGetTimestampSnafu, DateParseSnafu,
@@ -146,9 +147,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
         let mut ignore_missing = false;
 
         for (k, v) in hash {
-            let key = k
-                .as_str()
-                .ok_or_else(|| KeyMustBeStringSnafu { k: k.clone() }.build())?;
+            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
 
             match key {
                 FIELD_NAME => {
@@ -281,7 +280,7 @@ fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<i64> {
     if let Ok(dt) = DateTime::parse_from_str(val, fmt) {
         Ok(dt
             .timestamp_nanos_opt()
-            .ok_or_else(|| DateFailedToGetTimestampSnafu.build())?)
+            .context(DateFailedToGetTimestampSnafu)?)
     } else {
         let dt = NaiveDateTime::parse_from_str(val, fmt)
             .map_err(|e| {
@@ -293,10 +292,10 @@ fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<i64> {
             })?
             .and_local_timezone(tz)
             .single()
-            .ok_or_else(|| DateFailedToGetLocalTimezoneSnafu.build())?;
+            .context(DateFailedToGetLocalTimezoneSnafu)?;
         Ok(dt
             .timestamp_nanos_opt()
-            .ok_or_else(|| DateFailedToGetTimestampSnafu.build())?)
+            .context(DateFailedToGetTimestampSnafu)?)
     }
 }
 

@@ -14,6 +14,7 @@
 
 use ahash::HashSet;
 use regex::Regex;
+use snafu::OptionExt;
 
 use crate::etl::error::{
     Error, GsubPatternRequiredSnafu, GsubReplacementRequiredSnafu, KeyMustBeStringSnafu,
@@ -149,9 +150,8 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
         let mut replacement = None;
 
         for (k, v) in value.iter() {
-            let key = k
-                .as_str()
-                .ok_or_else(|| KeyMustBeStringSnafu { k: k.clone() }.build())?;
+            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);

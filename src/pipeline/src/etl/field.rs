@@ -15,6 +15,8 @@
 use std::ops::Deref;
 use std::str::FromStr;
 
+use snafu::OptionExt;
+
 use super::error::{EmptyInputFieldSnafu, MissingInputFieldSnafu};
 use crate::etl::error::{Error, Result};
 use crate::etl::find_key_index;
@@ -153,7 +155,7 @@ impl FromStr for Field {
         let mut parts = s.split(',');
         let input_field = parts
             .next()
-            .ok_or_else(|| MissingInputFieldSnafu.build())?
+            .context(MissingInputFieldSnafu)?
             .trim()
             .to_string();
         let target_field = parts.next().map(|x| x.trim().to_string());

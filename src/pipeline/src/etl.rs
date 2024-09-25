@@ -25,6 +25,7 @@ use common_telemetry::debug;
 use error::{IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, YamlLoadSnafu};
 use itertools::Itertools;
 use processor::{Processor, ProcessorBuilder, Processors};
+use snafu::OptionExt;
 use transform::{TransformBuilders, Transformer, Transforms};
 use value::Value;
 use yaml_rust::YamlLoader;
@@ -283,12 +284,9 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
     intermediate_keys
         .iter()
         .position(|k| k == key)
-        .ok_or_else(|| {
-            IntermediateKeyIndexSnafu {
-                kind: kind.to_string(),
-                key: key.to_string(),
-            }
-            .build()
+        .context(IntermediateKeyIndexSnafu {
+            kind: kind.to_string(),
+            key: key.to_string(),
         })
 }
 

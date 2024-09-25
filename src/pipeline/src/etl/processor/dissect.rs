@@ -16,6 +16,7 @@ use std::ops::Deref;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use itertools::Itertools;
+use snafu::OptionExt;
 
 use crate::etl::error::{
     DissectAppendOrderAlreadySetSnafu, DissectConsecutiveNamesSnafu, DissectEmptyPatternSnafu,
@@ -733,12 +734,9 @@ impl DissectProcessor {
 
                 // if Name part, and next part is Split, then find the matched value of the name
                 (Part::Name(name), Some(Part::Split(split))) => {
-                    let stop = split.chars().next().ok_or_else(|| {
-                        DissectInvalidPatternSnafu {
-                            s: pattern.origin.clone(),
-                            detail: "Empty split is not allowed",
-                        }
-                        .build()
+                    let stop = split.chars().next().context(DissectInvalidPatternSnafu {
+                        s: pattern.origin.clone(),
+                        detail: "Empty split is not allowed",
                     })?; // this won't happen
                     let mut end = pos;
                     while end < chs.len() && chs[end] != stop {
@@ -800,9 +798,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessorBuilder {
         let mut append_separator = None;
 
         for (k, v) in value.iter() {
-            let key = k
-                .as_str()
-                .ok_or_else(|| KeyMustBeStringSnafu { k: k.clone() }.build())?;
+            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
 
             match key {
                 FIELD_NAME => {
