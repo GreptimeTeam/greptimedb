@@ -24,7 +24,7 @@ use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 const ALL_ROW_GROUPS: i64 = -1;
 
 /// Index to access a row group.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct RowGroupIndex {
     /// Index to the memtable/file.
     pub(crate) index: usize,
@@ -75,6 +75,13 @@ impl RangeMeta {
     /// Merges given `meta` to this meta.
     /// It assumes that the time ranges overlap and they don't have the same file or memtable index.
     pub(crate) fn merge(&mut self, mut other: RangeMeta) {
+        debug_assert!(self.overlaps(&other));
+        debug_assert!(self.indices.iter().all(|idx| !other.indices.contains(idx)));
+        debug_assert!(self
+            .row_group_indices
+            .iter()
+            .all(|idx| !other.row_group_indices.contains(idx)));
+
         self.time_range = (
             self.time_range.0.min(other.time_range.0),
             self.time_range.1.max(other.time_range.1),
