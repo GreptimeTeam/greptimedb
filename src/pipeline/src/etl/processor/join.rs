@@ -13,7 +13,12 @@
 // limitations under the License.
 
 use ahash::HashSet;
+use snafu::OptionExt;
 
+use crate::etl::error::{
+    Error, JoinSeparatorRequiredSnafu, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
+    ProcessorMissingFieldSnafu, Result,
+};
 use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
@@ -42,21 +47,21 @@ impl ProcessorBuilder for JoinProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
         self.build(intermediate_keys).map(ProcessorKind::Join)
     }
 }
 
 impl JoinProcessorBuilder {
-    fn check(self) -> Result<Self, String> {
+    fn check(self) -> Result<Self> {
         if self.separator.is_none() {
-            return Err("separator is required".to_string());
+            return JoinSeparatorRequiredSnafu.fail();
         }
 
         Ok(self)
     }
 
-    pub fn build(self, intermediate_keys: &[String]) -> Result<JoinProcessor, String> {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<JoinProcessor> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
             let input = OneInputOneOutputField::build(
@@ -85,7 +90,7 @@ pub struct JoinProcessor {
 }
 
 impl JoinProcessor {
-    fn process(&self, arr: &Array) -> Result<Value, String> {
+    fn process(&self, arr: &Array) -> Result<Value> {
         let sep = self.separator.as_ref().unwrap();
         let val = arr
             .iter()
@@ -96,9 +101,9 @@ impl JoinProcessor {
         Ok(Value::String(val))
     }
 
-    fn check(self) -> Result<Self, String> {
+    fn check(self) -> Result<Self> {
         if self.separator.is_none() {
-            return Err("separator is required".to_string());
+            return JoinSeparatorRequiredSnafu.fail();
         }
 
         Ok(self)
@@ -106,9 +111,9 @@ impl JoinProcessor {
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for JoinProcessorBuilder {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
+    fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut fields = Fields::default();
         let mut separator = None;
         let mut ignore_missing = false;
@@ -116,7 +121,8 @@ impl TryFrom<&yaml_rust::yaml::Hash> for JoinProcessorBuilder {
         for (k, v) in value.iter() {
             let key = k
                 .as_str()
-                .ok_or(format!("key must be a string, but got {k:?}"))?;
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
+
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
@@ -152,7 +158,7 @@ impl Processor for JoinProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
@@ -163,18 +169,19 @@ impl Processor for JoinProcessor {
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
-                        return Err(format!(
-                            "{} processor: missing field: {}",
-                            self.kind(),
-                            field.input_name()
-                        ));
+                        return ProcessorMissingFieldSnafu {
+                            processor: self.kind(),
+                            field: field.input_name(),
+                        }
+                        .fail();
                     }
                 }
                 Some(v) => {
-                    return Err(format!(
-                        "{} processor: expect string value, but got {v:?}",
-                        self.kind()
-                    ));
+                    return ProcessorExpectStringSnafu {
+                        processor: self.kind(),
+                        v: v.clone(),
+                    }
+                    .fail();
                 }
             }
         }

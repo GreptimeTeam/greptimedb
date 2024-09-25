@@ -279,5 +279,5 @@ transform:
     let row = pipeline.exec_mut(&mut result);
 
     assert!(row.is_err());
-    assert_eq!(row.err().unwrap(), "No matching pattern found");
+    assert_eq!(row.err().unwrap().to_string(), "No matching pattern found");
 }

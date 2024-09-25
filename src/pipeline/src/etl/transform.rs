@@ -16,7 +16,9 @@ pub mod index;
 pub mod transformer;
 
 use itertools::Itertools;
+use snafu::OptionExt;
 
+use crate::etl::error::{Error, Result};
 use crate::etl::find_key_index;
 use crate::etl::processor::yaml_string;
 use crate::etl::transform::index::Index;
@@ -31,6 +33,10 @@ const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
 pub use transformer::greptime::GreptimeTransformer;
 
+use super::error::{
+    KeyMustBeStringSnafu, TransformElementMustBeMapSnafu, TransformOnFailureInvalidValueSnafu,
+    TransformTypeMustBeSetSnafu,
+};
 use super::field::{Fields, InputFieldInfo, OneInputOneOutputField};
 use super::processor::{yaml_new_field, yaml_new_fields};
 
@@ -38,11 +44,11 @@ pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     type Output;
     type VecOutput;
 
-    fn new(transforms: Transforms) -> Result<Self, String>;
+    fn new(transforms: Transforms) -> Result<Self>;
     fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema>;
     fn transforms(&self) -> &Transforms;
     fn transforms_mut(&mut self) -> &mut Transforms;
-    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput, String>;
+    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput>;
 }
 
 /// On Failure behavior when transform fails
@@ -57,13 +63,13 @@ pub enum OnFailure {
 }
 
 impl std::str::FromStr for OnFailure {
-    type Err = String;
+    type Err = Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         match s {
             "ignore" => Ok(OnFailure::Ignore),
             "default" => Ok(OnFailure::Default),
-            _ => Err(format!("invalid transform on_failure value: {}", s)),
+            _ => TransformOnFailureInvalidValueSnafu { value: s }.fail(),
         }
     }
 }
@@ -139,16 +145,16 @@ impl std::ops::DerefMut for Transforms {
 }
 
 impl TryFrom<&Vec<yaml_rust::Yaml>> for TransformBuilders {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(docs: &Vec<yaml_rust::Yaml>) -> Result<Self, Self::Error> {
+    fn try_from(docs: &Vec<yaml_rust::Yaml>) -> Result<Self> {
         let mut transforms = Vec::with_capacity(100);
         let mut all_output_keys: Vec<String> = Vec::with_capacity(100);
         let mut all_required_keys = Vec::with_capacity(100);
         for doc in docs {
             let transform_builder: TransformBuilder = doc
                 .as_hash()
-                .ok_or("transform element must be a map".to_string())?
+                .context(TransformElementMustBeMapSnafu)?
                 .try_into()?;
             let mut transform_output_keys = transform_builder
                 .fields
@@ -187,11 +193,7 @@ pub struct TransformBuilder {
 }
 
 impl TransformBuilder {
-    pub fn build(
-        self,
-        intermediate_keys: &[String],
-        output_keys: &[String],
-    ) -> Result<Transform, String> {
+    pub fn build(self, intermediate_keys: &[String], output_keys: &[String]) -> Result<Transform> {
         let mut real_fields = vec![];
         for field in self.fields {
             let input_index = find_key_index(intermediate_keys, field.input_field(), "transform")?;
@@ -277,9 +279,9 @@ impl Transform {
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
+    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut fields = Fields::default();
         let mut type_ = Value::Null;
         let mut default = None;
@@ -287,7 +289,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
         let mut on_failure = None;
 
         for (k, v) in hash {
-            let key = k.as_str().ok_or("key must be a string")?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 TRANSFORM_FIELD => {
                     fields = Fields::one(yaml_new_field(v, TRANSFORM_FIELD)?);
@@ -324,10 +328,11 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
         if let Some(default_value) = default {
             match (&type_, &default_value) {
                 (Value::Null, _) => {
-                    return Err(format!(
-                        "transform {:?} type MUST BE set before default {}",
-                        fields, &default_value,
-                    ));
+                    return TransformTypeMustBeSetSnafu {
+                        fields: format!("{:?}", fields),
+                        default: default_value.to_string(),
+                    }
+                    .fail();
                 }
                 (_, Value::Null) => {} // if default is not set, then it will be regarded as default null
                 (_, _) => {

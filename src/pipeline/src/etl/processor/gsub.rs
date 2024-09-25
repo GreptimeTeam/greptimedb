@@ -14,11 +14,16 @@
 
 use ahash::HashSet;
 use regex::Regex;
+use snafu::{OptionExt, ResultExt};
 
+use crate::etl::error::{
+    Error, GsubPatternRequiredSnafu, GsubReplacementRequiredSnafu, KeyMustBeStringSnafu,
+    ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, RegexSnafu, Result,
+};
 use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
-    ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, ProcessorBuilder, ProcessorKind,
+    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
 
@@ -46,25 +51,25 @@ impl ProcessorBuilder for GsubProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
         self.build(intermediate_keys).map(ProcessorKind::Gsub)
     }
 }
 
 impl GsubProcessorBuilder {
-    fn check(self) -> Result<Self, String> {
+    fn check(self) -> Result<Self> {
         if self.pattern.is_none() {
-            return Err("pattern is required".to_string());
+            return GsubPatternRequiredSnafu.fail();
         }
 
         if self.replacement.is_none() {
-            return Err("replacement is required".to_string());
+            return GsubReplacementRequiredSnafu.fail();
         }
 
         Ok(self)
     }
 
-    fn build(self, intermediate_keys: &[String]) -> Result<GsubProcessor, String> {
+    fn build(self, intermediate_keys: &[String]) -> Result<GsubProcessor> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
             let input = OneInputOneOutputField::build(
@@ -94,19 +99,19 @@ pub struct GsubProcessor {
 }
 
 impl GsubProcessor {
-    fn check(self) -> Result<Self, String> {
+    fn check(self) -> Result<Self> {
         if self.pattern.is_none() {
-            return Err("pattern is required".to_string());
+            return GsubPatternRequiredSnafu.fail();
         }
 
         if self.replacement.is_none() {
-            return Err("replacement is required".to_string());
+            return GsubReplacementRequiredSnafu.fail();
         }
 
         Ok(self)
     }
 
-    fn process_string(&self, val: &str) -> Result<Value, String> {
+    fn process_string(&self, val: &str) -> Result<Value> {
         let replacement = self.replacement.as_ref().unwrap();
         let new_val = self
             .pattern
@@ -119,21 +124,26 @@ impl GsubProcessor {
         Ok(val)
     }
 
-    fn process(&self, val: &Value) -> Result<Value, String> {
+    fn process(&self, val: &Value) -> Result<Value> {
         match val {
             Value::String(val) => self.process_string(val),
-            _ => Err(format!(
-                "{} processor: expect string or array string, but got {val:?}",
-                self.kind()
-            )),
+            _ => ProcessorExpectStringSnafu {
+                processor: PROCESSOR_GSUB,
+                v: val.clone(),
+            }
+            .fail(),
+            // Err(format!(
+            //     "{} processor: expect string or array string, but got {val:?}",
+            //     self.kind()
+            // )),
         }
     }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
+    fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut fields = Fields::default();
         let mut ignore_missing = false;
         let mut pattern = None;
@@ -142,7 +152,8 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
         for (k, v) in value.iter() {
             let key = k
                 .as_str()
-                .ok_or(format!("key must be a string, but got {k:?}"))?;
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
+
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
@@ -152,7 +163,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
                 }
                 PATTERN_NAME => {
                     let pattern_str = yaml_string(v, PATTERN_NAME)?;
-                    pattern = Some(Regex::new(&pattern_str).map_err(|e| e.to_string())?);
+                    pattern = Some(Regex::new(&pattern_str).context(RegexSnafu {
+                        pattern: pattern_str,
+                    })?);
                 }
                 REPLACEMENT_NAME => {
                     let replacement_str = yaml_string(v, REPLACEMENT_NAME)?;
@@ -187,17 +200,17 @@ impl crate::etl::processor::Processor for GsubProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
-                        return Err(format!(
-                            "{} processor: missing field: {}",
-                            self.kind(),
-                            field.input_name()
-                        ));
+                        return ProcessorMissingFieldSnafu {
+                            processor: self.kind(),
+                            field: field.input_name(),
+                        }
+                        .fail();
                     }
                 }
                 Some(v) => {

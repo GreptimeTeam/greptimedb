@@ -204,8 +204,7 @@ impl PipelineTable {
     /// Compile a pipeline from a string.
     pub fn compile_pipeline(pipeline: &str) -> Result<Pipeline<GreptimeTransformer>> {
         let yaml_content = Content::Yaml(pipeline.into());
-        parse::<GreptimeTransformer>(&yaml_content)
-            .map_err(|e| CompilePipelineSnafu { reason: e }.build())
+        parse::<GreptimeTransformer>(&yaml_content).context(CompilePipelineSnafu)
     }
 
     /// Insert a pipeline into the pipeline table.

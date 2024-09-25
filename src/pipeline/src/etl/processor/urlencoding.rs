@@ -13,8 +13,13 @@
 // limitations under the License.
 
 use ahash::HashSet;
+use snafu::{OptionExt, ResultExt};
 use urlencoding::{decode, encode};
 
+use crate::etl::error::{
+    Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
+    UrlEncodingDecodeSnafu, UrlEncodingInvalidMethodSnafu,
+};
 use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, ProcessorBuilder, ProcessorKind,
@@ -41,13 +46,13 @@ impl std::fmt::Display for Method {
 }
 
 impl std::str::FromStr for Method {
-    type Err = String;
+    type Err = Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         match s {
             "decode" => Ok(Method::Decode),
             "encode" => Ok(Method::Encode),
-            _ => Err(format!("invalid method: {s}")),
+            _ => UrlEncodingInvalidMethodSnafu { s }.fail(),
         }
     }
 }
@@ -71,14 +76,14 @@ impl ProcessorBuilder for UrlEncodingProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
         self.build(intermediate_keys)
             .map(ProcessorKind::UrlEncoding)
     }
 }
 
 impl UrlEncodingProcessorBuilder {
-    fn build(self, intermediate_keys: &[String]) -> Result<UrlEncodingProcessor, String> {
+    fn build(self, intermediate_keys: &[String]) -> Result<UrlEncodingProcessor> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
             let input = OneInputOneOutputField::build(
@@ -106,19 +111,19 @@ pub struct UrlEncodingProcessor {
 }
 
 impl UrlEncodingProcessor {
-    fn process_field(&self, val: &str) -> Result<Value, String> {
+    fn process_field(&self, val: &str) -> Result<Value> {
         let processed = match self.method {
             Method::Encode => encode(val).to_string(),
-            Method::Decode => decode(val).map_err(|e| e.to_string())?.into_owned(),
+            Method::Decode => decode(val).context(UrlEncodingDecodeSnafu)?.into_owned(),
         };
         Ok(Value::String(processed))
     }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for UrlEncodingProcessorBuilder {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
+    fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut fields = Fields::default();
         let mut method = Method::Decode;
         let mut ignore_missing = false;
@@ -126,7 +131,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for UrlEncodingProcessorBuilder {
         for (k, v) in value.iter() {
             let key = k
                 .as_str()
-                .ok_or(format!("key must be a string, but got {k:?}"))?;
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
@@ -166,7 +171,7 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
@@ -177,18 +182,19 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
-                        return Err(format!(
-                            "{} processor: missing field: {}",
-                            self.kind(),
-                            field.output_name()
-                        ));
+                        return ProcessorMissingFieldSnafu {
+                            processor: self.kind(),
+                            field: field.input_name(),
+                        }
+                        .fail();
                     }
                 }
                 Some(v) => {
-                    return Err(format!(
-                        "{} processor: expect string value, but got {v:?}",
-                        self.kind()
-                    ));
+                    return ProcessorExpectStringSnafu {
+                        processor: self.kind(),
+                        v: v.clone(),
+                    }
+                    .fail();
                 }
             }
         }

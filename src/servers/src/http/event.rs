@@ -115,19 +115,18 @@ pub async fn add_pipeline(
 ) -> Result<GreptimedbManageResponse> {
     let start = Instant::now();
     let handler = state.log_handler;
-    if pipeline_name.is_empty() {
-        return Err(InvalidParameterSnafu {
+    ensure!(
+        !pipeline_name.is_empty(),
+        InvalidParameterSnafu {
             reason: "pipeline_name is required in path",
         }
-        .build());
-    }
-
-    if payload.is_empty() {
-        return Err(InvalidParameterSnafu {
+    );
+    ensure!(
+        !payload.is_empty(),
+        InvalidParameterSnafu {
             reason: "pipeline is required in body",
         }
-        .build());
-    }
+    );
 
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
@@ -252,12 +251,12 @@ pub async fn pipeline_dryrun(
 
     let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
 
-    if value.len() > 10 {
-        return Err(InvalidParameterSnafu {
+    ensure!(
+        value.len() <= 10,
+        InvalidParameterSnafu {
             reason: "too many rows for dryrun",
         }
-        .build());
-    }
+    );
 
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
@@ -272,11 +271,11 @@ pub async fn pipeline_dryrun(
     for v in value {
         pipeline
             .prepare(v, &mut intermediate_state)
-            .map_err(|reason| PipelineTransformSnafu { reason }.build())
+            .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
         let r = pipeline
             .exec_mut(&mut intermediate_state)
-            .map_err(|reason| PipelineTransformSnafu { reason }.build())
+            .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
         results.push(r);
         pipeline.reset_intermediate_state(&mut intermediate_state);
@@ -438,21 +437,21 @@ async fn ingest_logs_inner(
     for v in pipeline_data {
         pipeline
             .prepare(v, &mut intermediate_state)
-            .map_err(|reason| {
+            .inspect_err(|_| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
                     .observe(transform_timer.elapsed().as_secs_f64());
-                PipelineTransformSnafu { reason }.build()
             })
+            .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
         let r = pipeline
             .exec_mut(&mut intermediate_state)
-            .map_err(|reason| {
+            .inspect_err(|_| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
                     .observe(transform_timer.elapsed().as_secs_f64());
-                PipelineTransformSnafu { reason }.build()
             })
+            .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
         results.push(r);
         pipeline.reset_intermediate_state(&mut intermediate_state);

@@ -18,7 +18,12 @@ use ahash::HashSet;
 use csv::{ReaderBuilder, Trim};
 use itertools::EitherOrBoth::{Both, Left, Right};
 use itertools::Itertools;
+use snafu::{OptionExt, ResultExt};
 
+use crate::etl::error::{
+    CsvNoRecordSnafu, CsvQuoteNameSnafu, CsvReadSnafu, CsvSeparatorNameSnafu, Error,
+    KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
+};
 use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
 use crate::etl::find_key_index;
 use crate::etl::processor::{
@@ -53,7 +58,7 @@ pub struct CsvProcessorBuilder {
 }
 
 impl CsvProcessorBuilder {
-    fn build(self, intermediate_keys: &[String]) -> Result<CsvProcessor, String> {
+    fn build(self, intermediate_keys: &[String]) -> Result<CsvProcessor> {
         let mut real_fields = vec![];
 
         for field in self.fields {
@@ -68,7 +73,7 @@ impl CsvProcessorBuilder {
             .target_fields
             .iter()
             .map(|f| find_key_index(intermediate_keys, f, "csv"))
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>>>()?;
         Ok(CsvProcessor {
             reader: self.reader,
             fields: real_fields,
@@ -88,7 +93,7 @@ impl ProcessorBuilder for CsvProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
         self.build(intermediate_keys).map(ProcessorKind::Csv)
     }
 }
@@ -114,11 +119,11 @@ pub struct CsvProcessor {
 
 impl CsvProcessor {
     // process the csv format string to a map with target_fields as keys
-    fn process(&self, val: &str) -> Result<Vec<(usize, Value)>, String> {
+    fn process(&self, val: &str) -> Result<Vec<(usize, Value)>> {
         let mut reader = self.reader.from_reader(val.as_bytes());
 
         if let Some(result) = reader.records().next() {
-            let record: csv::StringRecord = result.map_err(|e| e.to_string())?;
+            let record: csv::StringRecord = result.context(CsvReadSnafu)?;
 
             let values: Vec<(usize, Value)> = self
                 .output_index_info
@@ -142,15 +147,15 @@ impl CsvProcessor {
 
             Ok(values)
         } else {
-            Err("expected at least one record from csv format, but got none".into())
+            CsvNoRecordSnafu.fail()
         }
     }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessorBuilder {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
+    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut reader = ReaderBuilder::new();
         reader.has_headers(false);
 
@@ -162,7 +167,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessorBuilder {
         for (k, v) in hash {
             let key = k
                 .as_str()
-                .ok_or(format!("key must be a string, but got {k:?}"))?;
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
@@ -180,10 +185,11 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessorBuilder {
                 SEPARATOR_NAME => {
                     let separator = yaml_string(v, SEPARATOR_NAME)?;
                     if separator.len() != 1 {
-                        return Err(format!(
-                            "'{}' must be a single character, but got '{}'",
-                            SEPARATOR_NAME, separator
-                        ));
+                        return CsvSeparatorNameSnafu {
+                            separator: SEPARATOR_NAME,
+                            value: separator,
+                        }
+                        .fail();
                     } else {
                         reader.delimiter(separator.as_bytes()[0]);
                     }
@@ -191,10 +197,11 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessorBuilder {
                 QUOTE_NAME => {
                     let quote = yaml_string(v, QUOTE_NAME)?;
                     if quote.len() != 1 {
-                        return Err(format!(
-                            "'{}' must be a single character, but got '{}'",
-                            QUOTE_NAME, quote
-                        ));
+                        return CsvQuoteNameSnafu {
+                            quote: QUOTE_NAME,
+                            value: quote,
+                        }
+                        .fail();
                     } else {
                         reader.quote(quote.as_bytes()[0]);
                     }
@@ -240,7 +247,7 @@ impl Processor for CsvProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
@@ -252,18 +259,19 @@ impl Processor for CsvProcessor {
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
-                        return Err(format!(
-                            "{} processor: missing field: {}",
-                            self.kind(),
-                            field.input_name()
-                        ));
+                        return ProcessorMissingFieldSnafu {
+                            processor: self.kind().to_string(),
+                            field: field.input_name().to_string(),
+                        }
+                        .fail();
                     }
                 }
                 Some(v) => {
-                    return Err(format!(
-                        "{} processor: expect string value, but got {v:?}",
-                        self.kind()
-                    ));
+                    return ProcessorExpectStringSnafu {
+                        processor: self.kind().to_string(),
+                        v: v.clone(),
+                    }
+                    .fail();
                 }
             }
         }
