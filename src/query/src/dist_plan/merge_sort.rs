@@ -53,6 +53,8 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 use table::table_name::TableName;
 
+use crate::region_query::RegionQueryHandlerRef;
+
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct MergeSortLogicalPlan {
     pub input: LogicalPlan,
@@ -123,11 +125,4 @@ impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
         })?;
         Ok(self.clone())
     }
-}
-
-/// TODO(discord9): when executing, use region==partition to get from different region as stream
-pub struct MergeSortExec {
-    table: TableName,
-    regions: Vec<RegionId>,
-    plan: LogicalPlan,
 }
