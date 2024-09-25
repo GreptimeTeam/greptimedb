@@ -14,13 +14,13 @@
 
 use std::collections::HashMap;
 
+use common_meta::datanode::DatanodeStatValue;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tonic::codegen::http;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
-use crate::key::DatanodeStatValue;
 use crate::service::admin::{util, HttpHandler};
 
 #[derive(Clone)]
@@ -85,8 +85,8 @@ fn filter_by_addr(stat_vals: Vec<DatanodeStatValue>, addr: &str) -> Vec<Datanode
 
 #[cfg(test)]
 mod tests {
-    use crate::handler::node_stat::Stat;
-    use crate::key::DatanodeStatValue;
+    use common_meta::datanode::{DatanodeStatValue, Stat};
+
     use crate::service::admin::heartbeat::filter_by_addr;
 
     #[tokio::test]

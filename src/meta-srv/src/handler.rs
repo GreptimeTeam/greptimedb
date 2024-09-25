@@ -22,6 +22,7 @@ use api::v1::meta::{
     HeartbeatRequest, HeartbeatResponse, MailboxMessage, RegionLease, RequestHeader,
     ResponseHeader, Role, PROTOCOL_VERSION,
 };
+use common_meta::datanode::Stat;
 use common_meta::instruction::{Instruction, InstructionReply};
 use common_meta::sequence::Sequence;
 use common_telemetry::{debug, info, warn};
@@ -32,7 +33,6 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{oneshot, Notify, RwLock};
 
-use self::node_stat::Stat;
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
 use crate::metasrv::Context;
 use crate::metrics::{METRIC_META_HANDLER_EXECUTE, METRIC_META_HEARTBEAT_CONNECTION_NUM};
@@ -48,7 +48,6 @@ pub mod failure_handler;
 pub mod filter_inactive_region_stats;
 pub mod keep_lease_handler;
 pub mod mailbox_handler;
-pub mod node_stat;
 pub mod on_leader_start_handler;
 pub mod publish_heartbeat_handler;
 pub mod region_lease_handler;

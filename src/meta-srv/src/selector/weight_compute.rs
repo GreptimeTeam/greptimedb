@@ -14,10 +14,10 @@
 
 use std::collections::HashMap;
 
+use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
 use common_meta::peer::Peer;
 use itertools::{Itertools, MinMaxResult};
 
-use crate::key::{DatanodeStatKey, DatanodeStatValue};
 use crate::selector::weighted_choose::WeightedItem;
 
 /// The [`WeightCompute`] trait is used to compute the weight array by heartbeats.
@@ -95,13 +95,12 @@ impl WeightCompute for RegionNumsBasedWeightCompute {
 mod tests {
     use std::collections::HashMap;
 
+    use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat, Stat};
     use common_meta::peer::Peer;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
     use super::{RegionNumsBasedWeightCompute, WeightCompute};
-    use crate::handler::node_stat::{RegionStat, Stat};
-    use crate::key::{DatanodeStatKey, DatanodeStatValue};
 
     #[test]
     fn test_weight_compute() {

@@ -64,12 +64,12 @@ impl HeartbeatHandler for RegionFailureHandler {
 mod tests {
     use api::v1::meta::HeartbeatRequest;
     use common_catalog::consts::default_engine;
+    use common_meta::datanode::{RegionStat, Stat};
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
     use tokio::sync::oneshot;
 
     use crate::handler::failure_handler::RegionFailureHandler;
-    use crate::handler::node_stat::{RegionStat, Stat};
     use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
     use crate::metasrv::builder::MetasrvBuilder;
     use crate::region::supervisor::tests::new_test_supervisor;
