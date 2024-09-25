@@ -248,7 +248,7 @@ fn group_ranges_for_seq_scan(mut ranges: Vec<RangeMeta>) -> Vec<RangeMeta> {
 }
 
 /// Splits the range into multiple smaller ranges.
-/// It assumes the input `ranges` list is created by [group_ranges_for_merge_mode()].
+/// It assumes the input `ranges` list is created by [group_ranges_for_seq_scan()].
 fn maybe_split_ranges_for_seq_scan(ranges: Vec<RangeMeta>) -> Vec<RangeMeta> {
     let mut new_ranges = Vec::with_capacity(ranges.len());
     for range in ranges {

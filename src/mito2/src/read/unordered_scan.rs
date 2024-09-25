@@ -161,7 +161,7 @@ impl UnorderedScan {
             let cache = stream_ctx.input.cache_manager.as_deref();
             stream_ctx.build_mem_ranges(index, ranges);
             metrics.num_mem_ranges += ranges.len();
-            for range in &*ranges {
+            for range in ranges {
                 let build_reader_start = Instant::now();
                 let iter = range.build_iter().map_err(BoxedError::new).context(ExternalSnafu)?;
                 metrics.build_reader_cost = build_reader_start.elapsed();
