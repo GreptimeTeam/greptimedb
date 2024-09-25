@@ -111,7 +111,7 @@ mod test {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
-    use common_meta::rpc::router::{Region, RegionRoute, RegionStatus};
+    use common_meta::rpc::router::{Region, RegionRoute, RegionState};
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
@@ -297,7 +297,7 @@ mod test {
                 region: Region::new_test(region_id),
                 leader_peer: Some(peer.clone()),
                 follower_peers: vec![follower_peer.clone()],
-                leader_status: Some(RegionStatus::Downgraded),
+                leader_state: Some(RegionState::Downgrading),
                 leader_down_since: Some(1),
             },
             RegionRoute {

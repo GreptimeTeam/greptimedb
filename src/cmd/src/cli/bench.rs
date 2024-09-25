@@ -158,7 +158,7 @@ fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
                 addr: String::new(),
             }),
             follower_peers: vec![],
-            leader_status: None,
+            leader_state: None,
             leader_down_since: None,
         });
     }

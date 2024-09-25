@@ -224,7 +224,7 @@ impl InformationSchemaRegionPeersBuilder {
             let region_id = RegionId::new(table_id, route.region.id.region_number()).as_u64();
             let peer_id = route.leader_peer.clone().map(|p| p.id);
             let peer_addr = route.leader_peer.clone().map(|p| p.addr);
-            let status = if let Some(status) = route.leader_status {
+            let status = if let Some(status) = route.leader_state {
                 Some(status.as_ref().to_string())
             } else {
                 // Alive by default

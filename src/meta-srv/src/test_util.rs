@@ -36,7 +36,7 @@ pub(crate) fn new_region_route(region_id: u64, peers: &[Peer], leader_node: u64)
         region,
         leader_peer,
         follower_peers: vec![],
-        leader_status: None,
+        leader_state: None,
         leader_down_since: None,
     }
 }
