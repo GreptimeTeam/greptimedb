@@ -18,7 +18,7 @@ use ahash::HashSet;
 use csv::{ReaderBuilder, Trim};
 use itertools::EitherOrBoth::{Both, Left, Right};
 use itertools::Itertools;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::etl::error::{
     CsvNoRecordSnafu, CsvQuoteNameSnafu, CsvReadSnafu, CsvSeparatorNameSnafu, Error,
@@ -123,8 +123,7 @@ impl CsvProcessor {
         let mut reader = self.reader.from_reader(val.as_bytes());
 
         if let Some(result) = reader.records().next() {
-            let record: csv::StringRecord =
-                result.map_err(|e| CsvReadSnafu { error: e }.build())?;
+            let record: csv::StringRecord = result.context(CsvReadSnafu)?;
 
             let values: Vec<(usize, Value)> = self
                 .output_index_info
@@ -166,7 +165,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessorBuilder {
         let mut target_fields = vec![];
 
         for (k, v) in hash {
-            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);

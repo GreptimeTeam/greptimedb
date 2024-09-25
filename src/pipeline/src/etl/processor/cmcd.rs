@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use ahash::HashSet;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use urlencoding::decode;
 
 use crate::etl::error::{
@@ -213,36 +213,22 @@ fn bs_su(_: &str, _: &str, _: Option<&str>) -> Result<Value> {
 
 /// function to resolve CMCD_KEY_BR | CMCD_KEY_BL | CMCD_KEY_D | CMCD_KEY_DL | CMCD_KEY_MTP | CMCD_KEY_RTP | CMCD_KEY_TB
 fn br_tb(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
-    let v = v.context(CmcdMissingValueSnafu {
-        k: k.to_string(),
-        s: s.to_string(),
-    })?;
-    let val: i64 = v.parse().map_err(|e| {
-        FailedToParseIntKeySnafu {
-            key: k.to_string(),
-            value: v.to_string(),
-            error: e,
-        }
-        .build()
-    })?;
+    let v = v.context(CmcdMissingValueSnafu { k, s })?;
+    let val: i64 = v
+        .parse()
+        .context(FailedToParseIntKeySnafu { key: k, value: v })?;
     Ok(Value::Int64(val))
 }
 
 /// function to resolve CMCD_KEY_CID | CMCD_KEY_NRR | CMCD_KEY_OT | CMCD_KEY_SF | CMCD_KEY_SID | CMCD_KEY_V
 fn cid_v(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
-    let v = v.context(CmcdMissingValueSnafu {
-        k: k.to_string(),
-        s: s.to_string(),
-    })?;
+    let v = v.context(CmcdMissingValueSnafu { k, s })?;
     Ok(Value::String(v.to_string()))
 }
 
 /// function to resolve CMCD_KEY_NOR
 fn nor(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
-    let v = v.context(CmcdMissingValueSnafu {
-        k: k.to_string(),
-        s: s.to_string(),
-    })?;
+    let v = v.context(CmcdMissingValueSnafu { k, s })?;
     let val = match decode(v) {
         Ok(val) => val.to_string(),
         Err(_) => v.to_string(),
@@ -252,18 +238,10 @@ fn nor(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
 
 /// function to resolve CMCD_KEY_PR
 fn pr(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
-    let v = v.context(CmcdMissingValueSnafu {
-        k: k.to_string(),
-        s: s.to_string(),
-    })?;
-    let val: f64 = v.parse().map_err(|e| {
-        FailedToParseFloatKeySnafu {
-            key: k.to_string(),
-            value: v.to_string(),
-            error: e,
-        }
-        .build()
-    })?;
+    let v = v.context(CmcdMissingValueSnafu { k, s })?;
+    let val: f64 = v
+        .parse()
+        .context(FailedToParseFloatKeySnafu { key: k, value: v })?;
     Ok(Value::Float64(val))
 }
 
@@ -320,10 +298,7 @@ impl CmcdProcessor {
         let mut result = Vec::new();
         for part in parts {
             let mut kv = part.split('=');
-            let k = kv.next().context(CmcdMissingKeySnafu {
-                part: part.to_string(),
-                s: s.to_string(),
-            })?;
+            let k = kv.next().context(CmcdMissingKeySnafu { part, s })?;
             let v = kv.next();
 
             for cmcd_key in self.cmcd_outputs[field_index].iter() {
@@ -346,7 +321,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessorBuilder {
         let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
-            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);

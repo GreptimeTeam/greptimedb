@@ -36,7 +36,7 @@ use itertools::Itertools;
 use join::{JoinProcessor, JoinProcessorBuilder};
 use letter::{LetterProcessor, LetterProcessorBuilder};
 use regex::{RegexProcessor, RegexProcessorBuilder};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use timestamp::{TimestampProcessor, TimestampProcessorBuilder};
 use urlencoding::{UrlEncodingProcessor, UrlEncodingProcessorBuilder};
 
@@ -275,8 +275,8 @@ pub(crate) fn yaml_string(v: &yaml_rust::Yaml, field: &str) -> Result<String> {
     v.as_str()
         .map(|s| s.to_string())
         .context(FieldMustBeTypeSnafu {
-            field: field.to_string(),
-            ty: "string".to_string(),
+            field,
+            ty: "string",
         })
 }
 
@@ -284,8 +284,8 @@ pub(crate) fn yaml_strings(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<Strin
     let vec = v
         .as_vec()
         .context(FieldMustBeTypeSnafu {
-            field: field.to_string(),
-            ty: "list of string".to_string(),
+            field,
+            ty: "list of string",
         })?
         .iter()
         .map(|v| v.as_str().unwrap_or_default().into())
@@ -295,8 +295,8 @@ pub(crate) fn yaml_strings(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<Strin
 
 pub(crate) fn yaml_bool(v: &yaml_rust::Yaml, field: &str) -> Result<bool> {
     v.as_bool().context(FieldMustBeTypeSnafu {
-        field: field.to_string(),
-        ty: "boolean".to_string(),
+        field,
+        ty: "boolean",
     })
 }
 
@@ -305,13 +305,10 @@ where
     T: std::str::FromStr,
     T::Err: std::error::Error + Send + Sync + 'static,
 {
-    yaml_string(v, field)?.parse::<T>().map_err(|e| {
-        FailedParseFieldFromStringSnafu {
-            error: Box::new(e),
-            field: field.to_string(),
-        }
-        .build()
-    })
+    yaml_string(v, field)?
+        .parse::<T>()
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        .context(FailedParseFieldFromStringSnafu { field })
 }
 
 pub(crate) fn yaml_parse_strings<T>(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<T>>
@@ -322,13 +319,9 @@ where
     yaml_strings(v, field).and_then(|v| {
         v.into_iter()
             .map(|s| {
-                s.parse::<T>().map_err(|e| {
-                    FailedParseFieldFromStringSnafu {
-                        error: Box::new(e),
-                        field: field.to_string(),
-                    }
-                    .build()
-                })
+                s.parse::<T>()
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+                    .context(FailedParseFieldFromStringSnafu { field })
             })
             .collect()
     })

@@ -69,10 +69,7 @@ impl std::str::FromStr for OnFailure {
         match s {
             "ignore" => Ok(OnFailure::Ignore),
             "default" => Ok(OnFailure::Default),
-            _ => TransformOnFailureInvalidValueSnafu {
-                value: s.to_string(),
-            }
-            .fail(),
+            _ => TransformOnFailureInvalidValueSnafu { value: s }.fail(),
         }
     }
 }
@@ -292,7 +289,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
         let mut on_failure = None;
 
         for (k, v) in hash {
-            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 TRANSFORM_FIELD => {
                     fields = Fields::one(yaml_new_field(v, TRANSFORM_FIELD)?);

@@ -134,7 +134,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for LetterProcessorBuilder {
         let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
-            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);

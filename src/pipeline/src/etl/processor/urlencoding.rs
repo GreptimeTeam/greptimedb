@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use ahash::HashSet;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use urlencoding::{decode, encode};
 
 use crate::etl::error::{
@@ -114,9 +114,7 @@ impl UrlEncodingProcessor {
     fn process_field(&self, val: &str) -> Result<Value> {
         let processed = match self.method {
             Method::Encode => encode(val).to_string(),
-            Method::Decode => decode(val)
-                .map_err(|e| UrlEncodingDecodeSnafu { error: e }.build())?
-                .into_owned(),
+            Method::Decode => decode(val).context(UrlEncodingDecodeSnafu)?.into_owned(),
         };
         Ok(Value::String(processed))
     }
@@ -131,7 +129,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for UrlEncodingProcessorBuilder {
         let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
-            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);

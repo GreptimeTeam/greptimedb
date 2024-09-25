@@ -19,7 +19,7 @@ pub mod time;
 use ahash::{HashMap, HashMapExt};
 pub use array::Array;
 pub use map::Map;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 pub use time::Timestamp;
 
 use super::error::{
@@ -120,97 +120,53 @@ impl Value {
     /// only support string, bool, number, null
     pub fn parse_str_value(&self, v: &str) -> Result<Self> {
         match self {
-            Value::Int8(_) => v.parse::<i8>().map(Value::Int8).map_err(|e| {
-                ValueParseIntSnafu {
-                    ty: "int8",
-                    v,
-                    error: e,
-                }
-                .build()
-            }),
-            Value::Int16(_) => v.parse::<i16>().map(Value::Int16).map_err(|e| {
-                ValueParseIntSnafu {
-                    ty: "int16",
-                    v,
-                    error: e,
-                }
-                .build()
-            }),
-            Value::Int32(_) => v.parse::<i32>().map(Value::Int32).map_err(|e| {
-                ValueParseIntSnafu {
-                    ty: "int32",
-                    v,
-                    error: e,
-                }
-                .build()
-            }),
-            Value::Int64(_) => v.parse::<i64>().map(Value::Int64).map_err(|e| {
-                ValueParseIntSnafu {
-                    ty: "int64",
-                    v,
-                    error: e,
-                }
-                .build()
-            }),
+            Value::Int8(_) => v
+                .parse::<i8>()
+                .map(Value::Int8)
+                .context(ValueParseIntSnafu { ty: "int8", v }),
+            Value::Int16(_) => v
+                .parse::<i16>()
+                .map(Value::Int16)
+                .context(ValueParseIntSnafu { ty: "int16", v }),
+            Value::Int32(_) => v
+                .parse::<i32>()
+                .map(Value::Int32)
+                .context(ValueParseIntSnafu { ty: "int32", v }),
+            Value::Int64(_) => v
+                .parse::<i64>()
+                .map(Value::Int64)
+                .context(ValueParseIntSnafu { ty: "int64", v }),
 
-            Value::Uint8(_) => v.parse::<u8>().map(Value::Uint8).map_err(|e| {
-                ValueParseIntSnafu {
-                    ty: "uint8",
-                    v,
-                    error: e,
-                }
-                .build()
-            }),
-            Value::Uint16(_) => v.parse::<u16>().map(Value::Uint16).map_err(|e| {
-                ValueParseIntSnafu {
-                    ty: "uint16",
-                    v,
-                    error: e,
-                }
-                .build()
-            }),
-            Value::Uint32(_) => v.parse::<u32>().map(Value::Uint32).map_err(|e| {
-                ValueParseIntSnafu {
-                    ty: "uint32",
-                    v,
-                    error: e,
-                }
-                .build()
-            }),
-            Value::Uint64(_) => v.parse::<u64>().map(Value::Uint64).map_err(|e| {
-                ValueParseIntSnafu {
-                    ty: "uint64",
-                    v,
-                    error: e,
-                }
-                .build()
-            }),
+            Value::Uint8(_) => v
+                .parse::<u8>()
+                .map(Value::Uint8)
+                .context(ValueParseIntSnafu { ty: "uint8", v }),
+            Value::Uint16(_) => v
+                .parse::<u16>()
+                .map(Value::Uint16)
+                .context(ValueParseIntSnafu { ty: "uint16", v }),
+            Value::Uint32(_) => v
+                .parse::<u32>()
+                .map(Value::Uint32)
+                .context(ValueParseIntSnafu { ty: "uint32", v }),
+            Value::Uint64(_) => v
+                .parse::<u64>()
+                .map(Value::Uint64)
+                .context(ValueParseIntSnafu { ty: "uint64", v }),
 
-            Value::Float32(_) => v.parse::<f32>().map(Value::Float32).map_err(|e| {
-                ValueParseFloatSnafu {
-                    ty: "float32",
-                    v,
-                    error: e,
-                }
-                .build()
-            }),
-            Value::Float64(_) => v.parse::<f64>().map(Value::Float64).map_err(|e| {
-                ValueParseFloatSnafu {
-                    ty: "float64",
-                    v,
-                    error: e,
-                }
-                .build()
-            }),
+            Value::Float32(_) => v
+                .parse::<f32>()
+                .map(Value::Float32)
+                .context(ValueParseFloatSnafu { ty: "float32", v }),
+            Value::Float64(_) => v
+                .parse::<f64>()
+                .map(Value::Float64)
+                .context(ValueParseFloatSnafu { ty: "float64", v }),
 
-            Value::Boolean(_) => v.parse::<bool>().map(Value::Boolean).map_err(|e| {
-                ValueParseBooleanSnafu {
-                    ty: "boolean",
-                    v,
-                    error: e,
-                }
-                .build()
-            }),
+            Value::Boolean(_) => v
+                .parse::<bool>()
+                .map(Value::Boolean)
+                .context(ValueParseBooleanSnafu { ty: "boolean", v }),
             Value::String(_) => Ok(Value::String(v.to_string())),
 
             Value::Null => Ok(Value::Null),
@@ -351,12 +307,7 @@ impl TryFrom<&yaml_rust::Yaml> for Value {
             yaml_rust::Yaml::Integer(v) => Ok(Value::Int64(*v)),
             yaml_rust::Yaml::Real(v) => match v.parse::<f64>() {
                 Ok(v) => Ok(Value::Float64(v)),
-                Err(e) => ValueParseFloatSnafu {
-                    ty: "float64",
-                    v,
-                    error: e,
-                }
-                .fail(),
+                Err(e) => Err(e).context(ValueParseFloatSnafu { ty: "float64", v }),
             },
             yaml_rust::Yaml::String(v) => Ok(Value::String(v.to_string())),
             yaml_rust::Yaml::Array(arr) => {
@@ -371,7 +322,7 @@ impl TryFrom<&yaml_rust::Yaml> for Value {
                 for (k, v) in v {
                     let key = k
                         .as_str()
-                        .context(ValueYamlKeyMustBeStringSnafu { value: v.clone() })?;
+                        .with_context(|| ValueYamlKeyMustBeStringSnafu { value: v.clone() })?;
                     values.insert(key.to_string(), Value::try_from(v)?);
                 }
                 Ok(Value::Map(Map { values }))

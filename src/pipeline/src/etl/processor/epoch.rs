@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use ahash::HashSet;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::etl::error::{
     EpochInvalidResolutionSnafu, Error, FailedToParseIntSnafu, KeyMustBeStringSnafu,
@@ -52,10 +52,7 @@ impl TryFrom<&str> for Resolution {
             MILLISECOND_RESOLUTION | MILLI_RESOLUTION | MS_RESOLUTION => Ok(Resolution::Milli),
             MICROSECOND_RESOLUTION | MICRO_RESOLUTION | US_RESOLUTION => Ok(Resolution::Micro),
             NANOSECOND_RESOLUTION | NANO_RESOLUTION | NS_RESOLUTION => Ok(Resolution::Nano),
-            _ => EpochInvalidResolutionSnafu {
-                resolution: s.to_string(),
-            }
-            .fail(),
+            _ => EpochInvalidResolutionSnafu { resolution: s }.fail(),
         }
     }
 }
@@ -122,13 +119,9 @@ pub struct EpochProcessor {
 impl EpochProcessor {
     fn parse(&self, val: &Value) -> Result<Timestamp> {
         let t: i64 = match val {
-            Value::String(s) => s.parse::<i64>().map_err(|e| {
-                FailedToParseIntSnafu {
-                    value: s.to_string(),
-                    error: e,
-                }
-                .build()
-            })?,
+            Value::String(s) => s
+                .parse::<i64>()
+                .context(FailedToParseIntSnafu { value: s })?,
             Value::Int16(i) => *i as i64,
             Value::Int32(i) => *i as i64,
             Value::Int64(i) => *i,
@@ -173,7 +166,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessorBuilder {
         let mut ignore_missing = false;
 
         for (k, v) in hash {
-            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
 
             match key {
                 FIELD_NAME => {

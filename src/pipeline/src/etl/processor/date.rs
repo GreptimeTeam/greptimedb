@@ -18,7 +18,7 @@ use ahash::HashSet;
 use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::etl::error::{
     DateFailedToGetLocalTimezoneSnafu, DateFailedToGetTimestampSnafu, DateParseSnafu,
@@ -147,7 +147,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
         let mut ignore_missing = false;
 
         for (k, v) in hash {
-            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
 
             match key {
                 FIELD_NAME => {
@@ -212,12 +214,8 @@ impl DateProcessor {
     fn parse(&self, val: &str) -> Result<Timestamp> {
         let mut tz = Tz::UTC;
         if let Some(timezone) = &self.timezone {
-            tz = timezone.parse::<Tz>().map_err(|e| {
-                DateParseTimezoneSnafu {
-                    value: timezone.to_string(),
-                    error: e,
-                }
-                .build()
+            tz = timezone.parse::<Tz>().context(DateParseTimezoneSnafu {
+                value: timezone.as_ref(),
             })?;
         }
 
@@ -283,13 +281,7 @@ fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<i64> {
             .context(DateFailedToGetTimestampSnafu)?)
     } else {
         let dt = NaiveDateTime::parse_from_str(val, fmt)
-            .map_err(|e| {
-                DateParseSnafu {
-                    value: val.to_string(),
-                    error: e,
-                }
-                .build()
-            })?
+            .context(DateParseSnafu { value: val })?
             .and_local_timezone(tz)
             .single()
             .context(DateFailedToGetLocalTimezoneSnafu)?;

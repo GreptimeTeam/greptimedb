@@ -14,7 +14,7 @@
 
 use ahash::HashSet;
 use regex::Regex;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::etl::error::{
     Error, GsubPatternRequiredSnafu, GsubReplacementRequiredSnafu, KeyMustBeStringSnafu,
@@ -150,7 +150,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
         let mut replacement = None;
 
         for (k, v) in value.iter() {
-            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
 
             match key {
                 FIELD_NAME => {
@@ -161,12 +163,8 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
                 }
                 PATTERN_NAME => {
                     let pattern_str = yaml_string(v, PATTERN_NAME)?;
-                    pattern = Some(Regex::new(&pattern_str).map_err(|e| {
-                        RegexSnafu {
-                            pattern: pattern_str,
-                            error: e,
-                        }
-                        .build()
+                    pattern = Some(Regex::new(&pattern_str).context(RegexSnafu {
+                        pattern: pattern_str,
                     })?);
                 }
                 REPLACEMENT_NAME => {

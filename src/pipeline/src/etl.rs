@@ -25,7 +25,7 @@ use common_telemetry::debug;
 use error::{IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, YamlLoadSnafu};
 use itertools::Itertools;
 use processor::{Processor, ProcessorBuilder, Processors};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use transform::{TransformBuilders, Transformer, Transforms};
 use value::Value;
 use yaml_rust::YamlLoader;
@@ -48,8 +48,7 @@ where
 {
     match input {
         Content::Yaml(str) => {
-            let docs =
-                YamlLoader::load_from_str(str).map_err(|e| YamlLoadSnafu { error: e }.build())?;
+            let docs = YamlLoader::load_from_str(str).context(YamlLoadSnafu)?;
 
             let doc = &docs[0];
 
@@ -284,10 +283,7 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
     intermediate_keys
         .iter()
         .position(|k| k == key)
-        .context(IntermediateKeyIndexSnafu {
-            kind: kind.to_string(),
-            key: key.to_string(),
-        })
+        .context(IntermediateKeyIndexSnafu { kind, key })
 }
 
 #[cfg(test)]

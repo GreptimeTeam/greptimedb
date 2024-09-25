@@ -18,7 +18,7 @@ use ahash::HashSet;
 use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::etl::error::{
     DateFailedToGetLocalTimezoneSnafu, DateFailedToGetTimestampSnafu, DateInvalidFormatSnafu,
@@ -183,13 +183,7 @@ impl TimestampProcessor {
                 .context(DateFailedToGetTimestampSnafu)?)
         } else {
             let dt = NaiveDateTime::parse_from_str(val, fmt)
-                .map_err(|e| {
-                    DateParseSnafu {
-                        error: e,
-                        value: val,
-                    }
-                    .build()
-                })?
+                .context(DateParseSnafu { value: val })?
                 .and_local_timezone(tz)
                 .single()
                 .context(DateFailedToGetLocalTimezoneSnafu)?;
@@ -279,13 +273,8 @@ fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>>
                 let tz = iter
                     .next()
                     .map(|tz| {
-                        tz.parse::<Tz>().map_err(|e| {
-                            DateParseTimezoneSnafu {
-                                value: tz,
-                                error: e,
-                            }
-                            .build()
-                        })
+                        tz.parse::<Tz>()
+                            .context(DateParseTimezoneSnafu { value: tz })
                     })
                     .unwrap_or(Ok(Tz::UTC))?;
                 formats.push((Arc::new(formatter), tz));
@@ -310,7 +299,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessorBuilder {
         let mut ignore_missing = false;
 
         for (k, v) in hash {
-            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
 
             match key {
                 FIELD_NAME => {

@@ -351,7 +351,7 @@ impl std::str::FromStr for PatternInfo {
 
                     if j == pos + 1 {
                         return DissectInvalidPatternSnafu {
-                            s: s.to_string(),
+                            s,
                             detail: "Digit order must be set after '/'",
                         }
                         .fail();
@@ -373,7 +373,7 @@ impl std::str::FromStr for PatternInfo {
                     if let Some('>') = chars.get(pos + 1) {
                     } else {
                         return DissectInvalidPatternSnafu {
-                            s: s.to_string(),
+                            s,
                             detail: "Expected '->' but only '-'",
                         }
                         .fail();
@@ -382,7 +382,7 @@ impl std::str::FromStr for PatternInfo {
                     if let Some('}') = chars.get(pos + 2) {
                     } else {
                         return DissectInvalidPatternSnafu {
-                            s: s.to_string(),
+                            s,
                             detail: "Expected '}' after '->'",
                         }
                         .fail();
@@ -397,11 +397,7 @@ impl std::str::FromStr for PatternInfo {
                     } else {
                         format!("Invalid '{ch}' in '{name}'")
                     };
-                    return DissectInvalidPatternSnafu {
-                        s: s.to_string(),
-                        detail: tail,
-                    }
-                    .fail();
+                    return DissectInvalidPatternSnafu { s, detail: tail }.fail();
                 }
                 (_, PartInfo::Name(_)) => {
                     cursor.push(ch);
@@ -415,7 +411,7 @@ impl std::str::FromStr for PatternInfo {
             PartInfo::Split(ref split) if !split.is_empty() => parts.push(cursor),
             PartInfo::Name(name) if !name.is_empty() => {
                 return DissectInvalidPatternSnafu {
-                    s: s.to_string(),
+                    s,
                     detail: format!("'{name}' is not closed"),
                 }
                 .fail();
@@ -444,14 +440,14 @@ impl PatternInfo {
             match (this_part, next_part) {
                 (PartInfo::Split(split), _) if split.is_empty() => {
                     return DissectInvalidPatternSnafu {
-                        s: self.origin.clone(),
+                        s: &self.origin,
                         detail: "Empty split is not allowed",
                     }
                     .fail();
                 }
                 (PartInfo::Name(name1), Some(PartInfo::Name(name2))) => {
                     return DissectInvalidPatternSnafu {
-                        s: self.origin.clone(),
+                        s: &self.origin,
                         detail: format!("consecutive names are not allowed: '{name1}' '{name2}'",),
                     }
                     .fail();
@@ -459,7 +455,7 @@ impl PatternInfo {
                 (PartInfo::Name(name), _) if name.is_name_empty() => {
                     if let Some(ref m) = name.start_modifier {
                         return DissectInvalidPatternSnafu {
-                            s: self.origin.clone(),
+                            s: &self.origin,
                             detail: format!("only '{m}' modifier is invalid"),
                         }
                         .fail();
@@ -469,7 +465,7 @@ impl PatternInfo {
                     Some(StartModifier::MapKey) => {
                         if map_keys.contains(&name.name) {
                             return DissectInvalidPatternSnafu {
-                                s: self.origin.clone(),
+                                s: &self.origin,
                                 detail: format!("Duplicate map key: '{}'", name.name),
                             }
                             .fail();
@@ -480,7 +476,7 @@ impl PatternInfo {
                     Some(StartModifier::MapVal) => {
                         if map_vals.contains(&name.name) {
                             return DissectInvalidPatternSnafu {
-                                s: self.origin.clone(),
+                                s: &self.origin,
                                 detail: format!("Duplicate map val: '{}'", name.name),
                             }
                             .fail();
@@ -496,7 +492,7 @@ impl PatternInfo {
 
         if map_keys != map_vals {
             return DissectInvalidPatternSnafu {
-                s: self.origin.clone(),
+                s: &self.origin,
                 detail: format!(
                     "key and value not matched: '{}'",
                     map_keys
@@ -697,22 +693,15 @@ impl DissectProcessor {
                     let split_chs = split.chars().collect::<Vec<char>>();
                     let split_len = split_chs.len();
                     if pos + split_len > chs.len() {
-                        return DissectSplitExceedsInputSnafu {
-                            split: split.clone(),
-                        }
-                        .fail();
+                        return DissectSplitExceedsInputSnafu { split }.fail();
                     }
 
                     if &chs[pos..pos + split_len] != split_chs.as_slice() {
                         return DissectSplitNotMatchInputSnafu {
-                            split: split.clone(),
+                            split,
                             input: chs[pos..pos + split_len].iter().collect::<String>(),
                         }
                         .fail();
-                        // return Err(format!(
-                        //     "'{split}' does not match the input '{}'",
-                        //     chs[pos..pos + split_len].iter().collect::<String>()
-                        // ));
                     }
 
                     pos += split_len;
@@ -735,7 +724,7 @@ impl DissectProcessor {
                 // if Name part, and next part is Split, then find the matched value of the name
                 (Part::Name(name), Some(Part::Split(split))) => {
                     let stop = split.chars().next().context(DissectInvalidPatternSnafu {
-                        s: pattern.origin.clone(),
+                        s: &pattern.origin,
                         detail: "Empty split is not allowed",
                     })?; // this won't happen
                     let mut end = pos;
@@ -798,7 +787,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessorBuilder {
         let mut append_separator = None;
 
         for (k, v) in value.iter() {
-            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
 
             match key {
                 FIELD_NAME => {
@@ -858,15 +849,15 @@ impl Processor for DissectProcessor {
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
-                            processor: self.kind().to_string(),
-                            field: field.input_name().to_string(),
+                            processor: self.kind(),
+                            field: field.input_name(),
                         }
                         .fail();
                     }
                 }
                 Some(v) => {
                     return ProcessorExpectStringSnafu {
-                        processor: self.kind().to_string(),
+                        processor: self.kind(),
                         v: v.clone(),
                     }
                     .fail();

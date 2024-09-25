@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
+
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
@@ -97,7 +101,8 @@ pub enum Error {
 
     #[snafu(display("Field parse from string failed: {field}"))]
     FailedParseFieldFromString {
-        error: Box<dyn std::error::Error + Sync + Send>,
+        #[snafu(source)]
+        error: Box<dyn std::error::Error + Send + Sync>,
         field: String,
         #[snafu(implicit)]
         location: Location,
@@ -107,6 +112,7 @@ pub enum Error {
     FailedToParseIntKey {
         key: String,
         value: String,
+        #[snafu(source)]
         error: std::num::ParseIntError,
         #[snafu(implicit)]
         location: Location,
@@ -115,6 +121,7 @@ pub enum Error {
     #[snafu(display("Failed to parse {value} to int"))]
     FailedToParseInt {
         value: String,
+        #[snafu(source)]
         error: std::num::ParseIntError,
         #[snafu(implicit)]
         location: Location,
@@ -123,6 +130,7 @@ pub enum Error {
     FailedToParseFloatKey {
         key: String,
         value: String,
+        #[snafu(source)]
         error: std::num::ParseFloatError,
         #[snafu(implicit)]
         location: Location,
@@ -161,6 +169,7 @@ pub enum Error {
     CsvRead {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
         error: csv::Error,
     },
     #[snafu(display("expected at least one record from csv format, but got none"))]
@@ -188,6 +197,7 @@ pub enum Error {
     #[snafu(display("Parse date timezone error {value}"))]
     DateParseTimezone {
         value: String,
+        #[snafu(source)]
         error: chrono_tz::ParseError,
         #[snafu(implicit)]
         location: Location,
@@ -196,6 +206,7 @@ pub enum Error {
     #[snafu(display("Parse date error {value}"))]
     DateParse {
         value: String,
+        #[snafu(source)]
         error: chrono::ParseError,
         #[snafu(implicit)]
         location: Location,
@@ -213,7 +224,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("{processor} processor: invalid format {s:?}"))]
+    #[snafu(display("{processor} processor: invalid format {s}"))]
     DateInvalidFormat {
         s: String,
         processor: String,
@@ -311,6 +322,7 @@ pub enum Error {
     },
     #[snafu(display("invalid regex pattern: {pattern}"))]
     Regex {
+        #[snafu(source)]
         error: regex::Error,
         pattern: String,
         #[snafu(implicit)]
@@ -353,6 +365,7 @@ pub enum Error {
     },
     #[snafu(display("url decoding error"))]
     UrlEncodingDecode {
+        #[snafu(source)]
         error: std::string::FromUtf8Error,
         #[snafu(implicit)]
         location: Location,
@@ -447,6 +460,7 @@ pub enum Error {
     ValueParseInt {
         ty: String,
         v: String,
+        #[snafu(source)]
         error: std::num::ParseIntError,
         #[snafu(implicit)]
         location: Location,
@@ -456,6 +470,7 @@ pub enum Error {
     ValueParseFloat {
         ty: String,
         v: String,
+        #[snafu(source)]
         error: std::num::ParseFloatError,
         #[snafu(implicit)]
         location: Location,
@@ -465,6 +480,7 @@ pub enum Error {
     ValueParseBoolean {
         ty: String,
         v: String,
+        #[snafu(source)]
         error: std::str::ParseBoolError,
         #[snafu(implicit)]
         location: Location,
@@ -497,6 +513,7 @@ pub enum Error {
 
     #[snafu(display("Yaml load error."))]
     YamlLoad {
+        #[snafu(source)]
         error: yaml_rust::ScanError,
         #[snafu(implicit)]
         location: Location,
@@ -509,6 +526,7 @@ pub enum Error {
 
     #[snafu(display("Column options error"))]
     ColumnOptions {
+        #[snafu(source)]
         source: api::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -522,3 +540,13 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl ErrorExt for Error {
+    fn status_code(&self) -> StatusCode {
+        StatusCode::InvalidArguments
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}

@@ -119,7 +119,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for JoinProcessorBuilder {
         let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
-            let key = k.as_str().context(KeyMustBeStringSnafu { k: k.clone() })?;
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
 
             match key {
                 FIELD_NAME => {
@@ -168,20 +170,15 @@ impl Processor for JoinProcessor {
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
-                            processor: self.kind().to_string(),
-                            field: field.input_name().to_string(),
+                            processor: self.kind(),
+                            field: field.input_name(),
                         }
                         .fail();
-                        // return Err(format!(
-                        //     "{} processor: missing field: {}",
-                        //     self.kind(),
-                        //     field.input_name()
-                        // ));
                     }
                 }
                 Some(v) => {
                     return ProcessorExpectStringSnafu {
-                        processor: self.kind().to_string(),
+                        processor: self.kind(),
                         v: v.clone(),
                     }
                     .fail();
