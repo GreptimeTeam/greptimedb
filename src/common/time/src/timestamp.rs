@@ -178,24 +178,6 @@ impl Timestamp {
         Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
     }
 
-    // /// Adds given Interval to the current timestamp.
-    // /// Returns None if the resulting timestamp would be out of range.
-    // pub fn add_interval(&self, interval: Interval) -> Option<Timestamp> {
-    //     let naive_datetime = self.to_chrono_datetime()?;
-    //     let (months, days, nsecs) = interval.to_month_day_nano();
-
-    //     let naive_datetime = naive_datetime
-    //         .checked_add_months(Months::new(months as u32))?
-    //         .checked_add_days(Days::new(days as u64))?
-    //         + Duration::from_nanos(nsecs as u64);
-
-    //     match Timestamp::from_chrono_datetime(naive_datetime) {
-    //         // Have to convert the new timestamp by the current unit.
-    //         Some(ts) => ts.convert_to(self.unit),
-    //         None => None,
-    //     }
-    // }
-
     /// Subtracts given [IntervalYearMonth] to the current timestamp.
     pub fn sub_year_month(&self, interval: IntervalYearMonth) -> Option<Timestamp> {
         let naive_datetime = self.to_chrono_datetime()?;
@@ -231,24 +213,6 @@ impl Timestamp {
         // Have to convert the new timestamp by the current unit.
         Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
     }
-
-    // /// Subtracts given Interval to the current timestamp.
-    // /// Returns None if the resulting timestamp would be out of range.
-    // pub fn sub_interval(&self, interval: Interval) -> Option<Timestamp> {
-    //     let naive_datetime = self.to_chrono_datetime()?;
-    //     let (months, days, nsecs) = interval.to_month_day_nano();
-
-    //     let naive_datetime = naive_datetime
-    //         .checked_sub_months(Months::new(months as u32))?
-    //         .checked_sub_days(Days::new(days as u64))?
-    //         - Duration::from_nanos(nsecs as u64);
-
-    //     match Timestamp::from_chrono_datetime(naive_datetime) {
-    //         // Have to convert the new timestamp by the current unit.
-    //         Some(ts) => ts.convert_to(self.unit),
-    //         None => None,
-    //     }
-    // }
 
     /// Subtracts current timestamp with another timestamp, yielding a duration.
     pub fn sub(&self, rhs: &Self) -> Option<chrono::Duration> {

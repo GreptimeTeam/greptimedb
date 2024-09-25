@@ -241,14 +241,6 @@ impl Value {
         }
     }
 
-    // /// Cast Value to Interval. Return None if value is not a valid interval data type.
-    // pub fn as_interval(&self) -> Option<Interval> {
-    //     match self {
-    //         Value::Interval(i) => Some(*i),
-    //         _ => None,
-    //     }
-    // }
-
     /// Cast Value to utf8 String. Return None if value is not a valid string data type.
     pub fn as_string(&self) -> Option<String> {
         match self {
@@ -1186,11 +1178,6 @@ impl<'a> ValueRef<'a> {
     pub fn as_interval_month_day_nano(&self) -> Result<Option<IntervalMonthDayNano>> {
         impl_as_for_value_ref!(self, IntervalMonthDayNano)
     }
-
-    // /// Cast itself to [Interval].
-    // pub fn as_interval(&self) -> Result<Option<Interval>> {
-    //     impl_as_for_value_ref!(self, Interval)
-    // }
 
     /// Cast itself to [ListValueRef].
     pub fn as_list(&self) -> Result<Option<ListValueRef>> {

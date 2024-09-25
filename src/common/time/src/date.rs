@@ -165,19 +165,6 @@ impl Date {
             .map(Into::into)
     }
 
-    // /// Adds given Interval to the current date.
-    // /// Returns None if the resulting date would be out of range.
-    // pub fn add_interval(&self, interval: Interval) -> Option<Date> {
-    //     let naive_date = self.to_chrono_date()?;
-
-    //     let (months, days, _) = interval.to_month_day_nano();
-
-    //     naive_date
-    //         .checked_add_months(Months::new(months as u32))?
-    //         .checked_add_days(Days::new(days as u64))
-    //         .map(Into::into)
-    // }
-
     /// Subtracts given [IntervalYearMonth] to the current date.
     pub fn sub_year_month(&self, interval: IntervalYearMonth) -> Option<Date> {
         let naive_date = self.to_chrono_date()?;
@@ -207,19 +194,6 @@ impl Date {
             .checked_sub_signed(TimeDelta::nanoseconds(interval.nanoseconds))
             .map(Into::into)
     }
-
-    // /// Subtracts given Interval to the current date.
-    // /// Returns None if the resulting date would be out of range.
-    // pub fn sub_interval(&self, interval: Interval) -> Option<Date> {
-    //     let naive_date = self.to_chrono_date()?;
-
-    //     let (months, days, _) = interval.to_month_day_nano();
-
-    //     naive_date
-    //         .checked_sub_months(Months::new(months as u32))?
-    //         .checked_sub_days(Days::new(days as u64))
-    //         .map(Into::into)
-    // }
 
     pub fn negative(&self) -> Self {
         Self(-self.0)

@@ -29,7 +29,7 @@ use crate::types::{DateTimeType, DateType};
 use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
-// TODO(yingwen): Can we remove `Into<serde_json::Value>`.
+// TODO(yingwen): Can we remove `Into<serde_json::Value>`?
 /// Represents the wrapper type that wraps a native type using the `newtype pattern`,
 /// such as [Date](`common_time::Date`) is a wrapper type for the underlying native
 /// type `i32`.

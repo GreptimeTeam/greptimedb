@@ -25,18 +25,6 @@ use crate::vectors::{IntervalDayTimeVector, IntervalMonthDayNanoVector, Interval
 macro_rules! define_interval_with_unit {
     ($unit: ident, $native_ty: ty) => {
         paste! {
-            // impl From<[<Interval $unit>]> for Value {
-            //     fn from(t: [<Interval $unit>]) -> Value {
-            //         Value::[<Interval $unit>](t)
-            //     }
-            // }
-
-            // impl From<[<Interval $unit>]> for ValueRef<'static> {
-            //     fn from(t: [<Interval $unit>]) -> Self {
-            //         ValueRef::[<Interval $unit>](t)
-            //     }
-            // }
-
             impl Scalar for [<Interval $unit>] {
                 type VectorType = [<Interval $unit Vector>];
                 type RefType<'a> = [<Interval $unit>];
@@ -72,24 +60,6 @@ macro_rules! define_interval_with_unit {
                     self.[<to_ $native_ty>]()
                 }
             }
-
-            // impl TryFrom<Value> for Option<[<Interval $unit>]> {
-            //     type Error = $crate::error::Error;
-
-            //     #[inline]
-            //     fn try_from(from: Value) -> std::result::Result<Self, Self::Error> {
-            //         match from {
-            //             Value::[<Interval $unit>](v) => {
-            //                 Ok(Some(v))
-            //             },
-            //             Value::Null => Ok(None),
-            //             _ => $crate::error::TryFromValueSnafu {
-            //                 reason: format!("{:?} is not a {}", from, stringify!([<Interval $unit>])),
-            //             }
-            //             .fail(),
-            //         }
-            //     }
-            // }
         }
     };
 }

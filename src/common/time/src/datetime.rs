@@ -194,20 +194,6 @@ impl DateTime {
             .map(Into::into)
     }
 
-    // /// Adds given Interval to the current datetime.
-    // /// Returns None if the resulting datetime would be out of range.
-    // pub fn add_interval(&self, interval: Interval) -> Option<Self> {
-    //     let naive_datetime = self.to_chrono_datetime()?;
-    //     let (months, days, nsecs) = interval.to_month_day_nano();
-
-    //     let naive_datetime = naive_datetime
-    //         .checked_add_months(Months::new(months as u32))?
-    //         .checked_add_days(Days::new(days as u64))?
-    //         + Duration::from_nanos(nsecs as u64);
-
-    //     Some(naive_datetime.into())
-    // }
-
     /// Subtracts given [IntervalYearMonth] to the current datetime.
     pub fn sub_year_month(&self, interval: IntervalYearMonth) -> Option<Self> {
         let naive_datetime = self.to_chrono_datetime()?;
@@ -237,20 +223,6 @@ impl DateTime {
             .checked_sub_signed(TimeDelta::nanoseconds(interval.nanoseconds as i64))
             .map(Into::into)
     }
-
-    // /// Subtracts given Interval to the current datetime.
-    // /// Returns None if the resulting datetime would be out of range.
-    // pub fn sub_interval(&self, interval: Interval) -> Option<Self> {
-    //     let naive_datetime = self.to_chrono_datetime()?;
-    //     let (months, days, nsecs) = interval.to_month_day_nano();
-
-    //     let naive_datetime = naive_datetime
-    //         .checked_sub_months(Months::new(months as u32))?
-    //         .checked_sub_days(Days::new(days as u64))?
-    //         - Duration::from_nanos(nsecs as u64);
-
-    //     Some(naive_datetime.into())
-    // }
 
     /// Convert to [common_time::date].
     pub fn to_date(&self) -> Option<Date> {
