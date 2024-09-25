@@ -162,7 +162,7 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize, interval_only: bool) ->
         // We don't support interval with months as days in a month is unclear.
         Expr::Literal(ScalarValue::IntervalDayTime(interval)) => interval.map(|v| {
             let interval = IntervalDayTime::from_i64(v);
-            interval.days as i64 * MS_PER_DAY + interval.milliseconds as i64
+            interval.as_millis()
         }),
         Expr::Literal(ScalarValue::IntervalMonthDayNano(interval)) => interval.and_then(|v| {
             let interval = IntervalMonthDayNano::from_i128(v);
@@ -804,7 +804,7 @@ mod test {
         )))];
         assert_eq!(
             parse_duration_expr(&args, 0).unwrap().as_millis() as i64,
-            interval.days as i64 * MS_PER_DAY + interval.milliseconds as i64
+            interval.as_millis()
         );
         // test IntervalMonthDayNano
         let interval = IntervalMonthDayNano::new(0, 10, 10);

@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use arrow::array::{ArrayRef, BooleanArray};
 use common_error::ext::BoxedError;
@@ -52,8 +53,8 @@ pub enum UnmaterializableFunc {
     CurrentSchema,
     TumbleWindow {
         ts: Box<TypedExpr>,
-        window_size: common_time::Interval,
-        start_time: Option<DateTime>,
+        window_size: Duration,
+        start_time: Option<Timestamp>,
     },
 }
 
@@ -110,12 +111,12 @@ pub enum UnaryFunc {
     StepTimestamp,
     Cast(ConcreteDataType),
     TumbleWindowFloor {
-        window_size: common_time::Interval,
-        start_time: Option<DateTime>,
+        window_size: Duration,
+        start_time: Option<Timestamp>,
     },
     TumbleWindowCeiling {
-        window_size: common_time::Interval,
-        start_time: Option<DateTime>,
+        window_size: Duration,
+        start_time: Option<Timestamp>,
     },
 }
 
@@ -277,8 +278,8 @@ impl UnaryFunc {
                         }
                     })?;
 
-                let start_time = start_time.map(|t| t.val());
-                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+                let start_time = start_time.map(|t| t.value());
+                let window_size = window_size.as_millis() as repr::Duration; // nanosecond to millisecond
 
                 let ret = arrow::compute::unary(date_array_ref, |ts| {
                     get_window_start(ts, window_size, start_time)
@@ -302,8 +303,8 @@ impl UnaryFunc {
                         }
                     })?;
 
-                let start_time = start_time.map(|t| t.val());
-                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+                let start_time = start_time.map(|t| t.value());
+                let window_size = window_size.as_millis() as repr::Duration; // nanosecond to millisecond
 
                 let ret = arrow::compute::unary(date_array_ref, |ts| {
                     get_window_start(ts, window_size, start_time) + window_size
@@ -330,19 +331,20 @@ impl UnaryFunc {
                     })?;
                     if let Some(window_size) = window_size_untyped.as_string() {
                         // cast as interval
-                        cast(
+                        let interval = cast(
                             Value::from(window_size),
-                            &ConcreteDataType::interval_month_day_nano_datatype(),
+                            &ConcreteDataType::interval_day_time_datatype(),
                         )
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?
-                        .as_interval()
+                        .as_interval_day_time()
                         .context(UnexpectedSnafu {
                             reason: "Expect window size arg to be interval after successful cast"
                                 .to_string(),
-                        })?
-                    } else if let Some(interval) = window_size_untyped.as_interval() {
-                        interval
+                        })?;
+                        Duration::from_millis(interval.as_millis() as u64)
+                    } else if let Some(interval) = window_size_untyped.as_interval_day_time() {
+                        Duration::from_millis(interval.as_millis() as u64)
                     } else {
                         InvalidQuerySnafu {
                                 reason: format!(
@@ -358,15 +360,18 @@ impl UnaryFunc {
                     Some(start_time) => {
                         if let Some(value) = start_time.expr.as_literal() {
                             // cast as DateTime
-                            let ret = cast(value, &ConcreteDataType::datetime_datatype())
-                                .map_err(BoxedError::new)
-                                .context(ExternalSnafu)?
-                                .as_datetime()
-                                .context(UnexpectedSnafu {
-                                    reason:
-                                        "Expect start time arg to be datetime after successful cast"
-                                            .to_string(),
-                                })?;
+                            let ret = cast(
+                                value,
+                                &ConcreteDataType::timestamp_millisecond_datatype(),
+                            )
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)?
+                            .as_timestamp()
+                            .context(UnexpectedSnafu {
+                                reason:
+                                    "Expect start time arg to be datetime after successful cast"
+                                        .to_string(),
+                            })?;
                             Some(ret)
                         } else {
                             UnexpectedSnafu {
@@ -474,8 +479,8 @@ impl UnaryFunc {
                 start_time,
             } => {
                 let ts = get_ts_as_millisecond(arg)?;
-                let start_time = start_time.map(|t| t.val());
-                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+                let start_time = start_time.map(|t| t.value());
+                let window_size = window_size.as_millis() as repr::Duration;
                 let window_start = get_window_start(ts, window_size, start_time);
 
                 let ret = Timestamp::new_millisecond(window_start);
@@ -486,8 +491,8 @@ impl UnaryFunc {
                 start_time,
             } => {
                 let ts = get_ts_as_millisecond(arg)?;
-                let start_time = start_time.map(|t| t.val());
-                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+                let start_time = start_time.map(|t| t.value());
+                let window_size = window_size.as_millis() as repr::Duration;
                 let window_start = get_window_start(ts, window_size, start_time);
 
                 let window_end = window_start + window_size;
@@ -498,6 +503,7 @@ impl UnaryFunc {
     }
 }
 
+// FIXME(yingwen): should get timestamp array.
 fn get_datetime_array(vector: &VectorRef) -> Result<arrow::array::ArrayRef, EvalError> {
     let arrow_array = vector.to_arrow_array();
     let datetime_array =
@@ -1284,7 +1290,6 @@ where
 mod test {
     use std::sync::Arc;
 
-    use common_time::Interval;
     use datatypes::vectors::Vector;
     use pretty_assertions::assert_eq;
 
@@ -1294,11 +1299,11 @@ mod test {
     fn test_tumble_batch() {
         let datetime_vector = DateTimeVector::from_vec(vec![1, 2, 10, 13, 14, 20, 25]);
         let tumble_start = UnaryFunc::TumbleWindowFloor {
-            window_size: Interval::from_day_time(0, 10),
+            window_size: Duration::from_millis(10),
             start_time: None,
         };
         let tumble_end = UnaryFunc::TumbleWindowCeiling {
-            window_size: Interval::from_day_time(0, 10),
+            window_size: Duration::from_millis(10),
             start_time: None,
         };
 

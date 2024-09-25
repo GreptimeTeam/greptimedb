@@ -268,8 +268,31 @@ impl Value {
     /// Cast Value to [Time]. Return None if value is not a valid time data type.
     pub fn as_time(&self) -> Option<Time> {
         match self {
-            Value::Int64(v) => Some(Time::new_millisecond(*v)),
             Value::Time(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [IntervalYearMonth]. Return None if value is not a valid interval year month data type.
+    pub fn as_interval_year_month(&self) -> Option<IntervalYearMonth> {
+        match self {
+            Value::IntervalYearMonth(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [IntervalDayTime]. Return None if value is not a valid interval day time data type.
+    pub fn as_interval_day_time(&self) -> Option<IntervalDayTime> {
+        match self {
+            Value::IntervalDayTime(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [IntervalMonthDayNano]. Return None if value is not a valid interval month day nano data type.
+    pub fn as_interval_month_day_nano(&self) -> Option<IntervalMonthDayNano> {
+        match self {
+            Value::IntervalMonthDayNano(v) => Some(*v),
             _ => None,
         }
     }

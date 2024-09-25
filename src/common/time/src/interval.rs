@@ -175,6 +175,10 @@ impl IntervalDayTime {
     pub fn to_iso8601_string(&self) -> String {
         IntervalFormat::from(*self).to_iso8601_string()
     }
+
+    pub fn as_millis(&self) -> i64 {
+        self.days as i64 * MS_PER_DAY + self.milliseconds as i64
+    }
 }
 
 impl From<i64> for IntervalDayTime {
