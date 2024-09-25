@@ -35,8 +35,48 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
+use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::error::{CatalogSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
+
+/// Planner for convert merge sort logical plan to physical plan
+/// it is like:
+/// MergeSort(MergeScan) -> Sort(MergeScan) - to physical plan -> ...
+/// It should be applied after `DistExtensionPlanner`
+pub struct MergeSortExtensionPlanner {}
+
+#[async_trait]
+impl ExtensionPlanner for MergeSortExtensionPlanner {
+    async fn plan_extension(
+        &self,
+        planner: &dyn PhysicalPlanner,
+        node: &dyn UserDefinedLogicalNode,
+        _logical_inputs: &[&LogicalPlan],
+        _physical_inputs: &[Arc<dyn ExecutionPlan>],
+        session_state: &SessionState,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        if let Some(merge_sort) = node.as_any().downcast_ref::<MergeSortLogicalPlan>() {
+            if let LogicalPlan::Extension(ext) = &merge_sort.input.as_ref()
+                && ext
+                    .node
+                    .as_any()
+                    .downcast_ref::<MergeScanLogicalPlan>()
+                    .is_some()
+            {
+                // for now merge sort only exist in logical plan, and have the same effect as `Sort`
+                // doesn't change the execution plan, this will change in the future
+                let ret = planner
+                    .create_physical_plan(&merge_sort.clone().into_sort(), session_state)
+                    .await?;
+                Ok(Some(ret))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+}
 
 pub struct DistExtensionPlanner {
     catalog_manager: CatalogManagerRef,

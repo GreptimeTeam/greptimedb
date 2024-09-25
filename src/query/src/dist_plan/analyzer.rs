@@ -160,7 +160,6 @@ impl PlanRewriter {
         {
             return true;
         }
-
         match Categorizer::check_plan(plan, self.partition_cols.clone()) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
@@ -265,9 +264,10 @@ impl PlanRewriter {
 
         // add merge scan as the new root
         let mut node = MergeScanLogicalPlan::new(on_node, false).into_logical_plan();
+
         // expand stages
         for new_stage in self.stage.drain(..) {
-            node = new_stage.with_new_exprs(new_stage.expressions(), vec![node.clone()])?
+            node = new_stage.with_new_exprs(new_stage.expressions(), vec![node.clone()])?;
         }
         self.set_expanded();
 

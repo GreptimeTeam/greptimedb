@@ -16,54 +16,27 @@
 //! `SortPreservingMergeExec` operator in datafusion
 //!
 
-use std::any::Any;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::fmt;
+use std::sync::Arc;
 
-use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
-use async_stream::stream;
-use common_catalog::parse_catalog_and_schema_from_db_string;
-use common_error::ext::BoxedError;
-use common_plugins::GREPTIME_EXEC_READ_COST;
-use common_query::request::QueryRequest;
-use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchMetrics};
-use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::{
-    DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream,
-};
-use common_telemetry::tracing_context::TracingContext;
-use datafusion::execution::TaskContext;
-use datafusion::physical_plan::metrics::{
-    Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet, Time,
-};
-use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, Partitioning, PlanProperties,
-};
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion_physical_expr::EquivalenceProperties;
-use datatypes::schema::{Schema, SchemaRef};
-use futures_util::StreamExt;
-use greptime_proto::v1::region::RegionRequestHeader;
-use meter_core::data::ReadItem;
-use meter_macros::read_meter;
-use session::context::QueryContextRef;
-use snafu::ResultExt;
-use store_api::storage::RegionId;
-use table::table_name::TableName;
 
-use crate::region_query::RegionQueryHandlerRef;
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+#[derive(Hash, PartialEq, Eq, Clone)]
 pub struct MergeSortLogicalPlan {
-    pub input: LogicalPlan,
     pub expr: Vec<Expr>,
+    pub input: Arc<LogicalPlan>,
     pub fetch: Option<usize>,
 }
 
+impl fmt::Debug for MergeSortLogicalPlan {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        UserDefinedLogicalNodeCore::fmt_for_explain(self, f)
+    }
+}
+
 impl MergeSortLogicalPlan {
-    pub fn new(input: LogicalPlan, expr: Vec<Expr>, fetch: Option<usize>) -> Self {
+    pub fn new(input: Arc<LogicalPlan>, expr: Vec<Expr>, fetch: Option<usize>) -> Self {
         Self { input, expr, fetch }
     }
 
@@ -77,6 +50,15 @@ impl MergeSortLogicalPlan {
             node: Arc::new(self),
         })
     }
+
+    /// Convert self to a `Sort` logical plan with same input and expressions
+    pub fn into_sort(self) -> LogicalPlan {
+        LogicalPlan::Sort(datafusion::logical_expr::Sort {
+            input: self.input.clone(),
+            expr: self.expr,
+            fetch: self.fetch,
+        })
+    }
 }
 
 impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
@@ -87,7 +69,7 @@ impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
     // Prevent further optimization.
     // The input can be retrieved by `self.input()`
     fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![]
+        vec![self.input.as_ref()]
     }
 
     fn schema(&self) -> &datafusion_common::DFSchemaRef {
@@ -96,7 +78,7 @@ impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
 
     // Prevent further optimization
     fn expressions(&self) -> Vec<datafusion_expr::Expr> {
-        vec![]
+        self.expr.clone()
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -120,9 +102,21 @@ impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
     ) -> Result<Self> {
         let mut zelf = self.clone();
         zelf.expr = exprs;
-        zelf.input = inputs.pop().ok_or_else(|| {
+        zelf.input = Arc::new(inputs.pop().ok_or_else(|| {
             DataFusionError::Internal("Expected exactly one input with MergeSort".to_string())
-        })?;
-        Ok(self.clone())
+        })?);
+        Ok(zelf)
+    }
+}
+
+/// Turn `Sort` into `MergeSort` if possible
+pub fn merge_sort_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {
+    if let LogicalPlan::Sort(sort) = plan {
+        Some(
+            MergeSortLogicalPlan::new(sort.input.clone(), sort.expr.clone(), sort.fetch)
+                .into_logical_plan(),
+        )
+    } else {
+        None
     }
 }

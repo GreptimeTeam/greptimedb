@@ -20,4 +20,4 @@ mod planner;
 
 pub use analyzer::DistPlannerAnalyzer;
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
-pub use planner::DistExtensionPlanner;
+pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
