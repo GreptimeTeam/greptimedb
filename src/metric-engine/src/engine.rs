@@ -36,7 +36,9 @@ use mito2::engine::MitoEngine;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
-use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
+use store_api::region_engine::{
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetReadonlyResponse,
+};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -185,9 +187,9 @@ impl RegionEngine for MetricEngine {
     /// Retrieves region's disk usage.
     ///
     /// Note: Returns `None` if it's a logical region.
-    fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+    fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
         if self.inner.is_physical_region(region_id) {
-            self.inner.mito.region_disk_usage(region_id)
+            self.inner.mito.region_statistic(region_id)
         } else {
             None
         }
@@ -377,7 +379,7 @@ mod test {
         let logical_region_id = env.default_logical_region_id();
         let physical_region_id = env.default_physical_region_id();
 
-        assert!(env.metric().region_disk_usage(logical_region_id).is_none());
-        assert!(env.metric().region_disk_usage(physical_region_id).is_some());
+        assert!(env.metric().region_statistic(logical_region_id).is_none());
+        assert!(env.metric().region_statistic(physical_region_id).is_some());
     }
 }

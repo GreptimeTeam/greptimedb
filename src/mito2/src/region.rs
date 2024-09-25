@@ -28,6 +28,7 @@ use crossbeam_utils::atomic::AtomicCell;
 use snafu::{ensure, OptionExt};
 use store_api::logstore::provider::Provider;
 use store_api::metadata::RegionMetadataRef;
+use store_api::region_engine::RegionStatistic;
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
@@ -252,10 +253,8 @@ impl MitoRegion {
         }
     }
 
-    /// Returns the region usage in bytes.
-    pub(crate) fn region_usage(&self) -> RegionUsage {
-        let region_id = self.region_id;
-
+    /// Returns the region statistic.
+    pub(crate) fn region_statistic(&self) -> RegionStatistic {
         let version = self.version();
         let memtables = &version.memtables;
         let memtable_usage = (memtables.mutable_usage() + memtables.immutables_usage()) as u64;
@@ -265,11 +264,11 @@ impl MitoRegion {
         let wal_usage = self.estimated_wal_usage(memtable_usage);
         let manifest_usage = self.stats.total_manifest_size();
 
-        RegionUsage {
-            region_id,
-            wal_usage,
-            sst_usage,
-            manifest_usage,
+        RegionStatistic {
+            memtable_size: memtable_usage,
+            wal_size: wal_usage,
+            manifest_size: manifest_usage,
+            sst_size: sst_usage,
         }
     }
 

@@ -53,7 +53,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
-use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngineRef, RegionRole, RegionStatistic, SetReadonlyResponse};
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionOpenRequest, RegionRequest,
 };
@@ -290,9 +290,9 @@ impl RegionServer {
         self.inner.runtime.clone()
     }
 
-    pub fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+    pub fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
         match self.inner.region_map.get(&region_id) {
-            Some(e) => e.region_disk_usage(region_id),
+            Some(e) => e.region_statistic(region_id),
             None => None,
         }
     }

@@ -242,6 +242,25 @@ pub type RegionScannerRef = Box<dyn RegionScanner>;
 
 pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
 
+/// Represents the statistics of a region.
+pub struct RegionStatistic {
+    /// The size of memtable in bytes.
+    pub memtable_size: u64,
+    /// The size of WAL in bytes.
+    pub wal_size: u64,
+    /// The size of manifest in bytes.
+    pub manifest_size: u64,
+    /// The size of SST files in bytes.
+    pub sst_size: u64,
+}
+
+impl RegionStatistic {
+    /// Returns the estimated disk size of the region.
+    pub fn estimated_disk_size(&self) -> u64 {
+        self.wal_size + self.sst_size + self.manifest_size
+    }
+}
+
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
     /// Name of this engine
@@ -289,8 +308,8 @@ pub trait RegionEngine: Send + Sync {
     /// Retrieves region's metadata.
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError>;
 
-    /// Retrieves region's disk usage.
-    fn region_disk_usage(&self, region_id: RegionId) -> Option<i64>;
+    /// Retrieves region's statistic.
+    fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic>;
 
     /// Stops the engine
     async fn stop(&self) -> Result<(), BoxedError>;

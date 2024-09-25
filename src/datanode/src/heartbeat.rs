@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -320,16 +321,21 @@ impl HeartbeatTask {
         region_server
             .reportable_regions()
             .into_iter()
-            .map(|stat| RegionStat {
-                region_id: stat.region_id.as_u64(),
-                engine: stat.engine,
-                role: RegionRole::from(stat.role).into(),
-                // TODO(weny): w/rcus
-                rcus: 0,
-                wcus: 0,
-                approximate_bytes: region_server.region_disk_usage(stat.region_id).unwrap_or(0),
-                // TODO(weny): add extensions
-                extensions: Default::default(),
+            .map(|stat| {
+                let region_stats = region_server.region_statistic(stat.region_id);
+                let extensions = HashMap::new();
+                RegionStat {
+                    region_id: stat.region_id.as_u64(),
+                    engine: stat.engine,
+                    role: RegionRole::from(stat.role).into(),
+                    // TODO(weny): w/rcus
+                    rcus: 0,
+                    wcus: 0,
+                    approximate_bytes: region_stats
+                        .map(|stats| stats.estimated_disk_size())
+                        .unwrap_or_default() as i64,
+                    extensions,
+                }
             })
             .collect()
     }
