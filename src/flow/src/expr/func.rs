@@ -21,7 +21,7 @@ use std::time::Duration;
 use arrow::array::{ArrayRef, BooleanArray};
 use common_error::ext::BoxedError;
 use common_time::timestamp::TimeUnit;
-use common_time::{DateTime, Timestamp};
+use common_time::Timestamp;
 use datafusion_expr::Operator;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
@@ -140,8 +140,8 @@ impl UnaryFunc {
                 },
             },
             Self::StepTimestamp => Signature {
-                input: smallvec![ConcreteDataType::datetime_datatype()],
-                output: ConcreteDataType::datetime_datatype(),
+                input: smallvec![ConcreteDataType::timestamp_millisecond_datatype()],
+                output: ConcreteDataType::timestamp_millisecond_datatype(),
                 generic_fn: GenericFn::StepTimestamp,
             },
             Self::Cast(to) => Signature {
@@ -239,14 +239,14 @@ impl UnaryFunc {
                 }
             }
             Self::StepTimestamp => {
-                let datetime_array = get_datetime_array(&arg_col)?;
-                let date_array_ref = datetime_array
+                let timestamp_array = get_timestamp_array(&arg_col)?;
+                let date_array_ref = timestamp_array
                     .as_any()
-                    .downcast_ref::<arrow::array::Date64Array>()
+                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
                     .context({
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::boolean_datatype(),
-                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                            actual: ConcreteDataType::from_arrow_type(timestamp_array.data_type()),
                         }
                     })?;
 
@@ -267,14 +267,14 @@ impl UnaryFunc {
                 window_size,
                 start_time,
             } => {
-                let datetime_array = get_datetime_array(&arg_col)?;
-                let date_array_ref = datetime_array
+                let timestamp_array = get_timestamp_array(&arg_col)?;
+                let date_array_ref = timestamp_array
                     .as_any()
-                    .downcast_ref::<arrow::array::Date64Array>()
+                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
                     .context({
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::boolean_datatype(),
-                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                            actual: ConcreteDataType::from_arrow_type(timestamp_array.data_type()),
                         }
                     })?;
 
@@ -292,14 +292,14 @@ impl UnaryFunc {
                 window_size,
                 start_time,
             } => {
-                let datetime_array = get_datetime_array(&arg_col)?;
-                let date_array_ref = datetime_array
+                let timestamp_array = get_timestamp_array(&arg_col)?;
+                let date_array_ref = timestamp_array
                     .as_any()
-                    .downcast_ref::<arrow::array::Date64Array>()
+                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
                     .context({
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::boolean_datatype(),
-                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                            actual: ConcreteDataType::from_arrow_type(timestamp_array.data_type()),
                         }
                     })?;
 
@@ -359,7 +359,7 @@ impl UnaryFunc {
                 let start_time = match args.get(2) {
                     Some(start_time) => {
                         if let Some(value) = start_time.expr.as_literal() {
-                            // cast as DateTime
+                            // cast as timestamp
                             let ret = cast(
                                 value,
                                 &ConcreteDataType::timestamp_millisecond_datatype(),
@@ -369,7 +369,7 @@ impl UnaryFunc {
                             .as_timestamp()
                             .context(UnexpectedSnafu {
                                 reason:
-                                    "Expect start time arg to be datetime after successful cast"
+                                    "Expect start time arg to be timestamp after successful cast"
                                         .to_string(),
                             })?;
                             Some(ret)
@@ -451,12 +451,12 @@ impl UnaryFunc {
             }
             Self::StepTimestamp => {
                 let ty = arg.data_type();
-                if let Value::DateTime(datetime) = arg {
-                    let datetime = DateTime::from(datetime.val() + 1);
-                    Ok(Value::from(datetime))
+                if let Value::Timestamp(timestamp) = arg {
+                    let timestamp = Timestamp::new_millisecond(timestamp.value() + 1);
+                    Ok(Value::from(timestamp))
                 } else if let Ok(v) = value_to_internal_ts(arg) {
-                    let datetime = DateTime::from(v + 1);
-                    Ok(Value::from(datetime))
+                    let timestamp = Timestamp::new_millisecond(v + 1);
+                    Ok(Value::from(timestamp))
                 } else {
                     TypeMismatchSnafu {
                         expected: ConcreteDataType::datetime_datatype(),
@@ -503,22 +503,22 @@ impl UnaryFunc {
     }
 }
 
-// FIXME(yingwen): should get timestamp array.
-fn get_datetime_array(vector: &VectorRef) -> Result<arrow::array::ArrayRef, EvalError> {
+fn get_timestamp_array(vector: &VectorRef) -> Result<arrow::array::ArrayRef, EvalError> {
     let arrow_array = vector.to_arrow_array();
-    let datetime_array =
-        if *arrow_array.data_type() == ConcreteDataType::datetime_datatype().as_arrow_type() {
-            arrow_array
-        } else {
-            arrow::compute::cast(
-                &arrow_array,
-                &ConcreteDataType::datetime_datatype().as_arrow_type(),
-            )
-            .context(ArrowSnafu {
-                context: "Trying to cast to datetime in StepTimestamp",
-            })?
-        };
-    Ok(datetime_array)
+    let timestamp_array = if *arrow_array.data_type()
+        == ConcreteDataType::timestamp_millisecond_datatype().as_arrow_type()
+    {
+        arrow_array
+    } else {
+        arrow::compute::cast(
+            &arrow_array,
+            &ConcreteDataType::timestamp_millisecond_datatype().as_arrow_type(),
+        )
+        .context(ArrowSnafu {
+            context: "Trying to cast to timestamp in StepTimestamp",
+        })?
+    };
+    Ok(timestamp_array)
 }
 
 fn get_window_start(

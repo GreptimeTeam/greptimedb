@@ -61,7 +61,7 @@ pub const BATCH_SIZE: usize = 32 * 16384;
 /// Convert a value that is or can be converted to Datetime to internal timestamp
 ///
 /// support types are: `Date`, `DateTime`, `TimeStamp`, `i64`
-pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
+pub fn value_to_internal_ts(value: Value) -> Result<i64, EvalError> {
     let is_supported_time_type = |arg: &Value| {
         let ty = arg.data_type();
         matches!(
@@ -76,14 +76,14 @@ pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
         Value::Int64(ts) => Ok(ts),
         arg if is_supported_time_type(&arg) => {
             let arg_ty = arg.data_type();
-            let res = cast(arg, &ConcreteDataType::datetime_datatype()).context({
+            let res = cast(arg, &ConcreteDataType::timestamp_millisecond_datatype()).context({
                 CastValueSnafu {
                     from: arg_ty,
-                    to: ConcreteDataType::datetime_datatype(),
+                    to: ConcreteDataType::timestamp_millisecond_datatype(),
                 }
             })?;
-            if let Value::DateTime(ts) = res {
-                Ok(ts.val())
+            if let Value::Timestamp(ts) = res {
+                Ok(ts.value())
             } else {
                 unreachable!()
             }
