@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
+use common_meta::datanode::REGION_STATISTIC_KEY;
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
@@ -322,8 +323,14 @@ impl HeartbeatTask {
             .reportable_regions()
             .into_iter()
             .map(|stat| {
-                let region_stats = region_server.region_statistic(stat.region_id);
-                let extensions = HashMap::new();
+                let region_stat = region_server
+                    .region_statistic(stat.region_id)
+                    .unwrap_or_default();
+                let mut extensions = HashMap::new();
+                if let Some(serialized) = region_stat.serialize_to_vec() {
+                    extensions.insert(REGION_STATISTIC_KEY.to_string(), serialized);
+                }
+
                 RegionStat {
                     region_id: stat.region_id.as_u64(),
                     engine: stat.engine,
@@ -331,9 +338,7 @@ impl HeartbeatTask {
                     // TODO(weny): w/rcus
                     rcus: 0,
                     wcus: 0,
-                    approximate_bytes: region_stats
-                        .map(|stats| stats.estimated_disk_size())
-                        .unwrap_or_default() as i64,
+                    approximate_bytes: region_stat.estimated_disk_size() as i64,
                     extensions,
                 }
             })

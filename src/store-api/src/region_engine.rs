@@ -243,6 +243,7 @@ pub type RegionScannerRef = Box<dyn RegionScanner>;
 pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
 
 /// Represents the statistics of a region.
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub struct RegionStatistic {
     /// The size of memtable in bytes.
     pub memtable_size: u64,
@@ -252,6 +253,22 @@ pub struct RegionStatistic {
     pub manifest_size: u64,
     /// The size of SST files in bytes.
     pub sst_size: u64,
+}
+
+impl RegionStatistic {
+    /// Deserializes the region statistic to a byte array.
+    ///
+    /// Returns None if the deserialization fails.
+    pub fn deserialize_from_slice(value: &[u8]) -> Option<RegionStatistic> {
+        serde_json::from_slice(value).ok()
+    }
+
+    /// Serializes the region statistic to a byte array.
+    ///
+    /// Returns None if the serialization fails.
+    pub fn serialize_to_vec(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec(self).ok()
+    }
 }
 
 impl RegionStatistic {

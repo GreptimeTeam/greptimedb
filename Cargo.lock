@@ -3202,6 +3202,7 @@ dependencies = [
  "query",
  "reqwest",
  "serde",
+ "serde_json",
  "servers",
  "session",
  "snafu 0.8.4",

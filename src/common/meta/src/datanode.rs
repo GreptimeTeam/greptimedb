@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::str::FromStr;
 
 use api::v1::meta::{HeartbeatRequest, RequestHeader};
@@ -21,7 +21,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::region_engine::RegionRole;
+use store_api::region_engine::{RegionRole, RegionStatistic};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
@@ -32,6 +32,8 @@ pub(crate) const DATANODE_LEASE_PREFIX: &str = "__meta_datanode_lease";
 const INACTIVE_REGION_PREFIX: &str = "__meta_inactive_region";
 
 const DATANODE_STAT_PREFIX: &str = "__meta_datanode_stat";
+
+pub const REGION_STATISTIC_KEY: &str = "region_statistic";
 
 lazy_static! {
     pub(crate) static ref DATANODE_LEASE_KEY_PATTERN: Regex =
@@ -44,8 +46,8 @@ lazy_static! {
     .unwrap();
 }
 
-/// The key of the datanode stat in the storage. 
-/// 
+/// The key of the datanode stat in the storage.
+///
 /// The format is `__meta_datanode_stat-{cluster_id}-{node_id}`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stat {
@@ -81,8 +83,12 @@ pub struct RegionStat {
     pub engine: String,
     /// The region role.
     pub role: RegionRole,
-    /// The extension info of this region
-    pub extensions: HashMap<String, Vec<u8>>,
+    /// The size of the memtable in bytes.
+    pub memtable_size: u64,
+    /// The size of the manifest in bytes.
+    pub manifest_size: u64,
+    /// The size of the SST files in bytes.
+    pub sst_size: u64,
 }
 
 impl Stat {
@@ -162,6 +168,13 @@ impl TryFrom<&HeartbeatRequest> for Stat {
 
 impl From<&api::v1::meta::RegionStat> for RegionStat {
     fn from(value: &api::v1::meta::RegionStat) -> Self {
+        let region_stat = if let Some(bytes) = value.extensions.get(REGION_STATISTIC_KEY) {
+            RegionStatistic::deserialize_from_slice(bytes)
+        } else {
+            None
+        }
+        .unwrap_or_default();
+
         Self {
             id: RegionId::from_u64(value.region_id),
             rcus: value.rcus,
@@ -169,13 +182,15 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             approximate_bytes: value.approximate_bytes,
             engine: value.engine.to_string(),
             role: RegionRole::from(value.role()),
-            extensions: value.extensions.clone(),
+            memtable_size: region_stat.memtable_size,
+            manifest_size: region_stat.manifest_size,
+            sst_size: region_stat.sst_size,
         }
     }
 }
 
 /// The key of the datanode stat in the memory store.
-/// 
+///
 /// The format is `__meta_datanode_stat-{cluster_id}-{node_id}`.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct DatanodeStatKey {
@@ -184,8 +199,14 @@ pub struct DatanodeStatKey {
 }
 
 impl DatanodeStatKey {
+    /// The key prefix.
     pub fn prefix_key() -> Vec<u8> {
         format!("{DATANODE_STAT_PREFIX}-").into_bytes()
+    }
+
+    /// The key prefix with the cluster id.
+    pub fn key_prefix_with_cluster_id(cluster_id: ClusterId) -> String {
+        format!("{DATANODE_STAT_PREFIX}-{cluster_id}-")
     }
 }
 
@@ -390,5 +411,4 @@ mod tests {
         let region_num = stat_val.region_num().unwrap();
         assert_eq!(2, region_num);
     }
-
 }

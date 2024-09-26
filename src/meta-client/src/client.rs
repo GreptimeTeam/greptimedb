@@ -29,6 +29,7 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cluster::{
     ClusterInfo, MetasrvStatus, NodeInfo, NodeInfoKey, NodeStatus, Role as ClusterRole,
 };
+use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
@@ -326,6 +327,28 @@ impl ClusterInfo for MetaClient {
         }
 
         Ok(nodes)
+    }
+
+    async fn list_region_stats(&self) -> Result<Vec<RegionStat>> {
+        let cluster_client = self.cluster_client()?;
+        let range_prefix = DatanodeStatKey::key_prefix_with_cluster_id(self.id.0);
+        let req = RangeRequest::new().with_prefix(range_prefix);
+        let mut datanode_stats = cluster_client
+            .range(req)
+            .await?
+            .kvs
+            .into_iter()
+            .map(|kv| DatanodeStatValue::try_from(kv.value).context(ConvertMetaRequestSnafu))
+            .collect::<Result<Vec<_>>>()?;
+        let region_stats = datanode_stats
+            .iter_mut()
+            .flat_map(|datanode_stat| {
+                let last = datanode_stat.stats.pop();
+                last.map(|stat| stat.region_stats).unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+
+        Ok(region_stats)
     }
 }
 
