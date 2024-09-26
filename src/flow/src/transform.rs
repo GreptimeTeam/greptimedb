@@ -159,7 +159,8 @@ mod test {
     use common_time::DateTime;
     use datatypes::prelude::*;
     use datatypes::schema::Schema;
-    use datatypes::vectors::VectorRef;
+    use datatypes::timestamp::TimestampMillisecond;
+    use datatypes::vectors::{TimestampMillisecondVectorBuilder, VectorRef};
     use itertools::Itertools;
     use prost::Message;
     use query::parser::QueryLanguageParser;
@@ -244,7 +245,11 @@ mod test {
         columns.push(column);
 
         let ts = (1..=10).collect_vec();
-        let column: VectorRef = Arc::new(<DateTime as Scalar>::VectorType::from_vec(ts));
+        let mut builder = TimestampMillisecondVectorBuilder::with_capacity(10);
+        ts.into_iter()
+            .map(|v| builder.push(Some(TimestampMillisecond::new(v))))
+            .count();
+        let column: VectorRef = builder.to_vector_cloned();
         columns.push(column);
 
         let schema = Arc::new(Schema::new(schema));
