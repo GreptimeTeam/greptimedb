@@ -18,17 +18,9 @@ use ahash::HashMap;
 
 use crate::etl::value::Value;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Map {
     pub values: BTreeMap<String, Value>,
-}
-
-impl Default for Map {
-    fn default() -> Self {
-        Self {
-            values: BTreeMap::default(),
-        }
-    }
 }
 
 impl Map {

@@ -534,9 +534,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("OpenTelemetry log error: {}", error))]
+    #[snafu(display("OpenTelemetry log error"))]
     OpenTelemetryLog {
-        error: String,
+        source: pipeline::etl_error::Error,
         #[snafu(implicit)]
         location: Location,
     },

@@ -36,7 +36,7 @@ use headers::HeaderValue;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion};
+use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
 use serde_json::Value;
 use session::context::QueryContextRef;
 
@@ -105,10 +105,6 @@ pub trait PromStoreProtocolHandler {
     async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }
 
-pub enum PipelineWay {
-    Identity,
-    Custom(Arc<Pipeline<GreptimeTransformer>>),
-}
 #[async_trait]
 pub trait OpenTelemetryProtocolHandler: LogHandler {
     /// Handling opentelemetry metrics request

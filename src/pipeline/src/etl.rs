@@ -317,6 +317,11 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
         .context(IntermediateKeyIndexSnafu { kind, key })
 }
 
+pub enum PipelineWay {
+    Identity,
+    Custom(std::sync::Arc<Pipeline<crate::GreptimeTransformer>>),
+}
+
 #[cfg(test)]
 mod tests {
 
