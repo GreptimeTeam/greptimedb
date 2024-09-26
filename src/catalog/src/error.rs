@@ -50,14 +50,14 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to list nodes in cluster: {source}"))]
+    #[snafu(display("Failed to list nodes in cluster"))]
     ListNodes {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to region stats in cluster: {source}"))]
+    #[snafu(display("Failed to region stats in cluster"))]
     ListRegionStats {
         #[snafu(implicit)]
         location: Location,
