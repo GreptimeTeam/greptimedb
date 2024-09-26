@@ -190,7 +190,7 @@ impl DateTime {
         naive_datetime
             .checked_add_months(Months::new(interval.months as u32))?
             .checked_add_days(Days::new(interval.days as u64))?
-            .checked_add_signed(TimeDelta::nanoseconds(interval.nanoseconds as i64))
+            .checked_add_signed(TimeDelta::nanoseconds(interval.nanoseconds))
             .map(Into::into)
     }
 
@@ -220,7 +220,7 @@ impl DateTime {
         naive_datetime
             .checked_sub_months(Months::new(interval.months as u32))?
             .checked_sub_days(Days::new(interval.days as u64))?
-            .checked_sub_signed(TimeDelta::nanoseconds(interval.nanoseconds as i64))
+            .checked_sub_signed(TimeDelta::nanoseconds(interval.nanoseconds))
             .map(Into::into)
     }
 

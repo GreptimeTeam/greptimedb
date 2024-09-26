@@ -172,7 +172,7 @@ impl Timestamp {
         let naive_datetime = naive_datetime
             .checked_add_months(Months::new(interval.months as u32))?
             .checked_add_days(Days::new(interval.days as u64))?
-            .checked_add_signed(TimeDelta::nanoseconds(interval.nanoseconds as i64))?;
+            .checked_add_signed(TimeDelta::nanoseconds(interval.nanoseconds))?;
 
         // Have to convert the new timestamp by the current unit.
         Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
@@ -208,7 +208,7 @@ impl Timestamp {
         let naive_datetime = naive_datetime
             .checked_sub_months(Months::new(interval.months as u32))?
             .checked_sub_days(Days::new(interval.days as u64))?
-            .checked_sub_signed(TimeDelta::nanoseconds(interval.nanoseconds as i64))?;
+            .checked_sub_signed(TimeDelta::nanoseconds(interval.nanoseconds))?;
 
         // Have to convert the new timestamp by the current unit.
         Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))

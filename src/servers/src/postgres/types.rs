@@ -901,13 +901,13 @@ pub(super) fn parameters_to_scalar_values(
                             ScalarValue::IntervalDayTime(
                                 data.map(|i| {
                                     if i.months != 0 || i.microseconds % 1000 != 0 {
-                                        return Err(invalid_parameter_error(
+                                        Err(invalid_parameter_error(
                                             "invalid_parameter_type",
                                             Some(format!(
                                                 "Expected: {}, found: {}",
                                                 server_type, client_type
                                             )),
-                                        ));
+                                        ))
                                     } else {
                                         Ok(IntervalDayTime::new(
                                             i.days,
