@@ -69,7 +69,8 @@ impl Categorizer {
                 }
 
                 // sort plan needs to consider column priority
-                // Change Sort to MergeSort which assume the input streams is already sorted hence can be more efficient
+                // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient
+                // We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
                 Commutativity::ConditionalCommutative(Some(Arc::new(merge_sort_transformer)))
             }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
