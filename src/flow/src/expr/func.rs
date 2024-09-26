@@ -278,7 +278,7 @@ impl UnaryFunc {
                     })?;
 
                 let start_time = start_time.map(|t| t.value());
-                let window_size = window_size.as_millis() as repr::Duration; // nanosecond to millisecond
+                let window_size = window_size.as_millis() as repr::Duration;
 
                 let ret = arrow::compute::unary(date_array_ref, |ts| {
                     get_window_start(ts, window_size, start_time)
@@ -303,7 +303,7 @@ impl UnaryFunc {
                     })?;
 
                 let start_time = start_time.map(|t| t.value());
-                let window_size = window_size.as_millis() as repr::Duration; // nanosecond to millisecond
+                let window_size = window_size.as_millis() as repr::Duration;
 
                 let ret = arrow::compute::unary(date_array_ref, |ts| {
                     get_window_start(ts, window_size, start_time) + window_size
@@ -1461,6 +1461,21 @@ mod test {
                 &[None, None]
             ),
             Err(Error::InvalidQuery { .. })
+        );
+    }
+
+    /// datafusion Interval problem, remove the should_panic after that's fixed
+    #[test]
+    #[should_panic]
+    fn test_cast_int() {
+        let interval = cast(
+            Value::from("1 second"),
+            &ConcreteDataType::interval_day_time_datatype(),
+        )
+        .unwrap();
+        assert_eq!(
+            interval,
+            Value::from(common_time::IntervalDayTime::new(0, 1000))
         );
     }
 }

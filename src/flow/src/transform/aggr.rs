@@ -1524,7 +1524,7 @@ mod test {
                                                 true,
                                             ),ColumnType::new(
                                                 ConcreteDataType::timestamp_millisecond_datatype(),
-                                                true,
+                                                false,
                                             )])
                                             .into_unnamed(),
                                             extensions: FunctionExtensions {
@@ -1545,7 +1545,7 @@ mod test {
                                             Value::IntervalMonthDayNano(IntervalMonthDayNano::new(0, 0, 30000000000)),
                                             CDT::interval_month_day_nano_datatype()
                                         ),
-                                        ScalarExpr::Column(1).cast(CDT::timestamp_millisecond_datatype())
+                                        ScalarExpr::Column(1)
                                         ],
                                 }])
                                 .unwrap()
