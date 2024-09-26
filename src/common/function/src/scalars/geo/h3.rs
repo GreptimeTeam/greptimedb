@@ -23,8 +23,8 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::{Scalar, ScalarVectorBuilder};
 use datatypes::value::{ListValue, Value};
 use datatypes::vectors::{
-    BooleanVectorBuilder, Float64VectorBuilder, ListVectorBuilder, MutableVector,
-    StringVectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
+    BooleanVectorBuilder, Float64VectorBuilder, Int32VectorBuilder, ListVectorBuilder,
+    MutableVector, StringVectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
 };
 use derive_more::Display;
 use h3o::{CellIndex, LatLng, Resolution};
@@ -865,6 +865,277 @@ impl Function for H3ChildPosToCell {
     }
 }
 
+/// Function that returns cells with k distances of given cell
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3GridDisk;
+
+impl Function for H3GridDisk {
+    fn name(&self) -> &str {
+        "h3_grid_disk"
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::uint64_datatype(),
+        ))
+    }
+
+    fn signature(&self) -> Signature {
+        signature_of_cell_and_distance()
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure!(
+            columns.len() == 2,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not correct, expect 2, provided : {}",
+                    columns.len()
+                ),
+            }
+        );
+
+        let cell_vec = &columns[0];
+        let k_vec = &columns[1];
+        let size = cell_vec.len();
+        let mut results =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::uint64_datatype(), size);
+
+        for i in 0..size {
+            let cell = cell_from_value(cell_vec.get(i))?;
+            let k = value_to_distance(k_vec.get(i))?;
+
+            let result = cell.and_then(|cell| {
+                let children: Vec<Value> = cell
+                    .grid_disk::<Vec<_>>(k)
+                    .into_iter()
+                    .map(|child| Value::from(u64::from(child)))
+                    .collect();
+                Some(ListValue::new(
+                    children,
+                    ConcreteDataType::uint64_datatype(),
+                ))
+            });
+
+            if let Some(list_value) = result {
+                results.push(Some(list_value.as_scalar_ref()));
+            } else {
+                results.push(None);
+            }
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
+/// Function that returns all cells within k distances of given cell
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3GridDiskDistances;
+
+impl Function for H3GridDiskDistances {
+    fn name(&self) -> &str {
+        "h3_grid_disk_distances"
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::uint64_datatype(),
+        ))
+    }
+
+    fn signature(&self) -> Signature {
+        signature_of_cell_and_distance()
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure!(
+            columns.len() == 2,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not correct, expect 2, provided : {}",
+                    columns.len()
+                ),
+            }
+        );
+
+        let cell_vec = &columns[0];
+        let k_vec = &columns[1];
+        let size = cell_vec.len();
+        let mut results =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::uint64_datatype(), size);
+
+        for i in 0..size {
+            let cell = cell_from_value(cell_vec.get(i))?;
+            let k = value_to_distance(k_vec.get(i))?;
+
+            let result = cell.and_then(|cell| {
+                let children: Vec<Value> = cell
+                    .grid_disk_distances::<Vec<_>>(k)
+                    .into_iter()
+                    .map(|(child, _distance)| Value::from(u64::from(child)))
+                    .collect();
+                Some(ListValue::new(
+                    children,
+                    ConcreteDataType::uint64_datatype(),
+                ))
+            });
+
+            if let Some(list_value) = result {
+                results.push(Some(list_value.as_scalar_ref()));
+            } else {
+                results.push(None);
+            }
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
+/// Function that returns distance between two cells
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3GridDistance;
+
+impl Function for H3GridDistance {
+    fn name(&self) -> &str {
+        "h3_grid_distance"
+    }
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::int32_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        signature_of_double_cells()
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure!(
+            columns.len() == 2,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not correct, expect 2, provided : {}",
+                    columns.len()
+                ),
+            }
+        );
+
+        let cell_this_vec = &columns[0];
+        let cell_that_vec = &columns[1];
+        let size = cell_this_vec.len();
+
+        let mut results = Int32VectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let result = match (
+                cell_from_value(cell_this_vec.get(i))?,
+                cell_from_value(cell_that_vec.get(i))?,
+            ) {
+                (Some(cell_this), Some(cell_that)) => {
+                    let dist = cell_this
+                        .grid_distance(cell_that)
+                        .map_err(|e| {
+                            BoxedError::new(PlainError::new(
+                                format!("H3 error: {}", e),
+                                StatusCode::EngineExecuteQuery,
+                            ))
+                        })
+                        .context(error::ExecuteSnafu)?;
+                    Some(dist)
+                }
+                _ => None,
+            };
+
+            results.push(result);
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
+/// Function that returns path cells between two cells
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3GridPathCells;
+
+impl Function for H3GridPathCells {
+    fn name(&self) -> &str {
+        "h3_grid_path_cells"
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::uint64_datatype(),
+        ))
+    }
+
+    fn signature(&self) -> Signature {
+        signature_of_double_cells()
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure!(
+            columns.len() == 2,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not correct, expect 2, provided : {}",
+                    columns.len()
+                ),
+            }
+        );
+
+        let cell_this_vec = &columns[0];
+        let cell_that_vec = &columns[1];
+        let size = cell_this_vec.len();
+        let mut results =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::uint64_datatype(), size);
+
+        for i in 0..size {
+            let result = match (
+                cell_from_value(cell_this_vec.get(i))?,
+                cell_from_value(cell_that_vec.get(i))?,
+            ) {
+                (Some(cell_this), Some(cell_that)) => {
+                    let cells = cell_this
+                        .grid_path_cells(cell_that)
+                        .map_err(|e| {
+                            BoxedError::new(PlainError::new(
+                                format!("H3 error: {}", e),
+                                StatusCode::EngineExecuteQuery,
+                            ))
+                        })
+                        .context(error::ExecuteSnafu)?
+                        .collect::<std::result::Result<Vec<CellIndex>, _>>()
+                        .map_err(|e| {
+                            BoxedError::new(PlainError::new(
+                                format!("H3 error: {}", e),
+                                StatusCode::EngineExecuteQuery,
+                            ))
+                        })
+                        .context(error::ExecuteSnafu)?;
+                    Some(ListValue::new(
+                        cells
+                            .into_iter()
+                            .map(|c| Value::from(u64::from(c)))
+                            .collect(),
+                        ConcreteDataType::uint64_datatype(),
+                    ))
+                }
+                _ => None,
+            };
+
+            if let Some(list_value) = result {
+                results.push(Some(list_value.as_scalar_ref()));
+            } else {
+                results.push(None);
+            }
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
 fn value_to_resolution(v: Value) -> Result<Resolution> {
     let r = match v {
         Value::Int8(v) => v as u8,
@@ -901,14 +1172,28 @@ macro_rules! ensure_and_coerce {
 
 fn value_to_position(v: Value) -> Result<u64> {
     match v {
-        Value::Int8(v) => ensure_and_coerce!(v > 0, v as u64),
-        Value::Int16(v) => ensure_and_coerce!(v > 0, v as u64),
-        Value::Int32(v) => ensure_and_coerce!(v > 0, v as u64),
-        Value::Int64(v) => ensure_and_coerce!(v > 0, v as u64),
+        Value::Int8(v) => ensure_and_coerce!(v >= 0, v as u64),
+        Value::Int16(v) => ensure_and_coerce!(v >= 0, v as u64),
+        Value::Int32(v) => ensure_and_coerce!(v >= 0, v as u64),
+        Value::Int64(v) => ensure_and_coerce!(v >= 0, v as u64),
         Value::UInt8(v) => Ok(v as u64),
         Value::UInt16(v) => Ok(v as u64),
         Value::UInt32(v) => Ok(v as u64),
         Value::UInt64(v) => Ok(v as u64),
+        _ => unreachable!(),
+    }
+}
+
+fn value_to_distance(v: Value) -> Result<u32> {
+    match v {
+        Value::Int8(v) => ensure_and_coerce!(v >= 0, v as u32),
+        Value::Int16(v) => ensure_and_coerce!(v >= 0, v as u32),
+        Value::Int32(v) => ensure_and_coerce!(v >= 0, v as u32),
+        Value::Int64(v) => ensure_and_coerce!(v >= 0, v as u32),
+        Value::UInt8(v) => Ok(v as u32),
+        Value::UInt16(v) => Ok(v as u32),
+        Value::UInt32(v) => Ok(v as u32),
+        Value::UInt64(v) => Ok(v as u32),
         _ => unreachable!(),
     }
 }
@@ -925,7 +1210,50 @@ fn signature_of_cell() -> Signature {
     Signature::one_of(signatures, Volatility::Stable)
 }
 
+fn signature_of_double_cells() -> Signature {
+    let mut signatures = Vec::new();
+    let cell_types = &[
+        ConcreteDataType::uint64_datatype(),
+        ConcreteDataType::int64_datatype(),
+    ];
+    for cell_type in cell_types {
+        for cell_type2 in cell_types {
+            signatures.push(TypeSignature::Exact(vec![
+                cell_type.clone(),
+                cell_type2.clone(),
+            ]));
+        }
+    }
+
+    Signature::one_of(signatures, Volatility::Stable)
+}
+
 fn signature_of_cell_and_resolution() -> Signature {
+    let mut signatures = Vec::new();
+    for cell_type in &[
+        ConcreteDataType::uint64_datatype(),
+        ConcreteDataType::int64_datatype(),
+    ] {
+        for resolution_type in &[
+            ConcreteDataType::int8_datatype(),
+            ConcreteDataType::int16_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::uint8_datatype(),
+            ConcreteDataType::uint16_datatype(),
+            ConcreteDataType::uint32_datatype(),
+            ConcreteDataType::uint64_datatype(),
+        ] {
+            signatures.push(TypeSignature::Exact(vec![
+                cell_type.clone(),
+                resolution_type.clone(),
+            ]));
+        }
+    }
+    Signature::one_of(signatures, Volatility::Stable)
+}
+
+fn signature_of_cell_and_distance() -> Signature {
     let mut signatures = Vec::new();
     for cell_type in &[
         ConcreteDataType::uint64_datatype(),

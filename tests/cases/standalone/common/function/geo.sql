@@ -39,6 +39,22 @@ SELECT
     h3_child_pos_to_cell(25, cell, 11) AS child
 FROM (SELECT h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64) AS cell);
 
+SELECT
+    h3_grid_disk(cell, 0) AS current_cell,
+    h3_grid_disk(cell, 3) AS grids,
+    h3_grid_disk_distances(cell, 3) AS all_grids,
+FROM (SELECT h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64) AS cell);
+
+SELECT
+    h3_grid_distance(cell1, cell2) AS distance,
+    h3_grid_path_cells(cell1, cell2) AS path_cells,
+FROM
+    (
+      SELECT
+          h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64) AS cell1,
+          h3_latlng_to_cell(39.634, -104.999, 8::UInt64) AS cell2
+    );
+
 SELECT geohash(37.76938, -122.3889, 9);
 
 SELECT geohash(37.76938, -122.3889, 10);

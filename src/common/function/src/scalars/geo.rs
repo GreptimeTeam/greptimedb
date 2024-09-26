@@ -52,5 +52,9 @@ impl GeoFunctions {
         registry.register(Arc::new(h3::H3ChildPosToCell));
 
         // h3 grid traversal
+        registry.register(Arc::new(h3::H3GridDisk));
+        registry.register(Arc::new(h3::H3GridDiskDistances));
+        registry.register(Arc::new(h3::H3GridDistance));
+        registry.register(Arc::new(h3::H3GridPathCells));
     }
 }
