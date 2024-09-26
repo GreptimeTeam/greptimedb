@@ -50,6 +50,15 @@ lazy_static! {
         )
         .unwrap();
 
+    /// Elapsed time of tasks in scheduler.
+    pub static ref SCHEDULER_TASK_ELAPSED: HistogramVec = register_histogram_vec!(
+            "greptime_mito_handle_scheduler_task_elapsed",
+            "mito handle scheduler task elapsed",
+            &[TYPE_LABEL],
+            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 60.0, 300.0]
+        )
+        .unwrap();
+
     // ------ Flush related metrics
     /// Counter of scheduled flush requests.
     /// Note that the flush scheduler may merge some flush requests.

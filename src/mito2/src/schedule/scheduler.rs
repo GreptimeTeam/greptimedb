@@ -24,8 +24,28 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{InvalidSchedulerStateSnafu, InvalidSenderSnafu, Result, StopSchedulerSnafu};
+use crate::metrics::SCHEDULER_TASK_ELAPSED;
 
-pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
+pub struct Job {
+    /// Job type.
+    pub(crate) r#type: &'static str,
+    /// Async task to schedule.
+    pub(crate) task: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl Job {
+    pub fn new(r#type: &'static str, task: Pin<Box<dyn Future<Output = ()> + Send>>) -> Self {
+        Self { r#type, task }
+    }
+
+    #[cfg(test)]
+    pub fn new_test(task: Pin<Box<dyn Future<Output = ()> + Send>>) -> Self {
+        Self {
+            r#type: "test",
+            task,
+        }
+    }
+}
 
 ///The state of scheduler
 const STATE_RUNNING: u8 = 0;
@@ -69,7 +89,7 @@ impl LocalScheduler {
 
         for _ in 0..concurrency {
             let child = token.child_token();
-            let receiver = rx.clone();
+            let receiver: async_channel::Receiver<Job> = rx.clone();
             let state_clone = state.clone();
             let handle = common_runtime::spawn_global(async move {
                 while state_clone.load(Ordering::Relaxed) == STATE_RUNNING {
@@ -79,7 +99,8 @@ impl LocalScheduler {
                         }
                         req_opt = receiver.recv() =>{
                             if let Ok(job) = req_opt {
-                                job.await;
+                                let _timer = SCHEDULER_TASK_ELAPSED.with_label_values(&[job.r#type]);
+                                job.task.await;
                             }
                         }
                     }
@@ -88,7 +109,7 @@ impl LocalScheduler {
                 if state_clone.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
                     // recv_async waits until all sender's been dropped.
                     while let Ok(job) = receiver.recv().await {
-                        job.await;
+                        job.task.await;
                     }
                     state_clone.store(STATE_STOP, Ordering::Relaxed);
                 }
@@ -177,9 +198,9 @@ mod tests {
         for _ in 0..task_size {
             let sum_clone = sum.clone();
             local
-                .schedule(Box::pin(async move {
+                .schedule(Job::new_test(Box::pin(async move {
                     sum_clone.fetch_add(1, Ordering::Relaxed);
-                }))
+                })))
                 .unwrap();
         }
         local.stop(true).await.unwrap();
@@ -195,9 +216,9 @@ mod tests {
         for _ in 0..task_size {
             let sum_clone = sum.clone();
             let ok = local
-                .schedule(Box::pin(async move {
+                .schedule(Job::new_test(Box::pin(async move {
                     sum_clone.fetch_add(1, Ordering::Relaxed);
-                }))
+                })))
                 .is_ok();
             if ok {
                 target += 1;
@@ -217,9 +238,12 @@ mod tests {
         for _ in 0..task_size {
             let barrier_clone = barrier.clone();
             local
-                .schedule(Box::pin(async move {
-                    barrier_clone.wait().await;
-                }))
+                .schedule(Job {
+                    r#type: "test",
+                    task: Box::pin(async move {
+                        barrier_clone.wait().await;
+                    }),
+                })
                 .unwrap();
         }
         barrier.wait().await;
@@ -248,9 +272,12 @@ mod tests {
             loop {
                 let sum_c = sum_clone.clone();
                 let ok = local_task
-                    .schedule(Box::pin(async move {
-                        sum_c.fetch_add(1, Ordering::Relaxed);
-                    }))
+                    .schedule(Job {
+                        r#type: "test",
+                        task: Box::pin(async move {
+                            sum_c.fetch_add(1, Ordering::Relaxed);
+                        }),
+                    })
                     .is_ok();
                 if ok {
                     target_clone.fetch_add(1, Ordering::Relaxed);

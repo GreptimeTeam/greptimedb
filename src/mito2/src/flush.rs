@@ -260,9 +260,12 @@ impl RegionFlushTask {
         // wal entry id, sequence and immutable memtables.
         let version_data = version_control.current();
 
-        Box::pin(async move {
-            self.do_flush(version_data).await;
-        })
+        Job::new(
+            "flush",
+            Box::pin(async move {
+                self.do_flush(version_data).await;
+            }),
+        )
     }
 
     /// Runs the flush task.
