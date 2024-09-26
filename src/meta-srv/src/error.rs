@@ -285,22 +285,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse stat key from utf8"))]
-    StatKeyFromUtf8 {
-        #[snafu(source)]
-        error: std::string::FromUtf8Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to parse stat value from utf8"))]
-    StatValueFromUtf8 {
-        #[snafu(source)]
-        error: std::string::FromUtf8Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to parse invalid region key from utf8"))]
     InvalidRegionKeyFromUtf8 {
         #[snafu(source)]
@@ -822,8 +806,6 @@ impl ErrorExt for Error {
             | Error::TomlFormat { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
-            | Error::StatKeyFromUtf8 { .. }
-            | Error::StatValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }
             | Error::TableRouteNotFound { .. }
             | Error::TableInfoNotFound { .. }
