@@ -63,7 +63,7 @@ impl UnmaterializableFunc {
             Self::Now => Signature {
                 input: smallvec![],
                 // TODO(yingwen): Maybe return timestamp.
-                output: ConcreteDataType::datetime_datatype(),
+                output: ConcreteDataType::timestamp_millisecond_datatype(),
                 generic_fn: GenericFn::Now,
             },
             Self::CurrentSchema => Signature {
