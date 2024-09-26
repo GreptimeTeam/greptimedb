@@ -359,7 +359,6 @@ impl SqlQueryHandler for Instance {
             .schema_exists(catalog, schema, None)
             .await
             .context(error::CatalogSnafu)
-            .map(|b| b && !self.catalog_manager.is_reserved_schema_name(schema))
     }
 }
 
