@@ -354,7 +354,7 @@ fn json_value_to_row(schema_info: &mut SchemaInfo, map: Map<String, serde_json::
     Row { values: row }
 }
 
-pub fn identity_pipeline(array: Vec<serde_json::Value>) -> Result<Rows, String> {
+pub fn identity_pipeline(array: Vec<serde_json::Value>) -> Result<Rows> {
     let mut rows = Vec::with_capacity(array.len());
 
     let mut schema = SchemaInfo::default();

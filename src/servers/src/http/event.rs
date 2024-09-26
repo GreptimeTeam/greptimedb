@@ -437,21 +437,19 @@ async fn ingest_logs_inner(
         for v in pipeline_data {
             pipeline
                 .prepare(v, &mut intermediate_state)
-                .inspect_err(|reason| {
+                .inspect_err(|_| {
                     METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                         .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
                         .observe(transform_timer.elapsed().as_secs_f64());
-                    PipelineTransformSnafu { reason }.build()
                 })
                 .context(PipelineTransformSnafu)
                 .context(PipelineSnafu)?;
             let r = pipeline
                 .exec_mut(&mut intermediate_state)
-                .inspect_err(|reason| {
+                .inspect_err(|_| {
                     METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                         .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
                         .observe(transform_timer.elapsed().as_secs_f64());
-                    PipelineTransformSnafu { reason }.build()
                 })
                 .context(PipelineTransformSnafu)
                 .context(PipelineSnafu)?;
@@ -468,7 +466,7 @@ async fn ingest_logs_inner(
             schema: pipeline.schemas().clone(),
         };
     } else {
-        let rows = pipeline::identify_pipeline(pipeline_data)
+        let rows = pipeline::identity_pipeline(pipeline_data)
             .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
         transformed_data = rows;
