@@ -17,7 +17,6 @@ use std::cmp::Ordering;
 use crate::util::div_ceil;
 use crate::Timestamp;
 
-// TODO(yingwen): remove this.
 /// Unix timestamp in millisecond resolution.
 ///
 /// Negative timestamp is allowed, which represents timestamp before '1970-01-01T00:00:00'.
