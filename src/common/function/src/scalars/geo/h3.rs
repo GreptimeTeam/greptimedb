@@ -20,11 +20,11 @@ use common_query::error::{self, InvalidFuncArgsSnafu, Result};
 use common_query::prelude::{Signature, TypeSignature};
 use datafusion::logical_expr::Volatility;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::value::Value;
+use datatypes::scalars::{Scalar, ScalarVectorBuilder};
+use datatypes::value::{ListValue, Value};
 use datatypes::vectors::{
-    BooleanVectorBuilder, Float64VectorBuilder, MutableVector, StringVectorBuilder,
-    UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
+    BooleanVectorBuilder, Float64VectorBuilder, ListVectorBuilder, MutableVector,
+    StringVectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
 };
 use derive_more::Display;
 use h3o::{CellIndex, LatLng, Resolution};
@@ -633,22 +633,24 @@ impl Function for H3CellParent {
     }
 }
 
-/// Function that checks if two cells are neighbour
+/// Function that returns children cell list
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
-pub struct H3IsNeighbour;
+pub struct H3CellToChildren;
 
-impl Function for H3IsNeighbour {
+impl Function for H3CellToChildren {
     fn name(&self) -> &str {
-        "h3_is_neighbour"
+        "h3_cell_to_children"
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+        Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::uint64_datatype(),
+        ))
     }
 
     fn signature(&self) -> Signature {
-        signature_of_double_cell()
+        signature_of_cell_and_resolution()
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -663,30 +665,199 @@ impl Function for H3IsNeighbour {
         );
 
         let cell_vec = &columns[0];
-        let cell2_vec = &columns[1];
+        let res_vec = &columns[1];
         let size = cell_vec.len();
-        let mut results = BooleanVectorBuilder::with_capacity(size);
+        let mut results =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::uint64_datatype(), size);
 
         for i in 0..size {
-            let result = match (
-                cell_from_value(cell_vec.get(i))?,
-                cell_from_value(cell2_vec.get(i))?,
-            ) {
-                (Some(cell_this), Some(cell_that)) => {
-                    let is_neighbour = cell_this
-                        .is_neighbor_with(cell_that)
-                        .map_err(|e| {
-                            BoxedError::new(PlainError::new(
-                                format!("H3 error: {}", e),
-                                StatusCode::EngineExecuteQuery,
-                            ))
-                        })
-                        .context(error::ExecuteSnafu)?;
-                    Some(is_neighbour)
-                }
-                _ => None,
-            };
+            let cell = cell_from_value(cell_vec.get(i))?;
+            let res = value_to_resolution(res_vec.get(i))?;
+            let result = cell.and_then(|cell| {
+                let children: Vec<Value> = cell
+                    .children(res)
+                    .map(|child| Value::from(u64::from(child)))
+                    .collect();
+                Some(ListValue::new(
+                    children,
+                    ConcreteDataType::uint64_datatype(),
+                ))
+            });
 
+            if let Some(list_value) = result {
+                results.push(Some(list_value.as_scalar_ref()));
+            } else {
+                results.push(None);
+            }
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
+/// Function that returns children cell count
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3CellToChildrenSize;
+
+impl Function for H3CellToChildrenSize {
+    fn name(&self) -> &str {
+        "h3_cell_to_children_size"
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::uint64_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        signature_of_cell_and_resolution()
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure!(
+            columns.len() == 2,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not correct, expect 2, provided : {}",
+                    columns.len()
+                ),
+            }
+        );
+
+        let cell_vec = &columns[0];
+        let res_vec = &columns[1];
+        let size = cell_vec.len();
+        let mut results = UInt64VectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let cell = cell_from_value(cell_vec.get(i))?;
+            let res = value_to_resolution(res_vec.get(i))?;
+            let result = cell.map(|cell| cell.children_count(res));
+            results.push(result);
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
+/// Function that returns the cell position if its parent at given resolution
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3CellToChildPos;
+
+impl Function for H3CellToChildPos {
+    fn name(&self) -> &str {
+        "h3_cell_to_child_pos"
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::uint64_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        signature_of_cell_and_resolution()
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure!(
+            columns.len() == 2,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not correct, expect 2, provided : {}",
+                    columns.len()
+                ),
+            }
+        );
+
+        let cell_vec = &columns[0];
+        let res_vec = &columns[1];
+        let size = cell_vec.len();
+        let mut results = UInt64VectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let cell = cell_from_value(cell_vec.get(i))?;
+            let res = value_to_resolution(res_vec.get(i))?;
+            let result = cell.and_then(|cell| cell.child_position(res));
+            results.push(result);
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
+/// Function that returns the cell at given position of the parent at given resolution
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3ChildPosToCell;
+
+impl Function for H3ChildPosToCell {
+    fn name(&self) -> &str {
+        "h3_child_pos_to_cell"
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::uint64_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        let mut signatures = Vec::new();
+        for position_type in &[
+            ConcreteDataType::int8_datatype(),
+            ConcreteDataType::int16_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::uint8_datatype(),
+            ConcreteDataType::uint16_datatype(),
+            ConcreteDataType::uint32_datatype(),
+            ConcreteDataType::uint64_datatype(),
+        ] {
+            for cell_type in &[
+                ConcreteDataType::uint64_datatype(),
+                ConcreteDataType::int64_datatype(),
+            ] {
+                for resolution_type in &[
+                    ConcreteDataType::int8_datatype(),
+                    ConcreteDataType::int16_datatype(),
+                    ConcreteDataType::int32_datatype(),
+                    ConcreteDataType::int64_datatype(),
+                    ConcreteDataType::uint8_datatype(),
+                    ConcreteDataType::uint16_datatype(),
+                    ConcreteDataType::uint32_datatype(),
+                    ConcreteDataType::uint64_datatype(),
+                ] {
+                    signatures.push(TypeSignature::Exact(vec![
+                        position_type.clone(),
+                        cell_type.clone(),
+                        resolution_type.clone(),
+                    ]));
+                }
+            }
+        }
+        Signature::one_of(signatures, Volatility::Stable)
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure!(
+            columns.len() == 3,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not correct, expect 3, provided : {}",
+                    columns.len()
+                ),
+            }
+        );
+
+        let pos_vec = &columns[0];
+        let cell_vec = &columns[1];
+        let res_vec = &columns[2];
+        let size = cell_vec.len();
+        let mut results = UInt64VectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let cell = cell_from_value(cell_vec.get(i))?;
+            let pos = value_to_position(pos_vec.get(i))?;
+            let res = value_to_resolution(res_vec.get(i))?;
+            let result = cell.and_then(|cell| cell.child_at(pos, res).map(u64::from));
             results.push(result);
         }
 
@@ -716,6 +887,32 @@ fn value_to_resolution(v: Value) -> Result<Resolution> {
         .context(error::ExecuteSnafu)
 }
 
+macro_rules! ensure_and_coerce {
+    ($compare:expr, $coerce:expr) => {{
+        ensure!(
+            $compare,
+            InvalidFuncArgsSnafu {
+                err_msg: "Argument was outside of acceptable range "
+            }
+        );
+        Ok($coerce)
+    }};
+}
+
+fn value_to_position(v: Value) -> Result<u64> {
+    match v {
+        Value::Int8(v) => ensure_and_coerce!(v > 0, v as u64),
+        Value::Int16(v) => ensure_and_coerce!(v > 0, v as u64),
+        Value::Int32(v) => ensure_and_coerce!(v > 0, v as u64),
+        Value::Int64(v) => ensure_and_coerce!(v > 0, v as u64),
+        Value::UInt8(v) => Ok(v as u64),
+        Value::UInt16(v) => Ok(v as u64),
+        Value::UInt32(v) => Ok(v as u64),
+        Value::UInt64(v) => Ok(v as u64),
+        _ => unreachable!(),
+    }
+}
+
 fn signature_of_cell() -> Signature {
     let mut signatures = Vec::new();
     for cell_type in &[
@@ -723,24 +920,6 @@ fn signature_of_cell() -> Signature {
         ConcreteDataType::int64_datatype(),
     ] {
         signatures.push(TypeSignature::Exact(vec![cell_type.clone()]));
-    }
-
-    Signature::one_of(signatures, Volatility::Stable)
-}
-
-fn signature_of_double_cell() -> Signature {
-    let mut signatures = Vec::new();
-    let cell_types = &[
-        ConcreteDataType::uint64_datatype(),
-        ConcreteDataType::int64_datatype(),
-    ];
-    for cell_type in cell_types {
-        for cell_type2 in cell_types {
-            signatures.push(TypeSignature::Exact(vec![
-                cell_type.clone(),
-                cell_type2.clone(),
-            ]));
-        }
     }
 
     Signature::one_of(signatures, Volatility::Stable)
