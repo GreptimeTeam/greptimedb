@@ -22,7 +22,7 @@ use catalog::table_source::DfTableSourceProvider;
 use chrono::Utc;
 use common_time::interval::{MS_PER_DAY, NANOS_PER_MILLI};
 use common_time::timestamp::TimeUnit;
-use common_time::{IntervalDayTime, IntervalMonthDayNano, Timestamp, Timezone};
+use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp, Timezone};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::prelude::Column;
 use datafusion::scalar::ScalarValue;
@@ -160,18 +160,36 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize, interval_only: bool) ->
         Expr::Literal(ScalarValue::TimestampSecond(ts_secs, _))
         | Expr::Literal(ScalarValue::DurationSecond(ts_secs)) => ts_secs.map(|v| v * 1_000),
         // We don't support interval with months as days in a month is unclear.
+        Expr::Literal(ScalarValue::IntervalYearMonth(interval)) => interval
+            .map(|v| {
+                let interval = IntervalYearMonth::from_i32(v);
+                if interval.months != 0 {
+                    return Err(DataFusionError::Plan(format!(
+                        "Year or month interval is not allowed in range query: {}",
+                        expr.display_name().unwrap_or_default()
+                    )));
+                }
+
+                Ok(0)
+            })
+            .transpose()?,
         Expr::Literal(ScalarValue::IntervalDayTime(interval)) => interval.map(|v| {
             let interval = IntervalDayTime::from_i64(v);
             interval.as_millis()
         }),
-        Expr::Literal(ScalarValue::IntervalMonthDayNano(interval)) => interval.and_then(|v| {
-            let interval = IntervalMonthDayNano::from_i128(v);
-            if interval.months != 0 {
-                return None;
-            }
+        Expr::Literal(ScalarValue::IntervalMonthDayNano(interval)) => interval
+            .map(|v| {
+                let interval = IntervalMonthDayNano::from_i128(v);
+                if interval.months != 0 {
+                    return Err(DataFusionError::Plan(format!(
+                        "Year or month interval is not allowed in range query: {}",
+                        expr.display_name().unwrap_or_default()
+                    )));
+                }
 
-            Some(interval.days as i64 * MS_PER_DAY + interval.nanoseconds / NANOS_PER_MILLI)
-        }),
+                Ok(interval.days as i64 * MS_PER_DAY + interval.nanoseconds / NANOS_PER_MILLI)
+            })
+            .transpose()?,
         _ => None,
     }
     .ok_or_else(|| {

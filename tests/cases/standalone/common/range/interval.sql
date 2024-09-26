@@ -16,6 +16,6 @@ INSERT INTO TABLE host VALUES
 
 SELECT ts, host, min(val) RANGE (INTERVAL '1 year') FROM host ALIGN (INTERVAL '1 year') ORDER BY host, ts;
 
-SELECT ts, host, min(val) RANGE (INTERVAL '1' year) FROM host ALIGN (INTERVAL '1' year) ORDER BY host, ts;
+SELECT ts, host, min(val) RANGE (INTERVAL '1' day) FROM host ALIGN (INTERVAL '1' day) ORDER BY host, ts;
 
 DROP TABLE host;
