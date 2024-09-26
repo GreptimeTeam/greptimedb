@@ -122,7 +122,8 @@ pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
         StatusCode::RegionNotReady
         | StatusCode::TableUnavailable
         | StatusCode::RegionBusy
-        | StatusCode::StorageUnavailable => HttpStatusCode::SERVICE_UNAVAILABLE,
+        | StatusCode::StorageUnavailable
+        | StatusCode::External => HttpStatusCode::SERVICE_UNAVAILABLE,
 
         StatusCode::Internal
         | StatusCode::Unexpected

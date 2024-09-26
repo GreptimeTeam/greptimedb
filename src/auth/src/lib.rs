@@ -15,7 +15,7 @@
 mod common;
 pub mod error;
 mod permission;
-mod user_info;
+pub mod user_info;
 mod user_provider;
 
 #[cfg(feature = "testing")]

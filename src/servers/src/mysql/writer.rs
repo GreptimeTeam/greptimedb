@@ -328,7 +328,7 @@ pub fn create_mysql_column_def(schema: &SchemaRef) -> Result<Vec<Column>> {
 fn mysql_error_kind(status_code: &StatusCode) -> ErrorKind {
     match status_code {
         StatusCode::Success => ErrorKind::ER_YES,
-        StatusCode::Unknown => ErrorKind::ER_UNKNOWN_ERROR,
+        StatusCode::Unknown | StatusCode::External => ErrorKind::ER_UNKNOWN_ERROR,
         StatusCode::Unsupported => ErrorKind::ER_NOT_SUPPORTED_YET,
         StatusCode::Cancelled => ErrorKind::ER_QUERY_INTERRUPTED,
         StatusCode::RuntimeResourcesExhausted => ErrorKind::ER_OUT_OF_RESOURCES,
