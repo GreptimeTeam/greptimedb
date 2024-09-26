@@ -1464,9 +1464,7 @@ mod test {
         );
     }
 
-    /// datafusion Interval problem, remove the should_panic after that's fixed
     #[test]
-    #[should_panic]
     fn test_cast_int() {
         let interval = cast(
             Value::from("1 second"),

@@ -157,14 +157,14 @@ impl IntervalDayTime {
     }
 
     pub fn to_i64(&self) -> i64 {
-        let d = self.days as u64 & u32::MAX as u64;
-        let m = (self.milliseconds as u64 & u32::MAX as u64) << 32;
+        let d = (self.days as u64 & u32::MAX as u64) << 32;
+        let m = self.milliseconds as u64 & u32::MAX as u64;
         (d | m) as i64
     }
 
     pub fn from_i64(value: i64) -> Self {
-        let days = value as i32;
-        let milliseconds = (value >> 32) as i32;
+        let days = (value >> 32) as i32;
+        let milliseconds = value as i32;
         Self { days, milliseconds }
     }
 
@@ -254,16 +254,16 @@ impl IntervalMonthDayNano {
     }
 
     pub fn to_i128(&self) -> i128 {
-        let m = self.months as u128 & u32::MAX as u128;
-        let d = (self.days as u128 & u32::MAX as u128) << 32;
-        let n = (self.nanoseconds as u128 & u64::MAX as u128) << 64;
+        let m = (self.months as u128 & u32::MAX as u128) << 96;
+        let d = (self.days as u128 & u32::MAX as u128) << 64;
+        let n = self.nanoseconds as u128 & u64::MAX as u128;
         (m | d | n) as i128
     }
 
     pub fn from_i128(value: i128) -> Self {
-        let months = value as i32;
-        let days = (value >> 32) as i32;
-        let nanoseconds = (value >> 64) as i64;
+        let months = (value >> 96) as i32;
+        let days = (value >> 64) as i32;
+        let nanoseconds = value as i64;
         Self {
             months,
             days,
@@ -823,18 +823,26 @@ fn get_time_part(
 mod tests {
     use super::*;
 
-    // #[test]
-    // fn test_from_year_month() {
-    //     let interval = Interval::from_year_month(1);
-    //     assert_eq!(interval.months, 1);
-    // }
+    #[test]
+    fn test_from_year_month() {
+        let interval = IntervalYearMonth::new(1);
+        assert_eq!(interval.months, 1);
+    }
 
-    // #[test]
-    // fn test_from_date_time() {
-    //     let interval = Interval::from_day_time(1, 2);
-    //     assert_eq!(interval.days, 1);
-    //     assert_eq!(interval.nsecs, 2_000_000);
-    // }
+    #[test]
+    fn test_from_date_time() {
+        let interval = IntervalDayTime::new(1, 2);
+        assert_eq!(interval.days, 1);
+        assert_eq!(interval.milliseconds, 2);
+    }
+
+    #[test]
+    fn test_from_month_day_nano() {
+        let interval = IntervalMonthDayNano::new(1, 2, 3);
+        assert_eq!(interval.months, 1);
+        assert_eq!(interval.days, 2);
+        assert_eq!(interval.nanoseconds, 3);
+    }
 
     // #[test]
     // fn test_to_duration() {
@@ -873,28 +881,39 @@ mod tests {
     //     assert!(interval.is_zero());
     // }
 
-    // #[test]
-    // fn test_interval_i128_convert() {
-    //     let test_interval_eq = |month, day, nano| {
-    //         let interval = Interval::from_month_day_nano(month, day, nano);
-    //         let interval_i128 = interval.to_i128();
-    //         let interval2 = Interval::from_i128(interval_i128);
-    //         assert_eq!(interval, interval2);
-    //     };
+    #[test]
+    fn test_interval_i128_convert() {
+        let test_interval_eq = |month, day, nano| {
+            let interval = IntervalMonthDayNano::new(month, day, nano);
+            let interval_i128 = interval.to_i128();
+            let interval2 = IntervalMonthDayNano::from_i128(interval_i128);
+            assert_eq!(interval, interval2);
+        };
 
-    //     test_interval_eq(1, 2, 3);
-    //     test_interval_eq(1, -2, 3);
-    //     test_interval_eq(1, -2, -3);
-    //     test_interval_eq(-1, -2, -3);
-    //     test_interval_eq(i32::MAX, i32::MAX, i64::MAX);
-    //     test_interval_eq(i32::MIN, i32::MAX, i64::MAX);
-    //     test_interval_eq(i32::MAX, i32::MIN, i64::MAX);
-    //     test_interval_eq(i32::MAX, i32::MAX, i64::MIN);
-    //     test_interval_eq(i32::MIN, i32::MIN, i64::MAX);
-    //     test_interval_eq(i32::MAX, i32::MIN, i64::MIN);
-    //     test_interval_eq(i32::MIN, i32::MAX, i64::MIN);
-    //     test_interval_eq(i32::MIN, i32::MIN, i64::MIN);
-    // }
+        test_interval_eq(1, 2, 3);
+        test_interval_eq(1, -2, 3);
+        test_interval_eq(1, -2, -3);
+        test_interval_eq(-1, -2, -3);
+        test_interval_eq(i32::MAX, i32::MAX, i64::MAX);
+        test_interval_eq(i32::MIN, i32::MAX, i64::MAX);
+        test_interval_eq(i32::MAX, i32::MIN, i64::MAX);
+        test_interval_eq(i32::MAX, i32::MAX, i64::MIN);
+        test_interval_eq(i32::MIN, i32::MIN, i64::MAX);
+        test_interval_eq(i32::MAX, i32::MIN, i64::MIN);
+        test_interval_eq(i32::MIN, i32::MAX, i64::MIN);
+        test_interval_eq(i32::MIN, i32::MIN, i64::MIN);
+
+        let interval = IntervalMonthDayNano::from_i128(1);
+        assert_eq!(interval, IntervalMonthDayNano::new(0, 0, 1));
+        assert_eq!(1, IntervalMonthDayNano::new(0, 0, 1).to_i128());
+    }
+
+    #[test]
+    fn test_interval_i64_convert() {
+        let interval = IntervalDayTime::from_i64(1);
+        assert_eq!(interval, IntervalDayTime::new(0, 1));
+        assert_eq!(1, IntervalDayTime::new(0, 1).to_i64());
+    }
 
     #[test]
     fn test_convert_interval_format() {

@@ -156,7 +156,6 @@ mod test {
 
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
-    use common_time::DateTime;
     use datatypes::prelude::*;
     use datatypes::schema::Schema;
     use datatypes::timestamp::TimestampMillisecond;

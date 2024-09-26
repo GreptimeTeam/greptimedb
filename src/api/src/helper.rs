@@ -1463,7 +1463,7 @@ mod tests {
         push_vals(&mut column, 3, vector);
         (0..len).for_each(|i| {
             assert_eq!(
-                7 + i as i32,
+                7 + i as i64,
                 column
                     .values
                     .as_ref()
@@ -1471,7 +1471,7 @@ mod tests {
                     .interval_month_day_nano_values
                     .get(i)
                     .unwrap()
-                    .months
+                    .nanoseconds
             );
         });
     }
@@ -1506,9 +1506,9 @@ mod tests {
     fn test_convert_i128_to_interval() {
         let i128_val = 3;
         let interval = convert_month_day_nano_to_pb(IntervalMonthDayNano::from_i128(i128_val));
-        assert_eq!(interval.months, 3);
+        assert_eq!(interval.months, 0);
         assert_eq!(interval.days, 0);
-        assert_eq!(interval.nanoseconds, 0);
+        assert_eq!(interval.nanoseconds, 3);
     }
 
     #[test]
