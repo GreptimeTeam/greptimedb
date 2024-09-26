@@ -81,7 +81,7 @@ impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
         self.expr.clone()
     }
 
-    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "MergeSort: ")?;
         for (i, expr_item) in self.expr.iter().enumerate() {
             if i > 0 {

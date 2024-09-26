@@ -71,7 +71,6 @@ impl Categorizer {
                 // sort plan needs to consider column priority
                 // Change Sort to MergeSort which assume the input streams is already sorted hence can be more efficient
                 Commutativity::ConditionalCommutative(Some(Arc::new(merge_sort_transformer)))
-                // Commutativity::PartialCommutative
             }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
             LogicalPlan::CrossJoin(_) => Commutativity::NonCommutative,
