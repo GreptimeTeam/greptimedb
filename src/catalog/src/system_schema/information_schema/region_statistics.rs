@@ -29,7 +29,7 @@ use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{StringVectorBuilder, UInt64VectorBuilder};
+use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder};
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
@@ -40,6 +40,8 @@ use crate::system_schema::utils;
 use crate::CatalogManager;
 
 const REGION_ID: &str = "region_id";
+const TABLE_ID: &str = "table_id";
+const REGION_NUMBER: &str = "region_number";
 const MEMTABLE_SIZE: &str = "memtable_size";
 const MANIFEST_SIZE: &str = "manifest_size";
 const SST_SIZE: &str = "sst_size";
@@ -51,6 +53,8 @@ const INIT_CAPACITY: usize = 42;
 /// The `REGION_STATISTICS` table provides information about the region statistics. Including fields:
 ///
 /// - `region_id`: The region id.
+/// - `table_id`: The table id.
+/// - `region_number`: The region number.
 /// - `memtable_size`: The memtable size in bytes.
 /// - `manifest_size`: The manifest size in bytes.
 /// - `sst_size`: The sst size in bytes.
@@ -73,6 +77,8 @@ impl InformationSchemaRegionStatistics {
     pub(crate) fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
             ColumnSchema::new(REGION_ID, ConcreteDataType::uint64_datatype(), false),
+            ColumnSchema::new(TABLE_ID, ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new(REGION_NUMBER, ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new(MEMTABLE_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(MANIFEST_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(SST_SIZE, ConcreteDataType::uint64_datatype(), true),
@@ -129,7 +135,9 @@ struct InformationSchemaRegionStatisticsBuilder {
     schema: SchemaRef,
     catalog_manager: Weak<dyn CatalogManager>,
 
-    region_id: UInt64VectorBuilder,
+    region_ids: UInt64VectorBuilder,
+    table_ids: UInt32VectorBuilder,
+    region_numbers: UInt32VectorBuilder,
     memtable_sizes: UInt64VectorBuilder,
     manifest_sizes: UInt64VectorBuilder,
     sst_sizes: UInt64VectorBuilder,
@@ -142,7 +150,9 @@ impl InformationSchemaRegionStatisticsBuilder {
         Self {
             schema,
             catalog_manager,
-            region_id: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            region_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            table_ids: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            region_numbers: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
             memtable_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             manifest_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             sst_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
@@ -185,6 +195,8 @@ impl InformationSchemaRegionStatisticsBuilder {
     fn add_region_statistic(&mut self, predicate: &Predicates, region_stat: RegionStat) {
         let row = [
             (REGION_ID, &Value::from(region_stat.id.as_u64())),
+            (TABLE_ID, &Value::from(region_stat.id.table_id())),
+            (REGION_NUMBER, &Value::from(region_stat.id.region_number())),
             (MEMTABLE_SIZE, &Value::from(region_stat.memtable_size)),
             (MANIFEST_SIZE, &Value::from(region_stat.manifest_size)),
             (SST_SIZE, &Value::from(region_stat.sst_size)),
@@ -196,7 +208,10 @@ impl InformationSchemaRegionStatisticsBuilder {
             return;
         }
 
-        self.region_id.push(Some(region_stat.id.as_u64()));
+        self.region_ids.push(Some(region_stat.id.as_u64()));
+        self.table_ids.push(Some(region_stat.id.table_id()));
+        self.region_numbers
+            .push(Some(region_stat.id.region_number()));
         self.memtable_sizes.push(Some(region_stat.memtable_size));
         self.manifest_sizes.push(Some(region_stat.manifest_size));
         self.sst_sizes.push(Some(region_stat.sst_size));
@@ -206,7 +221,9 @@ impl InformationSchemaRegionStatisticsBuilder {
 
     fn finish(&mut self) -> Result<RecordBatch> {
         let columns: Vec<VectorRef> = vec![
-            Arc::new(self.region_id.finish()),
+            Arc::new(self.region_ids.finish()),
+            Arc::new(self.table_ids.finish()),
+            Arc::new(self.region_numbers.finish()),
             Arc::new(self.memtable_sizes.finish()),
             Arc::new(self.manifest_sizes.finish()),
             Arc::new(self.sst_sizes.finish()),
