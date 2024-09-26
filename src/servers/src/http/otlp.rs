@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::str;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
@@ -33,13 +34,18 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 use pipeline::util::to_pipeline_version;
+use pipeline::PipelineWay;
 use prost::Message;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 
 use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::error::{self, Result};
-use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineWay};
+use crate::query_handler::OpenTelemetryProtocolHandlerRef;
+
+const OTLP_GREPTIME_PIPELINE_NAME_HEADER_NAME: &str = "x-greptime-pipeline-name";
+const OTLP_GREPTIME_PIPELINE_VERSION_HEADER_NAME: &str = "x-greptime-pipeline-version";
+const OTLP_GREPTIME_TABLE_NAME_HEADER_NAME: &str = "x-greptime-table-name";
 
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "metrics"))]
@@ -102,12 +108,14 @@ pub struct PipelineInfo {
 
 fn pipeline_header_error(
     header: &HeaderValue,
-) -> StdResult<String, (http::StatusCode, &'static str)> {
-    match header.to_str() {
+    key: &str,
+) -> StdResult<String, (http::StatusCode, String)> {
+    let header_utf8 = str::from_utf8(header.as_bytes());
+    match header_utf8 {
         Ok(s) => Ok(s.to_string()),
         Err(_) => Err((
             StatusCode::BAD_REQUEST,
-            "`X-Pipeline-Name` or `X-Pipeline-Version` header is not string type.",
+            format!("`{}` header is not valid UTF-8 string type.", key),
         )),
     }
 }
@@ -117,22 +125,33 @@ impl<S> FromRequestParts<S> for PipelineInfo
 where
     S: Send + Sync,
 {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let pipeline_name = parts.headers.get("X-Pipeline-Name");
-        let pipeline_version = parts.headers.get("X-Pipeline-Version");
+        let pipeline_name = parts.headers.get(OTLP_GREPTIME_PIPELINE_NAME_HEADER_NAME);
+        let pipeline_version = parts
+            .headers
+            .get(OTLP_GREPTIME_PIPELINE_VERSION_HEADER_NAME);
         match (pipeline_name, pipeline_version) {
             (Some(name), Some(version)) => Ok(PipelineInfo {
-                pipeline_name: Some(pipeline_header_error(name)?),
-                pipeline_version: Some(pipeline_header_error(version)?),
+                pipeline_name: Some(pipeline_header_error(
+                    name,
+                    OTLP_GREPTIME_PIPELINE_NAME_HEADER_NAME,
+                )?),
+                pipeline_version: Some(pipeline_header_error(
+                    version,
+                    OTLP_GREPTIME_PIPELINE_VERSION_HEADER_NAME,
+                )?),
             }),
             (None, _) => Ok(PipelineInfo {
                 pipeline_name: None,
                 pipeline_version: None,
             }),
             (Some(name), None) => Ok(PipelineInfo {
-                pipeline_name: Some(pipeline_header_error(name)?),
+                pipeline_name: Some(pipeline_header_error(
+                    name,
+                    OTLP_GREPTIME_PIPELINE_NAME_HEADER_NAME,
+                )?),
                 pipeline_version: None,
             }),
         }
@@ -148,13 +167,14 @@ impl<S> FromRequestParts<S> for TableInfo
 where
     S: Send + Sync,
 {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let table_name = parts.headers.get("X-Table-Name");
+        let table_name = parts.headers.get(OTLP_GREPTIME_TABLE_NAME_HEADER_NAME);
+
         match table_name {
             Some(name) => Ok(TableInfo {
-                table_name: pipeline_header_error(name)?,
+                table_name: pipeline_header_error(name, OTLP_GREPTIME_TABLE_NAME_HEADER_NAME)?,
             }),
             None => Ok(TableInfo {
                 table_name: "opentelemetry_logs".to_string(),
@@ -185,7 +205,7 @@ pub async fn logs(
         let pipeline_version =
             to_pipeline_version(pipeline_info.pipeline_version).map_err(|_| {
                 error::InvalidParameterSnafu {
-                    reason: "X-Pipeline-Version".to_string(),
+                    reason: OTLP_GREPTIME_PIPELINE_VERSION_HEADER_NAME,
                 }
                 .build()
             })?;

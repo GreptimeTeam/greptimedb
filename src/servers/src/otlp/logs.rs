@@ -24,12 +24,12 @@ use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::LogRecord;
-use pipeline::{Array, Map, Value as PipelineValue};
+use pipeline::{Array, Map, PipelineWay, Value as PipelineValue};
+use snafu::ResultExt;
 
 use super::trace::attributes::OtlpAnyValue;
 use crate::error::{OpenTelemetryLogSnafu, Result};
 use crate::otlp::trace::span::bytes_to_hex_string;
-use crate::query_handler::PipelineWay;
 
 /// Normalize otlp instrumentation, metric and attribute names
 ///
@@ -74,10 +74,10 @@ pub fn to_grpc_insert_requests(
             let mut intermediate_state = p.init_intermediate_state();
             for v in request {
                 p.prepare_pipeline_value(v, &mut intermediate_state)
-                    .map_err(|e| OpenTelemetryLogSnafu { error: e }.build())?;
+                    .context(OpenTelemetryLogSnafu)?;
                 let r = p
                     .exec_mut(&mut intermediate_state)
-                    .map_err(|e| OpenTelemetryLogSnafu { error: e }.build())?;
+                    .context(OpenTelemetryLogSnafu)?;
                 result.push(r);
             }
             let len = result.len();
@@ -216,20 +216,6 @@ fn build_identity_schema() -> Vec<ColumnSchema> {
             None,
         ),
         (
-            "scope_schemaUrl",
-            ColumnDataType::String,
-            SemanticType::Field,
-            None,
-            None,
-        ),
-        (
-            "resource_schema_url",
-            ColumnDataType::String,
-            SemanticType::Field,
-            None,
-            None,
-        ),
-        (
             "resource_attributes",
             ColumnDataType::Binary,
             SemanticType::Field,
@@ -324,9 +310,7 @@ fn build_identity_schema() -> Vec<ColumnSchema> {
 
 fn build_identity_row(
     log: LogRecord,
-    resource_schema_url: String,
     resource_attr: JsonbValue<'_>,
-    scope_schema_url: String,
     scope_name: Option<String>,
     scope_version: Option<String>,
     scope_attrs: JsonbValue<'_>,
@@ -340,12 +324,6 @@ fn build_identity_row(
         },
         GreptimeValue {
             value_data: Some(ValueData::BinaryValue(scope_attrs.to_vec())),
-        },
-        GreptimeValue {
-            value_data: Some(ValueData::StringValue(scope_schema_url)),
-        },
-        GreptimeValue {
-            value_data: Some(ValueData::StringValue(resource_schema_url)),
         },
         GreptimeValue {
             value_data: Some(ValueData::BinaryValue(resource_attr.to_vec())),
@@ -398,16 +376,12 @@ fn parse_export_logs_service_request_to_rows(request: ExportLogsServiceRequest) 
             .resource
             .map(|x| key_value_to_jsonb(x.attributes))
             .unwrap_or(JsonbValue::Null);
-        let resource_schema_url = r.schema_url;
         for scope_logs in r.scope_logs {
             let (scope_attrs, scope_version, scope_name) = scope_to_jsonb(scope_logs.scope);
-            let scope_schema_url = scope_logs.schema_url;
             for log in scope_logs.log_records {
                 let value = build_identity_row(
                     log,
-                    resource_schema_url.clone(),
                     resource_attr.clone(),
-                    scope_schema_url.clone(),
                     scope_name.clone(),
                     scope_version.clone(),
                     scope_attrs.clone(),

@@ -1601,7 +1601,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     let res = send_req(
         &client,
         vec![(
-            HeaderName::from_static("x-table-name"),
+            HeaderName::from_static("x-greptime-table-name"),
             HeaderValue::from_static("logs"),
         )],
         "/v1/otlp/v1/logs?db=public",
@@ -1611,8 +1611,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    // TODO(qtang): we show convert jsonb to json string in http sql API
-    let expected = r#"[{"records":{"schema":{"column_schemas":[{"name":"scope_name","data_type":"String"},{"name":"scope_version","data_type":"String"},{"name":"scope_attributes","data_type":"Json"},{"name":"scope_schemaUrl","data_type":"String"},{"name":"resource_schema_url","data_type":"String"},{"name":"resource_attributes","data_type":"Json"},{"name":"log_attributes","data_type":"Json"},{"name":"timestamp","data_type":"TimestampNanosecond"},{"name":"observed_timestamp","data_type":"TimestampNanosecond"},{"name":"trace_id","data_type":"String"},{"name":"span_id","data_type":"String"},{"name":"trace_flags","data_type":"UInt32"},{"name":"severity_text","data_type":"String"},{"name":"severity_number","data_type":"Int32"},{"name":"body","data_type":"String"}]},"rows":[["","",[64,0,0,0],"https://opentelemetry.io/schemas/1.0.0/scopeLogs","https://opentelemetry.io/schemas/1.0.0/resourceLogs",[64,0,0,1,16,0,0,13,16,0,0,19,114,101,115,111,117,114,99,101,95,97,116,116,114,114,101,115,111,117,114,99,101,45,97,116,116,114,45,118,97,108,45,49],[64,0,0,2,16,0,0,8,16,0,0,3,16,0,0,4,16,0,0,3,99,117,115,116,111,109,101,114,101,110,118,97,99,109,101,100,101,118],1581452773000000789,1581452773000000789,"30","30",1,"Info",9,"something happened"],["","",[64,0,0,0],"https://opentelemetry.io/schemas/1.0.0/scopeLogs","https://opentelemetry.io/schemas/1.0.0/resourceLogs",[64,0,0,1,16,0,0,13,16,0,0,19,114,101,115,111,117,114,99,101,95,97,116,116,114,114,101,115,111,117,114,99,101,45,97,116,116,114,45,118,97,108,45,49],[64,0,0,2,16,0,0,3,16,0,0,12,16,0,0,6,32,0,0,2,97,112,112,105,110,115,116,97,110,99,101,95,110,117,109,115,101,114,118,101,114,64,1],1581452773000009875,1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030",1,"Info",9,"This is a log message"]]"#;
+    let expected = r#"[["","",{},{"resource_attr":"resource-attr-val-1"},{"customer":"acme","env":"dev"},1581452773000000789,1581452773000000789,"30","30",1,"Info",9,"something happened"],["","",{},{"resource_attr":"resource-attr-val-1"},{"app":"server","instance_num":1},1581452773000009875,1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030",1,"Info",9,"This is a log message"]]"#;
     validate_data(&client, "select * from logs;", expected).await;
 
     guard.remove_all().await;

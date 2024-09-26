@@ -20,11 +20,12 @@ use common_telemetry::tracing;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use pipeline::PipelineWay;
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
 use servers::otlp::plugin::TraceParserRef;
-use servers::query_handler::{OpenTelemetryProtocolHandler, PipelineWay};
+use servers::query_handler::OpenTelemetryProtocolHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
@@ -113,10 +114,10 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
         let (requests, rows) = otlp::logs::to_grpc_insert_requests(request, pipeline, table_name)?;
-        OTLP_LOGS_ROWS.inc_by(rows as u64);
 
         self.handle_row_inserts(requests, ctx)
             .await
+            .inspect(|_| OTLP_LOGS_ROWS.inc_by(rows as u64))
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)
     }
