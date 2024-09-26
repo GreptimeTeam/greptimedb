@@ -99,7 +99,7 @@ impl LocalScheduler {
                         }
                         req_opt = receiver.recv() =>{
                             if let Ok(job) = req_opt {
-                                let _timer = SCHEDULER_TASK_ELAPSED.with_label_values(&[job.r#type]);
+                                let _timer = SCHEDULER_TASK_ELAPSED.with_label_values(&[job.r#type]).start_timer();
                                 job.task.await;
                             }
                         }
@@ -109,6 +109,9 @@ impl LocalScheduler {
                 if state_clone.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
                     // recv_async waits until all sender's been dropped.
                     while let Ok(job) = receiver.recv().await {
+                        let _timer = SCHEDULER_TASK_ELAPSED
+                            .with_label_values(&[job.r#type])
+                            .start_timer();
                         job.task.await;
                     }
                     state_clone.store(STATE_STOP, Ordering::Relaxed);
