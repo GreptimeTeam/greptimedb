@@ -434,6 +434,10 @@ database my_db;
 
 Affected Rows: 1
 
+use information_schema;
+
+Affected Rows: 0
+
 use my_db;
 
 Affected Rows: 0
