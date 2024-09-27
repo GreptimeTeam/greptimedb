@@ -314,7 +314,7 @@ impl DatanodeBuilder {
         &self,
         event_listener: RegionServerEventListenerRef,
     ) -> Result<RegionServer> {
-        let opts = &self.opts;
+        let opts: &DatanodeOptions = &self.opts;
 
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
@@ -334,6 +334,9 @@ impl DatanodeBuilder {
             common_runtime::global_runtime(),
             event_listener,
             table_provider_factory,
+            opts.max_concurrent_queries,
+            //TODO: revaluate the hardcoded timeout on the next version of datanode concurrency limiter.
+            Duration::from_millis(100),
         );
 
         let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;

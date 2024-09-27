@@ -15,6 +15,9 @@ init_regions_in_background = false
 ## Parallelism of initializing regions.
 init_regions_parallelism = 16
 
+## The maximum current queries allowed to be executed. Zero means unlimited.
+max_concurrent_queries = 0
+
 ## The runtime options.
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
