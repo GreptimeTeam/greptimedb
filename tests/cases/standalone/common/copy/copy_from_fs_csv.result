@@ -11,7 +11,7 @@ values
 
 Affected Rows: 3
 
-Copy demo TO '/tmp/demo/export/csv/demo.csv' with (format='csv');
+Copy demo TO '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv');
 
 Affected Rows: 3
 
@@ -19,7 +19,7 @@ CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp 
 
 Affected Rows: 0
 
-Copy with_filename FROM '/tmp/demo/export/csv/demo.csv' with (format='csv', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
+Copy with_filename FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
 
 Affected Rows: 2
 
@@ -36,7 +36,7 @@ CREATE TABLE with_path(host string, cpu double, memory double, ts timestamp time
 
 Affected Rows: 0
 
-Copy with_path FROM '/tmp/demo/export/csv/' with (format='csv', start_time='2023-06-15 07:02:37');
+Copy with_path FROM '${SQLNESS_HOME}/demo/export/csv/' with (format='csv', start_time='2023-06-15 07:02:37');
 
 Affected Rows: 1
 
@@ -52,7 +52,7 @@ CREATE TABLE with_pattern(host string, cpu double, memory double, ts timestamp t
 
 Affected Rows: 0
 
-Copy with_pattern FROM '/tmp/demo/export/csv/' WITH (pattern = 'demo.*', format='csv', end_time='2025-06-15 07:02:39');
+Copy with_pattern FROM '${SQLNESS_HOME}/demo/export/csv/' WITH (pattern = 'demo.*', format='csv', end_time='2025-06-15 07:02:39');
 
 Affected Rows: 3
 

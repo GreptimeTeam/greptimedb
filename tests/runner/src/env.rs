@@ -69,6 +69,7 @@ impl EnvController for Env {
     type DB = GreptimeDB;
 
     async fn start(&self, mode: &str, _config: Option<&Path>) -> Self::DB {
+        std::env::set_var("SQLNESS_HOME", self.sqlness_home.display().to_string());
         match mode {
             "standalone" => self.start_standalone().await,
             "distributed" => self.start_distributed().await,

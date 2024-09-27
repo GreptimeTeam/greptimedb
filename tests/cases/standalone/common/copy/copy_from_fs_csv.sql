@@ -7,23 +7,23 @@ values
     ('host2', 88.8, 333.3, 1655276558000),
     ('host3', 99.9, 444.4, 1722077263000);
 
-Copy demo TO '/tmp/demo/export/csv/demo.csv' with (format='csv');
+Copy demo TO '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv');
 
 CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp time index);
 
-Copy with_filename FROM '/tmp/demo/export/csv/demo.csv' with (format='csv', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
+Copy with_filename FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
 
 select * from with_filename order by ts;
 
 CREATE TABLE with_path(host string, cpu double, memory double, ts timestamp time index);
 
-Copy with_path FROM '/tmp/demo/export/csv/' with (format='csv', start_time='2023-06-15 07:02:37');
+Copy with_path FROM '${SQLNESS_HOME}/demo/export/csv/' with (format='csv', start_time='2023-06-15 07:02:37');
 
 select * from with_path order by ts;
 
 CREATE TABLE with_pattern(host string, cpu double, memory double, ts timestamp time index);
 
-Copy with_pattern FROM '/tmp/demo/export/csv/' WITH (pattern = 'demo.*', format='csv', end_time='2025-06-15 07:02:39');
+Copy with_pattern FROM '${SQLNESS_HOME}/demo/export/csv/' WITH (pattern = 'demo.*', format='csv', end_time='2025-06-15 07:02:39');
 
 select * from with_pattern order by ts;
 
