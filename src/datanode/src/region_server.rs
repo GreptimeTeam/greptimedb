@@ -282,6 +282,7 @@ impl RegionServer {
             engine.role(region_id).map(|role| match role {
                 RegionRole::Follower => false,
                 RegionRole::Leader => true,
+                RegionRole::DowngradingLeader => true,
             })
         })
     }

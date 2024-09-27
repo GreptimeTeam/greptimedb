@@ -126,7 +126,9 @@ impl HeartbeatTask {
                     let mut follower_region_lease_count = 0;
                     for lease in &lease.regions {
                         match lease.role() {
-                            RegionRole::Leader => leader_region_lease_count += 1,
+                            RegionRole::Leader | RegionRole::DowngradingLeader => {
+                                leader_region_lease_count += 1
+                            }
                             RegionRole::Follower => follower_region_lease_count += 1,
                         }
                     }

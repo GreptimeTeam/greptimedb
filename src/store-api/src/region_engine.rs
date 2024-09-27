@@ -36,12 +36,23 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{RegionOpenRequest, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
 
+/// The settable region role state.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SettableRegionRoleState {
     Follower,
     DowngradingLeader,
 }
 
+impl From<SettableRegionRoleState> for RegionRole {
+    fn from(value: SettableRegionRoleState) -> Self {
+        match value {
+            SettableRegionRoleState::Follower => RegionRole::Follower,
+            SettableRegionRoleState::DowngradingLeader => RegionRole::DowngradingLeader,
+        }
+    }
+}
+
+/// The request to set region role state.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SetRegionRoleStateRequest {
     region_id: RegionId,
@@ -70,6 +81,7 @@ pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
 }
+
 impl GrantedRegion {
     pub fn new(region_id: RegionId, region_role: RegionRole) -> Self {
         Self {
@@ -97,12 +109,18 @@ impl From<PbGrantedRegion> for GrantedRegion {
     }
 }
 
+/// The role of the region.
+/// TODO(weny): rename it to `RegionRoleState`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegionRole {
     // Readonly region(mito2)
     Follower,
     // Writable region(mito2), Readonly region(file).
     Leader,
+    // Leader is downgrading to follower.
+    //
+    // This state is used to prevent new write requests.
+    DowngradingLeader = 2,
 }
 
 impl Display for RegionRole {
@@ -110,6 +128,7 @@ impl Display for RegionRole {
         match self {
             RegionRole::Follower => write!(f, "Follower"),
             RegionRole::Leader => write!(f, "Leader"),
+            RegionRole::DowngradingLeader => write!(f, "Leader(Downgrading)"),
         }
     }
 }
@@ -125,6 +144,7 @@ impl From<RegionRole> for PbRegionRole {
         match value {
             RegionRole::Follower => PbRegionRole::Follower,
             RegionRole::Leader => PbRegionRole::Leader,
+            RegionRole::DowngradingLeader => PbRegionRole::DowngradingLeader,
         }
     }
 }
@@ -134,6 +154,7 @@ impl From<PbRegionRole> for RegionRole {
         match value {
             PbRegionRole::Leader => RegionRole::Leader,
             PbRegionRole::Follower => RegionRole::Follower,
+            PbRegionRole::DowngradingLeader => RegionRole::DowngradingLeader,
         }
     }
 }
