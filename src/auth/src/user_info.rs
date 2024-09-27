@@ -23,13 +23,13 @@ pub trait UserInfo: Debug + Sync + Send {
     fn username(&self) -> &str;
 }
 
-#[derive(Debug, Clone)]
-pub struct DefaultUserInfo {
+#[derive(Debug)]
+pub(crate) struct DefaultUserInfo {
     username: String,
 }
 
 impl DefaultUserInfo {
-    pub fn with_name(username: impl Into<String>) -> UserInfoRef {
+    pub(crate) fn with_name(username: impl Into<String>) -> UserInfoRef {
         Arc::new(Self {
             username: username.into(),
         })
