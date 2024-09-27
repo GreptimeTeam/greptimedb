@@ -332,7 +332,7 @@ impl Env {
     fn flownode_start_args(
         &self,
         _db_ctx: &GreptimeDBContext,
-        sqlness_home: &PathBuf,
+        sqlness_home: &Path,
     ) -> (Vec<String>, String) {
         let id = 0;
 
