@@ -23,8 +23,8 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::{Scalar, ScalarVectorBuilder};
 use datatypes::value::{ListValue, Value};
 use datatypes::vectors::{
-    BooleanVectorBuilder, Float64VectorBuilder, Int32VectorBuilder, ListVectorBuilder,
-    MutableVector, StringVectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
+    BooleanVectorBuilder, Int32VectorBuilder, ListVectorBuilder, MutableVector,
+    StringVectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
 };
 use derive_more::Display;
 use h3o::{CellIndex, LatLng, Resolution};
@@ -319,18 +319,20 @@ impl Function for H3StringToCell {
     }
 }
 
-/// Function that returns centroid latitude of given cell id
+/// Function that returns centroid latitude and longitude of given cell id
 #[derive(Clone, Debug, Default, Display)]
 #[display("{}", self.name())]
-pub struct H3CellCenterLat;
+pub struct H3CellCenterLatLng;
 
-impl Function for H3CellCenterLat {
+impl Function for H3CellCenterLatLng {
     fn name(&self) -> &str {
-        "h3_cell_center_lat"
+        "h3_cell_center_latlng"
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float64_datatype())
+        Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::float64_datatype(),
+        ))
     }
 
     fn signature(&self) -> Signature {
@@ -350,57 +352,22 @@ impl Function for H3CellCenterLat {
 
         let cell_vec = &columns[0];
         let size = cell_vec.len();
-        let mut results = Float64VectorBuilder::with_capacity(size);
+        let mut results =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::float64_datatype(), size);
 
         for i in 0..size {
             let cell = cell_from_value(cell_vec.get(i))?;
-            let lat = cell.map(|cell| LatLng::from(cell).lat());
+            let latlng = cell.map(LatLng::from);
 
-            results.push(lat);
-        }
-
-        Ok(results.to_vector())
-    }
-}
-
-/// Function that returns centroid longitude of given cell id
-#[derive(Clone, Debug, Default, Display)]
-#[display("{}", self.name())]
-pub struct H3CellCenterLng;
-
-impl Function for H3CellCenterLng {
-    fn name(&self) -> &str {
-        "h3_cell_center_lng"
-    }
-
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float64_datatype())
-    }
-
-    fn signature(&self) -> Signature {
-        signature_of_cell()
-    }
-
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 1, provided : {}",
-                    columns.len()
-                ),
+            if let Some(latlng) = latlng {
+                let result = ListValue::new(
+                    vec![latlng.lat().into(), latlng.lng().into()],
+                    ConcreteDataType::float64_datatype(),
+                );
+                results.push(Some(result.as_scalar_ref()));
+            } else {
+                results.push(None);
             }
-        );
-
-        let cell_vec = &columns[0];
-        let size = cell_vec.len();
-        let mut results = Float64VectorBuilder::with_capacity(size);
-
-        for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
-            let lat = cell.map(|cell| LatLng::from(cell).lng());
-
-            results.push(lat);
         }
 
         Ok(results.to_vector())
@@ -673,15 +640,15 @@ impl Function for H3CellToChildren {
         for i in 0..size {
             let cell = cell_from_value(cell_vec.get(i))?;
             let res = value_to_resolution(res_vec.get(i))?;
-            let result = cell.and_then(|cell| {
+            let result = cell.map(|cell| {
                 let children: Vec<Value> = cell
                     .children(res)
                     .map(|child| Value::from(u64::from(child)))
                     .collect();
-                Some(ListValue::new(
+                ListValue::new(
                     children,
                     ConcreteDataType::uint64_datatype(),
-                ))
+                )
             });
 
             if let Some(list_value) = result {
@@ -906,16 +873,16 @@ impl Function for H3GridDisk {
             let cell = cell_from_value(cell_vec.get(i))?;
             let k = value_to_distance(k_vec.get(i))?;
 
-            let result = cell.and_then(|cell| {
+            let result = cell.map(|cell| {
                 let children: Vec<Value> = cell
                     .grid_disk::<Vec<_>>(k)
                     .into_iter()
                     .map(|child| Value::from(u64::from(child)))
                     .collect();
-                Some(ListValue::new(
+                ListValue::new(
                     children,
                     ConcreteDataType::uint64_datatype(),
-                ))
+                )
             });
 
             if let Some(list_value) = result {
@@ -970,16 +937,16 @@ impl Function for H3GridDiskDistances {
             let cell = cell_from_value(cell_vec.get(i))?;
             let k = value_to_distance(k_vec.get(i))?;
 
-            let result = cell.and_then(|cell| {
+            let result = cell.map(|cell| {
                 let children: Vec<Value> = cell
                     .grid_disk_distances::<Vec<_>>(k)
                     .into_iter()
                     .map(|(child, _distance)| Value::from(u64::from(child)))
                     .collect();
-                Some(ListValue::new(
+                ListValue::new(
                     children,
                     ConcreteDataType::uint64_datatype(),
-                ))
+                )
             });
 
             if let Some(list_value) = result {
@@ -1179,7 +1146,7 @@ fn value_to_position(v: Value) -> Result<u64> {
         Value::UInt8(v) => Ok(v as u64),
         Value::UInt16(v) => Ok(v as u64),
         Value::UInt32(v) => Ok(v as u64),
-        Value::UInt64(v) => Ok(v as u64),
+        Value::UInt64(v) => Ok(v),
         _ => unreachable!(),
     }
 }
@@ -1192,7 +1159,7 @@ fn value_to_distance(v: Value) -> Result<u32> {
         Value::Int64(v) => ensure_and_coerce!(v >= 0, v as u32),
         Value::UInt8(v) => Ok(v as u32),
         Value::UInt16(v) => Ok(v as u32),
-        Value::UInt32(v) => Ok(v as u32),
+        Value::UInt32(v) => Ok(v),
         Value::UInt64(v) => Ok(v as u32),
         _ => unreachable!(),
     }

@@ -39,8 +39,7 @@ impl GeoFunctions {
         registry.register(Arc::new(h3::H3CellIsPentagon));
         registry.register(Arc::new(h3::H3StringToCell));
         registry.register(Arc::new(h3::H3CellToString));
-        registry.register(Arc::new(h3::H3CellCenterLat));
-        registry.register(Arc::new(h3::H3CellCenterLng));
+        registry.register(Arc::new(h3::H3CellCenterLatLng));
         registry.register(Arc::new(h3::H3CellResolution));
 
         // h3 hierarchical grid

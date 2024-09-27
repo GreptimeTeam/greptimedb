@@ -102,13 +102,13 @@ SELECT h3_cell_to_string(h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64)) AS c
 | 88283082e7fffff | 613196570438926335 |
 +-----------------+--------------------+
 
-SELECT h3_cell_center_lat(h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64)) AS cell_center_lat, h3_cell_center_lng(h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64)) AS cell_center_lng;
+SELECT h3_cell_center_latlng(h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64)) AS cell_center;
 
-+-------------------+---------------------+
-| cell_center_lat   | cell_center_lng     |
-+-------------------+---------------------+
-| 37.77246152245501 | -122.39010997087324 |
-+-------------------+---------------------+
++------------------------------------------+
+| cell_center                              |
++------------------------------------------+
+| [37.77246152245501, -122.39010997087324] |
++------------------------------------------+
 
 SELECT
     h3_cell_resolution(cell) AS resolution,

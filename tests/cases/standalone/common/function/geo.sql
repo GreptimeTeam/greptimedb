@@ -26,7 +26,7 @@ SELECT h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64), h3_latlng_to_cell_stri
 
 SELECT h3_cell_to_string(h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64)) AS cell_str, h3_string_to_cell(h3_latlng_to_cell_string(37.76938, -122.3889, 8::UInt64)) AS cell_index;
 
-SELECT h3_cell_center_lat(h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64)) AS cell_center_lat, h3_cell_center_lng(h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64)) AS cell_center_lng;
+SELECT h3_cell_center_latlng(h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64)) AS cell_center;
 
 SELECT
     h3_cell_resolution(cell) AS resolution,
