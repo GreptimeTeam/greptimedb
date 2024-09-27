@@ -33,7 +33,7 @@ const INACTIVE_REGION_PREFIX: &str = "__meta_inactive_region";
 
 const DATANODE_STAT_PREFIX: &str = "__meta_datanode_stat";
 
-pub const REGION_STATISTIC_KEY: &str = "region_statistic";
+pub const REGION_STATISTIC_KEY: &str = "__region_statistic";
 
 lazy_static! {
     pub(crate) static ref DATANODE_LEASE_KEY_PATTERN: Regex =
