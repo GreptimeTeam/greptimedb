@@ -25,78 +25,84 @@ use crate::config::MitoConfig;
 use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
-async fn test_set_readonly_gracefully() {
-    let mut env = TestEnv::new();
-    let engine = env.create_engine(MitoConfig::default()).await;
+async fn test_set_role_state_gracefully() {
+    let settable_role_states = [
+        SettableRegionRoleState::Follower,
+        SettableRegionRoleState::DowngradingLeader,
+    ];
+    for settable_role_state in settable_role_states {
+        let mut env = TestEnv::new();
+        let engine = env.create_engine(MitoConfig::default()).await;
 
-    let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new().build();
 
-    let column_schemas = rows_schema(&request);
-    engine
-        .handle_request(region_id, RegionRequest::Create(request))
-        .await
-        .unwrap();
+        let column_schemas = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
 
-    let result = engine
-        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
-        .await
-        .unwrap();
-    assert_eq!(
-        SetRegionRoleStateResponse::Success {
-            last_entry_id: Some(0)
-        },
-        result
-    );
+        let result = engine
+            .set_region_role_state_gracefully(region_id, settable_role_state)
+            .await
+            .unwrap();
+        assert_eq!(
+            SetRegionRoleStateResponse::Success {
+                last_entry_id: Some(0)
+            },
+            result
+        );
 
-    // set readonly again.
-    let result = engine
-        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
-        .await
-        .unwrap();
-    assert_eq!(
-        SetRegionRoleStateResponse::Success {
-            last_entry_id: Some(0)
-        },
-        result
-    );
+        // set Follower again.
+        let result = engine
+            .set_region_role_state_gracefully(region_id, settable_role_state)
+            .await
+            .unwrap();
+        assert_eq!(
+            SetRegionRoleStateResponse::Success {
+                last_entry_id: Some(0)
+            },
+            result
+        );
 
-    let rows = Rows {
-        schema: column_schemas,
-        rows: build_rows(0, 3),
-    };
+        let rows = Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 3),
+        };
 
-    let error = engine
-        .handle_request(
-            region_id,
-            RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
-        )
-        .await
-        .unwrap_err();
+        let error = engine
+            .handle_request(
+                region_id,
+                RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
+            )
+            .await
+            .unwrap_err();
 
-    assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+        assert_eq!(error.status_code(), StatusCode::RegionNotReady);
 
-    engine
-        .set_region_role(region_id, RegionRole::Leader)
-        .unwrap();
+        engine
+            .set_region_role(region_id, RegionRole::Leader)
+            .unwrap();
 
-    put_rows(&engine, region_id, rows).await;
+        put_rows(&engine, region_id, rows).await;
 
-    let result = engine
-        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
-        .await
-        .unwrap();
+        let result = engine
+            .set_region_role_state_gracefully(region_id, settable_role_state)
+            .await
+            .unwrap();
 
-    assert_eq!(
-        SetRegionRoleStateResponse::Success {
-            last_entry_id: Some(1)
-        },
-        result
-    );
+        assert_eq!(
+            SetRegionRoleStateResponse::Success {
+                last_entry_id: Some(1)
+            },
+            result
+        );
+    }
 }
 
 #[tokio::test]
-async fn test_set_readonly_gracefully_not_exist() {
+async fn test_set_role_state_gracefully_not_exist() {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
 

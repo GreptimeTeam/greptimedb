@@ -37,7 +37,7 @@ use crate::region_request::{RegionOpenRequest, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
 
 /// The settable region role state.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SettableRegionRoleState {
     Follower,
     DowngradingLeader,
