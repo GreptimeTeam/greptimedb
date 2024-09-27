@@ -201,78 +201,10 @@ impl MitoRegion {
         self.manifest_ctx.state.load()
     }
 
-    /// Sets the [`RegionRole`].
-    ///
-    /// ```
-    ///     +------------------------------------------+    
-    ///     |                      +-----------------+ |    
-    ///     |                      |                 | |    
-    /// +---+------+       +-------+-----+        +--v-v---+
-    /// | Follower |       | Downgrading |        | Leader |
-    /// +---^-^----+       +-----+-^-----+        +--+-+---+
-    ///     | |                  | |                 | |    
-    ///     | +------------------+ +-----------------+ |    
-    ///     +------------------------------------------+    
-    ///
-    /// Transition:
-    /// - Follower -> Leader
-    /// - Downgrading Leader -> Leader
-    /// - Leader -> Follower
-    /// - Downgrading Leader -> Follower
-    /// - Leader -> Downgrading Leader
-    ///
-    /// ```
+    /// Sets the region role state.
     pub(crate) fn set_region_role_state(&self, next_role: RegionRole) {
-        match next_role {
-            RegionRole::Follower => {
-                self.manifest_ctx.state.store(RegionRoleState::Follower);
-            }
-            RegionRole::Leader => {
-                match self.manifest_ctx.state.fetch_update(|state| {
-                    if matches!(
-                        state,
-                        RegionRoleState::Follower
-                            | RegionRoleState::Leader(RegionLeaderState::Downgrading)
-                    ) {
-                        Some(RegionRoleState::Leader(RegionLeaderState::Writable))
-                    } else {
-                        None
-                    }
-                }) {
-                    Ok(state) => info!(
-                        "Convert region {} to leader, previous role state: {:?}",
-                        self.region_id, state
-                    ),
-                    Err(state) => {
-                        if state != RegionRoleState::Leader(RegionLeaderState::Writable) {
-                            warn!(
-                                "Failed to convert region {} to leader, current role state: {:?}",
-                                self.region_id, state
-                            )
-                        }
-                    }
-                }
-            }
-            RegionRole::DowngradingLeader => {
-                match self.manifest_ctx.state.compare_exchange(
-                    RegionRoleState::Leader(RegionLeaderState::Writable),
-                    RegionRoleState::Leader(RegionLeaderState::Downgrading),
-                ) {
-                    Ok(state) => info!(
-                        "Convert region {} to Leader(Downgrading), previous role state: {:?}",
-                        self.region_id, state
-                    ),
-                    Err(state) => {
-                        if state != RegionRoleState::Leader(RegionLeaderState::Downgrading) {
-                            warn!(
-                                "Failed to convert region {} to Leader(Downgrading), current role state: {:?}",
-                                self.region_id, state
-                            )
-                        }
-                    }
-                }
-            }
-        }
+        self.manifest_ctx
+            .set_role_role_state(next_role, self.region_id);
     }
 
     /// Sets the altering state.
@@ -480,6 +412,80 @@ impl ManifestContext {
 
         Ok(version)
     }
+
+    /// Sets the [`RegionRole`].
+    ///
+    /// ```
+    ///     +------------------------------------------+    
+    ///     |                      +-----------------+ |    
+    ///     |                      |                 | |    
+    /// +---+------+       +-------+-----+        +--v-v---+
+    /// | Follower |       | Downgrading |        | Leader |
+    /// +---^-^----+       +-----+-^-----+        +--+-+---+
+    ///     | |                  | |                 | |    
+    ///     | +------------------+ +-----------------+ |    
+    ///     +------------------------------------------+    
+    ///
+    /// Transition:
+    /// - Follower -> Leader
+    /// - Downgrading Leader -> Leader
+    /// - Leader -> Follower
+    /// - Downgrading Leader -> Follower
+    /// - Leader -> Downgrading Leader
+    ///
+    /// ```
+    pub(crate) fn set_role_role_state(&self, next_role: RegionRole, region_id: RegionId) {
+        match next_role {
+            RegionRole::Follower => {
+                self.state.store(RegionRoleState::Follower);
+            }
+            RegionRole::Leader => {
+                match self.state.fetch_update(|state| {
+                    if matches!(
+                        state,
+                        RegionRoleState::Follower
+                            | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+                    ) {
+                        Some(RegionRoleState::Leader(RegionLeaderState::Writable))
+                    } else {
+                        None
+                    }
+                }) {
+                    Ok(state) => info!(
+                        "Convert region {} to leader, previous role state: {:?}",
+                        region_id, state
+                    ),
+                    Err(state) => {
+                        if state != RegionRoleState::Leader(RegionLeaderState::Writable) {
+                            warn!(
+                                "Failed to convert region {} to leader, current role state: {:?}",
+                                region_id, state
+                            )
+                        }
+                    }
+                }
+            }
+            RegionRole::DowngradingLeader => {
+                match self.state.compare_exchange(
+                    RegionRoleState::Leader(RegionLeaderState::Writable),
+                    RegionRoleState::Leader(RegionLeaderState::Downgrading),
+                ) {
+                    Ok(state) => info!(
+                        "Convert region {} to Leader(Downgrading), previous role state: {:?}",
+                        region_id, state
+                    ),
+                    Err(state) => {
+                        if state != RegionRoleState::Leader(RegionLeaderState::Downgrading) {
+                            warn!(
+                                "Failed to convert region {} to Leader(Downgrading), current role state: {:?}",
+                                region_id, state
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -674,12 +680,70 @@ impl ManifestStats {
 
 #[cfg(test)]
 mod tests {
-    use crossbeam_utils::atomic::AtomicCell;
+    use std::sync::Arc;
 
-    use crate::region::RegionRoleState;
+    use crossbeam_utils::atomic::AtomicCell;
+    use store_api::region_engine::RegionRole;
+    use store_api::storage::RegionId;
+
+    use crate::region::{RegionLeaderState, RegionRoleState};
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::version_util::VersionControlBuilder;
 
     #[test]
     fn test_region_state_lock_free() {
         assert!(AtomicCell::<RegionRoleState>::is_lock_free());
+    }
+
+    #[tokio::test]
+    async fn test_set_region_state() {
+        let env = SchedulerEnv::new().await;
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+
+        let region_id = RegionId::new(1024, 0);
+        // Leader -> Follower
+        manifest_ctx.set_role_role_state(RegionRole::Follower, region_id);
+        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+
+        // Follower -> Leader
+        manifest_ctx.set_role_role_state(RegionRole::Leader, region_id);
+        assert_eq!(
+            manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+
+        // Leader -> Downgrading Leader
+        manifest_ctx.set_role_role_state(RegionRole::DowngradingLeader, region_id);
+        assert_eq!(
+            manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        );
+
+        // Downgrading Leader -> Follower
+        manifest_ctx.set_role_role_state(RegionRole::Follower, region_id);
+        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+
+        // Can't downgrade from follower (Follower -> Downgrading Leader)
+        manifest_ctx.set_role_role_state(RegionRole::DowngradingLeader, region_id);
+        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+
+        // Set region role too Downgrading Leader
+        manifest_ctx.set_role_role_state(RegionRole::Leader, region_id);
+        manifest_ctx.set_role_role_state(RegionRole::DowngradingLeader, region_id);
+        assert_eq!(
+            manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        );
+
+        // Downgrading Leader -> Leader
+        manifest_ctx.set_role_role_state(RegionRole::Leader, region_id);
+        assert_eq!(
+            manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
     }
 }
