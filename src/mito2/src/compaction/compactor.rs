@@ -38,7 +38,7 @@ use crate::memtable::MemtableBuilderProvider;
 use crate::read::Source;
 use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
-use crate::region::version::{VersionBuilder, VersionControl, VersionRef};
+use crate::region::version::{VersionBuilder, VersionRef};
 use crate::region::ManifestContext;
 use crate::region::RegionState::Writable;
 use crate::schedule::scheduler::LocalScheduler;
@@ -164,8 +164,7 @@ pub async fn open_compaction_region(
             .compaction_time_window(manifest.compaction_time_window)
             .options(req.region_options.clone())
             .build();
-        let version_control = Arc::new(VersionControl::new(version));
-        version_control.current().version
+        Arc::new(version)
     };
 
     Ok(CompactionRegion {
@@ -395,8 +394,9 @@ impl Compactor for DefaultCompactor {
     ) -> Result<()> {
         let picker_output = {
             let picker_output = new_picker(
-                compact_request_options,
+                &compact_request_options,
                 &compaction_region.region_options.compaction,
+                compaction_region.region_options.append_mode,
             )
             .pick(compaction_region);
 
