@@ -645,10 +645,7 @@ impl Function for H3CellToChildren {
                     .children(res)
                     .map(|child| Value::from(u64::from(child)))
                     .collect();
-                ListValue::new(
-                    children,
-                    ConcreteDataType::uint64_datatype(),
-                )
+                ListValue::new(children, ConcreteDataType::uint64_datatype())
             });
 
             if let Some(list_value) = result {
@@ -879,10 +876,7 @@ impl Function for H3GridDisk {
                     .into_iter()
                     .map(|child| Value::from(u64::from(child)))
                     .collect();
-                ListValue::new(
-                    children,
-                    ConcreteDataType::uint64_datatype(),
-                )
+                ListValue::new(children, ConcreteDataType::uint64_datatype())
             });
 
             if let Some(list_value) = result {
@@ -943,10 +937,7 @@ impl Function for H3GridDiskDistances {
                     .into_iter()
                     .map(|(child, _distance)| Value::from(u64::from(child)))
                     .collect();
-                ListValue::new(
-                    children,
-                    ConcreteDataType::uint64_datatype(),
-                )
+                ListValue::new(children, ConcreteDataType::uint64_datatype())
             });
 
             if let Some(list_value) = result {
