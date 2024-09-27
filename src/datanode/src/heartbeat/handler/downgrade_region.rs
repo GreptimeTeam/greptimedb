@@ -24,28 +24,6 @@ use crate::heartbeat::handler::HandlerContext;
 use crate::heartbeat::task_tracker::WaitResult;
 
 impl HandlerContext {
-    async fn downgrade_region_gracefully(&self, region_id: RegionId) -> Option<InstructionReply> {
-        match self
-            .region_server
-            .downgrade_region_gracefully(region_id)
-            .await
-        {
-            Ok(SetRegionRoleStateResponse::Success { .. }) => None,
-            Ok(SetRegionRoleStateResponse::NotFound) => {
-                Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                    last_entry_id: None,
-                    exists: false,
-                    error: None,
-                }))
-            }
-            Err(err) => Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                last_entry_id: None,
-                exists: true,
-                error: Some(format!("{err:?}")),
-            })),
-        }
-    }
-
     async fn become_follower_gracefully(&self, region_id: RegionId) -> InstructionReply {
         match self
             .region_server
@@ -84,6 +62,7 @@ impl HandlerContext {
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
             let Some(writable) = self.region_server.is_region_leader(region_id) else {
+                warn!("Region: {region_id} is not found");
                 return InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id: None,
                     exists: false,
@@ -100,8 +79,28 @@ impl HandlerContext {
             if let Some(flush_timeout) = flush_timeout {
                 if reject_write {
                     // Sets region to downgrading, the downgrading region will reject all write requests.
-                    if let Some(reply) = self.downgrade_region_gracefully(region_id).await {
-                        return reply;
+                    match self
+                        .region_server
+                        .downgrade_region_gracefully(region_id)
+                        .await
+                    {
+                        Ok(SetRegionRoleStateResponse::Success { .. }) => {}
+                        Ok(SetRegionRoleStateResponse::NotFound) => {
+                            warn!("Region: {region_id} is not found");
+                            return InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                                last_entry_id: None,
+                                exists: false,
+                                error: None,
+                            });
+                        }
+                        Err(err) => {
+                            warn!("Failed to set region to downgrading: {err:?}");
+                            return InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                                last_entry_id: None,
+                                exists: true,
+                                error: Some(format!("{err:?}")),
+                            });
+                        }
                     }
                 }
 
@@ -110,7 +109,7 @@ impl HandlerContext {
                     .try_register(
                         region_id,
                         Box::pin(async move {
-                            info!("Flush region: {region_id} before downgrading region");
+                            info!("Flush region: {region_id} before converting region to follower");
                             region_server_moved
                                 .handle_request(
                                     region_id,
@@ -137,9 +136,7 @@ impl HandlerContext {
                         InstructionReply::DowngradeRegion(DowngradeRegionReply {
                             last_entry_id: None,
                             exists: true,
-                            error: Some(format!(
-                                "Flush region: {region_id} before downgrading region is timeout"
-                            )),
+                            error: Some(format!("Flush region: {region_id} is timeout")),
                         })
                     }
                     WaitResult::Finish(Ok(_)) => self.become_follower_gracefully(region_id).await,
