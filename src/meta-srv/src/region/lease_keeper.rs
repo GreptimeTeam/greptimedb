@@ -269,7 +269,7 @@ mod tests {
         // The downgraded leader region on the datanode.
         assert_eq!(
             renew_region_lease_via_region_route(&region_route, leader_peer_id, region_id),
-            Some((region_id, RegionRole::Follower))
+            Some((region_id, RegionRole::DowngradingLeader))
         );
     }
 

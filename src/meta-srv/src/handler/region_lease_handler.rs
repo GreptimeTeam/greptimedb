@@ -352,7 +352,7 @@ mod test {
         assert_region_lease(
             acc,
             vec![
-                GrantedRegion::new(region_id, RegionRole::Follower),
+                GrantedRegion::new(region_id, RegionRole::DowngradingLeader),
                 GrantedRegion::new(another_region_id, RegionRole::Leader),
             ],
         );
