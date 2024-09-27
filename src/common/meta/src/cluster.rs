@@ -20,6 +20,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
+use crate::datanode::RegionStat;
 use crate::error::{
     DecodeJsonSnafu, EncodeJsonSnafu, Error, FromUtf8Snafu, InvalidNodeInfoKeySnafu,
     InvalidRoleSnafu, ParseNumSnafu, Result,
@@ -46,6 +47,9 @@ pub trait ClusterInfo {
         &self,
         role: Option<Role>,
     ) -> std::result::Result<Vec<NodeInfo>, Self::Error>;
+
+    /// List all region stats in the cluster.
+    async fn list_region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error>;
 
     // TODO(jeremy): Other info, like region status, etc.
 }

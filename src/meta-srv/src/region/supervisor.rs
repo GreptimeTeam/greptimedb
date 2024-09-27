@@ -16,6 +16,7 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::MAINTENANCE_KEY;
 use common_meta::kv_backend::KvBackendRef;
@@ -32,7 +33,6 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
-use crate::handler::node_stat::Stat;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::region_migration::RegionMigrationProcedureTask;

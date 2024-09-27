@@ -31,7 +31,9 @@ use query::query_engine::{DescribeResult, QueryEngineState};
 use query::{QueryEngine, QueryEngineContext};
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
+use store_api::region_engine::{
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetReadonlyResponse,
+};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use table::TableRef;
@@ -210,7 +212,7 @@ impl RegionEngine for MockRegionEngine {
         unimplemented!()
     }
 
-    fn region_disk_usage(&self, _region_id: RegionId) -> Option<i64> {
+    fn region_statistic(&self, _region_id: RegionId) -> Option<RegionStatistic> {
         unimplemented!()
     }
 

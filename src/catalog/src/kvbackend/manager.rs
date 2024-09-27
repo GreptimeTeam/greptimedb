@@ -64,12 +64,17 @@ use crate::CatalogManager;
 #[derive(Clone)]
 pub struct KvBackendCatalogManager {
     mode: Mode,
+    /// Only available in `Distributed` mode.
     meta_client: Option<Arc<MetaClient>>,
+    /// Manages partition rules.
     partition_manager: PartitionRuleManagerRef,
+    /// Manages table metadata.
     table_metadata_manager: TableMetadataManagerRef,
     /// A sub-CatalogManager that handles system tables
     system_catalog: SystemCatalog,
+    /// Cache registry for all caches.
     cache_registry: LayeredCacheRegistryRef,
+    /// Only available in `Standalone` mode.
     procedure_manager: Option<ProcedureManagerRef>,
 }
 

@@ -76,7 +76,8 @@ use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    BatchResponses, RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse,
+    BatchResponses, RegionEngine, RegionRole, RegionScannerRef, RegionStatistic,
+    SetReadonlyResponse,
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
@@ -89,7 +90,6 @@ use crate::error::{
 use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
-use crate::region::RegionUsage;
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::wal::entry_distributor::{
     build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
@@ -133,15 +133,12 @@ impl MitoEngine {
         self.inner.workers.is_region_opening(region_id)
     }
 
-    /// Returns the region disk/memory usage information.
-    pub fn get_region_usage(&self, region_id: RegionId) -> Result<RegionUsage> {
-        let region = self
-            .inner
+    /// Returns the region disk/memory statistic.
+    pub fn get_region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
+        self.inner
             .workers
             .get_region(region_id)
-            .context(RegionNotFoundSnafu { region_id })?;
-
-        Ok(region.region_usage())
+            .map(|region| region.region_statistic())
     }
 
     /// Handle substrait query and return a stream of record batches
@@ -546,12 +543,8 @@ impl RegionEngine for MitoEngine {
         self.inner.stop().await.map_err(BoxedError::new)
     }
 
-    fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
-        let size = self
-            .get_region_usage(region_id)
-            .map(|usage| usage.disk_usage())
-            .ok()?;
-        size.try_into().ok()
+    fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
+        self.get_region_statistic(region_id)
     }
 
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {

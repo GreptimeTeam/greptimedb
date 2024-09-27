@@ -49,6 +49,7 @@ SHOW TABLES;
 | profiling                             |
 | referential_constraints               |
 | region_peers                          |
+| region_statistics                     |
 | routines                              |
 | runtime_metrics                       |
 | schema_privileges                     |
@@ -96,6 +97,7 @@ SHOW FULL TABLES;
 | profiling                             | LOCAL TEMPORARY |
 | referential_constraints               | LOCAL TEMPORARY |
 | region_peers                          | LOCAL TEMPORARY |
+| region_statistics                     | LOCAL TEMPORARY |
 | routines                              | LOCAL TEMPORARY |
 | runtime_metrics                       | LOCAL TEMPORARY |
 | schema_privileges                     | LOCAL TEMPORARY |
@@ -137,6 +139,7 @@ SHOW TABLE STATUS;
 |profiling||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |referential_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |region_peers||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|region_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |routines||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |runtime_metrics||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |schema_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||

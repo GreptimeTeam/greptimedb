@@ -50,8 +50,15 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to list nodes in cluster: {source}"))]
+    #[snafu(display("Failed to list nodes in cluster"))]
     ListNodes {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to region stats in cluster"))]
+    ListRegionStats {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
@@ -314,6 +321,7 @@ impl ErrorExt for Error {
             | Error::ListTables { source, .. }
             | Error::ListFlows { source, .. }
             | Error::ListProcedures { source, .. }
+            | Error::ListRegionStats { source, .. }
             | Error::ConvertProtoData { source, .. } => source.status_code(),
 
             Error::CreateTable { source, .. } => source.status_code(),

@@ -22,6 +22,7 @@
 pub mod cache;
 pub mod cache_invalidator;
 pub mod cluster;
+pub mod datanode;
 pub mod ddl;
 pub mod ddl_manager;
 pub mod distributed_time_constants;

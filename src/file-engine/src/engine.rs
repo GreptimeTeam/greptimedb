@@ -26,7 +26,8 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse, SinglePartitionScanner,
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetReadonlyResponse,
+    SinglePartitionScanner,
 };
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
@@ -108,7 +109,7 @@ impl RegionEngine for FileRegionEngine {
         self.inner.stop().await.map_err(BoxedError::new)
     }
 
-    fn region_disk_usage(&self, _: RegionId) -> Option<i64> {
+    fn region_statistic(&self, _: RegionId) -> Option<RegionStatistic> {
         None
     }
 

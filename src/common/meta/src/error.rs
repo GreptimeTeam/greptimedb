@@ -218,6 +218,24 @@ pub enum Error {
         error: JsonError,
     },
 
+    #[snafu(display("Failed to serialize to json: {}", input))]
+    SerializeToJson {
+        input: String,
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to deserialize from json: {}", input))]
+    DeserializeFromJson {
+        input: String,
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Payload not exist"))]
     PayloadNotExist {
         #[snafu(implicit)]
@@ -531,8 +549,15 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid  node info key: {}", key))]
+    #[snafu(display("Invalid node info key: {}", key))]
     InvalidNodeInfoKey {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid node stat key: {}", key))]
+    InvalidStatKey {
         key: String,
         #[snafu(implicit)]
         location: Location,
@@ -627,7 +652,9 @@ impl ErrorExt for Error {
             | EtcdTxnFailed { .. }
             | ConnectEtcd { .. }
             | MoveValues { .. }
-            | GetCache { .. } => StatusCode::Internal,
+            | GetCache { .. }
+            | SerializeToJson { .. }
+            | DeserializeFromJson { .. } => StatusCode::Internal,
 
             ValueNotExist { .. } => StatusCode::Unexpected,
 
@@ -700,6 +727,7 @@ impl ErrorExt for Error {
             | InvalidNumTopics { .. }
             | SchemaNotFound { .. }
             | InvalidNodeInfoKey { .. }
+            | InvalidStatKey { .. }
             | ParseNum { .. }
             | InvalidRole { .. }
             | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,

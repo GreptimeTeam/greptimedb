@@ -103,6 +103,7 @@ mod test {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
+    use common_meta::datanode::{RegionStat, Stat};
     use common_meta::distributed_time_constants;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
@@ -115,7 +116,6 @@ mod test {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetasrvBuilder;
 
     fn new_test_keeper() -> RegionLeaseKeeper {
@@ -135,7 +135,9 @@ mod test {
             wcus: 0,
             approximate_bytes: 0,
             engine: String::new(),
-            extensions: Default::default(),
+            memtable_size: 0,
+            manifest_size: 0,
+            sst_size: 0,
         }
     }
 
