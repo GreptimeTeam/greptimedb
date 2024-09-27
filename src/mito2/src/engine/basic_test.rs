@@ -88,6 +88,41 @@ async fn test_write_to_region() {
     put_rows(&engine, region_id, rows).await;
 }
 
+#[tokio::test]
+async fn test_write_downgrading_region() {
+    let mut env = TestEnv::with_prefix("write-to-downgrading-region");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
+        .await
+        .unwrap();
+    assert_eq!(
+        SetRegionRoleStateResponse::Success {
+            last_entry_id: Some(0)
+        },
+        result
+    );
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 42),
+    };
+    let err = engine
+        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::RegionNotReady)
+}
+
 #[apply(multiple_log_store_factories)]
 
 async fn test_region_replay(factory: Option<LogStoreFactory>) {
