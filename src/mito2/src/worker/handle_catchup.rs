@@ -114,7 +114,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if request.set_writable {
-            region.set_region_role(RegionRole::Leader);
+            region.set_region_role_state(RegionRole::Leader);
         }
 
         Ok(0)

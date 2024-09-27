@@ -223,7 +223,7 @@ impl MitoRegion {
     /// - Leader -> Downgrading Leader
     ///
     /// ```
-    pub(crate) fn set_region_role(&self, next_role: RegionRole) {
+    pub(crate) fn set_region_role_state(&self, next_role: RegionRole) {
         match next_role {
             RegionRole::Follower => {
                 self.manifest_ctx.state.store(RegionRoleState::Follower);
@@ -313,11 +313,11 @@ impl MitoRegion {
     }
 
     /// Sets the region to readonly gracefully. This acquires the manifest write lock.
-    pub(crate) async fn set_state_gracefully(&self, state: SettableRegionRoleState) {
+    pub(crate) async fn set_role_state_gracefully(&self, state: SettableRegionRoleState) {
         let _manager = self.manifest_ctx.manifest_manager.write().await;
         // We acquires the write lock of the manifest manager to ensure that no one is updating the manifest.
         // Then we change the state.
-        self.set_region_role(state.into());
+        self.set_region_role_state(state.into());
     }
 
     /// Switches the region state to `RegionRoleState::Leader(RegionLeaderState::Writable)` if the current state is `expect`.

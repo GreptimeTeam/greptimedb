@@ -739,7 +739,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_role_state,
                     sender,
                 } => {
-                    self.set_state_gracefully(region_id, region_role_state, sender)
+                    self.set_role_state_gracefully(region_id, region_role_state, sender)
                         .await;
                 }
                 WorkerRequest::EditRegion(request) => {
@@ -840,7 +840,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Handles `set_state_gracefully`.
-    async fn set_state_gracefully(
+    async fn set_role_state_gracefully(
         &mut self,
         region_id: RegionId,
         region_role_state: SettableRegionRoleState,
@@ -849,7 +849,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if let Some(region) = self.regions.get_region(region_id) {
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
-                region.set_state_gracefully(region_role_state).await;
+                region.set_role_state_gracefully(region_role_state).await;
 
                 let last_entry_id = region.version_control.current().last_entry_id;
                 let _ = sender.send(SetRegionRoleStateResponse::success(Some(last_entry_id)));

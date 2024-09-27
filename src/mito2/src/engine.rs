@@ -443,7 +443,7 @@ impl EngineInner {
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
 
-        region.set_region_role(role);
+        region.set_region_role_state(role);
         Ok(())
     }
 

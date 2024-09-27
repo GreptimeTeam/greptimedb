@@ -173,7 +173,7 @@ impl RegionOpener {
                     &expect.primary_key,
                 )?;
                 // To keep consistence with Create behavior, set the opened Region to RegionRole::Leader.
-                region.set_region_role(RegionRole::Leader);
+                region.set_region_role_state(RegionRole::Leader);
                 return Ok(region);
             }
             Ok(None) => {
