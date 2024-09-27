@@ -168,12 +168,11 @@ impl TryFrom<&HeartbeatRequest> for Stat {
 
 impl From<&api::v1::meta::RegionStat> for RegionStat {
     fn from(value: &api::v1::meta::RegionStat) -> Self {
-        let region_stat = if let Some(bytes) = value.extensions.get(REGION_STATISTIC_KEY) {
-            RegionStatistic::deserialize_from_slice(bytes)
-        } else {
-            None
-        }
-        .unwrap_or_default();
+        let region_stat = value
+            .extensions
+            .get(REGION_STATISTIC_KEY)
+            .and_then(|value| RegionStatistic::deserialize_from_slice(value))
+            .unwrap_or_default();
 
         Self {
             id: RegionId::from_u64(value.region_id),
