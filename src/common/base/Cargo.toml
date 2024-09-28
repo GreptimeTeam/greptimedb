@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-anymap = "1.0.0-beta.2"
+anymap2 = "0.13"
 async-trait.workspace = true
 bitvec = "1.0"
 bytes.workspace = true
