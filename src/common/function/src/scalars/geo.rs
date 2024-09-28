@@ -17,6 +17,7 @@ pub(crate) mod encoding;
 mod geohash;
 mod h3;
 mod helpers;
+mod s2;
 
 use geohash::{GeohashFunction, GeohashNeighboursFunction};
 
@@ -55,5 +56,10 @@ impl GeoFunctions {
         registry.register(Arc::new(h3::H3GridDiskDistances));
         registry.register(Arc::new(h3::H3GridDistance));
         registry.register(Arc::new(h3::H3GridPathCells));
+
+        //s2
+        registry.register(Arc::new(s2::S2LatLngToCell));
+        registry.register(Arc::new(s2::S2CellLevel));
+        registry.register(Arc::new(s2::S2CellParent));
     }
 }
