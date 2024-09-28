@@ -131,6 +131,7 @@ impl Display for TqlAnalyze {
 }
 
 /// Intermediate structure used to unify parameter mappings for various TQL operations.
+///
 /// This struct serves as a common parameter container for parsing TQL queries
 /// and constructing corresponding TQL operations: `TqlEval`, `TqlAnalyze` or `TqlExplain`.
 #[derive(Debug)]

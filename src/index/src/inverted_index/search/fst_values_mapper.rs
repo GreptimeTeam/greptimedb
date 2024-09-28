@@ -19,7 +19,9 @@ use crate::inverted_index::error::Result;
 use crate::inverted_index::format::reader::InvertedIndexReader;
 
 /// `FstValuesMapper` maps FST-encoded u64 values to their corresponding bitmaps
-/// within an inverted index. The higher 32 bits of each u64 value represent the
+/// within an inverted index.
+///
+/// The higher 32 bits of each u64 value represent the
 /// bitmap offset and the lower 32 bits represent its size. This mapper uses these
 /// combined offset-size pairs to fetch and union multiple bitmaps into a single `BitVec`.
 pub struct FstValuesMapper<'a> {

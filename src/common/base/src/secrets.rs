@@ -46,8 +46,9 @@ impl From<String> for SecretString {
     }
 }
 
-/// Wrapper type for values that contains secrets, which attempts to limit
-/// accidental exposure and ensure secrets are wiped from memory when dropped.
+/// Wrapper type for values that contains secrets.
+///
+/// It attempts to limit accidental exposure and ensure secrets are wiped from memory when dropped.
 /// (e.g. passwords, cryptographic keys, access tokens or other credentials)
 ///
 /// Access to the secret inner value occurs through the [`ExposeSecret`]

@@ -724,7 +724,7 @@ fn maybe_split_parts(mut parts: Vec<ScanPart>, parallelism: usize) -> Vec<ScanPa
         // Safety: `can_split_preserve_order()` ensures file_ranges.len() == 1.
         // Splits part into `num_parts_to_split + 1` new parts if possible.
         let target_part_num = num_parts_to_split + 1;
-        let ranges_per_part = (part.file_ranges[0].len() + target_part_num - 1) / target_part_num;
+        let ranges_per_part = part.file_ranges[0].len().div_ceil(target_part_num);
         // `can_split_preserve_order()` ensures part.file_ranges[0].len() > 1.
         assert!(ranges_per_part > 0);
         for ranges in part.file_ranges[0].chunks(ranges_per_part) {

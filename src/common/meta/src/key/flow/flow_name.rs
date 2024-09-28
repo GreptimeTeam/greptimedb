@@ -104,7 +104,7 @@ impl<'a> MetadataKey<'a, FlowNameKeyInner<'a>> for FlowNameKeyInner<'_> {
         .into_bytes()
     }
 
-    fn from_bytes(bytes: &'a [u8]) -> Result<FlowNameKeyInner> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlowNameKeyInner<'a>> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidMetadataSnafu {
                 err_msg: format!(

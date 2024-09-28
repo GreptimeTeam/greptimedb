@@ -100,7 +100,8 @@ pub struct TableIdent {
     pub version: TableVersion,
 }
 
-/// The table metadata
+/// The table metadata.
+///
 /// Note: if you add new fields to this struct, please ensure 'new_meta_builder' function works.
 /// TODO(dennis): find a better way to ensure 'new_meta_builder' works when adding new fields.
 #[derive(Clone, Debug, Builder, PartialEq, Eq)]

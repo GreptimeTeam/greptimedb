@@ -62,6 +62,7 @@ impl From<ArrowIntervalUnit> for IntervalUnit {
 }
 
 /// Interval Type represents a period of time.
+///
 /// It is composed of months, days and nanoseconds.
 /// 3 kinds of interval are supported: year-month, day-time and
 /// month-day-nano, which will be stored in the following format.

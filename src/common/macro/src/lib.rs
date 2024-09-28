@@ -35,7 +35,9 @@ pub fn aggr_func_type_store_derive(input: TokenStream) -> TokenStream {
 }
 
 /// A struct can be used as a creator for aggregate function if it has been annotated with this
-/// attribute first. This attribute add a necessary field which is intended to store the input
+/// attribute first.
+///
+/// This attribute add a necessary field which is intended to store the input
 /// data's types to the struct.
 /// This attribute is expected to be used along with derive macro [AggrFuncTypeStore].
 #[proc_macro_attribute]
@@ -44,9 +46,10 @@ pub fn as_aggr_func_creator(args: TokenStream, input: TokenStream) -> TokenStrea
 }
 
 /// Attribute macro to convert an arithimetic function to a range function. The annotated function
-/// should accept servaral arrays as input and return a single value as output. This procedure
-/// macro can works on any number of input parameters. Return type can be either primitive type
-/// or wrapped in `Option`.
+/// should accept servaral arrays as input and return a single value as output.
+///
+/// This procedure macro can works on any number of input parameters. Return type can be either
+/// primitive type or wrapped in `Option`.
 ///
 /// # Example
 /// Take `count_over_time()` in PromQL as an example:

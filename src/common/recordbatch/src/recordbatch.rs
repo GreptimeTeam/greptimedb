@@ -220,7 +220,7 @@ pub struct RecordBatchRowIterator<'a> {
 }
 
 impl<'a> RecordBatchRowIterator<'a> {
-    fn new(record_batch: &'a RecordBatch) -> RecordBatchRowIterator {
+    fn new(record_batch: &'a RecordBatch) -> RecordBatchRowIterator<'a> {
         RecordBatchRowIterator {
             record_batch,
             rows: record_batch.df_record_batch.num_rows(),

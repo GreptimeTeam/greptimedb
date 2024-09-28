@@ -247,6 +247,7 @@ impl ScannerProperties {
 }
 
 /// A scanner that provides a way to scan the region concurrently.
+///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
 /// You can use this trait to implement an [`ExecutionPlan`](datafusion_physical_plan::ExecutionPlan).
 pub trait RegionScanner: Debug + DisplayAs + Send {
