@@ -50,6 +50,9 @@ use crate::metrics::{
 };
 use crate::query_handler::LogHandlerRef;
 
+const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
+const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
+
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LogIngesterQueryParams {
     pub table: Option<String>,
@@ -119,6 +122,12 @@ pub async fn add_pipeline(
         !pipeline_name.is_empty(),
         InvalidParameterSnafu {
             reason: "pipeline_name is required in path",
+        }
+    );
+    ensure!(
+        !pipeline_name.starts_with(GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX),
+        InvalidParameterSnafu {
+            reason: "pipeline_name cannot start with greptime_",
         }
     );
     ensure!(
@@ -363,7 +372,9 @@ pub async fn log_ingester(
 
     let handler = log_state.log_handler;
 
-    let pipeline_name = query_params.pipeline_name;
+    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
+        reason: "pipeline_name is required",
+    })?;
     let table_name = query_params.table.context(InvalidParameterSnafu {
         reason: "table is required",
     })?;
@@ -414,7 +425,7 @@ fn extract_pipeline_value_by_content_type(
 
 async fn ingest_logs_inner(
     state: LogHandlerRef,
-    pipeline_name: Option<String>,
+    pipeline_name: String,
     version: PipelineVersion,
     table_name: String,
     pipeline_data: Vec<Value>,
@@ -425,8 +436,12 @@ async fn ingest_logs_inner(
 
     let mut results = Vec::with_capacity(pipeline_data.len());
     let transformed_data: Rows;
-
-    if let Some(pipeline_name) = pipeline_name {
+    if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
+        let rows = pipeline::identity_pipeline(pipeline_data)
+            .context(PipelineTransformSnafu)
+            .context(PipelineSnafu)?;
+        transformed_data = rows;
+    } else {
         let pipeline = state
             .get_pipeline(&pipeline_name, version, query_ctx.clone())
             .await?;
@@ -465,11 +480,6 @@ async fn ingest_logs_inner(
             rows: results,
             schema: pipeline.schemas().clone(),
         };
-    } else {
-        let rows = pipeline::identity_pipeline(pipeline_data)
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?;
-        transformed_data = rows;
     }
 
     let insert_request = RowInsertRequest {

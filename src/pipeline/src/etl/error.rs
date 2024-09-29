@@ -537,6 +537,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Column type mismatch. column: {column}, original: {original}, now: {now}"))]
+    IdentifyPipelineColumnTypeMismatch {
+        column: String,
+        original: String,
+        now: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -24,11 +24,11 @@ use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, Semant
 use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
-use serde_json::Map;
+use serde_json::{Map, Number};
 
 use crate::etl::error::{
-    Result, TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
-    TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
+    IdentifyPipelineColumnTypeMismatchSnafu, Result, TransformColumnNameMustBeUniqueSnafu,
+    TransformEmptySnafu, TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
 };
 use crate::etl::field::{InputFieldInfo, OneInputOneOutputField};
 use crate::etl::transform::index::Index;
@@ -202,9 +202,14 @@ impl Transformer for GreptimeTransformer {
     }
 }
 
+/// This is used to record the current state schema information and a sequential cache of field names.
+/// As you traverse the user input JSON, this will change.
+/// It will record a superset of all user input schemas.
 #[derive(Debug, Default)]
 struct SchemaInfo {
+    /// schema info
     schema: Vec<ColumnSchema>,
+    /// index of the column name
     index: HashMap<String, usize>,
 }
 
@@ -214,7 +219,7 @@ fn resolve_schema(
     column_schema: ColumnSchema,
     row: &mut Vec<GreptimeValue>,
     schema_info: &mut SchemaInfo,
-) {
+) -> Result<()> {
     if let Some(index) = index {
         let api_value = GreptimeValue {
             value_data: Some(value_data),
@@ -223,9 +228,17 @@ fn resolve_schema(
         // safety unwrap is fine here because index is always valid
         let schema_column_data_type = schema_info.schema.get(index).unwrap().datatype();
         if value_column_data_type.is_some_and(|t| t != schema_column_data_type) {
-            row[index] = GreptimeValue { value_data: None };
+            IdentifyPipelineColumnTypeMismatchSnafu {
+                column: column_schema.column_name,
+                original: schema_column_data_type.as_str_name(),
+                now: value_column_data_type
+                    .map(|t| t.as_str_name())
+                    .unwrap_or_else(|| "null"),
+            }
+            .fail()
         } else {
             row[index] = api_value;
+            Ok(())
         }
     } else {
         let key = column_schema.column_name.clone();
@@ -235,19 +248,66 @@ fn resolve_schema(
             value_data: Some(value_data),
         };
         row.push(api_value);
+        Ok(())
     }
 }
 
-fn json_value_to_row(schema_info: &mut SchemaInfo, map: Map<String, serde_json::Value>) -> Row {
+fn resolve_number_schema(
+    n: Number,
+    column_name: String,
+    index: Option<usize>,
+    row: &mut Vec<GreptimeValue>,
+    schema_info: &mut SchemaInfo,
+) -> Result<()> {
+    let (value, datatype, semantic_type) = if n.is_i64() {
+        (
+            ValueData::I64Value(n.as_i64().unwrap()),
+            ColumnDataType::Int64 as i32,
+            SemanticType::Field as i32,
+        )
+    } else if n.is_u64() {
+        (
+            ValueData::U64Value(n.as_u64().unwrap()),
+            ColumnDataType::Uint64 as i32,
+            SemanticType::Field as i32,
+        )
+    } else if n.is_f64() {
+        (
+            ValueData::F64Value(n.as_f64().unwrap()),
+            ColumnDataType::Float64 as i32,
+            SemanticType::Field as i32,
+        )
+    } else {
+        unreachable!("unexpected number type");
+    };
+    resolve_schema(
+        index,
+        value,
+        ColumnSchema {
+            column_name,
+            datatype,
+            semantic_type,
+            datatype_extension: None,
+            options: None,
+        },
+        row,
+        schema_info,
+    )
+}
+
+fn json_value_to_row(
+    schema_info: &mut SchemaInfo,
+    map: Map<String, serde_json::Value>,
+) -> Result<Row> {
     let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
     for _ in 0..schema_info.schema.len() {
         row.push(GreptimeValue { value_data: None });
     }
-    for (key, value) in map {
-        if key == DEFAULT_GREPTIME_TIMESTAMP_COLUMN {
+    for (column_name, value) in map {
+        if column_name == DEFAULT_GREPTIME_TIMESTAMP_COLUMN {
             continue;
         }
-        let index = schema_info.index.get(&key).copied();
+        let index = schema_info.index.get(&column_name).copied();
         match value {
             serde_json::Value::Null => {
                 // do nothing
@@ -257,7 +317,7 @@ fn json_value_to_row(schema_info: &mut SchemaInfo, map: Map<String, serde_json::
                     index,
                     ValueData::StringValue(s),
                     ColumnSchema {
-                        column_name: key,
+                        column_name,
                         datatype: ColumnDataType::String as i32,
                         semantic_type: SemanticType::Field as i32,
                         datatype_extension: None,
@@ -265,14 +325,14 @@ fn json_value_to_row(schema_info: &mut SchemaInfo, map: Map<String, serde_json::
                     },
                     &mut row,
                     schema_info,
-                );
+                )?;
             }
             serde_json::Value::Bool(b) => {
                 resolve_schema(
                     index,
                     ValueData::BoolValue(b),
                     ColumnSchema {
-                        column_name: key,
+                        column_name,
                         datatype: ColumnDataType::Boolean as i32,
                         semantic_type: SemanticType::Field as i32,
                         datatype_extension: None,
@@ -280,64 +340,17 @@ fn json_value_to_row(schema_info: &mut SchemaInfo, map: Map<String, serde_json::
                     },
                     &mut row,
                     schema_info,
-                );
+                )?;
             }
             serde_json::Value::Number(n) => {
-                if n.is_i64() {
-                    resolve_schema(
-                        index,
-                        // safety unwrap is fine here because we have checked the number type
-                        ValueData::I64Value(n.as_i64().unwrap()),
-                        ColumnSchema {
-                            column_name: key,
-                            datatype: ColumnDataType::Int64 as i32,
-                            semantic_type: SemanticType::Field as i32,
-                            datatype_extension: None,
-                            options: None,
-                        },
-                        &mut row,
-                        schema_info,
-                    );
-                } else if n.is_u64() {
-                    resolve_schema(
-                        index,
-                        // safety unwrap is fine here because we have checked the number type
-                        ValueData::U64Value(n.as_u64().unwrap()),
-                        ColumnSchema {
-                            column_name: key,
-                            datatype: ColumnDataType::Uint64 as i32,
-                            semantic_type: SemanticType::Field as i32,
-                            datatype_extension: None,
-                            options: None,
-                        },
-                        &mut row,
-                        schema_info,
-                    );
-                } else if n.is_f64() {
-                    resolve_schema(
-                        index,
-                        // safety unwrap is fine here because we have checked the number type
-                        ValueData::F64Value(n.as_f64().unwrap()),
-                        ColumnSchema {
-                            column_name: key,
-                            datatype: ColumnDataType::Float64 as i32,
-                            semantic_type: SemanticType::Field as i32,
-                            datatype_extension: None,
-                            options: None,
-                        },
-                        &mut row,
-                        schema_info,
-                    );
-                } else {
-                    unreachable!("unexpected number type");
-                }
+                resolve_number_schema(n, column_name, index, &mut row, schema_info)?;
             }
             serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
                 resolve_schema(
                     index,
                     ValueData::BinaryValue(jsonb::Value::from(value).to_vec()),
                     ColumnSchema {
-                        column_name: key,
+                        column_name,
                         datatype: ColumnDataType::Binary as i32,
                         semantic_type: SemanticType::Field as i32,
                         datatype_extension: Some(ColumnDataTypeExtension {
@@ -347,11 +360,11 @@ fn json_value_to_row(schema_info: &mut SchemaInfo, map: Map<String, serde_json::
                     },
                     &mut row,
                     schema_info,
-                );
+                )?;
             }
         }
     }
-    Row { values: row }
+    Ok(Row { values: row })
 }
 
 pub fn identity_pipeline(array: Vec<serde_json::Value>) -> Result<Rows> {
@@ -360,7 +373,7 @@ pub fn identity_pipeline(array: Vec<serde_json::Value>) -> Result<Rows> {
     let mut schema = SchemaInfo::default();
     for value in array {
         if let serde_json::Value::Object(map) = value {
-            let row = json_value_to_row(&mut schema, map);
+            let row = json_value_to_row(&mut schema, map)?;
             rows.push(row);
         }
     }
@@ -396,30 +409,90 @@ mod tests {
 
     #[test]
     fn test_identify_pipeline() {
-        let array = vec![
-            serde_json::json!({
-                "woshinull": null,
-                "name": "Alice",
-                "age": 20,
-                "is_student": true,
-                "score": 99.5,
-                "hobbies": "reading",
-                "address": "Beijing",
-            }),
-            serde_json::json!({
-                "name": "Bob",
-                "age": 21,
-                "is_student": false,
-                "score": "88.5",
-                "hobbies": "swimming",
-                "address": "Shanghai",
-                "gaga": "gaga"
-            }),
-        ];
-        let rows = identity_pipeline(array).unwrap();
-        assert_eq!(rows.schema.len(), 8);
-        assert_eq!(rows.rows.len(), 2);
-        assert_eq!(8, rows.rows[0].values.len());
-        assert_eq!(8, rows.rows[1].values.len());
+        {
+            let array = vec![
+                serde_json::json!({
+                    "woshinull": null,
+                    "name": "Alice",
+                    "age": 20,
+                    "is_student": true,
+                    "score": 99.5,
+                    "hobbies": "reading",
+                    "address": "Beijing",
+                }),
+                serde_json::json!({
+                    "name": "Bob",
+                    "age": 21,
+                    "is_student": false,
+                    "score": "88.5",
+                    "hobbies": "swimming",
+                    "address": "Shanghai",
+                    "gaga": "gaga"
+                }),
+            ];
+            let rows = identity_pipeline(array);
+            assert!(rows.is_err());
+            assert_eq!(
+                rows.err().unwrap().to_string(),
+                "Column type mismatch. column: score, original: FLOAT64, now: STRING".to_string(),
+            );
+        }
+        {
+            let array = vec![
+                serde_json::json!({
+                    "woshinull": null,
+                    "name": "Alice",
+                    "age": 20,
+                    "is_student": true,
+                    "score": 99.5,
+                    "hobbies": "reading",
+                    "address": "Beijing",
+                }),
+                serde_json::json!({
+                    "name": "Bob",
+                    "age": 21,
+                    "is_student": false,
+                    "score": 88,
+                    "hobbies": "swimming",
+                    "address": "Shanghai",
+                    "gaga": "gaga"
+                }),
+            ];
+            let rows = identity_pipeline(array);
+            assert!(rows.is_err());
+            assert_eq!(
+                rows.err().unwrap().to_string(),
+                "Column type mismatch. column: score, original: FLOAT64, now: INT64".to_string(),
+            );
+        }
+        {
+            let array = vec![
+                serde_json::json!({
+                    "woshinull": null,
+                    "name": "Alice",
+                    "age": 20,
+                    "is_student": true,
+                    "score": 99.5,
+                    "hobbies": "reading",
+                    "address": "Beijing",
+                }),
+                serde_json::json!({
+                    "name": "Bob",
+                    "age": 21,
+                    "is_student": false,
+                    "score": 88.5,
+                    "hobbies": "swimming",
+                    "address": "Shanghai",
+                    "gaga": "gaga"
+                }),
+            ];
+            let rows = identity_pipeline(array);
+            assert!(rows.is_ok());
+            let rows = rows.unwrap();
+            assert_eq!(rows.schema.len(), 8);
+            assert_eq!(rows.rows.len(), 2);
+            assert_eq!(8, rows.rows[0].values.len());
+            assert_eq!(8, rows.rows[1].values.len());
+        }
     }
 }
