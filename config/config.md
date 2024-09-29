@@ -166,6 +166,7 @@
 | `logging.slow_query` | -- | -- | The slow query log options. |
 | `logging.slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
 | `logging.slow_query.threshold` | String | Unset | The threshold of slow query. |
+| `logging.slow_query.sample_rate` | Float | Unset | The sampling rate of slow query log. |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
@@ -255,6 +256,7 @@
 | `logging.slow_query` | -- | -- | The slow query log options. |
 | `logging.slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
 | `logging.slow_query.threshold` | String | Unset | The threshold of slow query. |
+| `logging.slow_query.sample_rate` | Float | Unset | The sampling rate of slow query log. |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
@@ -323,6 +325,7 @@
 | `logging.slow_query` | -- | -- | The slow query log options. |
 | `logging.slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
 | `logging.slow_query.threshold` | String | Unset | The threshold of slow query. |
+| `logging.slow_query.sample_rate` | Float | Unset | The sampling rate of slow query log. |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
@@ -478,6 +481,7 @@
 | `logging.slow_query` | -- | -- | The slow query log options. |
 | `logging.slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
 | `logging.slow_query.threshold` | String | Unset | The threshold of slow query. |
+| `logging.slow_query.sample_rate` | Float | Unset | The sampling rate of slow query log. |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
@@ -527,5 +531,6 @@
 | `logging.slow_query` | -- | -- | The slow query log options. |
 | `logging.slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
 | `logging.slow_query.threshold` | String | Unset | The threshold of slow query. |
+| `logging.slow_query.sample_rate` | Float | Unset | The sampling rate of slow query log. |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |

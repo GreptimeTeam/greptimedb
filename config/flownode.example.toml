@@ -93,6 +93,10 @@ enable = false
 ## @toml2docs:none-default
 threshold = "10s"
 
+## The sampling rate of slow query log.
+## @toml2docs:none-default
+sample_rate = 1.0
+
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
 [tracing]
 ## The tokio console address.

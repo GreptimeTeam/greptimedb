@@ -200,6 +200,10 @@ enable = false
 ## @toml2docs:none-default
 threshold = "10s"
 
+## The sampling rate of slow query log.
+## @toml2docs:none-default
+sample_rate = 1.0
+
 ## The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.
 ## This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
 [export_metrics]
