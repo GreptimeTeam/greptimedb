@@ -279,12 +279,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             let password = match auth_plugin {
                 MYSQL_NATIVE_PASSWORD => Password::MysqlNativePassword(auth_data, salt),
                 MYSQL_CLEAR_PASSWORD => {
-                    if auth_data.is_empty() {
-                        return false;
-                    }
-                    // The raw bytes received are represented in C-like string, ended in '\0'.
+                    // The raw bytes received could be represented in C-like string, ended in '\0'.
                     // We must "trim" it to get the real password string.
-                    let password = &auth_data[0..auth_data.len() - 1];
+                    let password = if let &[password @ .., 0] = &auth_data {
+                        password
+                    } else {
+                        auth_data
+                    };
                     Password::PlainText(String::from_utf8_lossy(password).to_string().into())
                 }
                 other => {
