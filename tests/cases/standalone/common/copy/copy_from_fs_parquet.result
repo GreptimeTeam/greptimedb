@@ -24,11 +24,11 @@ values
 
 Affected Rows: 3
 
-Copy demo TO '/tmp/demo/export/parquet_files/demo.parquet';
+Copy demo TO '${SQLNESS_HOME}/demo/export/parquet_files/demo.parquet';
 
 Affected Rows: 3
 
-Copy demo_2 TO '/tmp/demo/export/parquet_files/demo_2.parquet';
+Copy demo_2 TO '${SQLNESS_HOME}/demo/export/parquet_files/demo_2.parquet';
 
 Affected Rows: 3
 
@@ -36,7 +36,7 @@ CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp 
 
 Affected Rows: 0
 
-Copy with_filename FROM '/tmp/demo/export/parquet_files/demo.parquet' with (start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
+Copy with_filename FROM '${SQLNESS_HOME}/demo/export/parquet_files/demo.parquet' with (start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
 
 Affected Rows: 2
 
@@ -53,7 +53,7 @@ CREATE TABLE with_path(host string, cpu double, memory double, ts timestamp time
 
 Affected Rows: 0
 
-Copy with_path FROM '/tmp/demo/export/parquet_files/';
+Copy with_path FROM '${SQLNESS_HOME}/demo/export/parquet_files/';
 
 Affected Rows: 6
 
@@ -74,7 +74,7 @@ CREATE TABLE with_pattern(host string, cpu double, memory double, ts timestamp t
 
 Affected Rows: 0
 
-Copy with_pattern FROM '/tmp/demo/export/parquet_files/' WITH (PATTERN = 'demo.*', start_time='2022-06-15 07:02:39');
+Copy with_pattern FROM '${SQLNESS_HOME}/demo/export/parquet_files/' WITH (PATTERN = 'demo.*', start_time='2022-06-15 07:02:39');
 
 Affected Rows: 2
 
@@ -91,7 +91,7 @@ CREATE TABLE without_limit_rows(host string, cpu double, memory double, ts times
 
 Affected Rows: 0
 
-Copy without_limit_rows FROM '/tmp/demo/export/parquet_files/';
+Copy without_limit_rows FROM '${SQLNESS_HOME}/demo/export/parquet_files/';
 
 Affected Rows: 6
 
@@ -107,7 +107,7 @@ CREATE TABLE with_limit_rows_segment(host string, cpu double, memory double, ts 
 
 Affected Rows: 0
 
-Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT 3;
+Copy with_limit_rows_segment FROM '${SQLNESS_HOME}/demo/export/parquet_files/' LIMIT 3;
 
 Affected Rows: 3
 
@@ -119,9 +119,9 @@ select count(*) from with_limit_rows_segment;
 | 3        |
 +----------+
 
-Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT hello;
+Copy with_limit_rows_segment FROM '${SQLNESS_HOME}/demo/export/parquet_files/' LIMIT hello;
 
-Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: 'the number of maximum rows', found: ;: sql parser error: Expected literal int, found: hello at Line: 1, Column 75
+Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: 'the number of maximum rows', found: ;: sql parser error: Expected literal int, found: hello at Line: 1, Column 86
 
 drop table demo;
 
