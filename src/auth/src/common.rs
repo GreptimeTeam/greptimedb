@@ -75,6 +75,16 @@ pub enum Password<'a> {
     PgMD5(HashedPassword<'a>, Salt<'a>),
 }
 
+impl Password<'_> {
+    pub fn r#type(&self) -> &str {
+        match self {
+            Password::PlainText(_) => "plain_text",
+            Password::MysqlNativePassword(_, _) => "mysql_native_password",
+            Password::PgMD5(_, _) => "pg_md5",
+        }
+    }
+}
+
 pub fn auth_mysql(
     auth_data: HashedPassword,
     salt: Salt,
