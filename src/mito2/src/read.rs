@@ -20,6 +20,7 @@ pub mod last_row;
 pub mod merge;
 pub mod projection;
 pub(crate) mod prune;
+pub(crate) mod range;
 pub(crate) mod scan_region;
 pub(crate) mod seq_scan;
 pub(crate) mod unordered_scan;
@@ -753,6 +754,10 @@ pub(crate) struct ScannerMetrics {
     num_batches: usize,
     /// Number of rows returned.
     num_rows: usize,
+    /// Number of mem ranges scanned.
+    num_mem_ranges: usize,
+    /// Number of file ranges scanned.
+    num_file_ranges: usize,
     /// Filter related metrics for readers.
     filter_metrics: ReaderFilterMetrics,
 }

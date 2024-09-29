@@ -14,6 +14,7 @@
 
 //! Memtables are write buffers for regions.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -71,6 +72,8 @@ pub struct MemtableStats {
     time_range: Option<(Timestamp, Timestamp)>,
     /// Total rows in memtable
     num_rows: usize,
+    /// Total number of ranges in the memtable.
+    num_ranges: usize,
 }
 
 impl MemtableStats {
@@ -94,6 +97,11 @@ impl MemtableStats {
     /// Returns the num of total rows in memtable.
     pub fn num_rows(&self) -> usize {
         self.num_rows
+    }
+
+    /// Returns the number of ranges in the memtable.
+    pub fn num_ranges(&self) -> usize {
+        self.num_ranges
     }
 }
 
@@ -123,11 +131,12 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     ) -> Result<BoxedBatchIterator>;
 
     /// Returns the ranges in the memtable.
+    /// The returned map contains the range id and the range after applying the predicate.
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> Vec<MemtableRange>;
+    ) -> BTreeMap<usize, MemtableRange>;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
@@ -332,7 +341,6 @@ impl MemtableRangeContext {
 pub struct MemtableRange {
     /// Shared context.
     context: MemtableRangeContextRef,
-    // TODO(yingwen): Id to identify the range in the memtable.
 }
 
 impl MemtableRange {

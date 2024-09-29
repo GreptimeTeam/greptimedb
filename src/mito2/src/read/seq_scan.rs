@@ -68,11 +68,10 @@ impl SeqScan {
     pub(crate) fn new(input: ScanInput) -> Self {
         let parallelism = input.parallelism.parallelism.max(1);
         let mut properties = ScannerProperties::default()
-            .with_parallelism(parallelism)
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows());
-        properties.partitions = vec![input.partition_ranges()];
-        let stream_ctx = Arc::new(StreamContext::new(input));
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
+        properties.partitions = vec![stream_ctx.partition_ranges()];
 
         Self {
             properties,
@@ -594,7 +593,7 @@ impl SeqDistributor {
                 continue;
             }
             let part = ScanPart {
-                memtable_ranges: mem_ranges,
+                memtable_ranges: mem_ranges.into_values().collect(),
                 file_ranges: smallvec![],
                 time_range: stats.time_range(),
             };
