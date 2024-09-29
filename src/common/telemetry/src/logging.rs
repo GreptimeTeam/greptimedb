@@ -80,6 +80,9 @@ pub struct SlowQueryLoggingOptions {
     /// The threshold of slow queries.
     #[serde(with = "humantime_serde")]
     pub threshold: Option<Duration>,
+
+    /// The sample rate of slow queries.
+    pub sample_rate: Option<f64>,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
