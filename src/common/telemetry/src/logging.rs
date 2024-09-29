@@ -67,13 +67,13 @@ pub struct LoggingOptions {
     pub tracing_sample_ratio: Option<TracingSampleOptions>,
 
     /// The logging options of slow query.
-    pub slow_query: SlowQueryLoggingOptions,
+    pub slow_query: SlowQueryOptions,
 }
 
-/// The slow query log options.
+/// The options of slow query.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct SlowQueryLoggingOptions {
+pub struct SlowQueryOptions {
     /// Whether to enable slow query log.
     pub enable: bool,
 
@@ -81,8 +81,8 @@ pub struct SlowQueryLoggingOptions {
     #[serde(with = "humantime_serde")]
     pub threshold: Option<Duration>,
 
-    /// The sample rate of slow queries.
-    pub sample_rate: Option<f64>,
+    /// The sample ratio of slow queries.
+    pub sample_ratio: Option<f64>,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,7 +115,7 @@ impl Default for LoggingOptions {
             otlp_endpoint: None,
             tracing_sample_ratio: None,
             append_stdout: true,
-            slow_query: SlowQueryLoggingOptions::default(),
+            slow_query: SlowQueryOptions::default(),
         }
     }
 }

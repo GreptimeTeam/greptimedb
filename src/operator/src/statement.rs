@@ -87,6 +87,7 @@ pub struct StatementExecutor {
 pub type StatementExecutorRef = Arc<StatementExecutor>;
 
 impl StatementExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,

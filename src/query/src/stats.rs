@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use common_telemetry::logging::SlowQueryLoggingOptions;
+use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::slow;
 use rand::random;
 
@@ -24,24 +24,13 @@ use crate::parser::QueryStatement;
 #[derive(Default, Clone, Debug)]
 pub struct StatementStatistics {
     /// slow_query is used to configure slow query log.
-    pub slow_query: SlowQuery,
-}
-
-#[derive(Default, Clone, Debug)]
-pub struct SlowQuery {
-    pub enable: bool,
-    pub threshold: Option<Duration>,
-    pub sample_rate: Option<f64>,
+    pub slow_query: SlowQueryOptions,
 }
 
 impl StatementStatistics {
-    pub fn new(slow_query_logging_options: &SlowQueryLoggingOptions) -> Self {
+    pub fn new(slow_query_options: SlowQueryOptions) -> Self {
         Self {
-            slow_query: SlowQuery {
-                enable: slow_query_logging_options.enable,
-                threshold: slow_query_logging_options.threshold,
-                sample_rate: slow_query_logging_options.sample_rate,
-            },
+            slow_query: slow_query_options,
         }
     }
 
@@ -51,7 +40,7 @@ impl StatementStatistics {
                 start: std::time::Instant::now(),
                 stmt,
                 threshold: self.slow_query.threshold,
-                rate: self.slow_query.sample_rate,
+                sample_ratio: self.slow_query.sample_ratio,
             })
         } else {
             None
@@ -59,11 +48,12 @@ impl StatementStatistics {
     }
 }
 
+/// SlowQueryTimer is used to log slow query when it's dropped.
 pub struct SlowQueryTimer {
     start: std::time::Instant,
     stmt: QueryStatement,
     threshold: Option<Duration>,
-    rate: Option<f64>,
+    sample_ratio: Option<f64>,
 }
 
 impl SlowQueryTimer {
@@ -93,15 +83,13 @@ impl Drop for SlowQueryTimer {
         if let Some(threshold) = self.threshold {
             let elapsed = self.start.elapsed();
             if elapsed > threshold {
-                if let Some(rate) = self.rate {
-                    if rate >= 1.0 {
+                if let Some(ratio) = self.sample_ratio {
+                    // Generate a random number in [0, 1) and compare it with sample_ratio.
+                    if ratio >= 1.0 || random::<f64>() <= ratio {
                         self.log_slow_query(elapsed, threshold);
-                    } else {
-                        if random::<f64>() < rate {
-                            self.log_slow_query(elapsed, threshold);
-                        }
                     }
                 } else {
+                    // If sample_ratio is not set, log all slow queries.
                     self.log_slow_query(elapsed, threshold);
                 }
             }

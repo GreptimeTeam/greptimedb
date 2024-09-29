@@ -353,7 +353,7 @@ impl StartCommand {
             catalog_manager,
             Arc::new(client),
             meta_client,
-            StatementStatistics::new(&opts.logging.slow_query),
+            StatementStatistics::new(opts.logging.slow_query.clone()),
         )
         .with_plugin(plugins.clone())
         .with_local_cache_invalidator(layered_cache_registry)
