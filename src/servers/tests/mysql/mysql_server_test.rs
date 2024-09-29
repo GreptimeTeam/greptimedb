@@ -43,7 +43,6 @@ struct MysqlOpts<'a> {
     tls: TlsOption,
     auth_info: Option<DatabaseAuthInfo<'a>>,
     reject_no_database: bool,
-    slow_query_threshold: Option<Duration>,
 }
 
 fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn Server>> {
@@ -72,7 +71,6 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
             opts.tls.should_force_tls(),
             tls_server_config,
             opts.reject_no_database,
-            opts.slow_query_threshold,
         )),
     ))
 }

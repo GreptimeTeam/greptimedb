@@ -78,15 +78,7 @@ where
     }
 
     pub fn http_server_builder(&self, opts: &FrontendOptions) -> HttpServerBuilder {
-        let mut builder = HttpServerBuilder::new(opts.http.clone());
-
-        if opts.logging.slow_query.enable {
-            if let Some(threshold) = opts.logging.slow_query.threshold {
-                builder = builder.set_slow_query_threshold(threshold);
-            }
-        }
-
-        builder = builder.with_sql_handler(
+        let mut builder = HttpServerBuilder::new(opts.http.clone()).with_sql_handler(
             ServerSqlQueryHandlerAdapter::arc(self.instance.clone()),
             Some(self.instance.clone()),
         );
@@ -194,7 +186,7 @@ where
         let instance = self.instance.clone();
 
         let toml = opts.to_toml().context(TomlFormatSnafu)?;
-        let fn_opts: FrontendOptions = opts.into();
+        let opts: FrontendOptions = opts.into();
 
         let handlers = ServerHandlers::default();
 
@@ -202,37 +194,31 @@ where
 
         {
             // Always init GRPC server
-            let grpc_addr = parse_addr(&fn_opts.grpc.addr)?;
-            let grpc_server = self.build_grpc_server(&fn_opts)?;
+            let grpc_addr = parse_addr(&opts.grpc.addr)?;
+            let grpc_server = self.build_grpc_server(&opts)?;
             handlers.insert((Box::new(grpc_server), grpc_addr)).await;
         }
 
         {
             // Always init HTTP server
-            let http_options = &fn_opts.http;
+            let http_options = &opts.http;
             let http_addr = parse_addr(&http_options.addr)?;
-            let http_server = self.build_http_server(&fn_opts, toml)?;
+            let http_server = self.build_http_server(&opts, toml)?;
             handlers.insert((Box::new(http_server), http_addr)).await;
         }
 
-        if fn_opts.mysql.enable {
+        if opts.mysql.enable {
             // Init MySQL server
-            let mysql_opts = &fn_opts.mysql;
-            let mysql_addr = parse_addr(&mysql_opts.addr)?;
+            let opts = &opts.mysql;
+            let mysql_addr = parse_addr(&opts.addr)?;
 
             let tls_server_config = Arc::new(
-                ReloadableTlsServerConfig::try_new(mysql_opts.tls.clone())
-                    .context(StartServerSnafu)?,
+                ReloadableTlsServerConfig::try_new(opts.tls.clone()).context(StartServerSnafu)?,
             );
 
             // will not watch if watch is disabled in tls option
             maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
-            let slow_query_threshold = if fn_opts.logging.slow_query.enable {
-                fn_opts.logging.slow_query.threshold
-            } else {
-                None
-            };
             let mysql_server = MysqlServer::create_server(
                 common_runtime::global_runtime(),
                 Arc::new(MysqlSpawnRef::new(
@@ -240,39 +226,31 @@ where
                     user_provider.clone(),
                 )),
                 Arc::new(MysqlSpawnConfig::new(
-                    mysql_opts.tls.should_force_tls(),
+                    opts.tls.should_force_tls(),
                     tls_server_config,
-                    mysql_opts.reject_no_database.unwrap_or(false),
-                    slow_query_threshold,
+                    opts.reject_no_database.unwrap_or(false),
                 )),
             );
             handlers.insert((mysql_server, mysql_addr)).await;
         }
 
-        if fn_opts.postgres.enable {
+        if opts.postgres.enable {
             // Init PosgresSQL Server
-            let pg_opts = &fn_opts.postgres;
-            let pg_addr = parse_addr(&pg_opts.addr)?;
+            let opts = &opts.postgres;
+            let pg_addr = parse_addr(&opts.addr)?;
 
             let tls_server_config = Arc::new(
-                ReloadableTlsServerConfig::try_new(pg_opts.tls.clone())
-                    .context(StartServerSnafu)?,
+                ReloadableTlsServerConfig::try_new(opts.tls.clone()).context(StartServerSnafu)?,
             );
 
             maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
-            let slow_query_threshold = if fn_opts.logging.slow_query.enable {
-                fn_opts.logging.slow_query.threshold
-            } else {
-                None
-            };
             let pg_server = Box::new(PostgresServer::new(
                 ServerSqlQueryHandlerAdapter::arc(instance.clone()),
-                pg_opts.tls.should_force_tls(),
+                opts.tls.should_force_tls(),
                 tls_server_config,
                 common_runtime::global_runtime(),
                 user_provider.clone(),
-                slow_query_threshold,
             )) as Box<dyn Server>;
 
             handlers.insert((pg_server, pg_addr)).await;

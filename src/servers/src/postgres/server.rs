@@ -15,7 +15,6 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ::auth::UserProviderRef;
 use async_trait::async_trait;
@@ -45,14 +44,12 @@ impl PostgresServer {
         tls_server_config: Arc<ReloadableTlsServerConfig>,
         io_runtime: Runtime,
         user_provider: Option<UserProviderRef>,
-        slow_query_threshold: Option<Duration>,
     ) -> PostgresServer {
         let make_handler = Arc::new(
             MakePostgresServerHandlerBuilder::default()
                 .query_handler(query_handler.clone())
                 .user_provider(user_provider.clone())
                 .force_tls(force_tls)
-                .slow_query_threshold(slow_query_threshold)
                 .build()
                 .unwrap(),
         );

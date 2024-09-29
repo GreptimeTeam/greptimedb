@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ::auth::{Identity, Password, UserProviderRef};
 use async_trait::async_trait;
@@ -24,7 +24,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_telemetry::{debug, error, slow, tracing, warn};
+use common_telemetry::{debug, error, tracing, warn};
 use datafusion_common::ParamValues;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
@@ -65,7 +65,6 @@ pub struct MysqlInstanceShim {
     user_provider: Option<UserProviderRef>,
     prepared_stmts: Arc<RwLock<HashMap<String, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
-    slow_query_threshold: Option<Duration>,
 }
 
 impl MysqlInstanceShim {
@@ -73,7 +72,6 @@ impl MysqlInstanceShim {
         query_handler: ServerSqlQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
         client_addr: SocketAddr,
-        slow_query_threshold: Option<Duration>,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
@@ -99,7 +97,6 @@ impl MysqlInstanceShim {
             user_provider,
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),
-            slow_query_threshold,
         }
     }
 
@@ -427,7 +424,6 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        let start = Instant::now();
         let query_ctx = self.session.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_MYSQL_QUERY_TIMER
@@ -555,17 +551,6 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         }
 
         let outputs = self.do_query(query, query_ctx.clone()).await;
-
-        let elapsed = start.elapsed();
-        if let Some(threshold) = self.slow_query_threshold {
-            if elapsed > threshold {
-                slow!(
-                    cost = elapsed.as_millis() as u64,
-                    threshold = threshold.as_millis() as u64,
-                    sql = query.to_string()
-                );
-            }
-        }
         writer::write_output(writer, query_ctx, outputs).await?;
         Ok(())
     }
