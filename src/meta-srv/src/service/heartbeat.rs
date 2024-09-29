@@ -113,7 +113,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
             );
 
             if let Some(key) = pusher_key {
-                let _ = handler_group.deregister(&key).await;
+                let _ = handler_group.deregister_push(&key).await;
             }
         });
 
@@ -177,7 +177,7 @@ async fn register_pusher(
     let node_id = get_node_id(header);
     let key = format!("{}-{}", role, node_id);
     let pusher = Pusher::new(sender, header);
-    handler_group.register(&key, pusher).await;
+    handler_group.register_pusher(&key, pusher).await;
     Some(key)
 }
 
