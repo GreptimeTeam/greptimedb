@@ -23,6 +23,7 @@ use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
+use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_runtime::Runtime;
 use datafusion_expr::LogicalPlan;
 use query::dataframe::DataFrame;

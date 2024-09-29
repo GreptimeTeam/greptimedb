@@ -25,6 +25,7 @@ use common_base::secrets::ExposeSecret;
 use common_config::Configurable;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
+use common_runtime::runtime::BuilderBuild;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::warn;
 use common_test_util::ports;

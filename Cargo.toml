@@ -104,6 +104,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
+ratelimit = "0.9"
 dashmap = "5.4"
 datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
 datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
@@ -154,6 +155,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "multipart",
 ] }
+parking_lot = "0.12"
 rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "75535b5ad9bae4a5dbb582c82e44dfd81ec10105", features = [
     "transport-tls",
 ] }
@@ -244,6 +246,7 @@ sql = { path = "src/sql" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
+
 
 [patch.crates-io]
 # change all rustls dependencies to use our fork to default to `ring` to make it "just work"

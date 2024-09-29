@@ -1,0 +1,5 @@
+# Run performance test for different priority & workload type
+
+```
+cargo test --package common-runtime --lib -- test_metrics::test_all_cpu_usage --nocapture
+```

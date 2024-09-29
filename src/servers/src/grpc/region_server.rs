@@ -18,6 +18,7 @@ use api::v1::region::region_server::Region as RegionServer;
 use api::v1::region::{region_request, RegionRequest, RegionResponse};
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
+use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
 use common_telemetry::tracing::info_span;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
