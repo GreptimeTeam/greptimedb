@@ -22,6 +22,9 @@ use std::sync::Arc;
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 
+/// MergeSort Logical Plan, have same field as `Sort`, but indicate it is a merge sort,
+/// which assume each input partition is a sorted stream, and will use `SortPreserveingMergeExec`
+/// to merge them into a single sorted stream.
 #[derive(Hash, PartialEq, Eq, Clone)]
 pub struct MergeSortLogicalPlan {
     pub expr: Vec<Expr>,
@@ -44,14 +47,14 @@ impl MergeSortLogicalPlan {
         "MergeSort"
     }
 
-    /// Create a [LogicalPlan::Extension] node from this merge sort plan
+    /// Create a [`LogicalPlan::Extension`] node from this merge sort plan
     pub fn into_logical_plan(self) -> LogicalPlan {
         LogicalPlan::Extension(Extension {
             node: Arc::new(self),
         })
     }
 
-    /// Convert self to a `Sort` logical plan with same input and expressions
+    /// Convert self to a [`Sort`] logical plan with same input and expressions
     pub fn into_sort(self) -> LogicalPlan {
         LogicalPlan::Sort(datafusion::logical_expr::Sort {
             input: self.input.clone(),
