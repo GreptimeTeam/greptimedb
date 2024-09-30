@@ -733,6 +733,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Handler: {} is not found", name))]
+    HandlerNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -803,7 +810,8 @@ impl ErrorExt for Error {
             | Error::InitExportMetricsTask { .. }
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
-            | Error::TomlFormat { .. } => StatusCode::InvalidArguments,
+            | Error::TomlFormat { .. }
+            | Error::HandlerNotFound { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }

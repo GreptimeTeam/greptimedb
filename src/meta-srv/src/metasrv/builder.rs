@@ -358,9 +358,11 @@ impl MetasrvBuilder {
                     memory_region_keeper.clone(),
                 );
 
-                HeartbeatHandlerGroupBuilder::new(pushers, region_lease_handler)
+                HeartbeatHandlerGroupBuilder::new(pushers)
                     .with_plugins(plugins.clone())
                     .with_region_failure_handler(region_failover_handler)
+                    .with_region_lease_handler(Some(region_lease_handler))
+                    .add_default_handlers()
                     .build()
             }
         };

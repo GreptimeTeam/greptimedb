@@ -17,6 +17,7 @@
 #![feature(assert_matches)]
 #![feature(extract_if)]
 #![feature(option_take_if)]
+#![feature(linked_list_cursors)]
 
 pub mod bootstrap;
 mod cache_invalidator;
