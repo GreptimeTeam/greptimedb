@@ -28,7 +28,8 @@ use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetReadonlyResponse,
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
+    SettableRegionRoleState,
 };
 use store_api::region_request::RegionRequest;
 use store_api::storage::{ConcreteDataType, RegionId, ScanRequest};
@@ -89,14 +90,15 @@ impl RegionEngine for MetaRegionEngine {
         Ok(())
     }
 
-    fn set_writable(&self, _region_id: RegionId, _writable: bool) -> Result<(), BoxedError> {
+    fn set_region_role(&self, _region_id: RegionId, _role: RegionRole) -> Result<(), BoxedError> {
         unimplemented!()
     }
 
-    async fn set_readonly_gracefully(
+    async fn set_region_role_state_gracefully(
         &self,
         _region_id: RegionId,
-    ) -> Result<SetReadonlyResponse, BoxedError> {
+        _region_role_state: SettableRegionRoleState,
+    ) -> Result<SetRegionRoleStateResponse, BoxedError> {
         unimplemented!()
     }
 

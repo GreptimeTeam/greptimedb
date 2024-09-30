@@ -28,6 +28,7 @@ use snafu::{ensure, OptionExt};
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::region_engine::RegionRole;
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
@@ -42,7 +43,9 @@ use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
-use crate::region::{ManifestContext, ManifestStats, MitoRegion, RegionState};
+use crate::region::{
+    ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
+};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
@@ -169,8 +172,8 @@ impl RegionOpener {
                     &expect.column_metadatas,
                     &expect.primary_key,
                 )?;
-                // To keep consistence with Create behavior, set the opened Region writable.
-                region.set_writable(true);
+                // To keep consistence with Create behavior, set the opened Region to RegionRole::Leader.
+                region.set_role(RegionRole::Leader);
                 return Ok(region);
             }
             Ok(None) => {
@@ -235,7 +238,7 @@ impl RegionOpener {
             // Region is writable after it is created.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
-                RegionState::Writable,
+                RegionRoleState::Leader(RegionLeaderState::Writable),
             )),
             file_purger: Arc::new(LocalFilePurger::new(
                 self.purge_scheduler,
@@ -362,9 +365,10 @@ impl RegionOpener {
         let version_control = Arc::new(VersionControl::new(version));
         if !self.skip_wal_replay {
             info!(
-                "Start replaying memtable at flushed_entry_id + 1 {} for region {}",
+                "Start replaying memtable at flushed_entry_id + 1: {} for region {}, manifest version: {}",
                 flushed_entry_id + 1,
-                region_id
+                region_id,
+                manifest.manifest_version
             );
             replay_memtable(
                 &provider,
@@ -377,7 +381,10 @@ impl RegionOpener {
             )
             .await?;
         } else {
-            info!("Skip the WAL replay for region: {}", region_id);
+            info!(
+                "Skip the WAL replay for region: {}, manifest version: {}",
+                region_id, manifest.manifest_version
+            );
         }
         let now = self.time_provider.current_time_millis();
 
@@ -388,7 +395,7 @@ impl RegionOpener {
             // Region is always opened in read only mode.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
-                RegionState::ReadOnly,
+                RegionRoleState::Follower,
             )),
             file_purger,
             provider: provider.clone(),

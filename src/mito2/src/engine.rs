@@ -53,7 +53,7 @@ mod prune_test;
 #[cfg(test)]
 mod row_selector_test;
 #[cfg(test)]
-mod set_readonly_test;
+mod set_role_state_test;
 #[cfg(test)]
 mod truncate_test;
 
@@ -77,7 +77,7 @@ use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionRole, RegionScannerRef, RegionStatistic,
-    SetReadonlyResponse,
+    SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
@@ -436,22 +436,27 @@ impl EngineInner {
         Ok(scan_region)
     }
 
-    /// Set writable mode for a region.
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<()> {
+    /// Converts the [`RegionRole`].
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self
             .workers
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
 
-        region.set_writable(writable);
+        region.set_role(role);
         Ok(())
     }
 
     /// Sets read-only for a region and ensures no more writes in the region after it returns.
-    async fn set_readonly_gracefully(&self, region_id: RegionId) -> Result<SetReadonlyResponse> {
+    async fn set_region_role_state_gracefully(
+        &self,
+        region_id: RegionId,
+        region_role_state: SettableRegionRoleState,
+    ) -> Result<SetRegionRoleStateResponse> {
         // Notes: It acquires the mutable ownership to ensure no other threads,
         // Therefore, we submit it to the worker.
-        let (request, receiver) = WorkerRequest::new_set_readonly_gracefully(region_id);
+        let (request, receiver) =
+            WorkerRequest::new_set_readonly_gracefully(region_id, region_role_state);
         self.workers.submit_to_worker(region_id, request).await?;
 
         receiver.await.context(RecvSnafu)
@@ -459,7 +464,7 @@ impl EngineInner {
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.workers.get_region(region_id).map(|region| {
-            if region.is_readonly() {
+            if region.is_follower() {
                 RegionRole::Follower
             } else {
                 RegionRole::Leader
@@ -547,22 +552,23 @@ impl RegionEngine for MitoEngine {
         self.get_region_statistic(region_id)
     }
 
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError> {
         self.inner
-            .set_writable(region_id, writable)
+            .set_region_role(region_id, role)
             .map_err(BoxedError::new)
     }
 
-    async fn set_readonly_gracefully(
+    async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
-    ) -> Result<SetReadonlyResponse, BoxedError> {
+        region_role_state: SettableRegionRoleState,
+    ) -> Result<SetRegionRoleStateResponse, BoxedError> {
         let _timer = HANDLE_REQUEST_ELAPSED
-            .with_label_values(&["set_readonly_gracefully"])
+            .with_label_values(&["set_region_role_state_gracefully"])
             .start_timer();
 
         self.inner
-            .set_readonly_gracefully(region_id)
+            .set_region_role_state_gracefully(region_id, region_role_state)
             .await
             .map_err(BoxedError::new)
     }

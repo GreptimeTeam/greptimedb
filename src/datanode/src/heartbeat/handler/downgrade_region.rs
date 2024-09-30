@@ -16,7 +16,7 @@ use common_meta::instruction::{DowngradeRegion, DowngradeRegionReply, Instructio
 use common_telemetry::tracing::info;
 use common_telemetry::warn;
 use futures_util::future::BoxFuture;
-use store_api::region_engine::SetReadonlyResponse;
+use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -24,16 +24,20 @@ use crate::heartbeat::handler::HandlerContext;
 use crate::heartbeat::task_tracker::WaitResult;
 
 impl HandlerContext {
-    async fn set_readonly_gracefully(&self, region_id: RegionId) -> InstructionReply {
-        match self.region_server.set_readonly_gracefully(region_id).await {
-            Ok(SetReadonlyResponse::Success { last_entry_id }) => {
+    async fn downgrade_to_follower_gracefully(&self, region_id: RegionId) -> InstructionReply {
+        match self
+            .region_server
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+            .await
+        {
+            Ok(SetRegionRoleStateResponse::Success { last_entry_id }) => {
                 InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id,
                     exists: true,
                     error: None,
                 })
             }
-            Ok(SetReadonlyResponse::NotFound) => {
+            Ok(SetRegionRoleStateResponse::NotFound) => {
                 InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id: None,
                     exists: false,
@@ -53,10 +57,12 @@ impl HandlerContext {
         DowngradeRegion {
             region_id,
             flush_timeout,
+            reject_write,
         }: DowngradeRegion,
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
-            let Some(writable) = self.region_server.is_writable(region_id) else {
+            let Some(writable) = self.region_server.is_region_leader(region_id) else {
+                warn!("Region: {region_id} is not found");
                 return InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id: None,
                     exists: false,
@@ -64,61 +70,89 @@ impl HandlerContext {
                 });
             };
 
+            let region_server_moved = self.region_server.clone();
+
             // Ignores flush request
             if !writable {
-                return self.set_readonly_gracefully(region_id).await;
+                return self.downgrade_to_follower_gracefully(region_id).await;
             }
 
-            let region_server_moved = self.region_server.clone();
-            if let Some(flush_timeout) = flush_timeout {
-                let register_result = self
-                    .downgrade_tasks
-                    .try_register(
+            // If flush_timeout is not set, directly convert region to follower.
+            let Some(flush_timeout) = flush_timeout else {
+                return self.downgrade_to_follower_gracefully(region_id).await;
+            };
+
+            if reject_write {
+                // Sets region to downgrading, the downgrading region will reject all write requests.
+                match self
+                    .region_server
+                    .set_region_role_state_gracefully(
                         region_id,
-                        Box::pin(async move {
-                            info!("Flush region: {region_id} before downgrading region");
-                            region_server_moved
-                                .handle_request(
-                                    region_id,
-                                    RegionRequest::Flush(RegionFlushRequest {
-                                        row_group_size: None,
-                                    }),
-                                )
-                                .await?;
-
-                            Ok(())
-                        }),
+                        SettableRegionRoleState::DowngradingLeader,
                     )
-                    .await;
-
-                if register_result.is_busy() {
-                    warn!("Another flush task is running for the region: {region_id}");
-                }
-
-                let mut watcher = register_result.into_watcher();
-                let result = self.catchup_tasks.wait(&mut watcher, flush_timeout).await;
-
-                match result {
-                    WaitResult::Timeout => {
-                        InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    .await
+                {
+                    Ok(SetRegionRoleStateResponse::Success { .. }) => {}
+                    Ok(SetRegionRoleStateResponse::NotFound) => {
+                        warn!("Region: {region_id} is not found");
+                        return InstructionReply::DowngradeRegion(DowngradeRegionReply {
                             last_entry_id: None,
-                            exists: true,
-                            error: Some(format!(
-                                "Flush region: {region_id} before downgrading region is timeout"
-                            )),
-                        })
+                            exists: false,
+                            error: None,
+                        });
                     }
-                    WaitResult::Finish(Ok(_)) => self.set_readonly_gracefully(region_id).await,
-                    WaitResult::Finish(Err(err)) => {
-                        InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    Err(err) => {
+                        warn!(err; "Failed to convert region to downgrading leader");
+                        return InstructionReply::DowngradeRegion(DowngradeRegionReply {
                             last_entry_id: None,
                             exists: true,
                             error: Some(format!("{err:?}")),
-                        })
+                        });
                     }
                 }
-            } else {
-                self.set_readonly_gracefully(region_id).await
+            }
+
+            let register_result = self
+                .downgrade_tasks
+                .try_register(
+                    region_id,
+                    Box::pin(async move {
+                        info!("Flush region: {region_id} before converting region to follower");
+                        region_server_moved
+                            .handle_request(
+                                region_id,
+                                RegionRequest::Flush(RegionFlushRequest {
+                                    row_group_size: None,
+                                }),
+                            )
+                            .await?;
+
+                        Ok(())
+                    }),
+                )
+                .await;
+
+            if register_result.is_busy() {
+                warn!("Another flush task is running for the region: {region_id}");
+            }
+
+            let mut watcher = register_result.into_watcher();
+            let result = self.catchup_tasks.wait(&mut watcher, flush_timeout).await;
+
+            match result {
+                WaitResult::Timeout => InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    last_entry_id: None,
+                    exists: true,
+                    error: Some(format!("Flush region: {region_id} is timeout")),
+                }),
+                WaitResult::Finish(Ok(_)) => self.downgrade_to_follower_gracefully(region_id).await,
+                WaitResult::Finish(Err(err)) => {
+                    InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                        last_entry_id: None,
+                        exists: true,
+                        error: Some(format!("{err:?}")),
+                    })
+                }
             }
         })
     }
@@ -131,7 +165,7 @@ mod tests {
 
     use common_meta::instruction::{DowngradeRegion, InstructionReply};
     use mito2::engine::MITO_ENGINE_NAME;
-    use store_api::region_engine::{RegionRole, SetReadonlyResponse};
+    use store_api::region_engine::{RegionRole, SetRegionRoleStateResponse};
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
     use tokio::time::Instant;
@@ -155,6 +189,7 @@ mod tests {
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
                     flush_timeout,
+                    reject_write: false,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -182,8 +217,9 @@ mod tests {
 
                     Ok(0)
                 }));
-                region_engine.handle_set_readonly_gracefully_mock_fn =
-                    Some(Box::new(|_| Ok(SetReadonlyResponse::success(Some(1024)))))
+                region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
+                    Ok(SetRegionRoleStateResponse::success(Some(1024)))
+                }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
@@ -195,6 +231,7 @@ mod tests {
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
                     flush_timeout,
+                    reject_write: false,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -215,8 +252,9 @@ mod tests {
             MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
                 region_engine.mock_role = Some(Some(RegionRole::Leader));
                 region_engine.handle_request_delay = Some(Duration::from_secs(100));
-                region_engine.handle_set_readonly_gracefully_mock_fn =
-                    Some(Box::new(|_| Ok(SetReadonlyResponse::success(Some(1024)))))
+                region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
+                    Ok(SetRegionRoleStateResponse::success(Some(1024)))
+                }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
@@ -227,6 +265,7 @@ mod tests {
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
                 flush_timeout: Some(flush_timeout),
+                reject_write: false,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -246,8 +285,9 @@ mod tests {
             MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
                 region_engine.mock_role = Some(Some(RegionRole::Leader));
                 region_engine.handle_request_delay = Some(Duration::from_millis(300));
-                region_engine.handle_set_readonly_gracefully_mock_fn =
-                    Some(Box::new(|_| Ok(SetReadonlyResponse::success(Some(1024)))))
+                region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
+                    Ok(SetRegionRoleStateResponse::success(Some(1024)))
+                }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
@@ -263,6 +303,7 @@ mod tests {
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
                     flush_timeout,
+                    reject_write: false,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -277,6 +318,7 @@ mod tests {
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
                 flush_timeout: Some(Duration::from_millis(500)),
+                reject_write: false,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -304,8 +346,9 @@ mod tests {
                     }
                     .fail()
                 }));
-                region_engine.handle_set_readonly_gracefully_mock_fn =
-                    Some(Box::new(|_| Ok(SetReadonlyResponse::success(Some(1024)))))
+                region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
+                    Ok(SetRegionRoleStateResponse::success(Some(1024)))
+                }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
@@ -321,6 +364,7 @@ mod tests {
                 .handle_downgrade_region_instruction(DowngradeRegion {
                     region_id,
                     flush_timeout,
+                    reject_write: false,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -335,6 +379,7 @@ mod tests {
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
                 flush_timeout: Some(Duration::from_millis(500)),
+                reject_write: false,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -356,7 +401,7 @@ mod tests {
             MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
                 region_engine.mock_role = Some(Some(RegionRole::Leader));
                 region_engine.handle_set_readonly_gracefully_mock_fn =
-                    Some(Box::new(|_| Ok(SetReadonlyResponse::NotFound)));
+                    Some(Box::new(|_| Ok(SetRegionRoleStateResponse::NotFound)));
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
@@ -365,6 +410,7 @@ mod tests {
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
                 flush_timeout: None,
+                reject_write: false,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));
@@ -396,6 +442,7 @@ mod tests {
             .handle_downgrade_region_instruction(DowngradeRegion {
                 region_id,
                 flush_timeout: None,
+                reject_write: false,
             })
             .await;
         assert_matches!(reply, InstructionReply::DowngradeRegion(_));

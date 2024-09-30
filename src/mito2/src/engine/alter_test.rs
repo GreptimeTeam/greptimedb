@@ -24,7 +24,7 @@ use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     AddColumn, AddColumnLocation, AlterKind, RegionAlterRequest, RegionOpenRequest, RegionRequest,
 };
@@ -213,8 +213,10 @@ async fn test_put_after_alter() {
         )
         .await
         .unwrap();
-    // Set writable.
-    engine.set_writable(region_id, true).unwrap();
+    // Convert region to leader.
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
 
     // Put with old schema.
     let rows = Rows {

@@ -39,8 +39,7 @@ use crate::read::Source;
 use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionRef};
-use crate::region::ManifestContext;
-use crate::region::RegionState::Writable;
+use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::file::{FileMeta, IndexType};
 use crate::sst::file_purger::LocalFilePurger;
@@ -129,7 +128,10 @@ pub async fn open_compaction_region(
 
     let manifest = manifest_manager.manifest();
     let region_metadata = manifest.metadata.clone();
-    let manifest_ctx = Arc::new(ManifestContext::new(manifest_manager, Writable));
+    let manifest_ctx = Arc::new(ManifestContext::new(
+        manifest_manager,
+        RegionRoleState::Leader(RegionLeaderState::Writable),
+    ));
 
     let file_purger = {
         let purge_scheduler = Arc::new(LocalScheduler::new(mito_config.max_background_jobs));
@@ -379,7 +381,7 @@ impl Compactor for DefaultCompactor {
         // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
         compaction_region
             .manifest_ctx
-            .update_manifest(Writable, action_list)
+            .update_manifest(RegionLeaderState::Writable, action_list)
             .await?;
 
         Ok(edit)

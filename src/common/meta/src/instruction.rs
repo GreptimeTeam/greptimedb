@@ -137,14 +137,16 @@ pub struct DowngradeRegion {
     /// `None` stands for don't flush before downgrading the region.
     #[serde(default)]
     pub flush_timeout: Option<Duration>,
+    /// Rejects all write requests after flushing.
+    pub reject_write: bool,
 }
 
 impl Display for DowngradeRegion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "DowngradeRegion(region_id={}, flush_timeout={:?})",
-            self.region_id, self.flush_timeout,
+            "DowngradeRegion(region_id={}, flush_timeout={:?}, rejct_write={})",
+            self.region_id, self.flush_timeout, self.reject_write
         )
     }
 }

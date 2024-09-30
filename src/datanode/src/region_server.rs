@@ -54,7 +54,10 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
-use store_api::region_engine::{RegionEngineRef, RegionRole, RegionStatistic, SetReadonlyResponse};
+use store_api::region_engine::{
+    RegionEngineRef, RegionRole, RegionStatistic, SetRegionRoleStateResponse,
+    SettableRegionRoleState,
+};
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionOpenRequest, RegionRequest,
 };
@@ -274,37 +277,47 @@ impl RegionServer {
             .collect()
     }
 
-    pub fn is_writable(&self, region_id: RegionId) -> Option<bool> {
-        // TODO(weny): Finds a better way.
+    pub fn is_region_leader(&self, region_id: RegionId) -> Option<bool> {
         self.inner.region_map.get(&region_id).and_then(|engine| {
             engine.role(region_id).map(|role| match role {
                 RegionRole::Follower => false,
                 RegionRole::Leader => true,
+                RegionRole::DowngradingLeader => true,
             })
         })
     }
 
-    pub fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<()> {
+    pub fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let engine = self
             .inner
             .region_map
             .get(&region_id)
             .with_context(|| RegionNotFoundSnafu { region_id })?;
         engine
-            .set_writable(region_id, writable)
+            .set_region_role(region_id, role)
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
-    pub async fn set_readonly_gracefully(
+    /// Set region role state gracefully.
+    ///
+    /// For [SettableRegionRoleState::Follower]:
+    /// After the call returns, the engine ensures that
+    /// no **further** write or flush operations will succeed in this region.
+    ///
+    /// For [SettableRegionRoleState::DowngradingLeader]:
+    /// After the call returns, the engine ensures that
+    /// no **further** write operations will succeed in this region.
+    pub async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
-    ) -> Result<SetReadonlyResponse> {
+        state: SettableRegionRoleState,
+    ) -> Result<SetRegionRoleStateResponse> {
         match self.inner.region_map.get(&region_id) {
             Some(engine) => Ok(engine
-                .set_readonly_gracefully(region_id)
+                .set_region_role_state_gracefully(region_id, state)
                 .await
                 .with_context(|_| HandleRegionRequestSnafu { region_id })?),
-            None => Ok(SetReadonlyResponse::NotFound),
+            None => Ok(SetRegionRoleStateResponse::NotFound),
         }
     }
 
@@ -842,7 +855,7 @@ impl RegionServerInner {
                 info!("Region {region_id} is deregistered from engine {engine_type}");
                 self.region_map
                     .remove(&region_id)
-                    .map(|(id, engine)| engine.set_writable(id, false));
+                    .map(|(id, engine)| engine.set_region_role(id, RegionRole::Follower));
                 self.event_listener.on_region_deregistered(region_id);
             }
             RegionChange::Catchup => {

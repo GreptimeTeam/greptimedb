@@ -36,9 +36,32 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{RegionOpenRequest, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
 
-/// The result of setting readonly for the region.
+/// The settable region role state.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum SettableRegionRoleState {
+    Follower,
+    DowngradingLeader,
+}
+
+impl From<SettableRegionRoleState> for RegionRole {
+    fn from(value: SettableRegionRoleState) -> Self {
+        match value {
+            SettableRegionRoleState::Follower => RegionRole::Follower,
+            SettableRegionRoleState::DowngradingLeader => RegionRole::DowngradingLeader,
+        }
+    }
+}
+
+/// The request to set region role state.
 #[derive(Debug, PartialEq, Eq)]
-pub enum SetReadonlyResponse {
+pub struct SetRegionRoleStateRequest {
+    region_id: RegionId,
+    region_role_state: SettableRegionRoleState,
+}
+
+/// The response of setting region role state.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SetRegionRoleStateResponse {
     Success {
         /// Returns `last_entry_id` of the region if available(e.g., It's not available in file engine).
         last_entry_id: Option<entry::Id>,
@@ -46,8 +69,8 @@ pub enum SetReadonlyResponse {
     NotFound,
 }
 
-impl SetReadonlyResponse {
-    /// Returns a [SetReadonlyResponse::Success] with the `last_entry_id`.
+impl SetRegionRoleStateResponse {
+    /// Returns a [SetRegionRoleStateResponse::Success] with the `last_entry_id`.
     pub fn success(last_entry_id: Option<entry::Id>) -> Self {
         Self::Success { last_entry_id }
     }
@@ -58,6 +81,7 @@ pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
 }
+
 impl GrantedRegion {
     pub fn new(region_id: RegionId, region_role: RegionRole) -> Self {
         Self {
@@ -85,12 +109,18 @@ impl From<PbGrantedRegion> for GrantedRegion {
     }
 }
 
+/// The role of the region.
+/// TODO(weny): rename it to `RegionRoleState`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegionRole {
     // Readonly region(mito2)
     Follower,
     // Writable region(mito2), Readonly region(file).
     Leader,
+    // Leader is downgrading to follower.
+    //
+    // This state is used to prevent new write requests.
+    DowngradingLeader,
 }
 
 impl Display for RegionRole {
@@ -98,6 +128,7 @@ impl Display for RegionRole {
         match self {
             RegionRole::Follower => write!(f, "Follower"),
             RegionRole::Leader => write!(f, "Leader"),
+            RegionRole::DowngradingLeader => write!(f, "Leader(Downgrading)"),
         }
     }
 }
@@ -113,6 +144,7 @@ impl From<RegionRole> for PbRegionRole {
         match value {
             RegionRole::Follower => PbRegionRole::Follower,
             RegionRole::Leader => PbRegionRole::Leader,
+            RegionRole::DowngradingLeader => PbRegionRole::DowngradingLeader,
         }
     }
 }
@@ -122,6 +154,7 @@ impl From<PbRegionRole> for RegionRole {
         match value {
             PbRegionRole::Leader => RegionRole::Leader,
             PbRegionRole::Follower => RegionRole::Follower,
+            PbRegionRole::DowngradingLeader => RegionRole::DowngradingLeader,
         }
     }
 }
@@ -331,20 +364,21 @@ pub trait RegionEngine: Send + Sync {
     /// Stops the engine
     async fn stop(&self) -> Result<(), BoxedError>;
 
-    /// Sets writable mode for a region.
+    /// Sets [RegionRole] for a region.
     ///
     /// The engine checks whether the region is writable before writing to the region. Setting
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError>;
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
 
-    /// Sets readonly for a region gracefully.
+    /// Sets region role state gracefully.
     ///
     /// After the call returns, the engine ensures no more write operations will succeed in the region.
-    async fn set_readonly_gracefully(
+    async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
-    ) -> Result<SetReadonlyResponse, BoxedError>;
+        region_role_state: SettableRegionRoleState,
+    ) -> Result<SetRegionRoleStateResponse, BoxedError>;
 
     /// Indicates region role.
     ///

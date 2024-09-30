@@ -37,7 +37,8 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetReadonlyResponse,
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
+    SettableRegionRoleState,
 };
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
@@ -201,14 +202,14 @@ impl RegionEngine for MetricEngine {
         Ok(())
     }
 
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError> {
         // ignore the region not found error
         for x in [
             utils::to_metadata_region_id(region_id),
             utils::to_data_region_id(region_id),
             region_id,
         ] {
-            if let Err(e) = self.inner.mito.set_writable(x, writable)
+            if let Err(e) = self.inner.mito.set_region_role(x, role)
                 && e.status_code() != StatusCode::RegionNotFound
             {
                 return Err(e);
@@ -217,11 +218,15 @@ impl RegionEngine for MetricEngine {
         Ok(())
     }
 
-    async fn set_readonly_gracefully(
+    async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
-    ) -> std::result::Result<SetReadonlyResponse, BoxedError> {
-        self.inner.mito.set_readonly_gracefully(region_id).await
+        region_role_state: SettableRegionRoleState,
+    ) -> std::result::Result<SetRegionRoleStateResponse, BoxedError> {
+        self.inner
+            .mito
+            .set_region_role_state_gracefully(region_id, region_role_state)
+            .await
     }
 
     /// Returns the physical region role.

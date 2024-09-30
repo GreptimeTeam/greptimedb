@@ -153,6 +153,7 @@ mod tests {
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
     use store_api::path_utils::region_dir;
+    use store_api::region_engine::RegionRole;
     use store_api::region_request::{RegionCloseRequest, RegionRequest};
     use store_api::storage::RegionId;
     use tokio::sync::mpsc::{self, Receiver};
@@ -213,6 +214,7 @@ mod tests {
         let instruction = Instruction::DowngradeRegion(DowngradeRegion {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
+            reject_write: false,
         });
         assert!(heartbeat_handler
             .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
@@ -295,7 +297,9 @@ mod tests {
             }
 
             assert_matches!(
-                region_server.set_writable(region_id, true).unwrap_err(),
+                region_server
+                    .set_region_role(region_id, RegionRole::Leader)
+                    .unwrap_err(),
                 error::Error::RegionNotFound { .. }
             );
         }
@@ -411,6 +415,7 @@ mod tests {
             let instruction = Instruction::DowngradeRegion(DowngradeRegion {
                 region_id,
                 flush_timeout: Some(Duration::from_secs(1)),
+                reject_write: false,
             });
 
             let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
@@ -433,6 +438,7 @@ mod tests {
         let instruction = Instruction::DowngradeRegion(DowngradeRegion {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
+            reject_write: false,
         });
         let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();

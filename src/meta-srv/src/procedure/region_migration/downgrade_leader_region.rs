@@ -22,8 +22,10 @@ use common_meta::instruction::{
 };
 use common_procedure::Status;
 use common_telemetry::{error, info, warn};
+use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionId;
 use tokio::time::{sleep, Instant};
 
 use super::update_metadata::UpdateMetadata;
@@ -95,13 +97,30 @@ impl DowngradeLeaderRegion {
         &self,
         ctx: &Context,
         flush_timeout: Duration,
+        reject_write: bool,
     ) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
         Instruction::DowngradeRegion(DowngradeRegion {
             region_id,
             flush_timeout: Some(flush_timeout),
+            reject_write,
         })
+    }
+
+    async fn should_reject_write(ctx: &mut Context, region_id: RegionId) -> Result<bool> {
+        let datanode_table_value = ctx.get_from_peer_datanode_table_value().await?;
+        if let Some(wal_option) = datanode_table_value
+            .region_info
+            .region_wal_options
+            .get(&region_id.region_number())
+        {
+            let options: WalOptions = serde_json::from_str(wal_option)
+                .with_context(|_| error::DeserializeFromJsonSnafu { input: wal_option })?;
+            return Ok(matches!(options, WalOptions::RaftEngine));
+        }
+
+        Ok(true)
     }
 
     /// Tries to downgrade a leader region.
@@ -118,16 +137,17 @@ impl DowngradeLeaderRegion {
     /// - [ExceededDeadline](error::Error::ExceededDeadline)
     /// - Invalid JSON.
     async fn downgrade_region(&self, ctx: &mut Context) -> Result<()> {
-        let pc = &ctx.persistent_ctx;
-        let region_id = pc.region_id;
-        let leader = &pc.from_peer;
+        let region_id = ctx.persistent_ctx.region_id;
         let operation_timeout =
             ctx.next_operation_timeout()
                 .context(error::ExceededDeadlineSnafu {
                     operation: "Downgrade region",
                 })?;
-        let downgrade_instruction = self.build_downgrade_region_instruction(ctx, operation_timeout);
+        let reject_write = Self::should_reject_write(ctx, region_id).await?;
+        let downgrade_instruction =
+            self.build_downgrade_region_instruction(ctx, operation_timeout, reject_write);
 
+        let leader = &ctx.persistent_ctx.from_peer;
         let msg = MailboxMessage::json_message(
             &format!("Downgrade leader region: {}", region_id),
             &format!("Meta@{}", ctx.server_addr()),
@@ -240,8 +260,13 @@ impl DowngradeLeaderRegion {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
 
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_wal::options::KafkaWalOptions;
     use store_api::storage::RegionId;
     use tokio::time::Instant;
 
@@ -264,17 +289,71 @@ mod tests {
         }
     }
 
+    async fn prepare_table_metadata(ctx: &Context, wal_options: HashMap<u32, String>) {
+        let table_info =
+            new_test_table_info(ctx.persistent_ctx.region_id.table_id(), vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(ctx.persistent_ctx.region_id),
+            leader_peer: Some(ctx.persistent_ctx.from_peer.clone()),
+            follower_peers: vec![ctx.persistent_ctx.to_peer.clone()],
+            ..Default::default()
+        }];
+        ctx.table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(region_routes),
+                wal_options,
+            )
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_datanode_is_unreachable() {
         let state = DowngradeLeaderRegion::default();
         let persistent_context = new_persistent_context();
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
-
+        prepare_table_metadata(&ctx, HashMap::default()).await;
         let err = state.downgrade_region(&mut ctx).await.unwrap_err();
 
         assert_matches!(err, Error::PusherNotFound { .. });
         assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_writes() {
+        let persistent_context = new_persistent_context();
+        let region_id = persistent_context.region_id;
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let wal_options =
+            HashMap::from([(1, serde_json::to_string(&WalOptions::RaftEngine).unwrap())]);
+        prepare_table_metadata(&ctx, wal_options).await;
+
+        let reject_write = DowngradeLeaderRegion::should_reject_write(&mut ctx, region_id)
+            .await
+            .unwrap();
+        assert!(reject_write);
+
+        // Remote WAL
+        let persistent_context = new_persistent_context();
+        let region_id = persistent_context.region_id;
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let wal_options = HashMap::from([(
+            1,
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                topic: "my_topic".to_string(),
+            }))
+            .unwrap(),
+        )]);
+        prepare_table_metadata(&ctx, wal_options).await;
+
+        let reject_write = DowngradeLeaderRegion::should_reject_write(&mut ctx, region_id)
+            .await
+            .unwrap();
+        assert!(!reject_write);
     }
 
     #[tokio::test]
@@ -285,6 +364,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
         let mailbox_ctx = env.mailbox_context();
 
         let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -307,6 +387,7 @@ mod tests {
         let persistent_context = new_persistent_context();
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
         ctx.volatile_ctx.operations_elapsed = ctx.persistent_ctx.timeout + Duration::from_secs(1);
 
         let err = state.downgrade_region(&mut ctx).await.unwrap_err();
@@ -330,6 +411,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
@@ -356,6 +438,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
@@ -383,6 +466,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
@@ -416,6 +500,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
@@ -508,6 +593,7 @@ mod tests {
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
