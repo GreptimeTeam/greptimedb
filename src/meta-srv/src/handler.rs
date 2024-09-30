@@ -620,6 +620,7 @@ mod tests {
     use super::{HeartbeatHandlerGroupBuilder, Pushers};
     use crate::error;
     use crate::handler::collect_stats_handler::CollectStatsHandler;
+    use crate::handler::response_header_handler::ResponseHeaderHandler;
     use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
     use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
 
@@ -809,6 +810,70 @@ mod tests {
             "CollectFrontendClusterInfoHandler",
             "CollectFlownodeClusterInfoHandler",
             "CollectStatsHandler",
+            "FilterInactiveRegionStatsHandler",
+            "CollectStatsHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
+    }
+
+    #[test]
+    fn test_handler_group_builder_replace_last() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder
+            .replace_handler("CollectStatsHandler", ResponseHeaderHandler)
+            .unwrap();
+
+        let group = builder.build();
+        let handlers = group.handlers;
+        assert_eq!(12, handlers.len());
+
+        let names = [
+            "ResponseHeaderHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "MailboxHandler",
+            "FilterInactiveRegionStatsHandler",
+            "ResponseHeaderHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
+    }
+
+    #[test]
+    fn test_handler_group_builder_replace_first() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder
+            .replace_handler("ResponseHeaderHandler", CollectStatsHandler::default())
+            .unwrap();
+
+        let group = builder.build();
+        let handlers = group.handlers;
+        assert_eq!(12, handlers.len());
+
+        let names = [
+            "CollectStatsHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectStatsHandler",
         ];
