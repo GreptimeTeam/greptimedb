@@ -68,6 +68,9 @@ pub struct LoggingOptions {
 
     /// The logging options of slow query.
     pub slow_query: SlowQueryOptions,
+
+    /// The maximum number of log files set by default.
+    pub max_log_files: usize,
 }
 
 /// The options of slow query.
@@ -116,6 +119,8 @@ impl Default for LoggingOptions {
             tracing_sample_ratio: None,
             append_stdout: true,
             slow_query: SlowQueryOptions::default(),
+            // Rotation hourly, 24 files per day, keeps info log files of 30 days
+            max_log_files: 720,
         }
     }
 }
@@ -206,8 +211,12 @@ pub fn init_global_logging(
 
         // Configure the file logging layer with rolling policy.
         let file_logging_layer = if !opts.dir.is_empty() {
-            let rolling_appender =
-                RollingFileAppender::new(Rotation::HOURLY, &opts.dir, "greptimedb");
+            let rolling_appender = RollingFileAppender::builder()
+                .rotation(Rotation::HOURLY)
+                .filename_prefix("greptimedb")
+                .max_log_files(opts.max_log_files)
+                .build(&opts.dir)
+                .expect("initializing rolling file appender failed");
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
