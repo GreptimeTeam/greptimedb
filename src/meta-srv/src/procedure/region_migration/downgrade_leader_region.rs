@@ -110,19 +110,17 @@ impl DowngradeLeaderRegion {
 
     async fn should_reject_write(ctx: &mut Context, region_id: RegionId) -> Result<bool> {
         let datanode_table_value = ctx.get_from_peer_datanode_table_value().await?;
-        let reject_write = if let Some(wal_option) = datanode_table_value
+        if let Some(wal_option) = datanode_table_value
             .region_info
             .region_wal_options
             .get(&region_id.region_number())
         {
             let options: WalOptions = serde_json::from_str(wal_option)
                 .with_context(|_| error::DeserializeFromJsonSnafu { input: wal_option })?;
-            matches!(options, WalOptions::RaftEngine)
-        } else {
-            true
-        };
+            return Ok(matches!(options, WalOptions::RaftEngine));
+        }
 
-        Ok(reject_write)
+        Ok(true)
     }
 
     /// Tries to downgrade a leader region.

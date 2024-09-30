@@ -298,37 +298,23 @@ impl RegionServer {
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
-    /// Converts region to follower gracefully.
+    /// Set region role state gracefully.
     ///
-    /// After the call returns,
-    /// the engine ensures that no **further** write or flush operations will succeed in this region.
-    pub async fn become_follower_gracefully(
+    /// For [SettableRegionRoleState::Follower]:
+    /// After the call returns, the engine ensures that
+    /// no **further** write or flush operations will succeed in this region.
+    ///
+    /// For [SettableRegionRoleState::DowngradingLeader]:
+    /// After the call returns, the engine ensures that
+    /// no **further** write operations will succeed in this region.
+    pub async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
+        state: SettableRegionRoleState,
     ) -> Result<SetRegionRoleStateResponse> {
         match self.inner.region_map.get(&region_id) {
             Some(engine) => Ok(engine
-                .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
-                .await
-                .with_context(|_| HandleRegionRequestSnafu { region_id })?),
-            None => Ok(SetRegionRoleStateResponse::NotFound),
-        }
-    }
-
-    /// Set region to downgrading gracefully.
-    ///
-    /// After the call returns,
-    /// the engine ensures that no **further** write operations will succeed in this region.
-    pub async fn downgrade_region_gracefully(
-        &self,
-        region_id: RegionId,
-    ) -> Result<SetRegionRoleStateResponse> {
-        match self.inner.region_map.get(&region_id) {
-            Some(engine) => Ok(engine
-                .set_region_role_state_gracefully(
-                    region_id,
-                    SettableRegionRoleState::DowngradingLeader,
-                )
+                .set_region_role_state_gracefully(region_id, state)
                 .await
                 .with_context(|_| HandleRegionRequestSnafu { region_id })?),
             None => Ok(SetRegionRoleStateResponse::NotFound),

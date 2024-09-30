@@ -422,8 +422,9 @@ impl RegionFlushTask {
             .update_manifest(expected_state, action_list)
             .await?;
         info!(
-            "Successfully update manifest version to {version}, region: {}",
-            self.region_id
+            "Successfully update manifest version to {version}, region: {}, reason: {}",
+            self.region_id,
+            self.reason.as_str()
         );
 
         Ok(edit)

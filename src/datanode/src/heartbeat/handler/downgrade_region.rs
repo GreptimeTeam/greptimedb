@@ -16,7 +16,7 @@ use common_meta::instruction::{DowngradeRegion, DowngradeRegionReply, Instructio
 use common_telemetry::tracing::info;
 use common_telemetry::warn;
 use futures_util::future::BoxFuture;
-use store_api::region_engine::SetRegionRoleStateResponse;
+use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -24,10 +24,10 @@ use crate::heartbeat::handler::HandlerContext;
 use crate::heartbeat::task_tracker::WaitResult;
 
 impl HandlerContext {
-    async fn become_follower_gracefully(&self, region_id: RegionId) -> InstructionReply {
+    async fn downgrade_to_follower_gracefully(&self, region_id: RegionId) -> InstructionReply {
         match self
             .region_server
-            .become_follower_gracefully(region_id)
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
             .await
         {
             Ok(SetRegionRoleStateResponse::Success { last_entry_id }) => {
@@ -70,86 +70,89 @@ impl HandlerContext {
                 });
             };
 
+            let region_server_moved = self.region_server.clone();
+
             // Ignores flush request
             if !writable {
-                return self.become_follower_gracefully(region_id).await;
+                return self.downgrade_to_follower_gracefully(region_id).await;
             }
 
-            let region_server_moved = self.region_server.clone();
-            if let Some(flush_timeout) = flush_timeout {
-                if reject_write {
-                    // Sets region to downgrading, the downgrading region will reject all write requests.
-                    match self
-                        .region_server
-                        .downgrade_region_gracefully(region_id)
-                        .await
-                    {
-                        Ok(SetRegionRoleStateResponse::Success { .. }) => {}
-                        Ok(SetRegionRoleStateResponse::NotFound) => {
-                            warn!("Region: {region_id} is not found");
-                            return InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                                last_entry_id: None,
-                                exists: false,
-                                error: None,
-                            });
-                        }
-                        Err(err) => {
-                            warn!(err; "Failed to convert region to downgrading leader");
-                            return InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                                last_entry_id: None,
-                                exists: true,
-                                error: Some(format!("{err:?}")),
-                            });
-                        }
-                    }
-                }
+            // If flush_timeout is not set, directly convert region to follower.
+            let Some(flush_timeout) = flush_timeout else {
+                return self.downgrade_to_follower_gracefully(region_id).await;
+            };
 
-                let register_result = self
-                    .downgrade_tasks
-                    .try_register(
+            if reject_write {
+                // Sets region to downgrading, the downgrading region will reject all write requests.
+                match self
+                    .region_server
+                    .set_region_role_state_gracefully(
                         region_id,
-                        Box::pin(async move {
-                            info!("Flush region: {region_id} before converting region to follower");
-                            region_server_moved
-                                .handle_request(
-                                    region_id,
-                                    RegionRequest::Flush(RegionFlushRequest {
-                                        row_group_size: None,
-                                    }),
-                                )
-                                .await?;
-
-                            Ok(())
-                        }),
+                        SettableRegionRoleState::DowngradingLeader,
                     )
-                    .await;
-
-                if register_result.is_busy() {
-                    warn!("Another flush task is running for the region: {region_id}");
-                }
-
-                let mut watcher = register_result.into_watcher();
-                let result = self.catchup_tasks.wait(&mut watcher, flush_timeout).await;
-
-                match result {
-                    WaitResult::Timeout => {
-                        InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    .await
+                {
+                    Ok(SetRegionRoleStateResponse::Success { .. }) => {}
+                    Ok(SetRegionRoleStateResponse::NotFound) => {
+                        warn!("Region: {region_id} is not found");
+                        return InstructionReply::DowngradeRegion(DowngradeRegionReply {
                             last_entry_id: None,
-                            exists: true,
-                            error: Some(format!("Flush region: {region_id} is timeout")),
-                        })
+                            exists: false,
+                            error: None,
+                        });
                     }
-                    WaitResult::Finish(Ok(_)) => self.become_follower_gracefully(region_id).await,
-                    WaitResult::Finish(Err(err)) => {
-                        InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    Err(err) => {
+                        warn!(err; "Failed to convert region to downgrading leader");
+                        return InstructionReply::DowngradeRegion(DowngradeRegionReply {
                             last_entry_id: None,
                             exists: true,
                             error: Some(format!("{err:?}")),
-                        })
+                        });
                     }
                 }
-            } else {
-                self.become_follower_gracefully(region_id).await
+            }
+
+            let register_result = self
+                .downgrade_tasks
+                .try_register(
+                    region_id,
+                    Box::pin(async move {
+                        info!("Flush region: {region_id} before converting region to follower");
+                        region_server_moved
+                            .handle_request(
+                                region_id,
+                                RegionRequest::Flush(RegionFlushRequest {
+                                    row_group_size: None,
+                                }),
+                            )
+                            .await?;
+
+                        Ok(())
+                    }),
+                )
+                .await;
+
+            if register_result.is_busy() {
+                warn!("Another flush task is running for the region: {region_id}");
+            }
+
+            let mut watcher = register_result.into_watcher();
+            let result = self.catchup_tasks.wait(&mut watcher, flush_timeout).await;
+
+            match result {
+                WaitResult::Timeout => InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    last_entry_id: None,
+                    exists: true,
+                    error: Some(format!("Flush region: {region_id} is timeout")),
+                }),
+                WaitResult::Finish(Ok(_)) => self.downgrade_to_follower_gracefully(region_id).await,
+                WaitResult::Finish(Err(err)) => {
+                    InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                        last_entry_id: None,
+                        exists: true,
+                        error: Some(format!("{err:?}")),
+                    })
+                }
             }
         })
     }

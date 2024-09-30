@@ -108,8 +108,8 @@ pub fn convert_to_region_peer_map(
         .collect::<HashMap<_, _>>()
 }
 
-/// Returns the HashMap<[RegionNumber], [RegionStatus]>;
-pub fn convert_to_region_leader_status_map(
+/// Returns the HashMap<[RegionNumber], [LeaderState]>;
+pub fn convert_to_region_leader_state_map(
     region_routes: &[RegionRoute],
 ) -> HashMap<RegionNumber, LeaderState> {
     region_routes
@@ -117,7 +117,7 @@ pub fn convert_to_region_leader_status_map(
         .filter_map(|x| {
             x.leader_state
                 .as_ref()
-                .map(|status| (x.region.id.region_number(), *status))
+                .map(|state| (x.region.id.region_number(), *state))
         })
         .collect::<HashMap<_, _>>()
 }
@@ -265,7 +265,7 @@ pub struct RegionRoute {
         skip_serializing_if = "Option::is_none"
     )]
     pub leader_state: Option<LeaderState>,
-    /// The start time when the leader is in `Downgraded` status.
+    /// The start time when the leader is in `Downgraded` state.
     #[serde(default)]
     #[builder(default = "self.default_leader_down_since()")]
     pub leader_down_since: Option<i64>,
@@ -320,7 +320,7 @@ impl RegionRoute {
         self.leader_state = Some(LeaderState::Downgrading)
     }
 
-    /// Returns how long since the leader is in `Downgraded` status.
+    /// Returns how long since the leader is in `Downgraded` state.
     pub fn leader_down_millis(&self) -> Option<i64> {
         self.leader_down_since
             .map(|start| current_time_millis() - start)
@@ -329,22 +329,22 @@ impl RegionRoute {
     /// Sets the leader state.
     ///
     /// Returns true if updated.
-    pub fn set_leader_state(&mut self, status: Option<LeaderState>) -> bool {
-        let updated = self.leader_state != status;
+    pub fn set_leader_state(&mut self, state: Option<LeaderState>) -> bool {
+        let updated = self.leader_state != state;
 
-        match (status, updated) {
+        match (state, updated) {
             (Some(LeaderState::Downgrading), true) => {
                 self.leader_down_since = Some(current_time_millis());
             }
             (Some(LeaderState::Downgrading), false) => {
-                // Do nothing if leader is still in `Downgraded` status.
+                // Do nothing if leader is still in `Downgraded` state.
             }
             _ => {
                 self.leader_down_since = None;
             }
         }
 
-        self.leader_state = status;
+        self.leader_state = state;
         updated
     }
 }
