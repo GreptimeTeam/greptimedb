@@ -17,6 +17,7 @@ backtrace = "0.3"
 common-error.workspace = true
 console-subscriber = { version = "0.1", optional = true }
 greptime-proto.workspace = true
+humantime-serde.workspace = true
 lazy_static.workspace = true
 once_cell.workspace = true
 opentelemetry = { version = "0.21.0", default-features = false, features = [

@@ -36,6 +36,7 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
+use query::stats::StatementStatistics;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
@@ -352,6 +353,7 @@ impl StartCommand {
             catalog_manager,
             Arc::new(client),
             meta_client,
+            StatementStatistics::new(opts.logging.slow_query.clone()),
         )
         .with_plugin(plugins.clone())
         .with_local_cache_invalidator(layered_cache_registry)

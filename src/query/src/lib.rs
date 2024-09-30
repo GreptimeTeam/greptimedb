@@ -35,6 +35,7 @@ pub mod query_engine;
 mod range_select;
 pub mod region_query;
 pub mod sql;
+pub mod stats;
 
 #[cfg(test)]
 mod tests;

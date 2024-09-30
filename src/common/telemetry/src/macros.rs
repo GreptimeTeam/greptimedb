@@ -152,6 +152,17 @@ macro_rules! trace {
     };
 }
 
+#[macro_export]
+macro_rules! slow {
+    (target: $target:expr, $($arg:tt)+) => {
+        $crate::log!(target: $target, slow = true, $crate::tracing::Level::INFO, $($arg)+)
+    };
+
+    ($($arg:tt)+) => {
+        $crate::log!($crate::tracing::Level::INFO, slow = true, $($arg)+)
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use common_error::mock::MockError;

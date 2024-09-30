@@ -45,6 +45,7 @@ use common_time::Timestamp;
 use datafusion_expr::LogicalPlan;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
+use query::stats::StatementStatistics;
 use query::QueryEngineRef;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
@@ -80,11 +81,13 @@ pub struct StatementExecutor {
     partition_manager: PartitionRuleManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
+    stats: StatementStatistics,
 }
 
 pub type StatementExecutorRef = Arc<StatementExecutor>;
 
 impl StatementExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
@@ -93,6 +96,7 @@ impl StatementExecutor {
         cache_invalidator: CacheInvalidatorRef,
         inserter: InserterRef,
         table_route_cache: TableRouteCacheRef,
+        stats: StatementStatistics,
     ) -> Self {
         Self {
             catalog_manager,
@@ -104,6 +108,7 @@ impl StatementExecutor {
             partition_manager: Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache)),
             cache_invalidator,
             inserter,
+            stats,
         }
     }
 
@@ -113,6 +118,7 @@ impl StatementExecutor {
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        let _slow_query_timer = self.stats.start_slow_query_timer(stmt.clone());
         match stmt {
             QueryStatement::Sql(stmt) => self.execute_sql(stmt, query_ctx).await,
             QueryStatement::Promql(_) => self.plan_exec(stmt, query_ctx).await,

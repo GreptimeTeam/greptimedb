@@ -40,6 +40,7 @@ use flow::FlownodeBuilder;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
+use query::stats::StatementStatistics;
 use servers::Mode;
 use snafu::ResultExt;
 
@@ -215,6 +216,7 @@ impl GreptimeDbStandaloneBuilder {
             catalog_manager.clone(),
             node_manager.clone(),
             ddl_task_executor.clone(),
+            StatementStatistics::default(),
         )
         .with_plugin(plugins)
         .try_build()
