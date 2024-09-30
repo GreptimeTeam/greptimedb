@@ -734,7 +734,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Handler: {} is not found", name))]
+    #[snafu(display("Handler not found: {}", name))]
     HandlerNotFound {
         name: String,
         #[snafu(implicit)]

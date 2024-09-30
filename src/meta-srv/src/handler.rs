@@ -498,30 +498,30 @@ impl HeartbeatHandlerGroupBuilder {
             None
         };
 
-        self.add_handler(ResponseHeaderHandler);
+        self.add_handler_last(ResponseHeaderHandler);
         // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
         // because even if the current meta-server node is no longer the leader it can
         // still help the datanode to keep lease.
-        self.add_handler(DatanodeKeepLeaseHandler);
-        self.add_handler(FlownodeKeepLeaseHandler);
-        self.add_handler(CheckLeaderHandler);
-        self.add_handler(OnLeaderStartHandler);
-        self.add_handler(ExtractStatHandler);
-        self.add_handler(CollectDatanodeClusterInfoHandler);
-        self.add_handler(CollectFrontendClusterInfoHandler);
-        self.add_handler(CollectFlownodeClusterInfoHandler);
-        self.add_handler(MailboxHandler);
+        self.add_handler_last(DatanodeKeepLeaseHandler);
+        self.add_handler_last(FlownodeKeepLeaseHandler);
+        self.add_handler_last(CheckLeaderHandler);
+        self.add_handler_last(OnLeaderStartHandler);
+        self.add_handler_last(ExtractStatHandler);
+        self.add_handler_last(CollectDatanodeClusterInfoHandler);
+        self.add_handler_last(CollectFrontendClusterInfoHandler);
+        self.add_handler_last(CollectFlownodeClusterInfoHandler);
+        self.add_handler_last(MailboxHandler);
         if let Some(region_lease_handler) = self.region_lease_handler.take() {
-            self.add_handler(region_lease_handler);
+            self.add_handler_last(region_lease_handler);
         }
-        self.add_handler(FilterInactiveRegionStatsHandler);
+        self.add_handler_last(FilterInactiveRegionStatsHandler);
         if let Some(region_failure_handler) = self.region_failure_handler.take() {
-            self.add_handler(region_failure_handler);
+            self.add_handler_last(region_failure_handler);
         }
         if let Some(publish_heartbeat_handler) = publish_heartbeat_handler {
-            self.add_handler(publish_heartbeat_handler);
+            self.add_handler_last(publish_heartbeat_handler);
         }
-        self.add_handler(CollectStatsHandler::default());
+        self.add_handler_last(CollectStatsHandler::default());
 
         self
     }
@@ -537,13 +537,13 @@ impl HeartbeatHandlerGroupBuilder {
     /// Adds the handler after the specified handler.
     pub fn add_handler_after(
         &mut self,
+        target: &'static str,
         handler: impl HeartbeatHandler + 'static,
-        after: &'static str,
     ) -> Result<()> {
         let mut cursor = self.handlers.cursor_front_mut();
         let mut found = false;
         while let Some(NameCachedHandler { name, .. }) = cursor.current() {
-            if *name == after {
+            if *name == target {
                 found = true;
                 cursor.insert_after(NameCachedHandler::new(handler));
 
@@ -552,20 +552,20 @@ impl HeartbeatHandlerGroupBuilder {
             cursor.move_next();
         }
 
-        ensure!(found, error::HandlerNotFoundSnafu { name: after });
+        ensure!(found, error::HandlerNotFoundSnafu { name: target });
         Ok(())
     }
 
     /// Adds the handler before the specified handler.
     pub fn add_handler_before(
         &mut self,
+        target: &'static str,
         handler: impl HeartbeatHandler + 'static,
-        before: &'static str,
     ) -> Result<()> {
         let mut cursor = self.handlers.cursor_front_mut();
         let mut found = false;
         while let Some(NameCachedHandler { name, .. }) = cursor.current() {
-            if *name == before {
+            if *name == target {
                 found = true;
                 cursor.insert_before(NameCachedHandler::new(handler));
 
@@ -573,20 +573,20 @@ impl HeartbeatHandlerGroupBuilder {
             }
             cursor.move_next();
         }
-        ensure!(found, error::HandlerNotFoundSnafu { name: before });
+        ensure!(found, error::HandlerNotFoundSnafu { name: target });
         Ok(())
     }
 
     /// Replaces the handler with the specified name.
     pub fn replace_handler(
         &mut self,
+        target: &'static str,
         handler: impl HeartbeatHandler + 'static,
-        name: &'static str,
     ) -> Result<()> {
         let mut cursor = self.handlers.cursor_front_mut();
         let mut found = false;
-        while let Some(NameCachedHandler { name: n, .. }) = cursor.current() {
-            if *n == name {
+        while let Some(NameCachedHandler { name, .. }) = cursor.current() {
+            if *name == target {
                 found = true;
                 cursor.remove_current();
                 cursor.insert_before(NameCachedHandler::new(handler));
@@ -596,11 +596,11 @@ impl HeartbeatHandlerGroupBuilder {
             cursor.move_next();
         }
 
-        ensure!(found, error::HandlerNotFoundSnafu { name });
+        ensure!(found, error::HandlerNotFoundSnafu { name: target });
         Ok(())
     }
 
-    fn add_handler(&mut self, handler: impl HeartbeatHandler + 'static) {
+    fn add_handler_last(&mut self, handler: impl HeartbeatHandler + 'static) {
         self.handlers.push_back(NameCachedHandler::new(handler));
     }
 }
@@ -723,8 +723,8 @@ mod tests {
             HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
         builder
             .add_handler_before(
-                CollectStatsHandler::default(),
                 "FilterInactiveRegionStatsHandler",
+                CollectStatsHandler::default(),
             )
             .unwrap();
 
@@ -758,7 +758,7 @@ mod tests {
         let mut builder =
             HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
         builder
-            .add_handler_after(CollectStatsHandler::default(), "MailboxHandler")
+            .add_handler_after("MailboxHandler", CollectStatsHandler::default())
             .unwrap();
 
         let group = builder.build();
@@ -791,7 +791,7 @@ mod tests {
         let mut builder =
             HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
         builder
-            .replace_handler(CollectStatsHandler::default(), "MailboxHandler")
+            .replace_handler("MailboxHandler", CollectStatsHandler::default())
             .unwrap();
 
         let group = builder.build();
@@ -823,17 +823,17 @@ mod tests {
         let mut builder =
             HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
         let err = builder
-            .add_handler_before(CollectStatsHandler::default(), "NotExists")
+            .add_handler_before("NotExists", CollectStatsHandler::default())
             .unwrap_err();
         assert_matches!(err, error::Error::HandlerNotFound { .. });
 
         let err = builder
-            .add_handler_after(CollectStatsHandler::default(), "NotExists")
+            .add_handler_after("NotExists", CollectStatsHandler::default())
             .unwrap_err();
         assert_matches!(err, error::Error::HandlerNotFound { .. });
 
         let err = builder
-            .replace_handler(CollectStatsHandler::default(), "NotExists")
+            .replace_handler("NotExists", CollectStatsHandler::default())
             .unwrap_err();
         assert_matches!(err, error::Error::HandlerNotFound { .. });
     }
