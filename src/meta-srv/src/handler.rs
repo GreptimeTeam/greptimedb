@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashSet, LinkedList};
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,7 +44,7 @@ use on_leader_start_handler::OnLeaderStartHandler;
 use publish_heartbeat_handler::PublishHeartbeatHandler;
 use region_lease_handler::RegionLeaseHandler;
 use response_header_handler::ResponseHeaderHandler;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{oneshot, Notify, RwLock};
@@ -456,7 +456,7 @@ pub struct HeartbeatHandlerGroupBuilder {
     pushers: Pushers,
 
     /// The group of heartbeat handlers.
-    handlers: LinkedList<NameCachedHandler>,
+    handlers: Vec<NameCachedHandler>,
 }
 
 impl HeartbeatHandlerGroupBuilder {
@@ -466,7 +466,7 @@ impl HeartbeatHandlerGroupBuilder {
             region_lease_handler: None,
             plugins: None,
             pushers,
-            handlers: LinkedList::new(),
+            handlers: vec![],
         }
     }
 
@@ -540,20 +540,13 @@ impl HeartbeatHandlerGroupBuilder {
         target: &'static str,
         handler: impl HeartbeatHandler + 'static,
     ) -> Result<()> {
-        let mut cursor = self.handlers.cursor_front_mut();
-        let mut found = false;
-        while let Some(NameCachedHandler { name, .. }) = cursor.current() {
-            if *name == target {
-                found = true;
-                cursor.insert_after(NameCachedHandler::new(handler));
-
-                break;
-            }
-            cursor.move_next();
+        if let Some(pos) = self.handlers.iter().position(|x| x.name == target) {
+            self.handlers
+                .insert(pos + 1, NameCachedHandler::new(handler));
+            return Ok(());
         }
 
-        ensure!(found, error::HandlerNotFoundSnafu { name: target });
-        Ok(())
+        error::HandlerNotFoundSnafu { name: target }.fail()
     }
 
     /// Adds the handler before the specified handler.
@@ -562,19 +555,12 @@ impl HeartbeatHandlerGroupBuilder {
         target: &'static str,
         handler: impl HeartbeatHandler + 'static,
     ) -> Result<()> {
-        let mut cursor = self.handlers.cursor_front_mut();
-        let mut found = false;
-        while let Some(NameCachedHandler { name, .. }) = cursor.current() {
-            if *name == target {
-                found = true;
-                cursor.insert_before(NameCachedHandler::new(handler));
-
-                break;
-            }
-            cursor.move_next();
+        if let Some(pos) = self.handlers.iter().position(|x| x.name == target) {
+            self.handlers.insert(pos, NameCachedHandler::new(handler));
+            return Ok(());
         }
-        ensure!(found, error::HandlerNotFoundSnafu { name: target });
-        Ok(())
+
+        error::HandlerNotFoundSnafu { name: target }.fail()
     }
 
     /// Replaces the handler with the specified name.
@@ -583,25 +569,16 @@ impl HeartbeatHandlerGroupBuilder {
         target: &'static str,
         handler: impl HeartbeatHandler + 'static,
     ) -> Result<()> {
-        let mut cursor = self.handlers.cursor_front_mut();
-        let mut found = false;
-        while let Some(NameCachedHandler { name, .. }) = cursor.current() {
-            if *name == target {
-                found = true;
-                cursor.remove_current();
-                cursor.insert_before(NameCachedHandler::new(handler));
-
-                break;
-            }
-            cursor.move_next();
+        if let Some(pos) = self.handlers.iter().position(|x| x.name == target) {
+            self.handlers[pos] = NameCachedHandler::new(handler);
+            return Ok(());
         }
 
-        ensure!(found, error::HandlerNotFoundSnafu { name: target });
-        Ok(())
+        error::HandlerNotFoundSnafu { name: target }.fail()
     }
 
     fn add_handler_last(&mut self, handler: impl HeartbeatHandler + 'static) {
-        self.handlers.push_back(NameCachedHandler::new(handler));
+        self.handlers.push(NameCachedHandler::new(handler));
     }
 }
 
@@ -755,6 +732,39 @@ mod tests {
     }
 
     #[test]
+    fn test_handler_group_builder_add_before_first() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder
+            .add_handler_before("ResponseHeaderHandler", CollectStatsHandler::default())
+            .unwrap();
+
+        let group = builder.build();
+        let handlers = group.handlers;
+        assert_eq!(13, handlers.len());
+
+        let names = [
+            "CollectStatsHandler",
+            "ResponseHeaderHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "MailboxHandler",
+            "FilterInactiveRegionStatsHandler",
+            "CollectStatsHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
+    }
+
+    #[test]
     fn test_handler_group_builder_add_after() {
         let mut builder =
             HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
@@ -780,6 +790,39 @@ mod tests {
             "CollectStatsHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectStatsHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
+    }
+
+    #[test]
+    fn test_handler_group_builder_add_after_last() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder
+            .add_handler_after("CollectStatsHandler", ResponseHeaderHandler)
+            .unwrap();
+
+        let group = builder.build();
+        let handlers = group.handlers;
+        assert_eq!(13, handlers.len());
+
+        let names = [
+            "ResponseHeaderHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "MailboxHandler",
+            "FilterInactiveRegionStatsHandler",
+            "CollectStatsHandler",
+            "ResponseHeaderHandler",
         ];
 
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
