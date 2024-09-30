@@ -216,7 +216,10 @@ pub fn init_global_logging(
                 .filename_prefix("greptimedb")
                 .max_log_files(opts.max_log_files)
                 .build(&opts.dir)
-                .expect("initializing rolling file appender failed");
+                .expect(&format!(
+                    "initializing rolling file appender at {} failed",
+                    &opts.dir
+                ));
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -237,8 +240,16 @@ pub fn init_global_logging(
 
         // Configure the error file logging layer with rolling policy.
         let err_file_logging_layer = if !opts.dir.is_empty() {
-            let rolling_appender =
-                RollingFileAppender::new(Rotation::HOURLY, &opts.dir, "greptimedb-err");
+            let rolling_appender = RollingFileAppender::builder()
+                .rotation(Rotation::HOURLY)
+                .filename_prefix("greptimedb-err")
+                // Simply set maximum to constant 30 here
+                .max_log_files(30)
+                .build(&opts.dir)
+                .expect(&format!(
+                    "initializing rolling file appender at {} failed",
+                    &opts.dir
+                ));
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -265,8 +276,15 @@ pub fn init_global_logging(
         };
 
         let slow_query_logging_layer = if !opts.dir.is_empty() && opts.slow_query.enable {
-            let rolling_appender =
-                RollingFileAppender::new(Rotation::HOURLY, &opts.dir, "greptimedb-slow-queries");
+            let rolling_appender = RollingFileAppender::builder()
+                .rotation(Rotation::HOURLY)
+                .filename_prefix("greptimedb-slow-queries")
+                .max_log_files(opts.max_log_files)
+                .build(&opts.dir)
+                .expect(&format!(
+                    "initializing rolling file appender at {} failed",
+                    &opts.dir
+                ));
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
