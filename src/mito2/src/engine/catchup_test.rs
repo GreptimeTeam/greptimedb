@@ -247,7 +247,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
     assert_matches!(err, error::Error::UnexpectedReplay { .. });
 
     // It should ignore requests to writable regions.
-    region.set_region_role_state(RegionRole::Leader);
+    region.set_role(RegionRole::Leader);
     let resp = follower_engine
         .handle_request(
             region_id,

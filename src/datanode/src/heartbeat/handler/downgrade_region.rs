@@ -94,7 +94,7 @@ impl HandlerContext {
                             });
                         }
                         Err(err) => {
-                            warn!("Failed to set region to downgrading: {err:?}");
+                            warn!(err; "Failed to convert region to downgrading leader");
                             return InstructionReply::DowngradeRegion(DowngradeRegionReply {
                                 last_entry_id: None,
                                 exists: true,

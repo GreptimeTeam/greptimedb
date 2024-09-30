@@ -120,7 +120,7 @@ pub enum RegionRole {
     // Leader is downgrading to follower.
     //
     // This state is used to prevent new write requests.
-    DowngradingLeader = 2,
+    DowngradingLeader,
 }
 
 impl Display for RegionRole {

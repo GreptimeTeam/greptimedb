@@ -839,7 +839,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
     }
 
-    /// Handles `set_state_gracefully`.
+    /// Handles `set_region_role_gracefully`.
     async fn set_role_state_gracefully(
         &mut self,
         region_id: RegionId,

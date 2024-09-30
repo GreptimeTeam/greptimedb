@@ -43,7 +43,7 @@ impl UpdateMetadata {
             .context(error::RegionRouteNotFoundSnafu { region_id })?;
 
         // Removes downgraded status.
-        region_route.set_leader_status(None);
+        region_route.set_leader_state(None);
 
         let candidate = &ctx.persistent_ctx.to_peer;
         let expected_old_leader = &ctx.persistent_ctx.from_peer;
@@ -190,7 +190,7 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
-    use common_meta::rpc::router::{Region, RegionRoute, RegionState};
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use common_time::util::current_time_millis;
     use store_api::storage::RegionId;
 
@@ -286,7 +286,7 @@ mod tests {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(Peer::empty(1)),
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
-            leader_state: Some(RegionState::Downgrading),
+            leader_state: Some(LeaderState::Downgrading),
             leader_down_since: Some(current_time_millis()),
         }];
 
@@ -319,13 +319,13 @@ mod tests {
                 region: Region::new_test(RegionId::new(table_id, 1)),
                 leader_peer: Some(Peer::empty(1)),
                 follower_peers: vec![Peer::empty(5), Peer::empty(3)],
-                leader_state: Some(RegionState::Downgrading),
+                leader_state: Some(LeaderState::Downgrading),
                 leader_down_since: Some(current_time_millis()),
             },
             RegionRoute {
                 region: Region::new_test(RegionId::new(table_id, 2)),
                 leader_peer: Some(Peer::empty(4)),
-                leader_state: Some(RegionState::Downgrading),
+                leader_state: Some(LeaderState::Downgrading),
                 ..Default::default()
             },
         ];
@@ -430,7 +430,7 @@ mod tests {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(candidate_peer),
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
-            leader_state: Some(RegionState::Downgrading),
+            leader_state: Some(LeaderState::Downgrading),
             leader_down_since: None,
         }];
 
@@ -455,7 +455,7 @@ mod tests {
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(table_id, 1)),
             leader_peer: Some(Peer::empty(1)),
-            leader_state: Some(RegionState::Downgrading),
+            leader_state: Some(LeaderState::Downgrading),
             ..Default::default()
         }];
 

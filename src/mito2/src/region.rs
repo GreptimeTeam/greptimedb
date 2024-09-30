@@ -25,7 +25,6 @@ use std::sync::{Arc, RwLock};
 
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
-use smallvec::{smallvec, SmallVec};
 use snafu::{ensure, OptionExt};
 use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
@@ -34,7 +33,10 @@ use store_api::region_engine::{RegionRole, RegionStatistic, SettableRegionRoleSt
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{RegionLeaderStateSnafu, RegionNotFoundSnafu, RegionTruncatedSnafu, Result};
+use crate::error::{
+    FlushableRegionStateSnafu, RegionLeaderStateSnafu, RegionNotFoundSnafu, RegionTruncatedSnafu,
+    Result,
+};
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
@@ -191,6 +193,14 @@ impl MitoRegion {
         )
     }
 
+    /// Returns whether the region is downgrading.
+    pub(crate) fn is_downgrading(&self) -> bool {
+        matches!(
+            self.manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        )
+    }
+
     /// Returns whether the region is readonly.
     pub(crate) fn is_follower(&self) -> bool {
         self.manifest_ctx.state.load() == RegionRoleState::Follower
@@ -202,9 +212,8 @@ impl MitoRegion {
     }
 
     /// Sets the region role state.
-    pub(crate) fn set_region_role_state(&self, next_role: RegionRole) {
-        self.manifest_ctx
-            .set_role_role_state(next_role, self.region_id);
+    pub(crate) fn set_role(&self, next_role: RegionRole) {
+        self.manifest_ctx.set_role(next_role, self.region_id);
     }
 
     /// Sets the altering state.
@@ -248,7 +257,7 @@ impl MitoRegion {
         let _manager = self.manifest_ctx.manifest_manager.write().await;
         // We acquires the write lock of the manifest manager to ensure that no one is updating the manifest.
         // Then we change the state.
-        self.set_region_role_state(state.into());
+        self.set_role(state.into());
     }
 
     /// Switches the region state to `RegionRoleState::Leader(RegionLeaderState::Writable)` if the current state is `expect`.
@@ -300,7 +309,7 @@ impl MitoRegion {
                 RegionLeaderStateSnafu {
                     region_id: self.region_id,
                     state: actual,
-                    expect: smallvec![expect],
+                    expect,
                 }
                 .build()
             })?;
@@ -341,7 +350,7 @@ impl ManifestContext {
     /// Updates the manifest if current state is `expect_state`.
     pub(crate) async fn update_manifest(
         &self,
-        expect_states: SmallVec<[RegionLeaderState; 2]>,
+        expect_state: RegionLeaderState,
         action_list: RegionMetaActionList,
     ) -> Result<ManifestVersion> {
         // Acquires the write lock of the manifest manager.
@@ -351,15 +360,12 @@ impl ManifestContext {
         // Checks state inside the lock. This is to ensure that we won't update the manifest
         // after `set_readonly_gracefully()` is called.
         let current_state = self.state.load();
-        let expected = expect_states
-            .iter()
-            .any(|expect_state| current_state == RegionRoleState::Leader(*expect_state));
         ensure!(
-            expected,
+            current_state == RegionRoleState::Leader(expect_state),
             RegionLeaderStateSnafu {
                 region_id: manifest.metadata.region_id,
                 state: current_state,
-                expect: expect_states,
+                expect: expect_state,
             }
         );
 
@@ -405,7 +411,7 @@ impl ManifestContext {
 
         if self.state.load() == RegionRoleState::Follower {
             warn!(
-                "Region {} becomes follower while updating manifest which may cause inconsistency",
+                "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
                 manifest.metadata.region_id
             );
         }
@@ -434,7 +440,7 @@ impl ManifestContext {
     /// - Leader -> Downgrading Leader
     ///
     /// ```
-    pub(crate) fn set_role_role_state(&self, next_role: RegionRole, region_id: RegionId) {
+    pub(crate) fn set_role(&self, next_role: RegionRole, region_id: RegionId) {
         match next_role {
             RegionRole::Follower => {
                 self.state.store(RegionRoleState::Follower);
@@ -471,13 +477,13 @@ impl ManifestContext {
                     RegionRoleState::Leader(RegionLeaderState::Downgrading),
                 ) {
                     Ok(state) => info!(
-                        "Convert region {} to Leader(Downgrading), previous role state: {:?}",
+                        "Convert region {} to downgrading region, previous role state: {:?}",
                         region_id, state
                     ),
                     Err(state) => {
                         if state != RegionRoleState::Leader(RegionLeaderState::Downgrading) {
                             warn!(
-                                "Failed to convert region {} to Leader(Downgrading), current role state: {:?}",
+                                "Failed to convert region {} to downgrading leader, current role state: {:?}",
                                 region_id, state
                             )
                         }
@@ -534,7 +540,7 @@ impl RegionMap {
             RegionLeaderStateSnafu {
                 region_id,
                 state: region.state(),
-                expect: smallvec![RegionLeaderState::Writable],
+                expect: RegionLeaderState::Writable,
             }
         );
         Ok(region)
@@ -566,10 +572,9 @@ impl RegionMap {
             .context(RegionNotFoundSnafu { region_id })?;
         ensure!(
             region.is_flushable(),
-            RegionLeaderStateSnafu {
+            FlushableRegionStateSnafu {
                 region_id,
                 state: region.state(),
-                expect: smallvec![RegionLeaderState::Writable, RegionLeaderState::Downgrading],
             }
         );
         Ok(region)
@@ -706,41 +711,41 @@ mod tests {
 
         let region_id = RegionId::new(1024, 0);
         // Leader -> Follower
-        manifest_ctx.set_role_role_state(RegionRole::Follower, region_id);
+        manifest_ctx.set_role(RegionRole::Follower, region_id);
         assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
 
         // Follower -> Leader
-        manifest_ctx.set_role_role_state(RegionRole::Leader, region_id);
+        manifest_ctx.set_role(RegionRole::Leader, region_id);
         assert_eq!(
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
 
         // Leader -> Downgrading Leader
-        manifest_ctx.set_role_role_state(RegionRole::DowngradingLeader, region_id);
+        manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
         assert_eq!(
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         );
 
         // Downgrading Leader -> Follower
-        manifest_ctx.set_role_role_state(RegionRole::Follower, region_id);
+        manifest_ctx.set_role(RegionRole::Follower, region_id);
         assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
 
         // Can't downgrade from follower (Follower -> Downgrading Leader)
-        manifest_ctx.set_role_role_state(RegionRole::DowngradingLeader, region_id);
+        manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
         assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
 
         // Set region role too Downgrading Leader
-        manifest_ctx.set_role_role_state(RegionRole::Leader, region_id);
-        manifest_ctx.set_role_role_state(RegionRole::DowngradingLeader, region_id);
+        manifest_ctx.set_role(RegionRole::Leader, region_id);
+        manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
         assert_eq!(
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         );
 
         // Downgrading Leader -> Leader
-        manifest_ctx.set_role_role_state(RegionRole::Leader, region_id);
+        manifest_ctx.set_role(RegionRole::Leader, region_id);
         assert_eq!(
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Writable)

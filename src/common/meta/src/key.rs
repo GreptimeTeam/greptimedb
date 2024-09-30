@@ -140,7 +140,7 @@ use crate::key::table_route::TableRouteKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::router::{region_distribution, RegionRoute, RegionState};
+use crate::rpc::router::{region_distribution, LeaderState, RegionRoute};
 use crate::rpc::store::BatchDeleteRequest;
 use crate::DatanodeId;
 
@@ -1126,14 +1126,14 @@ impl TableMetadataManager {
         next_region_route_status: F,
     ) -> Result<()>
     where
-        F: Fn(&RegionRoute) -> Option<Option<RegionState>>,
+        F: Fn(&RegionRoute) -> Option<Option<LeaderState>>,
     {
         let mut new_region_routes = current_table_route_value.region_routes()?.clone();
 
         let mut updated = 0;
         for route in &mut new_region_routes {
             if let Some(status) = next_region_route_status(route) {
-                if route.set_leader_status(status) {
+                if route.set_leader_state(status) {
                     updated += 1;
                 }
             }
@@ -1280,7 +1280,7 @@ mod tests {
     use crate::key::{DeserializedValueWithBytes, TableMetadataManager, ViewInfoValue};
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
-    use crate::rpc::router::{region_distribution, Region, RegionRoute, RegionState};
+    use crate::rpc::router::{region_distribution, LeaderState, Region, RegionRoute};
 
     #[test]
     fn test_deserialized_value_with_bytes() {
@@ -1715,7 +1715,7 @@ mod tests {
                     attrs: BTreeMap::new(),
                 },
                 leader_peer: Some(Peer::new(datanode, "a2")),
-                leader_state: Some(RegionState::Downgrading),
+                leader_state: Some(LeaderState::Downgrading),
                 follower_peers: vec![],
                 leader_down_since: Some(current_time_millis()),
             },
@@ -1753,7 +1753,7 @@ mod tests {
                 if region_route.leader_state.is_some() {
                     None
                 } else {
-                    Some(Some(RegionState::Downgrading))
+                    Some(Some(LeaderState::Downgrading))
                 }
             })
             .await
@@ -1769,7 +1769,7 @@ mod tests {
 
         assert_eq!(
             updated_route_value.region_routes().unwrap()[0].leader_state,
-            Some(RegionState::Downgrading)
+            Some(LeaderState::Downgrading)
         );
 
         assert!(updated_route_value.region_routes().unwrap()[0]
@@ -1778,7 +1778,7 @@ mod tests {
 
         assert_eq!(
             updated_route_value.region_routes().unwrap()[1].leader_state,
-            Some(RegionState::Downgrading)
+            Some(LeaderState::Downgrading)
         );
         assert!(updated_route_value.region_routes().unwrap()[1]
             .leader_down_since

@@ -111,7 +111,7 @@ pub fn convert_to_region_peer_map(
 /// Returns the HashMap<[RegionNumber], [RegionStatus]>;
 pub fn convert_to_region_leader_status_map(
     region_routes: &[RegionRoute],
-) -> HashMap<RegionNumber, RegionState> {
+) -> HashMap<RegionNumber, LeaderState> {
     region_routes
         .iter()
         .filter_map(|x| {
@@ -264,7 +264,7 @@ pub struct RegionRoute {
         alias = "leader_status",
         skip_serializing_if = "Option::is_none"
     )]
-    pub leader_state: Option<RegionState>,
+    pub leader_state: Option<LeaderState>,
     /// The start time when the leader is in `Downgraded` status.
     #[serde(default)]
     #[builder(default = "self.default_leader_down_since()")]
@@ -274,17 +274,17 @@ pub struct RegionRoute {
 impl RegionRouteBuilder {
     fn default_leader_down_since(&self) -> Option<i64> {
         match self.leader_state {
-            Some(Some(RegionState::Downgrading)) => Some(current_time_millis()),
+            Some(Some(LeaderState::Downgrading)) => Some(current_time_millis()),
             _ => None,
         }
     }
 }
 
-/// The State of the [`Region`].
+/// The State of the [`Region`] Leader.
 /// TODO(dennis): It's better to add more fine-grained statuses such as `PENDING` etc.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, AsRefStr)]
 #[strum(serialize_all = "UPPERCASE")]
-pub enum RegionState {
+pub enum LeaderState {
     /// The following cases in which the [`Region`] will be downgraded.
     ///
     /// - The [`Region`] may be unavailable (e.g., Crashed, Network disconnected).
@@ -301,7 +301,7 @@ impl RegionRoute {
     /// - The [`Region`] was planned to migrate to another [`Peer`].
     ///
     pub fn is_leader_downgrading(&self) -> bool {
-        matches!(self.leader_state, Some(RegionState::Downgrading))
+        matches!(self.leader_state, Some(LeaderState::Downgrading))
     }
 
     /// Marks the Leader [`Region`] as [`RegionState::Downgrading`].
@@ -311,12 +311,13 @@ impl RegionRoute {
     /// - During the [`Region`] Failover Procedure.
     /// - Migrating a [`Region`].
     ///
-    /// TODO(weny): Update comments
-    /// **Notes:** Meta Server will stop renewing the lease for the downgrading [`Region`].
+    /// **Notes:** Meta Server will renewing a special lease(`Downgrading`) for the downgrading [`Region`].
+    ///
+    /// A downgrading region will reject any write requests, and only allow memetable to be flushed to object storage
     ///
     pub fn downgrade_leader(&mut self) {
         self.leader_down_since = Some(current_time_millis());
-        self.leader_state = Some(RegionState::Downgrading)
+        self.leader_state = Some(LeaderState::Downgrading)
     }
 
     /// Returns how long since the leader is in `Downgraded` status.
@@ -325,17 +326,17 @@ impl RegionRoute {
             .map(|start| current_time_millis() - start)
     }
 
-    /// Sets the leader status.
+    /// Sets the leader state.
     ///
     /// Returns true if updated.
-    pub fn set_leader_status(&mut self, status: Option<RegionState>) -> bool {
+    pub fn set_leader_state(&mut self, status: Option<LeaderState>) -> bool {
         let updated = self.leader_state != status;
 
         match (status, updated) {
-            (Some(RegionState::Downgrading), true) => {
+            (Some(LeaderState::Downgrading), true) => {
                 self.leader_down_since = Some(current_time_millis());
             }
-            (Some(RegionState::Downgrading), false) => {
+            (Some(LeaderState::Downgrading), false) => {
                 // Do nothing if leader is still in `Downgraded` status.
             }
             _ => {

@@ -40,12 +40,14 @@ impl<S> RegionWorkerLoop<S> {
             return;
         };
 
-        let mut task = self.new_flush_task(
-            &region,
-            FlushReason::Manual,
-            request.row_group_size,
-            self.config.clone(),
-        );
+        let reason = if region.is_downgrading() {
+            FlushReason::Downgrading
+        } else {
+            FlushReason::Manual
+        };
+
+        let mut task =
+            self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
         task.push_sender(sender);
         if let Err(e) =
             self.flush_scheduler

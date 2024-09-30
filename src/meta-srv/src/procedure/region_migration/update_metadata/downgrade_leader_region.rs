@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_error::ext::BoxedError;
-use common_meta::rpc::router::RegionState;
+use common_meta::rpc::router::LeaderState;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -53,7 +53,7 @@ impl UpdateMetadata {
                         .as_ref()
                         .is_some_and(|leader_peer| leader_peer.id == from_peer_id)
                 {
-                    Some(Some(RegionState::Downgrading))
+                    Some(Some(LeaderState::Downgrading))
                 } else {
                     None
                 }
@@ -81,7 +81,7 @@ mod tests {
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
-    use common_meta::rpc::router::{Region, RegionRoute, RegionState};
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use store_api::storage::RegionId;
 
     use crate::error::Error;
@@ -155,7 +155,7 @@ mod tests {
         table_metadata_manager
             .update_leader_region_status(table_id, &original_table_route, |route| {
                 if route.region.id == RegionId::new(1024, 2) {
-                    Some(Some(RegionState::Downgrading))
+                    Some(Some(LeaderState::Downgrading))
                 } else {
                     None
                 }

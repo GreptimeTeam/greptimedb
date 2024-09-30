@@ -132,7 +132,7 @@ impl RegionAliveKeeper {
                 let _ = self
                     .region_server
                     .set_region_role(region_id, RegionRole::Follower);
-                error!(e; "Failed to close staled region {}, convert region to readonly.",region_id);
+                error!(e; "Failed to close staled region {}, convert region to follower.", region_id);
             }
         }
     }
@@ -401,7 +401,7 @@ impl CountdownTask {
                     }
                 }
                 () = &mut countdown => {
-                    warn!("The region {region_id} lease is expired, convert region to readonly.");
+                    warn!("The region {region_id} lease is expired, convert region to follower.");
                     let _ = self.region_server.set_region_role(self.region_id, RegionRole::Follower);
                     // resets the countdown.
                     let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);

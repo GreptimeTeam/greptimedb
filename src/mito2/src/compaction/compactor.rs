@@ -19,7 +19,7 @@ use api::v1::region::compact_request;
 use common_telemetry::info;
 use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec};
+use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -381,7 +381,7 @@ impl Compactor for DefaultCompactor {
         // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
         compaction_region
             .manifest_ctx
-            .update_manifest(smallvec![RegionLeaderState::Writable], action_list)
+            .update_manifest(RegionLeaderState::Writable, action_list)
             .await?;
 
         Ok(edit)

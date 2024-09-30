@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::{debug, error, info};
-use smallvec::{smallvec, SmallVec};
+use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::IntoStaticStr;
@@ -195,6 +195,8 @@ pub enum FlushReason {
     Alter,
     /// Flush periodically.
     Periodically,
+    /// Flush memtable during downgrading state.
+    Downgrading,
 }
 
 impl FlushReason {
@@ -407,14 +409,17 @@ impl RegionFlushTask {
         info!("Applying {edit:?} to region {}", self.region_id);
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+
+        let expected_state = if matches!(self.reason, FlushReason::Downgrading) {
+            RegionLeaderState::Downgrading
+        } else {
+            RegionLeaderState::Writable
+        };
         // We will leak files if the manifest update fails, but we ignore them for simplicity. We can
         // add a cleanup job to remove them later.
         let version = self
             .manifest_ctx
-            .update_manifest(
-                smallvec![RegionLeaderState::Writable, RegionLeaderState::Downgrading],
-                action_list,
-            )
+            .update_manifest(expected_state, action_list)
             .await?;
         info!(
             "Successfully update manifest version to {version}, region: {}",

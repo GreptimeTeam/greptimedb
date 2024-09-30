@@ -301,7 +301,7 @@ impl RegionServer {
     /// Converts region to follower gracefully.
     ///
     /// After the call returns,
-    /// the engine ensures no more write or flush operations will succeed in the region.
+    /// the engine ensures that no **further** write or flush operations will succeed in this region.
     pub async fn become_follower_gracefully(
         &self,
         region_id: RegionId,
@@ -318,7 +318,7 @@ impl RegionServer {
     /// Set region to downgrading gracefully.
     ///
     /// After the call returns,
-    /// the engine ensures no more write operations will succeed in the region.
+    /// the engine ensures that no **further** write operations will succeed in this region.
     pub async fn downgrade_region_gracefully(
         &self,
         region_id: RegionId,

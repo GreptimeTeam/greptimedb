@@ -26,7 +26,6 @@ use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
 use prost::{DecodeError, EncodeError};
-use smallvec::SmallVec;
 use snafu::{Location, Snafu};
 use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
@@ -487,7 +486,19 @@ pub enum Error {
     RegionLeaderState {
         region_id: RegionId,
         state: RegionRoleState,
-        expect: SmallVec<[RegionLeaderState; 2]>,
+        expect: RegionLeaderState,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} is in {:?} state, expect: Leader or Leader(Downgrading)",
+        region_id,
+        state
+    ))]
+    FlushableRegionState {
+        region_id: RegionId,
+        state: RegionRoleState,
         #[snafu(implicit)]
         location: Location,
     },
@@ -956,6 +967,7 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionLeaderState { .. } => StatusCode::RegionNotReady,
+            &FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
