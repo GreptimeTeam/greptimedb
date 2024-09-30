@@ -318,6 +318,7 @@ transform:
 
 #[test]
 fn test_timestamp_default_wrong_resolution() {
+    // same as test_default_wrong_resolution from epoch tests
     let test_input = r#"
     {
         "input_s": "1722580862",
@@ -327,28 +328,30 @@ fn test_timestamp_default_wrong_resolution() {
     let pipeline_yaml = r#"
 processors:
   - timestamp:
-      fields: 
-        - input_s
-        - input_nano
+      field: input_s
+      resolution: s
+  - timestamp:
+      field: input_nano
+      resolution: ns
 
 transform:
   - fields:
       - input_s
-    type: timestamp, s
+    type: timestamp, ms
   - fields:
       - input_nano
-    type: timestamp, nano
+    type: timestamp, ms
 "#;
 
     let expected_schema = vec![
         common::make_column_schema(
             "input_s".to_string(),
-            ColumnDataType::TimestampSecond,
+            ColumnDataType::TimestampMillisecond,
             SemanticType::Field,
         ),
         common::make_column_schema(
             "input_nano".to_string(),
-            ColumnDataType::TimestampNanosecond,
+            ColumnDataType::TimestampMillisecond,
             SemanticType::Field,
         ),
         common::make_column_schema(
@@ -360,14 +363,12 @@ transform:
 
     let output = common::parse_and_exec(test_input, pipeline_yaml);
     assert_eq!(output.schema, expected_schema);
-    // this is actually wrong
-    // TODO(shuiyisong): add check for type when converting epoch
     assert_eq!(
         output.rows[0].values[0].value_data,
-        Some(ValueData::TimestampMillisecondValue(1722580862))
+        Some(ValueData::TimestampMillisecondValue(1722580862000))
     );
     assert_eq!(
         output.rows[0].values[1].value_data,
-        Some(ValueData::TimestampMillisecondValue(1722583122284583936))
+        Some(ValueData::TimestampMillisecondValue(1722583122284))
     );
 }

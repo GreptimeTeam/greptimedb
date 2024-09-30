@@ -176,16 +176,23 @@ pub(crate) fn coerce_value(val: &Value, transform: &Transform) -> Result<Option<
         Value::Boolean(b) => coerce_bool_value(*b, transform),
         Value::String(s) => coerce_string_value(s, transform),
 
-        Value::Timestamp(Timestamp::Nanosecond(ns)) => {
-            Ok(Some(ValueData::TimestampNanosecondValue(*ns)))
-        }
-        Value::Timestamp(Timestamp::Microsecond(us)) => {
-            Ok(Some(ValueData::TimestampMicrosecondValue(*us)))
-        }
-        Value::Timestamp(Timestamp::Millisecond(ms)) => {
-            Ok(Some(ValueData::TimestampMillisecondValue(*ms)))
-        }
-        Value::Timestamp(Timestamp::Second(s)) => Ok(Some(ValueData::TimestampSecondValue(*s))),
+        Value::Timestamp(input_timestamp) => match &transform.type_ {
+            Value::Timestamp(target_timestamp) => match target_timestamp {
+                Timestamp::Nanosecond(_) => Ok(Some(ValueData::TimestampNanosecondValue(
+                    input_timestamp.timestamp_nanos(),
+                ))),
+                Timestamp::Microsecond(_) => Ok(Some(ValueData::TimestampMicrosecondValue(
+                    input_timestamp.timestamp_micros(),
+                ))),
+                Timestamp::Millisecond(_) => Ok(Some(ValueData::TimestampMillisecondValue(
+                    input_timestamp.timestamp_millis(),
+                ))),
+                Timestamp::Second(_) => Ok(Some(ValueData::TimestampSecondValue(
+                    input_timestamp.timestamp(),
+                ))),
+            },
+            _ => unimplemented!("Timestamp can only be coerced to another timestamp"),
+        },
 
         Value::Array(_) => unimplemented!("Array type not supported"),
         Value::Map(_) => unimplemented!("Object type not supported"),
