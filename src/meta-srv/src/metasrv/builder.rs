@@ -46,22 +46,11 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
 use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
-use crate::handler::check_leader_handler::CheckLeaderHandler;
-use crate::handler::collect_cluster_info_handler::{
-    CollectDatanodeClusterInfoHandler, CollectFlownodeClusterInfoHandler,
-    CollectFrontendClusterInfoHandler,
-};
-use crate::handler::collect_stats_handler::CollectStatsHandler;
-use crate::handler::extract_stat_handler::ExtractStatHandler;
 use crate::handler::failure_handler::RegionFailureHandler;
-use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
-use crate::handler::keep_lease_handler::{DatanodeKeepLeaseHandler, FlownodeKeepLeaseHandler};
-use crate::handler::mailbox_handler::MailboxHandler;
-use crate::handler::on_leader_start_handler::OnLeaderStartHandler;
-use crate::handler::publish_heartbeat_handler::PublishHeartbeatHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
-use crate::handler::response_header_handler::ResponseHeaderHandler;
-use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pushers};
+use crate::handler::{
+    HeartbeatHandlerGroup, HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers,
+};
 use crate::lease::MetaPeerLookupService;
 use crate::lock::memory::MemLock;
 use crate::lock::DistLockRef;
@@ -70,7 +59,6 @@ use crate::metasrv::{
 };
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
-use crate::pubsub::PublisherRef;
 use crate::region::supervisor::{
     HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorTicker,
     DEFAULT_TICK_INTERVAL,
@@ -364,41 +352,16 @@ impl MetasrvBuilder {
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
             None => {
-                let publish_heartbeat_handler = plugins
-                    .clone()
-                    .and_then(|plugins| plugins.get::<PublisherRef>())
-                    .map(|publish| PublishHeartbeatHandler::new(publish.clone()));
-
                 let region_lease_handler = RegionLeaseHandler::new(
                     distributed_time_constants::REGION_LEASE_SECS,
                     table_metadata_manager.clone(),
                     memory_region_keeper.clone(),
                 );
 
-                let group = HeartbeatHandlerGroup::new(pushers);
-                group.add_handler(ResponseHeaderHandler).await;
-                // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
-                // because even if the current meta-server node is no longer the leader it can
-                // still help the datanode to keep lease.
-                group.add_handler(DatanodeKeepLeaseHandler).await;
-                group.add_handler(FlownodeKeepLeaseHandler).await;
-                group.add_handler(CheckLeaderHandler).await;
-                group.add_handler(OnLeaderStartHandler).await;
-                group.add_handler(ExtractStatHandler).await;
-                group.add_handler(CollectDatanodeClusterInfoHandler).await;
-                group.add_handler(CollectFrontendClusterInfoHandler).await;
-                group.add_handler(CollectFlownodeClusterInfoHandler).await;
-                group.add_handler(MailboxHandler).await;
-                group.add_handler(region_lease_handler).await;
-                group.add_handler(FilterInactiveRegionStatsHandler).await;
-                if let Some(region_failover_handler) = region_failover_handler {
-                    group.add_handler(region_failover_handler).await;
-                }
-                if let Some(publish_heartbeat_handler) = publish_heartbeat_handler {
-                    group.add_handler(publish_heartbeat_handler).await;
-                }
-                group.add_handler(CollectStatsHandler::default()).await;
-                group
+                HeartbeatHandlerGroupBuilder::new(pushers, region_lease_handler)
+                    .with_plugins(plugins.clone())
+                    .with_region_failure_handler(region_failover_handler)
+                    .build()
             }
         };
 
@@ -417,7 +380,7 @@ impl MetasrvBuilder {
             selector,
             // TODO(jeremy): We do not allow configuring the flow selector.
             flow_selector: Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)),
-            handler_group,
+            handler_group: Arc::new(handler_group),
             election,
             lock,
             procedure_manager,
