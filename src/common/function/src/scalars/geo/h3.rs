@@ -84,6 +84,50 @@ const POSITION_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     ]
 });
 
+macro_rules! ensure_columns_len {
+    ($columns:ident) => {
+        ensure!(
+            $columns.windows(2).all(|c| c[0].len() == c[1].len()),
+            InvalidFuncArgsSnafu {
+                err_msg: "The length of input columns are in different size"
+            }
+        )
+    };
+    ($column_a:ident, $column_b:ident, $($column_n:ident),*) => {
+        ensure!(
+            {
+                let mut result = $column_a.len() == $column_b.len();
+                $(
+                result = result && ($column_a.len() == $column_n.len());
+                )*
+                result
+            }
+            InvalidFuncArgsSnafu {
+                err_msg: "The length of input columns are in different size"
+            }
+        )
+    };
+}
+
+macro_rules! ensure_columns_n {
+    ($columns:ident, $n:literal) => {
+        ensure!(
+            $columns.len() == $n,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of arguments is not correct, expect {}, provided : {}",
+                    stringify!($n),
+                    $columns.len()
+                ),
+            }
+        );
+
+        if $n > 1 {
+            ensure_columns_len!($columns);
+        }
+    };
+}
+
 /// Function that returns [h3] encoding cellid for a given geospatial coordinate.
 ///
 /// [h3]: https://h3geo.org/
@@ -118,15 +162,7 @@ impl Function for H3LatLngToCell {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 3,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 3, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 3);
 
         let lat_vec = &columns[0];
         let lon_vec = &columns[1];
@@ -198,15 +234,7 @@ impl Function for H3LatLngToCellString {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 3,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 3, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 3);
 
         let lat_vec = &columns[0];
         let lon_vec = &columns[1];
@@ -262,15 +290,7 @@ impl Function for H3CellToString {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 1, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
         let size = cell_vec.len();
@@ -308,15 +328,7 @@ impl Function for H3StringToCell {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 1, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 1);
 
         let string_vec = &columns[0];
         let size = string_vec.len();
@@ -368,15 +380,7 @@ impl Function for H3CellCenterLatLng {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 1, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
         let size = cell_vec.len();
@@ -465,15 +469,7 @@ impl Function for H3CellBase {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 1, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
         let size = cell_vec.len();
@@ -509,15 +505,7 @@ impl Function for H3CellIsPentagon {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 1, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
         let size = cell_vec.len();
@@ -553,15 +541,7 @@ impl Function for H3CellCenterChild {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
         let res_vec = &columns[1];
@@ -601,15 +581,7 @@ impl Function for H3CellParent {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
         let res_vec = &columns[1];
@@ -649,15 +621,7 @@ impl Function for H3CellToChildren {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
         let res_vec = &columns[1];
@@ -706,15 +670,7 @@ impl Function for H3CellToChildrenSize {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
         let res_vec = &columns[1];
@@ -751,15 +707,7 @@ impl Function for H3CellToChildPos {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
         let res_vec = &columns[1];
@@ -808,15 +756,7 @@ impl Function for H3ChildPosToCell {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 3,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 3, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 3);
 
         let pos_vec = &columns[0];
         let cell_vec = &columns[1];
@@ -857,15 +797,7 @@ impl Function for H3GridDisk {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
         let k_vec = &columns[1];
@@ -918,15 +850,7 @@ impl Function for H3GridDiskDistances {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
         let k_vec = &columns[1];
@@ -976,15 +900,7 @@ impl Function for H3GridDistance {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 2);
 
         let cell_this_vec = &columns[0];
         let cell_that_vec = &columns[1];
@@ -1040,15 +956,7 @@ impl Function for H3GridPathCells {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 2);
 
         let cell_this_vec = &columns[0];
         let cell_that_vec = &columns[1];
