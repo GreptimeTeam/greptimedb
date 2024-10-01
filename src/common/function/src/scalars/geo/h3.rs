@@ -33,20 +33,20 @@ use snafu::{ensure, ResultExt};
 
 use crate::function::{Function, FunctionContext};
 
-const CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
+static CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     vec![
         ConcreteDataType::int64_datatype(),
         ConcreteDataType::uint64_datatype(),
     ]
 });
 
-const COORDINATE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
+static COORDINATE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     vec![
         ConcreteDataType::float32_datatype(),
         ConcreteDataType::float64_datatype(),
     ]
 });
-const RESOLUTION_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
+static RESOLUTION_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     vec![
         ConcreteDataType::int8_datatype(),
         ConcreteDataType::int16_datatype(),
@@ -58,7 +58,7 @@ const RESOLUTION_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
         ConcreteDataType::uint64_datatype(),
     ]
 });
-const DISTANCE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
+static DISTANCE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     vec![
         ConcreteDataType::int8_datatype(),
         ConcreteDataType::int16_datatype(),
@@ -71,7 +71,7 @@ const DISTANCE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     ]
 });
 
-const POSITION_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
+static POSITION_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     vec![
         ConcreteDataType::int8_datatype(),
         ConcreteDataType::int16_datatype(),
