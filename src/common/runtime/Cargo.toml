@@ -23,6 +23,12 @@ tokio.workspace = true
 tokio-metrics = "0.3"
 tokio-metrics-collector = { git = "https://github.com/MichaelScofield/tokio-metrics-collector.git", rev = "89d692d5753d28564a7aac73c6ac5aba22243ba0" }
 tokio-util.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+ratelimit.workspace = true
+rand.workspace = true
+pin-project.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"
