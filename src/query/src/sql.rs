@@ -48,7 +48,7 @@ use datatypes::vectors::StringVector;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Ident;
@@ -650,6 +650,23 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
         "DATESTYLE" => {
             let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
             format!("{}, {}", style, order)
+        }
+        "MAX_EXECUTION_TIME" => {
+            if query_ctx.channel() == Channel::Mysql {
+                query_ctx.query_timeout_as_millis().to_string()
+            } else {
+                return UnsupportedVariableSnafu { name: variable }.fail();
+            }
+        }
+        "STATEMENT_TIMEOUT" => {
+            // Add time units to postgres query timeout display.
+            if query_ctx.channel() == Channel::Postgres {
+                let mut timeout = query_ctx.query_timeout_as_millis().to_string();
+                timeout.push_str("ms");
+                timeout
+            } else {
+                return UnsupportedVariableSnafu { name: variable }.fail();
+            }
         }
         _ => return UnsupportedVariableSnafu { name: variable }.fail(),
     };

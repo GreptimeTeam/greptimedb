@@ -48,6 +48,7 @@ use query::parser::QueryStatement;
 use query::QueryEngineRef;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
+use set::set_query_timeout;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::set_variables::SetVariables;
@@ -338,6 +339,31 @@ impl StatementExecutor {
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
+            // TODO: write sqlness test for query timeout variables
+            // once the proper channel is configured in the test infra.
+            // The current sqlness test channel is default to Unknown.
+            "MAX_EXECUTION_TIME" => match query_ctx.channel() {
+                Channel::Mysql => set_query_timeout(set_var.value, query_ctx)?,
+                Channel::Postgres => {
+                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name))
+                }
+                _ => {
+                    return NotSupportedSnafu {
+                        feat: format!("Unsupported set variable {}", var_name),
+                    }
+                    .fail()
+                }
+            },
+            "STATEMENT_TIMEOUT" => {
+                if query_ctx.channel() == Channel::Postgres {
+                    set_query_timeout(set_var.value, query_ctx)?
+                } else {
+                    return NotSupportedSnafu {
+                        feat: format!("Unsupported set variable {}", var_name),
+                    }
+                    .fail();
+                }
+            }
             _ => {
                 // for postgres, we give unknown SET statements a warning with
                 //  success, this is prevent the SET call becoming a blocker
