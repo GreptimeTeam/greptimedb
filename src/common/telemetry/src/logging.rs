@@ -54,6 +54,9 @@ pub struct LoggingOptions {
     /// The log format that can be one of "json" or "text". Default is "text".
     pub log_format: LogFormat,
 
+    /// The maximum number of log files set by default.
+    pub max_log_files: usize,
+
     /// Whether to append logs to stdout. Default is true.
     pub append_stdout: bool,
 
@@ -68,9 +71,6 @@ pub struct LoggingOptions {
 
     /// The logging options of slow query.
     pub slow_query: SlowQueryOptions,
-
-    /// The maximum number of log files set by default.
-    pub max_log_files: usize,
 }
 
 /// The options of slow query.
@@ -216,8 +216,11 @@ pub fn init_global_logging(
                 .filename_prefix("greptimedb")
                 .max_log_files(opts.max_log_files)
                 .build(&opts.dir)
-                .unwrap_or_else(|_| {
-                    panic!("initializing rolling file appender at {} failed", &opts.dir)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "initializing rolling file appender at {} failed: {}",
+                        &opts.dir, e
+                    )
                 });
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
@@ -242,11 +245,13 @@ pub fn init_global_logging(
             let rolling_appender = RollingFileAppender::builder()
                 .rotation(Rotation::HOURLY)
                 .filename_prefix("greptimedb-err")
-                // Simply set maximum to constant 30 here
-                .max_log_files(30)
+                .max_log_files(opts.max_log_files)
                 .build(&opts.dir)
-                .unwrap_or_else(|_| {
-                    panic!("initializing rolling file appender at {} failed", &opts.dir)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "initializing rolling file appender at {} failed: {}",
+                        &opts.dir, e
+                    )
                 });
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
@@ -279,8 +284,11 @@ pub fn init_global_logging(
                 .filename_prefix("greptimedb-slow-queries")
                 .max_log_files(opts.max_log_files)
                 .build(&opts.dir)
-                .unwrap_or_else(|_| {
-                    panic!("initializing rolling file appender at {} failed", &opts.dir)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "initializing rolling file appender at {} failed: {}",
+                        &opts.dir, e
+                    )
                 });
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
