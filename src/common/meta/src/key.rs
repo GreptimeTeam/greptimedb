@@ -140,7 +140,7 @@ use crate::key::table_route::TableRouteKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
+use crate::rpc::router::{region_distribution, LeaderState, RegionRoute};
 use crate::rpc::store::BatchDeleteRequest;
 use crate::DatanodeId;
 
@@ -1126,14 +1126,14 @@ impl TableMetadataManager {
         next_region_route_status: F,
     ) -> Result<()>
     where
-        F: Fn(&RegionRoute) -> Option<Option<RegionStatus>>,
+        F: Fn(&RegionRoute) -> Option<Option<LeaderState>>,
     {
         let mut new_region_routes = current_table_route_value.region_routes()?.clone();
 
         let mut updated = 0;
         for route in &mut new_region_routes {
-            if let Some(status) = next_region_route_status(route) {
-                if route.set_leader_status(status) {
+            if let Some(state) = next_region_route_status(route) {
+                if route.set_leader_state(state) {
                     updated += 1;
                 }
             }
@@ -1280,7 +1280,7 @@ mod tests {
     use crate::key::{DeserializedValueWithBytes, TableMetadataManager, ViewInfoValue};
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
-    use crate::rpc::router::{region_distribution, Region, RegionRoute, RegionStatus};
+    use crate::rpc::router::{region_distribution, LeaderState, Region, RegionRoute};
 
     #[test]
     fn test_deserialized_value_with_bytes() {
@@ -1324,7 +1324,7 @@ mod tests {
             },
             leader_peer: Some(Peer::new(datanode, "a2")),
             follower_peers: vec![],
-            leader_status: None,
+            leader_state: None,
             leader_down_since: None,
         }
     }
@@ -1715,7 +1715,7 @@ mod tests {
                     attrs: BTreeMap::new(),
                 },
                 leader_peer: Some(Peer::new(datanode, "a2")),
-                leader_status: Some(RegionStatus::Downgraded),
+                leader_state: Some(LeaderState::Downgrading),
                 follower_peers: vec![],
                 leader_down_since: Some(current_time_millis()),
             },
@@ -1727,7 +1727,7 @@ mod tests {
                     attrs: BTreeMap::new(),
                 },
                 leader_peer: Some(Peer::new(datanode, "a1")),
-                leader_status: None,
+                leader_state: None,
                 follower_peers: vec![],
                 leader_down_since: None,
             },
@@ -1750,10 +1750,10 @@ mod tests {
 
         table_metadata_manager
             .update_leader_region_status(table_id, &current_table_route_value, |region_route| {
-                if region_route.leader_status.is_some() {
+                if region_route.leader_state.is_some() {
                     None
                 } else {
-                    Some(Some(RegionStatus::Downgraded))
+                    Some(Some(LeaderState::Downgrading))
                 }
             })
             .await
@@ -1768,8 +1768,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            updated_route_value.region_routes().unwrap()[0].leader_status,
-            Some(RegionStatus::Downgraded)
+            updated_route_value.region_routes().unwrap()[0].leader_state,
+            Some(LeaderState::Downgrading)
         );
 
         assert!(updated_route_value.region_routes().unwrap()[0]
@@ -1777,8 +1777,8 @@ mod tests {
             .is_some());
 
         assert_eq!(
-            updated_route_value.region_routes().unwrap()[1].leader_status,
-            Some(RegionStatus::Downgraded)
+            updated_route_value.region_routes().unwrap()[1].leader_state,
+            Some(LeaderState::Downgrading)
         );
         assert!(updated_route_value.region_routes().unwrap()[1]
             .leader_down_since
@@ -1943,21 +1943,21 @@ mod tests {
                         region: Region::new_test(RegionId::new(table_id, 1)),
                         leader_peer: Some(Peer::empty(1)),
                         follower_peers: vec![Peer::empty(5)],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 2)),
                         leader_peer: Some(Peer::empty(2)),
                         follower_peers: vec![Peer::empty(4)],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 3)),
                         leader_peer: Some(Peer::empty(3)),
                         follower_peers: vec![],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                 ]),
@@ -1996,21 +1996,21 @@ mod tests {
                         region: Region::new_test(RegionId::new(table_id, 1)),
                         leader_peer: Some(Peer::empty(1)),
                         follower_peers: vec![Peer::empty(5)],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 2)),
                         leader_peer: Some(Peer::empty(2)),
                         follower_peers: vec![Peer::empty(4)],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 3)),
                         leader_peer: Some(Peer::empty(3)),
                         follower_peers: vec![],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                 ]),

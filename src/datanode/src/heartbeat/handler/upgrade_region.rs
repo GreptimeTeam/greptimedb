@@ -31,7 +31,7 @@ impl HandlerContext {
         }: UpgradeRegion,
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
-            let Some(writable) = self.region_server.is_writable(region_id) else {
+            let Some(writable) = self.region_server.is_region_leader(region_id) else {
                 return InstructionReply::UpgradeRegion(UpgradeRegionReply {
                     ready: false,
                     exists: false,

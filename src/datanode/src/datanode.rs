@@ -47,7 +47,7 @@ use servers::server::ServerHandlers;
 use servers::Mode;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::path_utils::{region_dir, WAL_DIR};
-use store_api::region_engine::RegionEngineRef;
+use store_api::region_engine::{RegionEngineRef, RegionRole};
 use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
 use tokio::fs;
@@ -314,7 +314,7 @@ impl DatanodeBuilder {
         &self,
         event_listener: RegionServerEventListenerRef,
     ) -> Result<RegionServer> {
-        let opts = &self.opts;
+        let opts: &DatanodeOptions = &self.opts;
 
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
@@ -334,6 +334,9 @@ impl DatanodeBuilder {
             common_runtime::global_runtime(),
             event_listener,
             table_provider_factory,
+            opts.max_concurrent_queries,
+            //TODO: revaluate the hardcoded timeout on the next version of datanode concurrency limiter.
+            Duration::from_millis(100),
         );
 
         let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
@@ -543,9 +546,9 @@ async fn open_all_regions(
 
     for region_id in open_regions {
         if open_with_writable {
-            if let Err(e) = region_server.set_writable(region_id, true) {
+            if let Err(e) = region_server.set_region_role(region_id, RegionRole::Leader) {
                 error!(
-                    e; "failed to set writable for region {region_id}"
+                    e; "failed to convert region {region_id} to leader"
                 );
             }
         }

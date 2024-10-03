@@ -102,7 +102,7 @@ async fn main() {
         .prefix("sqlness")
         .tempdir()
         .unwrap();
-    let data_home = temp_dir.into_path();
+    let sqlness_home = temp_dir.into_path();
 
     let mut interceptor_registry: Registry = Default::default();
     interceptor_registry.register(
@@ -135,7 +135,7 @@ async fn main() {
     let runner = Runner::new(
         config,
         Env::new(
-            data_home.clone(),
+            sqlness_home.clone(),
             args.server_addr.clone(),
             wal,
             args.bins_dir,
@@ -145,7 +145,7 @@ async fn main() {
 
     // clean up and exit
     if !args.preserve_state {
-        println!("Removing state in {:?}", data_home);
-        tokio::fs::remove_dir_all(data_home).await.unwrap();
+        println!("Removing state in {:?}", sqlness_home);
+        tokio::fs::remove_dir_all(sqlness_home).await.unwrap();
     }
 }

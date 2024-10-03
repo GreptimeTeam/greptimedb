@@ -53,7 +53,9 @@ async fn test_engine_open_empty() {
         .await
         .unwrap_err();
     assert_eq!(StatusCode::RegionNotFound, err.status_code());
-    let err = engine.set_writable(region_id, true).unwrap_err();
+    let err = engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap_err();
     assert_eq!(StatusCode::RegionNotFound, err.status_code());
     let role = engine.role(region_id);
     assert_eq!(role, None);
@@ -134,8 +136,10 @@ async fn test_engine_open_readonly() {
     assert_eq!(StatusCode::RegionNotReady, err.status_code());
 
     assert_eq!(Some(RegionRole::Follower), engine.role(region_id));
-    // Set writable and write.
-    engine.set_writable(region_id, true).unwrap();
+    // Converts region to leader.
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
     assert_eq!(Some(RegionRole::Leader), engine.role(region_id));
 
     put_rows(&engine, region_id, rows).await;

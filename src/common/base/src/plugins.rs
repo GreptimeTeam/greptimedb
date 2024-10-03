@@ -12,20 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-/// [`Plugins`] is a wrapper of [AnyMap](https://github.com/chris-morgan/anymap) and provides a thread-safe way to store and retrieve plugins.
+use anymap2::SendSyncAnyMap;
+
+/// [`Plugins`] is a wrapper of [anymap2](https://github.com/azriel91/anymap2) and provides a thread-safe way to store and retrieve plugins.
 /// Make it Cloneable and we can treat it like an Arc struct.
 #[derive(Default, Clone)]
 pub struct Plugins {
-    inner: Arc<RwLock<anymap::Map<dyn Any + Send + Sync>>>,
+    inner: Arc<RwLock<SendSyncAnyMap>>,
 }
 
 impl Plugins {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(anymap::Map::new())),
+            inner: Arc::new(RwLock::new(SendSyncAnyMap::new())),
         }
     }
 
@@ -61,11 +62,11 @@ impl Plugins {
         self.read().is_empty()
     }
 
-    fn read(&self) -> RwLockReadGuard<anymap::Map<dyn Any + Send + Sync>> {
+    fn read(&self) -> RwLockReadGuard<SendSyncAnyMap> {
         self.inner.read().unwrap()
     }
 
-    fn write(&self) -> RwLockWriteGuard<anymap::Map<dyn Any + Send + Sync>> {
+    fn write(&self) -> RwLockWriteGuard<SendSyncAnyMap> {
         self.inner.write().unwrap()
     }
 }

@@ -204,6 +204,8 @@ pub struct TwcsOptions {
     /// Compaction time window defined when creating tables.
     #[serde(with = "humantime_serde")]
     pub time_window: Option<Duration>,
+    /// Compaction time window defined when creating tables.
+    pub max_output_file_size: Option<ReadableSize>,
     /// Whether to use remote compaction.
     #[serde_as(as = "DisplayFromStr")]
     pub remote_compaction: bool,
@@ -236,6 +238,7 @@ impl Default for TwcsOptions {
             max_inactive_window_runs: 1,
             max_inactive_window_files: 1,
             time_window: None,
+            max_output_file_size: None,
             remote_compaction: false,
             fallback_to_local: true,
         }
@@ -597,6 +600,7 @@ mod tests {
             ("compaction.twcs.max_active_window_files", "11"),
             ("compaction.twcs.max_inactive_window_runs", "2"),
             ("compaction.twcs.max_inactive_window_files", "3"),
+            ("compaction.twcs.max_output_file_size", "1GB"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
             ("compaction.twcs.remote_compaction", "false"),
@@ -624,6 +628,7 @@ mod tests {
                 max_inactive_window_runs: 2,
                 max_inactive_window_files: 3,
                 time_window: Some(Duration::from_secs(3600 * 2)),
+                max_output_file_size: Some(ReadableSize::gb(1)),
                 remote_compaction: false,
                 fallback_to_local: true,
             }),
@@ -656,6 +661,7 @@ mod tests {
                 max_inactive_window_runs: 2,
                 max_inactive_window_files: usize::MAX,
                 time_window: Some(Duration::from_secs(3600 * 2)),
+                max_output_file_size: None,
                 remote_compaction: false,
                 fallback_to_local: true,
             }),
@@ -693,6 +699,7 @@ mod tests {
     "compaction.twcs.max_active_window_files": "11",
     "compaction.twcs.max_inactive_window_runs": "2",
     "compaction.twcs.max_inactive_window_files": "7",
+    "compaction.twcs.max_output_file_size": "7MB",
     "compaction.twcs.time_window": "2h"
   },
   "storage": "S3",
@@ -722,6 +729,7 @@ mod tests {
                 max_inactive_window_runs: 2,
                 max_inactive_window_files: 7,
                 time_window: Some(Duration::from_secs(3600 * 2)),
+                max_output_file_size: Some(ReadableSize::mb(7)),
                 remote_compaction: false,
                 fallback_to_local: true,
             }),

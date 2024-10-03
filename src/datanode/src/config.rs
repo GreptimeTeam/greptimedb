@@ -305,6 +305,7 @@ pub struct DatanodeOptions {
     pub meta_client: Option<MetaClientOptions>,
     pub wal: DatanodeWalConfig,
     pub storage: StorageConfig,
+    pub max_concurrent_queries: usize,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
     pub logging: LoggingOptions,
@@ -339,6 +340,7 @@ impl Default for DatanodeOptions {
             meta_client: None,
             wal: DatanodeWalConfig::default(),
             storage: StorageConfig::default(),
+            max_concurrent_queries: 0,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
                 RegionEngineConfig::File(FileEngineConfig::default()),

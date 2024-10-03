@@ -28,7 +28,7 @@ use store_api::storage::RegionId;
 use tokio::time::sleep;
 
 use crate::error::{OpenDalSnafu, Result};
-use crate::region::{RegionMapRef, RegionState};
+use crate::region::{RegionLeaderState, RegionMapRef};
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
@@ -62,7 +62,7 @@ where
 
                 // Sets the state back to writable. It's possible that the marker file has been written.
                 // We set the state back to writable so we can retry the drop operation.
-                region.switch_state_to_writable(RegionState::Dropping);
+                region.switch_state_to_writable(RegionLeaderState::Dropping);
             })?;
 
         region.stop().await;

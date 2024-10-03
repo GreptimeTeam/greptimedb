@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_error::ext::BoxedError;
-use common_meta::rpc::router::RegionStatus;
+use common_meta::rpc::router::LeaderState;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -53,7 +53,7 @@ impl UpdateMetadata {
                         .as_ref()
                         .is_some_and(|leader_peer| leader_peer.id == from_peer_id)
                 {
-                    Some(Some(RegionStatus::Downgraded))
+                    Some(Some(LeaderState::Downgrading))
                 } else {
                     None
                 }
@@ -81,7 +81,7 @@ mod tests {
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
-    use common_meta::rpc::router::{Region, RegionRoute, RegionStatus};
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use store_api::storage::RegionId;
 
     use crate::error::Error;
@@ -155,7 +155,7 @@ mod tests {
         table_metadata_manager
             .update_leader_region_status(table_id, &original_table_route, |route| {
                 if route.region.id == RegionId::new(1024, 2) {
-                    Some(Some(RegionStatus::Downgraded))
+                    Some(Some(LeaderState::Downgrading))
                 } else {
                     None
                 }
@@ -210,7 +210,7 @@ mod tests {
 
         // It should remain unchanged.
         assert_eq!(latest_table_route.version().unwrap(), 0);
-        assert!(!latest_table_route.region_routes().unwrap()[0].is_leader_downgraded());
+        assert!(!latest_table_route.region_routes().unwrap()[0].is_leader_downgrading());
         assert!(ctx.volatile_ctx.table_route.is_none());
     }
 
@@ -251,7 +251,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(latest_table_route.region_routes().unwrap()[0].is_leader_downgraded());
+        assert!(latest_table_route.region_routes().unwrap()[0].is_leader_downgrading());
         assert!(ctx.volatile_ctx.table_route.is_none());
     }
 }

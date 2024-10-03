@@ -54,6 +54,9 @@ use crate::mysql::writer::{create_mysql_column, handle_err};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::SqlPlan;
 
+const MYSQL_NATIVE_PASSWORD: &str = "mysql_native_password";
+const MYSQL_CLEAR_PASSWORD: &str = "mysql_clear_password";
+
 // An intermediate shim for executing MySQL queries.
 pub struct MysqlInstanceShim {
     query_handler: ServerSqlQueryHandlerRef,
@@ -219,6 +222,19 @@ impl MysqlInstanceShim {
         let mut guard = self.prepared_stmts.write();
         let _ = guard.remove(&stmt_key);
     }
+
+    fn auth_plugin(&self) -> &str {
+        if self
+            .user_provider
+            .as_ref()
+            .map(|x| x.external())
+            .unwrap_or(false)
+        {
+            MYSQL_CLEAR_PASSWORD
+        } else {
+            MYSQL_NATIVE_PASSWORD
+        }
+    }
 }
 
 #[async_trait]
@@ -227,6 +243,14 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
     fn version(&self) -> String {
         std::env::var("GREPTIMEDB_MYSQL_SERVER_VERSION").unwrap_or_else(|_| "8.4.2".to_string())
+    }
+
+    fn default_auth_plugin(&self) -> &str {
+        self.auth_plugin()
+    }
+
+    async fn auth_plugin_for_username(&self, _user: &[u8]) -> &str {
+        self.auth_plugin()
     }
 
     fn salt(&self) -> [u8; 20] {
@@ -253,7 +277,17 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             let user_id = Identity::UserId(&username, addr.as_deref());
 
             let password = match auth_plugin {
-                "mysql_native_password" => Password::MysqlNativePassword(auth_data, salt),
+                MYSQL_NATIVE_PASSWORD => Password::MysqlNativePassword(auth_data, salt),
+                MYSQL_CLEAR_PASSWORD => {
+                    // The raw bytes received could be represented in C-like string, ended in '\0'.
+                    // We must "trim" it to get the real password string.
+                    let password = if let &[password @ .., 0] = &auth_data {
+                        password
+                    } else {
+                        auth_data
+                    };
+                    Password::PlainText(String::from_utf8_lossy(password).to_string().into())
+                }
                 other => {
                     error!("Unsupported mysql auth plugin: {}", other);
                     return false;

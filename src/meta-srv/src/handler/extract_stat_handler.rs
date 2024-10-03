@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use api::v1::meta::{HeartbeatRequest, Role};
+use common_meta::datanode::Stat;
 use common_telemetry::{info, warn};
 
-use super::node_stat::Stat;
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;

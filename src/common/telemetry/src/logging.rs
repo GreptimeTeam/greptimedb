@@ -15,6 +15,7 @@
 //! logging stuffs, inspired by databend
 use std::env;
 use std::sync::{Arc, Mutex, Once};
+use std::time::Duration;
 
 use once_cell::sync::{Lazy, OnceCell};
 use opentelemetry::{global, KeyValue};
@@ -26,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_log::LogTracer;
-use tracing_subscriber::filter::Targets;
+use tracing_subscriber::filter::{FilterFn, Targets};
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::prelude::*;
@@ -64,6 +65,24 @@ pub struct LoggingOptions {
 
     /// The tracing sample ratio.
     pub tracing_sample_ratio: Option<TracingSampleOptions>,
+
+    /// The logging options of slow query.
+    pub slow_query: SlowQueryOptions,
+}
+
+/// The options of slow query.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SlowQueryOptions {
+    /// Whether to enable slow query log.
+    pub enable: bool,
+
+    /// The threshold of slow queries.
+    #[serde(with = "humantime_serde")]
+    pub threshold: Option<Duration>,
+
+    /// The sample ratio of slow queries.
+    pub sample_ratio: Option<f64>,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +115,7 @@ impl Default for LoggingOptions {
             otlp_endpoint: None,
             tracing_sample_ratio: None,
             append_stdout: true,
+            slow_query: SlowQueryOptions::default(),
         }
     }
 }
@@ -235,6 +255,42 @@ pub fn init_global_logging(
             None
         };
 
+        let slow_query_logging_layer = if !opts.dir.is_empty() && opts.slow_query.enable {
+            let rolling_appender =
+                RollingFileAppender::new(Rotation::HOURLY, &opts.dir, "greptimedb-slow-queries");
+            let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
+            guards.push(guard);
+
+            // Only logs if the field contains "slow".
+            let slow_query_filter = FilterFn::new(|metadata| {
+                metadata
+                    .fields()
+                    .iter()
+                    .any(|field| field.name().contains("slow"))
+            });
+
+            if opts.log_format == LogFormat::Json {
+                Some(
+                    Layer::new()
+                        .json()
+                        .with_writer(writer)
+                        .with_ansi(false)
+                        .with_filter(slow_query_filter)
+                        .boxed(),
+                )
+            } else {
+                Some(
+                    Layer::new()
+                        .with_writer(writer)
+                        .with_ansi(false)
+                        .with_filter(slow_query_filter)
+                        .boxed(),
+                )
+            }
+        } else {
+            None
+        };
+
         // resolve log level settings from:
         // - options from command line or config files
         // - environment variable: RUST_LOG
@@ -279,6 +335,7 @@ pub fn init_global_logging(
                 .with(stdout_logging_layer)
                 .with(file_logging_layer)
                 .with(err_file_logging_layer)
+                .with(slow_query_logging_layer)
         };
 
         // consume the `tracing_opts` to avoid "unused" warnings.
@@ -289,7 +346,8 @@ pub fn init_global_logging(
             .with(dyn_filter)
             .with(stdout_logging_layer)
             .with(file_logging_layer)
-            .with(err_file_logging_layer);
+            .with(err_file_logging_layer)
+            .with(slow_query_logging_layer);
 
         if opts.enable_otlp_tracing {
             global::set_text_map_propagator(TraceContextPropagator::new());

@@ -129,8 +129,10 @@ impl RegionAliveKeeper {
         let request = RegionRequest::Close(RegionCloseRequest {});
         if let Err(e) = self.region_server.handle_request(region_id, request).await {
             if e.status_code() != StatusCode::RegionNotFound {
-                let _ = self.region_server.set_writable(region_id, false);
-                error!(e; "Failed to close staled region {}, set region to readonly.",region_id);
+                let _ = self
+                    .region_server
+                    .set_region_role(region_id, RegionRole::Follower);
+                error!(e; "Failed to close staled region {}, convert region to follower.", region_id);
             }
         }
     }
@@ -378,7 +380,7 @@ impl CountdownTask {
                             }
                         },
                         Some(CountdownCommand::Reset((role, deadline))) => {
-                            let _ = self.region_server.set_writable(self.region_id, role.writable());
+                            let _ = self.region_server.set_region_role(self.region_id, role);
                             trace!(
                                 "Reset deadline of region {region_id} to approximately {} seconds later.",
                                 (deadline - Instant::now()).as_secs_f32(),
@@ -399,8 +401,8 @@ impl CountdownTask {
                     }
                 }
                 () = &mut countdown => {
-                    warn!("The region {region_id} lease is expired, set region to readonly.");
-                    let _ = self.region_server.set_writable(self.region_id, false);
+                    warn!("The region {region_id} lease is expired, convert region to follower.");
+                    let _ = self.region_server.set_region_role(self.region_id, RegionRole::Follower);
                     // resets the countdown.
                     let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);
                     countdown.as_mut().reset(far_future);
@@ -436,7 +438,9 @@ mod test {
             .handle_request(region_id, RegionRequest::Create(builder.build()))
             .await
             .unwrap();
-        region_server.set_writable(region_id, true).unwrap();
+        region_server
+            .set_region_role(region_id, RegionRole::Leader)
+            .unwrap();
 
         // Register a region before starting.
         alive_keeper.register_region(region_id).await;

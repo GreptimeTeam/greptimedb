@@ -246,7 +246,7 @@ impl RegionMigrationManager {
         region_route: &RegionRoute,
         task: &RegionMigrationProcedureTask,
     ) -> Result<bool> {
-        if region_route.is_leader_downgraded() {
+        if region_route.is_leader_downgrading() {
             return Ok(false);
         }
 

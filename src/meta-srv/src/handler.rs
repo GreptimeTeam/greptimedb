@@ -22,20 +22,37 @@ use api::v1::meta::{
     HeartbeatRequest, HeartbeatResponse, MailboxMessage, RegionLease, RequestHeader,
     ResponseHeader, Role, PROTOCOL_VERSION,
 };
+use check_leader_handler::CheckLeaderHandler;
+use collect_cluster_info_handler::{
+    CollectDatanodeClusterInfoHandler, CollectFlownodeClusterInfoHandler,
+    CollectFrontendClusterInfoHandler,
+};
+use collect_stats_handler::CollectStatsHandler;
+use common_base::Plugins;
+use common_meta::datanode::Stat;
 use common_meta::instruction::{Instruction, InstructionReply};
 use common_meta::sequence::Sequence;
 use common_telemetry::{debug, info, warn};
 use dashmap::DashMap;
+use extract_stat_handler::ExtractStatHandler;
+use failure_handler::RegionFailureHandler;
+use filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
 use futures::future::join_all;
+use keep_lease_handler::{DatanodeKeepLeaseHandler, FlownodeKeepLeaseHandler};
+use mailbox_handler::MailboxHandler;
+use on_leader_start_handler::OnLeaderStartHandler;
+use publish_heartbeat_handler::PublishHeartbeatHandler;
+use region_lease_handler::RegionLeaseHandler;
+use response_header_handler::ResponseHeaderHandler;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{oneshot, Notify, RwLock};
 
-use self::node_stat::Stat;
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
 use crate::metasrv::Context;
 use crate::metrics::{METRIC_META_HANDLER_EXECUTE, METRIC_META_HEARTBEAT_CONNECTION_NUM};
+use crate::pubsub::PublisherRef;
 use crate::service::mailbox::{
     BroadcastChannel, Channel, Mailbox, MailboxReceiver, MailboxRef, MessageId,
 };
@@ -48,7 +65,6 @@ pub mod failure_handler;
 pub mod filter_inactive_region_stats;
 pub mod keep_lease_handler;
 pub mod mailbox_handler;
-pub mod node_stat;
 pub mod on_leader_start_handler;
 pub mod publish_heartbeat_handler;
 pub mod region_lease_handler;
@@ -97,6 +113,7 @@ impl HeartbeatAccumulator {
     }
 }
 
+/// The pusher of the heartbeat response.
 pub struct Pusher {
     sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
     res_header: ResponseHeader,
@@ -132,6 +149,7 @@ impl Pusher {
     }
 }
 
+/// The group of heartbeat pushers.
 #[derive(Clone, Default)]
 pub struct Pushers(Arc<RwLock<BTreeMap<String, Pusher>>>);
 
@@ -204,50 +222,46 @@ impl NameCachedHandler {
     }
 }
 
-#[derive(Clone, Default)]
+pub type HeartbeatHandlerGroupRef = Arc<HeartbeatHandlerGroup>;
+
+/// The group of heartbeat handlers.
+#[derive(Default)]
 pub struct HeartbeatHandlerGroup {
-    handlers: Arc<RwLock<Vec<NameCachedHandler>>>,
+    handlers: Vec<NameCachedHandler>,
     pushers: Pushers,
 }
 
 impl HeartbeatHandlerGroup {
-    pub(crate) fn new(pushers: Pushers) -> Self {
-        Self {
-            handlers: Arc::new(RwLock::new(vec![])),
-            pushers,
-        }
-    }
-
-    pub async fn add_handler(&self, handler: impl HeartbeatHandler + 'static) {
-        let mut handlers = self.handlers.write().await;
-        handlers.push(NameCachedHandler::new(handler));
-    }
-
-    pub async fn register(&self, key: impl AsRef<str>, pusher: Pusher) {
+    /// Registers the heartbeat response [`Pusher`] with the given key to the group.
+    pub async fn register_pusher(&self, key: impl AsRef<str>, pusher: Pusher) {
         let key = key.as_ref();
         METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
         info!("Pusher register: {}", key);
         let _ = self.pushers.insert(key.to_string(), pusher).await;
     }
 
-    pub async fn deregister(&self, key: impl AsRef<str>) -> Option<Pusher> {
+    /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
+    ///
+    /// Returns the [`Pusher`] if it exists.
+    pub async fn deregister_push(&self, key: impl AsRef<str>) -> Option<Pusher> {
         let key = key.as_ref();
         METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         info!("Pusher unregister: {}", key);
         self.pushers.remove(key).await
     }
 
+    /// Returns the [`Pushers`] of the group.
     pub fn pushers(&self) -> Pushers {
         self.pushers.clone()
     }
 
+    /// Handles the heartbeat request.
     pub async fn handle(
         &self,
         req: HeartbeatRequest,
         mut ctx: Context,
     ) -> Result<HeartbeatResponse> {
         let mut acc = HeartbeatAccumulator::default();
-        let handlers = self.handlers.read().await;
         let role = req
             .header
             .as_ref()
@@ -256,7 +270,7 @@ impl HeartbeatHandlerGroup {
                 err_msg: format!("invalid role: {:?}", req.header),
             })?;
 
-        for NameCachedHandler { name, handler } in handlers.iter() {
+        for NameCachedHandler { name, handler } in self.handlers.iter() {
             if !handler.is_acceptable(role) {
                 continue;
             }
@@ -427,9 +441,151 @@ impl Mailbox for HeartbeatMailbox {
     }
 }
 
+/// The builder to build the group of heartbeat handlers.
+pub struct HeartbeatHandlerGroupBuilder {
+    /// The handler to handle region failure.
+    region_failure_handler: Option<RegionFailureHandler>,
+
+    /// The handler to handle region lease.
+    region_lease_handler: Option<RegionLeaseHandler>,
+
+    /// The plugins.
+    plugins: Option<Plugins>,
+
+    /// The heartbeat response pushers.
+    pushers: Pushers,
+
+    /// The group of heartbeat handlers.
+    handlers: Vec<NameCachedHandler>,
+}
+
+impl HeartbeatHandlerGroupBuilder {
+    pub fn new(pushers: Pushers) -> Self {
+        Self {
+            region_failure_handler: None,
+            region_lease_handler: None,
+            plugins: None,
+            pushers,
+            handlers: vec![],
+        }
+    }
+
+    pub fn with_region_lease_handler(mut self, handler: Option<RegionLeaseHandler>) -> Self {
+        self.region_lease_handler = handler;
+        self
+    }
+
+    /// Sets the [`RegionFailureHandler`].
+    pub fn with_region_failure_handler(mut self, handler: Option<RegionFailureHandler>) -> Self {
+        self.region_failure_handler = handler;
+        self
+    }
+
+    /// Sets the [`Plugins`].
+    pub fn with_plugins(mut self, plugins: Option<Plugins>) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
+    /// Adds the default handlers.
+    pub fn add_default_handlers(mut self) -> Self {
+        // Extract the `PublishHeartbeatHandler` from the plugins.
+        let publish_heartbeat_handler = if let Some(plugins) = self.plugins.as_ref() {
+            plugins
+                .get::<PublisherRef>()
+                .map(|publish| PublishHeartbeatHandler::new(publish.clone()))
+        } else {
+            None
+        };
+
+        self.add_handler_last(ResponseHeaderHandler);
+        // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
+        // because even if the current meta-server node is no longer the leader it can
+        // still help the datanode to keep lease.
+        self.add_handler_last(DatanodeKeepLeaseHandler);
+        self.add_handler_last(FlownodeKeepLeaseHandler);
+        self.add_handler_last(CheckLeaderHandler);
+        self.add_handler_last(OnLeaderStartHandler);
+        self.add_handler_last(ExtractStatHandler);
+        self.add_handler_last(CollectDatanodeClusterInfoHandler);
+        self.add_handler_last(CollectFrontendClusterInfoHandler);
+        self.add_handler_last(CollectFlownodeClusterInfoHandler);
+        self.add_handler_last(MailboxHandler);
+        if let Some(region_lease_handler) = self.region_lease_handler.take() {
+            self.add_handler_last(region_lease_handler);
+        }
+        self.add_handler_last(FilterInactiveRegionStatsHandler);
+        if let Some(region_failure_handler) = self.region_failure_handler.take() {
+            self.add_handler_last(region_failure_handler);
+        }
+        if let Some(publish_heartbeat_handler) = publish_heartbeat_handler {
+            self.add_handler_last(publish_heartbeat_handler);
+        }
+        self.add_handler_last(CollectStatsHandler::default());
+
+        self
+    }
+
+    /// Builds the group of heartbeat handlers.
+    pub fn build(self) -> HeartbeatHandlerGroup {
+        HeartbeatHandlerGroup {
+            handlers: self.handlers.into_iter().collect(),
+            pushers: self.pushers,
+        }
+    }
+
+    /// Adds the handler after the specified handler.
+    pub fn add_handler_after(
+        &mut self,
+        target: &'static str,
+        handler: impl HeartbeatHandler + 'static,
+    ) -> Result<()> {
+        if let Some(pos) = self.handlers.iter().position(|x| x.name == target) {
+            self.handlers
+                .insert(pos + 1, NameCachedHandler::new(handler));
+            return Ok(());
+        }
+
+        error::HandlerNotFoundSnafu { name: target }.fail()
+    }
+
+    /// Adds the handler before the specified handler.
+    pub fn add_handler_before(
+        &mut self,
+        target: &'static str,
+        handler: impl HeartbeatHandler + 'static,
+    ) -> Result<()> {
+        if let Some(pos) = self.handlers.iter().position(|x| x.name == target) {
+            self.handlers.insert(pos, NameCachedHandler::new(handler));
+            return Ok(());
+        }
+
+        error::HandlerNotFoundSnafu { name: target }.fail()
+    }
+
+    /// Replaces the handler with the specified name.
+    pub fn replace_handler(
+        &mut self,
+        target: &'static str,
+        handler: impl HeartbeatHandler + 'static,
+    ) -> Result<()> {
+        if let Some(pos) = self.handlers.iter().position(|x| x.name == target) {
+            self.handlers[pos] = NameCachedHandler::new(handler);
+            return Ok(());
+        }
+
+        error::HandlerNotFoundSnafu { name: target }.fail()
+    }
+
+    fn add_handler_last(&mut self, handler: impl HeartbeatHandler + 'static) {
+        self.handlers.push(NameCachedHandler::new(handler));
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
+    use std::assert_matches::assert_matches;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -438,17 +594,9 @@ mod tests {
     use common_meta::sequence::SequenceBuilder;
     use tokio::sync::mpsc;
 
-    use crate::handler::check_leader_handler::CheckLeaderHandler;
-    use crate::handler::collect_cluster_info_handler::{
-        CollectDatanodeClusterInfoHandler, CollectFlownodeClusterInfoHandler,
-        CollectFrontendClusterInfoHandler,
-    };
+    use super::{HeartbeatHandlerGroupBuilder, Pushers};
+    use crate::error;
     use crate::handler::collect_stats_handler::CollectStatsHandler;
-    use crate::handler::extract_stat_handler::ExtractStatHandler;
-    use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
-    use crate::handler::keep_lease_handler::{DatanodeKeepLeaseHandler, FlownodeKeepLeaseHandler};
-    use crate::handler::mailbox_handler::MailboxHandler;
-    use crate::handler::on_leader_start_handler::OnLeaderStartHandler;
     use crate::handler::response_header_handler::ResponseHeaderHandler;
     use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
     use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
@@ -490,7 +638,7 @@ mod tests {
         let pusher: Pusher = Pusher::new(pusher_tx, &res_header);
         let handler_group = HeartbeatHandlerGroup::default();
         handler_group
-            .register(format!("{}-{}", Role::Datanode as i32, datanode_id), pusher)
+            .register_pusher(format!("{}-{}", Role::Datanode as i32, datanode_id), pusher)
             .await;
 
         let kv_backend = Arc::new(MemoryKvBackend::new());
@@ -518,24 +666,13 @@ mod tests {
         (mailbox, receiver)
     }
 
-    #[tokio::test]
-    async fn test_handler_name() {
-        let group = HeartbeatHandlerGroup::default();
-        group.add_handler(ResponseHeaderHandler).await;
-        group.add_handler(DatanodeKeepLeaseHandler).await;
-        group.add_handler(FlownodeKeepLeaseHandler).await;
-        group.add_handler(CheckLeaderHandler).await;
-        group.add_handler(OnLeaderStartHandler).await;
-        group.add_handler(ExtractStatHandler).await;
-        group.add_handler(CollectDatanodeClusterInfoHandler).await;
-        group.add_handler(CollectFrontendClusterInfoHandler).await;
-        group.add_handler(CollectFlownodeClusterInfoHandler).await;
-        group.add_handler(MailboxHandler).await;
-        group.add_handler(FilterInactiveRegionStatsHandler).await;
-        group.add_handler(CollectStatsHandler::default()).await;
+    #[test]
+    fn test_handler_group_builder() {
+        let group = HeartbeatHandlerGroupBuilder::new(Pushers::default())
+            .add_default_handlers()
+            .build();
 
-        let handlers = group.handlers.read().await;
-
+        let handlers = group.handlers;
         assert_eq!(12, handlers.len());
 
         let names = [
@@ -556,5 +693,256 @@ mod tests {
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
             assert_eq!(handler.name, name);
         }
+    }
+
+    #[test]
+    fn test_handler_group_builder_add_before() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder
+            .add_handler_before(
+                "FilterInactiveRegionStatsHandler",
+                CollectStatsHandler::default(),
+            )
+            .unwrap();
+
+        let group = builder.build();
+        let handlers = group.handlers;
+        assert_eq!(13, handlers.len());
+
+        let names = [
+            "ResponseHeaderHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "MailboxHandler",
+            "CollectStatsHandler",
+            "FilterInactiveRegionStatsHandler",
+            "CollectStatsHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
+    }
+
+    #[test]
+    fn test_handler_group_builder_add_before_first() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder
+            .add_handler_before("ResponseHeaderHandler", CollectStatsHandler::default())
+            .unwrap();
+
+        let group = builder.build();
+        let handlers = group.handlers;
+        assert_eq!(13, handlers.len());
+
+        let names = [
+            "CollectStatsHandler",
+            "ResponseHeaderHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "MailboxHandler",
+            "FilterInactiveRegionStatsHandler",
+            "CollectStatsHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
+    }
+
+    #[test]
+    fn test_handler_group_builder_add_after() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder
+            .add_handler_after("MailboxHandler", CollectStatsHandler::default())
+            .unwrap();
+
+        let group = builder.build();
+        let handlers = group.handlers;
+        assert_eq!(13, handlers.len());
+
+        let names = [
+            "ResponseHeaderHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "MailboxHandler",
+            "CollectStatsHandler",
+            "FilterInactiveRegionStatsHandler",
+            "CollectStatsHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
+    }
+
+    #[test]
+    fn test_handler_group_builder_add_after_last() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder
+            .add_handler_after("CollectStatsHandler", ResponseHeaderHandler)
+            .unwrap();
+
+        let group = builder.build();
+        let handlers = group.handlers;
+        assert_eq!(13, handlers.len());
+
+        let names = [
+            "ResponseHeaderHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "MailboxHandler",
+            "FilterInactiveRegionStatsHandler",
+            "CollectStatsHandler",
+            "ResponseHeaderHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
+    }
+
+    #[test]
+    fn test_handler_group_builder_replace() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder
+            .replace_handler("MailboxHandler", CollectStatsHandler::default())
+            .unwrap();
+
+        let group = builder.build();
+        let handlers = group.handlers;
+        assert_eq!(12, handlers.len());
+
+        let names = [
+            "ResponseHeaderHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "CollectStatsHandler",
+            "FilterInactiveRegionStatsHandler",
+            "CollectStatsHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
+    }
+
+    #[test]
+    fn test_handler_group_builder_replace_last() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder
+            .replace_handler("CollectStatsHandler", ResponseHeaderHandler)
+            .unwrap();
+
+        let group = builder.build();
+        let handlers = group.handlers;
+        assert_eq!(12, handlers.len());
+
+        let names = [
+            "ResponseHeaderHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "MailboxHandler",
+            "FilterInactiveRegionStatsHandler",
+            "ResponseHeaderHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
+    }
+
+    #[test]
+    fn test_handler_group_builder_replace_first() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder
+            .replace_handler("ResponseHeaderHandler", CollectStatsHandler::default())
+            .unwrap();
+
+        let group = builder.build();
+        let handlers = group.handlers;
+        assert_eq!(12, handlers.len());
+
+        let names = [
+            "CollectStatsHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "MailboxHandler",
+            "FilterInactiveRegionStatsHandler",
+            "CollectStatsHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
+    }
+
+    #[test]
+    fn test_handler_group_builder_handler_not_found() {
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        let err = builder
+            .add_handler_before("NotExists", CollectStatsHandler::default())
+            .unwrap_err();
+        assert_matches!(err, error::Error::HandlerNotFound { .. });
+
+        let err = builder
+            .add_handler_after("NotExists", CollectStatsHandler::default())
+            .unwrap_err();
+        assert_matches!(err, error::Error::HandlerNotFound { .. });
+
+        let err = builder
+            .replace_handler("NotExists", CollectStatsHandler::default())
+            .unwrap_err();
+        assert_matches!(err, error::Error::HandlerNotFound { .. });
     }
 }

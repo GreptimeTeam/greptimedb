@@ -22,6 +22,7 @@ use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::error::Error as TableError;
+use tokio::time::error::Elapsed;
 
 /// Business error of datanode.
 #[derive(Snafu)]
@@ -347,6 +348,22 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to acquire permit, source closed"))]
+    ConcurrentQueryLimiterClosed {
+        #[snafu(source)]
+        error: tokio::sync::AcquireError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to acquire permit under timeouts"))]
+    ConcurrentQueryLimiterTimeout {
+        #[snafu(source)]
+        error: Elapsed,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -411,6 +428,9 @@ impl ErrorExt for Error {
 
             FindLogicalRegions { source, .. } => source.status_code(),
             BuildMitoEngine { source, .. } => source.status_code(),
+            ConcurrentQueryLimiterClosed { .. } | ConcurrentQueryLimiterTimeout { .. } => {
+                StatusCode::RegionBusy
+            }
         }
     }
 

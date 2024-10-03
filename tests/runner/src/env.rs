@@ -66,7 +66,7 @@ pub enum WalConfig {
 
 #[derive(Clone)]
 pub struct Env {
-    data_home: PathBuf,
+    sqlness_home: PathBuf,
     server_addrs: ServerAddr,
     wal: WalConfig,
 
@@ -81,6 +81,7 @@ impl EnvController for Env {
     type DB = GreptimeDB;
 
     async fn start(&self, mode: &str, _config: Option<&Path>) -> Self::DB {
+        std::env::set_var("SQLNESS_HOME", self.sqlness_home.display().to_string());
         match mode {
             "standalone" => self.start_standalone().await,
             "distributed" => self.start_distributed().await,
@@ -102,7 +103,7 @@ impl Env {
         bins_dir: Option<PathBuf>,
     ) -> Self {
         Self {
-            data_home,
+            sqlness_home: data_home,
             server_addrs,
             wal,
             bins_dir: Arc::new(Mutex::new(bins_dir)),
@@ -257,16 +258,16 @@ impl Env {
             "standalone" => "greptime-sqlness-standalone.log".to_string(),
             _ => panic!("Unexpected subcommand: {subcommand}"),
         };
-        let log_file_name = self.data_home.join(log_file_name).display().to_string();
+        let stdout_file_name = self.sqlness_home.join(log_file_name).display().to_string();
 
-        println!("{subcommand} log file at {log_file_name}");
+        println!("{subcommand} log file at {stdout_file_name}");
 
-        let log_file = OpenOptions::new()
+        let stdout_file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(truncate_log)
             .append(!truncate_log)
-            .open(log_file_name)
+            .open(stdout_file_name)
             .unwrap();
 
         let (args, check_ip_addrs) = match subcommand {
@@ -275,7 +276,7 @@ impl Env {
                 (args, vec![addr])
             }
             "flownode" => {
-                let (args, addr) = self.flownode_start_args(db_ctx);
+                let (args, addr) = self.flownode_start_args(db_ctx, &self.sqlness_home);
                 (args, vec![addr])
             }
             "standalone" => {
@@ -283,6 +284,10 @@ impl Env {
                     DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
+                    format!(
+                        "--log-dir={}/greptimedb-flownode/logs",
+                        self.sqlness_home.display()
+                    ),
                     "-c".to_string(),
                     self.generate_config_file(subcommand, db_ctx),
                     "--http-addr=127.0.0.1:5002".to_string(),
@@ -296,6 +301,10 @@ impl Env {
                     "start".to_string(),
                     "--metasrv-addrs=127.0.0.1:3002".to_string(),
                     "--http-addr=127.0.0.1:5003".to_string(),
+                    format!(
+                        "--log-dir={}/greptimedb-frontend/logs",
+                        self.sqlness_home.display()
+                    ),
                 ];
                 (args, vec![GRPC_SERVER_ADDR.to_string()])
             }
@@ -309,6 +318,10 @@ impl Env {
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
                     "--http-addr=127.0.0.1:5002".to_string(),
+                    format!(
+                        "--log-dir={}/greptimedb-metasrv/logs",
+                        self.sqlness_home.display()
+                    ),
                     "-c".to_string(),
                     self.generate_config_file(subcommand, db_ctx),
                 ];
@@ -339,7 +352,7 @@ impl Env {
             .current_dir(bins_dir)
             .env("TZ", "UTC")
             .args(args)
-            .stdout(log_file)
+            .stdout(stdout_file)
             .spawn()
             .unwrap_or_else(|error| {
                 panic!("Failed to start the DB with subcommand {subcommand},Error: {error}")
@@ -359,7 +372,7 @@ impl Env {
         let id = db_ctx.datanode_id();
 
         let data_home = self
-            .data_home
+            .sqlness_home
             .join(format!("greptimedb_datanode_{}_{id}", db_ctx.time));
 
         let subcommand = "datanode";
@@ -371,6 +384,7 @@ impl Env {
         args.push(format!("--rpc-addr=127.0.0.1:410{id}"));
         args.push(format!("--http-addr=127.0.0.1:430{id}"));
         args.push(format!("--data-home={}", data_home.display()));
+        args.push(format!("--log-dir={}/logs", data_home.display()));
         args.push(format!("--node-id={id}"));
         args.push("-c".to_string());
         args.push(self.generate_config_file(subcommand, db_ctx));
@@ -378,7 +392,11 @@ impl Env {
         (args, format!("127.0.0.1:410{id}"))
     }
 
-    fn flownode_start_args(&self, _db_ctx: &GreptimeDBContext) -> (Vec<String>, String) {
+    fn flownode_start_args(
+        &self,
+        _db_ctx: &GreptimeDBContext,
+        sqlness_home: &Path,
+    ) -> (Vec<String>, String) {
         let id = 0;
 
         let subcommand = "flownode";
@@ -389,6 +407,10 @@ impl Env {
         ];
         args.push(format!("--rpc-addr=127.0.0.1:680{id}"));
         args.push(format!("--node-id={id}"));
+        args.push(format!(
+            "--log-dir={}/greptimedb-flownode/logs",
+            sqlness_home.display()
+        ));
         args.push("--metasrv-addrs=127.0.0.1:3002".to_string());
         (args, format!("127.0.0.1:680{id}"))
     }
@@ -457,7 +479,7 @@ impl Env {
             kafka_wal_broker_endpoints: String,
         }
 
-        let data_home = self.data_home.join(format!("greptimedb-{subcommand}"));
+        let data_home = self.sqlness_home.join(format!("greptimedb-{subcommand}"));
         std::fs::create_dir_all(data_home.as_path()).unwrap();
 
         let wal_dir = data_home.join("wal").display().to_string();

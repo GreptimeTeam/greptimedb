@@ -39,7 +39,7 @@ use prometheus::IntGauge;
 use rand::{thread_rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::region_engine::SetReadonlyResponse;
+use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
@@ -734,8 +734,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     // For background notify, we handle it directly.
                     self.handle_background_notify(region_id, notify).await;
                 }
-                WorkerRequest::SetReadonlyGracefully { region_id, sender } => {
-                    self.set_readonly_gracefully(region_id, sender).await;
+                WorkerRequest::SetRegionRoleStateGracefully {
+                    region_id,
+                    region_role_state,
+                    sender,
+                } => {
+                    self.set_role_state_gracefully(region_id, region_role_state, sender)
+                        .await;
                 }
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request).await;
@@ -834,22 +839,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
     }
 
-    /// Handles `set_readonly_gracefully`.
-    async fn set_readonly_gracefully(
+    /// Handles `set_region_role_gracefully`.
+    async fn set_role_state_gracefully(
         &mut self,
         region_id: RegionId,
-        sender: oneshot::Sender<SetReadonlyResponse>,
+        region_role_state: SettableRegionRoleState,
+        sender: oneshot::Sender<SetRegionRoleStateResponse>,
     ) {
         if let Some(region) = self.regions.get_region(region_id) {
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
-                region.set_readonly_gracefully().await;
+                region.set_role_state_gracefully(region_role_state).await;
 
                 let last_entry_id = region.version_control.current().last_entry_id;
-                let _ = sender.send(SetReadonlyResponse::success(Some(last_entry_id)));
+                let _ = sender.send(SetRegionRoleStateResponse::success(Some(last_entry_id)));
             });
         } else {
-            let _ = sender.send(SetReadonlyResponse::NotFound);
+            let _ = sender.send(SetRegionRoleStateResponse::NotFound);
         }
     }
 }

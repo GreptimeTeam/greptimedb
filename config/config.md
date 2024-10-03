@@ -17,6 +17,7 @@
 | `default_timezone` | String | Unset | The default timezone of the server. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
+| `max_concurrent_queries` | Integer | `0` | The maximum current queries allowed to be executed. Zero means unlimited. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
@@ -162,6 +163,10 @@
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
+| `logging.slow_query` | -- | -- | The slow query log options. |
+| `logging.slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
+| `logging.slow_query.threshold` | String | Unset | The threshold of slow query. |
+| `logging.slow_query.sample_ratio` | Float | Unset | The sampling ratio of slow query log. The value should be in the range of (0, 1]. |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
@@ -248,6 +253,10 @@
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
+| `logging.slow_query` | -- | -- | The slow query log options. |
+| `logging.slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
+| `logging.slow_query.threshold` | String | Unset | The threshold of slow query. |
+| `logging.slow_query.sample_ratio` | Float | Unset | The sampling ratio of slow query log. The value should be in the range of (0, 1]. |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
@@ -313,6 +322,10 @@
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
+| `logging.slow_query` | -- | -- | The slow query log options. |
+| `logging.slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
+| `logging.slow_query.threshold` | String | Unset | The threshold of slow query. |
+| `logging.slow_query.sample_ratio` | Float | Unset | The sampling ratio of slow query log. The value should be in the range of (0, 1]. |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
@@ -335,6 +348,7 @@
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
+| `max_concurrent_queries` | Integer | `0` | The maximum current queries allowed to be executed. Zero means unlimited. |
 | `rpc_addr` | String | Unset | Deprecated, use `grpc.addr` instead. |
 | `rpc_hostname` | String | Unset | Deprecated, use `grpc.hostname` instead. |
 | `rpc_runtime_size` | Integer | Unset | Deprecated, use `grpc.runtime_size` instead. |
@@ -464,6 +478,10 @@
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
+| `logging.slow_query` | -- | -- | The slow query log options. |
+| `logging.slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
+| `logging.slow_query.threshold` | String | Unset | The threshold of slow query. |
+| `logging.slow_query.sample_ratio` | Float | Unset | The sampling ratio of slow query log. The value should be in the range of (0, 1]. |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
 | `export_metrics.write_interval` | String | `30s` | The interval of export metrics. |
@@ -510,5 +528,9 @@
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
+| `logging.slow_query` | -- | -- | The slow query log options. |
+| `logging.slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
+| `logging.slow_query.threshold` | String | Unset | The threshold of slow query. |
+| `logging.slow_query.sample_ratio` | Float | Unset | The sampling ratio of slow query log. The value should be in the range of (0, 1]. |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |

@@ -52,7 +52,7 @@ use crate::error::{
     StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
-use crate::handler::HeartbeatHandlerGroup;
+use crate::handler::HeartbeatHandlerGroupRef;
 use crate::lease::lookup_datanode_peer;
 use crate::lock::DistLockRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
@@ -366,7 +366,7 @@ pub struct Metasrv {
     selector: SelectorRef,
     // The flow selector is used to select a target flownode.
     flow_selector: SelectorRef,
-    handler_group: HeartbeatHandlerGroup,
+    handler_group: HeartbeatHandlerGroupRef,
     election: Option<ElectionRef>,
     lock: DistLockRef,
     procedure_manager: ProcedureManagerRef,
@@ -562,7 +562,7 @@ impl Metasrv {
         &self.flow_selector
     }
 
-    pub fn handler_group(&self) -> &HeartbeatHandlerGroup {
+    pub fn handler_group(&self) -> &HeartbeatHandlerGroupRef {
         &self.handler_group
     }
 

@@ -20,6 +20,7 @@ pub mod key_column_usage;
 mod partitions;
 mod procedure_info;
 mod region_peers;
+mod region_statistics;
 mod runtime_metrics;
 pub mod schemata;
 mod table_constraints;
@@ -194,6 +195,11 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                     self.catalog_manager.clone(),
                 )) as _,
             ),
+            REGION_STATISTICS => Some(Arc::new(
+                region_statistics::InformationSchemaRegionStatistics::new(
+                    self.catalog_manager.clone(),
+                ),
+            ) as _),
             _ => None,
         }
     }
@@ -241,6 +247,14 @@ impl InformationSchemaProvider {
                 CLUSTER_INFO.to_string(),
                 self.build_table(CLUSTER_INFO).unwrap(),
             );
+            tables.insert(
+                PROCEDURE_INFO.to_string(),
+                self.build_table(PROCEDURE_INFO).unwrap(),
+            );
+            tables.insert(
+                REGION_STATISTICS.to_string(),
+                self.build_table(REGION_STATISTICS).unwrap(),
+            );
         }
 
         tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
@@ -256,10 +270,6 @@ impl InformationSchemaProvider {
             self.build_table(TABLE_CONSTRAINTS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
-        tables.insert(
-            PROCEDURE_INFO.to_string(),
-            self.build_table(PROCEDURE_INFO).unwrap(),
-        );
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
             tables.insert((*name).to_string(), self.build_table(name).expect(name));

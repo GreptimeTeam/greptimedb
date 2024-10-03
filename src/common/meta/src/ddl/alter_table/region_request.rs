@@ -187,7 +187,7 @@ mod tests {
                     region: Region::new_test(region_id),
                     leader_peer: Some(Peer::empty(1)),
                     follower_peers: vec![],
-                    leader_status: None,
+                    leader_state: None,
                     leader_down_since: None,
                 }]),
                 HashMap::new(),

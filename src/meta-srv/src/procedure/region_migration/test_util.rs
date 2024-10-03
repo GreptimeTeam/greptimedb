@@ -449,7 +449,7 @@ impl ProcedureMigrationTestSuite {
             .find(|route| route.region.id == region_id)
             .unwrap();
 
-        assert!(!region_route.is_leader_downgraded());
+        assert!(!region_route.is_leader_downgrading());
         assert_eq!(
             region_route.leader_peer.as_ref().unwrap().id,
             expected_leader_id

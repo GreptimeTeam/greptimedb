@@ -62,8 +62,8 @@ fn renew_region_lease_via_region_route(
     // If it's a leader region on this datanode.
     if let Some(leader) = &region_route.leader_peer {
         if leader.id == datanode_id {
-            let region_role = if region_route.is_leader_downgraded() {
-                RegionRole::Follower
+            let region_role = if region_route.is_leader_downgrading() {
+                RegionRole::DowngradingLeader
             } else {
                 RegionRole::Leader
             };
@@ -220,7 +220,7 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
-    use common_meta::rpc::router::{Region, RegionRouteBuilder, RegionStatus};
+    use common_meta::rpc::router::{LeaderState, Region, RegionRouteBuilder};
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
     use table::metadata::RawTableInfo;
@@ -265,11 +265,11 @@ mod tests {
             Some((region_id, RegionRole::Follower))
         );
 
-        region_route.leader_status = Some(RegionStatus::Downgraded);
+        region_route.leader_state = Some(LeaderState::Downgrading);
         // The downgraded leader region on the datanode.
         assert_eq!(
             renew_region_lease_via_region_route(&region_route, leader_peer_id, region_id),
-            Some((region_id, RegionRole::Follower))
+            Some((region_id, RegionRole::DowngradingLeader))
         );
     }
 
@@ -492,7 +492,7 @@ mod tests {
             .region(Region::new_test(region_id))
             .leader_peer(Peer::empty(leader_peer_id))
             .follower_peers(vec![Peer::empty(follower_peer_id)])
-            .leader_status(RegionStatus::Downgraded)
+            .leader_state(LeaderState::Downgrading)
             .build()
             .unwrap();
 

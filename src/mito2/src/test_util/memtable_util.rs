@@ -14,6 +14,7 @@
 
 //! Memtable test utilities.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -92,8 +93,8 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
-    ) -> Vec<MemtableRange> {
-        vec![]
+    ) -> BTreeMap<usize, MemtableRange> {
+        BTreeMap::new()
     }
 
     fn is_empty(&self) -> bool {

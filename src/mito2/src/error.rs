@@ -32,7 +32,7 @@ use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::FileType;
-use crate::region::RegionState;
+use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::schedule::remote_job_scheduler::JobId;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
@@ -483,10 +483,22 @@ pub enum Error {
     },
 
     #[snafu(display("Region {} is in {:?} state, expect: {:?}", region_id, state, expect))]
-    RegionState {
+    RegionLeaderState {
         region_id: RegionId,
-        state: RegionState,
-        expect: RegionState,
+        state: RegionRoleState,
+        expect: RegionLeaderState,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} is in {:?} state, expect: Leader or Leader(Downgrading)",
+        region_id,
+        state
+    ))]
+    FlushableRegionState {
+        region_id: RegionId,
+        state: RegionRoleState,
         #[snafu(implicit)]
         location: Location,
     },
@@ -954,7 +966,8 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionState { .. } => StatusCode::RegionNotReady,
+            RegionLeaderState { .. } => StatusCode::RegionNotReady,
+            &FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,

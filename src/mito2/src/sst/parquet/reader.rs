@@ -238,6 +238,7 @@ impl ParquetReaderBuilder {
             cache_manager: self.cache_manager.clone(),
         };
 
+        // TODO(yingwen): count the cost of the method.
         metrics.build_cost = start.elapsed();
 
         let mut filters = if let Some(predicate) = &self.predicate {

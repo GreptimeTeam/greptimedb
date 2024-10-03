@@ -36,7 +36,10 @@ use mito2::engine::MitoEngine;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
-use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
+use store_api::region_engine::{
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
+    SettableRegionRoleState,
+};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -185,9 +188,9 @@ impl RegionEngine for MetricEngine {
     /// Retrieves region's disk usage.
     ///
     /// Note: Returns `None` if it's a logical region.
-    fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+    fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
         if self.inner.is_physical_region(region_id) {
-            self.inner.mito.region_disk_usage(region_id)
+            self.inner.mito.region_statistic(region_id)
         } else {
             None
         }
@@ -199,14 +202,14 @@ impl RegionEngine for MetricEngine {
         Ok(())
     }
 
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError> {
         // ignore the region not found error
         for x in [
             utils::to_metadata_region_id(region_id),
             utils::to_data_region_id(region_id),
             region_id,
         ] {
-            if let Err(e) = self.inner.mito.set_writable(x, writable)
+            if let Err(e) = self.inner.mito.set_region_role(x, role)
                 && e.status_code() != StatusCode::RegionNotFound
             {
                 return Err(e);
@@ -215,11 +218,15 @@ impl RegionEngine for MetricEngine {
         Ok(())
     }
 
-    async fn set_readonly_gracefully(
+    async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
-    ) -> std::result::Result<SetReadonlyResponse, BoxedError> {
-        self.inner.mito.set_readonly_gracefully(region_id).await
+        region_role_state: SettableRegionRoleState,
+    ) -> std::result::Result<SetRegionRoleStateResponse, BoxedError> {
+        self.inner
+            .mito
+            .set_region_role_state_gracefully(region_id, region_role_state)
+            .await
     }
 
     /// Returns the physical region role.
@@ -377,7 +384,7 @@ mod test {
         let logical_region_id = env.default_logical_region_id();
         let physical_region_id = env.default_physical_region_id();
 
-        assert!(env.metric().region_disk_usage(logical_region_id).is_none());
-        assert!(env.metric().region_disk_usage(physical_region_id).is_some());
+        assert!(env.metric().region_statistic(logical_region_id).is_none());
+        assert!(env.metric().region_statistic(physical_region_id).is_some());
     }
 }
