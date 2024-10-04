@@ -66,3 +66,5 @@ SELECT geohash(37.76938, -122.3889, 11::UInt32);
 SELECT geohash(37.76938, -122.3889, 11::UInt64);
 
 SELECT geohash_neighbours(37.76938, -122.3889, 11);
+
+SELECT geojson_encode(37.76938, -122.3889, 1728083375::TimestampSecond);

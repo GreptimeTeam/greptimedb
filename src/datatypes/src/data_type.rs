@@ -249,6 +249,15 @@ impl ConcreteDataType {
         ]
     }
 
+    pub fn timestamps() -> Vec<ConcreteDataType> {
+        vec![
+            ConcreteDataType::timestamp_second_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            ConcreteDataType::timestamp_microsecond_datatype(),
+            ConcreteDataType::timestamp_nanosecond_datatype(),
+        ]
+    }
+
     /// Convert arrow data type to [ConcreteDataType].
     ///
     /// # Panics
