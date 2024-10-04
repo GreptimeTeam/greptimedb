@@ -833,9 +833,9 @@ max_retry_times = 3
 retry_delay = "500ms"
 
 [logging]
+max_log_files = 720
 append_stdout = true
 enable_otlp_tracing = false
-max_log_files = 720
 
 [logging.slow_query]
 enable = false
