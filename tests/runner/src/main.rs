@@ -15,12 +15,15 @@
 #![allow(clippy::print_stdout)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
 use env::{Env, WalConfig};
+use sqlness::interceptor::Registry;
 use sqlness::{ConfigBuilder, Runner};
 
 mod env;
+mod protocol_interceptor;
 mod util;
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -28,6 +31,23 @@ mod util;
 enum Wal {
     RaftEngine,
     Kafka,
+}
+
+// add a group to ensure that all server addresses are set together
+#[derive(clap::Args, Debug, Clone, Default)]
+#[group(multiple = true, requires_all=["server_addr", "pg_server_addr", "mysql_server_addr"])]
+struct ServerAddr {
+    /// Address of the grpc server.
+    #[clap(short, long)]
+    server_addr: Option<String>,
+
+    /// Address of the postgres server. Must be set if server_addr is set.
+    #[clap(short, long, requires = "server_addr")]
+    pg_server_addr: Option<String>,
+
+    /// Address of the mysql server. Must be set if server_addr is set.
+    #[clap(short, long, requires = "server_addr")]
+    mysql_server_addr: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -50,9 +70,9 @@ struct Args {
     #[clap(short, long, default_value = ".*")]
     test_filter: String,
 
-    /// Address of the server.
-    #[clap(short, long)]
-    server_addr: Option<String>,
+    /// Addresses of the server.
+    #[command(flatten)]
+    server_addr: ServerAddr,
 
     /// The type of Wal.
     #[clap(short, long, default_value = "raft_engine")]
@@ -84,12 +104,19 @@ async fn main() {
         .unwrap();
     let sqlness_home = temp_dir.into_path();
 
+    let mut interceptor_registry: Registry = Default::default();
+    interceptor_registry.register(
+        protocol_interceptor::PREFIX,
+        Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
+    );
+
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir(args.case_dir))
         .fail_fast(args.fail_fast)
         .test_filter(args.test_filter)
         .follow_links(true)
         .env_config_file(args.env_config_file)
+        .interceptor_registry(interceptor_registry)
         .build()
         .unwrap();
 
@@ -107,7 +134,12 @@ async fn main() {
 
     let runner = Runner::new(
         config,
-        Env::new(sqlness_home.clone(), args.server_addr, wal, args.bins_dir),
+        Env::new(
+            sqlness_home.clone(),
+            args.server_addr.clone(),
+            wal,
+            args.bins_dir,
+        ),
     );
     runner.run().await.unwrap();
 

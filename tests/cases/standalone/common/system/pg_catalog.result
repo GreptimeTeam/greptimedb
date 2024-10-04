@@ -3,11 +3,49 @@ create database pg_catalog;
 
 Error: 1004(InvalidArguments), Schema pg_catalog already exists
 
-select * from pg_catalog.pg_type order by oid;
+-- make sure all the pg_catalog tables are only visible to postgres
+select * from pg_catalog.pg_class;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
+
+select * from pg_catalog.pg_namespace;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_namespace
+
+select * from pg_catalog.pg_type;
 
 Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_type
 
+-- SQLNESS PROTOCOL POSTGRES
+select * from pg_catalog.pg_type order by oid;
+
++-----+-----------+--------+
+| oid | typname   | typlen |
++-----+-----------+--------+
+| 1   | String    | -1     |
+| 2   | Binary    | -1     |
+| 3   | Int8      | 1      |
+| 4   | Int16     | 2      |
+| 5   | Int32     | 4      |
+| 6   | Int64     | 8      |
+| 7   | UInt8     | 1      |
+| 8   | UInt16    | 2      |
+| 9   | UInt32    | 4      |
+| 10  | UInt64    | 8      |
+| 11  | Float32   | 4      |
+| 12  | Float64   | 8      |
+| 13  | Decimal   | 16     |
+| 14  | Date      | 4      |
+| 15  | DateTime  | 8      |
+| 16  | Timestamp | 8      |
+| 17  | Time      | 8      |
+| 18  | Duration  | 8      |
+| 19  | Interval  | 16     |
+| 20  | List      | -1     |
++-----+-----------+--------+
+
 -- \d
+-- SQLNESS PROTOCOL POSTGRES
 SELECT n.nspname as "Schema",
   c.relname as "Name",
   CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
@@ -21,9 +59,14 @@ WHERE c.relkind IN ('r','p','v','m','S','f','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
++--------+---------+-------+-------+
+| Schema | Name    | Type  | Owner |
++--------+---------+-------+-------+
+| public | numbers | table |       |
++--------+---------+-------+-------+
 
 -- \dt
+-- SQLNESS PROTOCOL POSTGRES
 SELECT n.nspname as "Schema",
   c.relname as "Name",
   CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
@@ -37,22 +80,36 @@ WHERE c.relkind IN ('r','p','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
++--------+---------+-------+-------+
+| Schema | Name    | Type  | Owner |
++--------+---------+-------+-------+
+| public | numbers | table |       |
++--------+---------+-------+-------+
 
 -- make sure oid of namespace keep stable
+-- SQLNESS PROTOCOL POSTGRES
 SELECT * FROM pg_namespace ORDER BY oid;
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.pg_namespace
++------------+--------------------+
+| oid        | nspname            |
++------------+--------------------+
+| 667359454  | pg_catalog         |
+| 3174397350 | information_schema |
+| 3338153620 | greptime_private   |
+| 3927743705 | public             |
++------------+--------------------+
 
-create
-database my_db;
+-- SQLNESS PROTOCOL POSTGRES
+create database my_db;
 
 Affected Rows: 1
 
+-- SQLNESS PROTOCOL POSTGRES
 use my_db;
 
-Affected Rows: 0
 
+
+-- SQLNESS PROTOCOL POSTGRES
 create table foo
 (
     ts TIMESTAMP TIME INDEX
@@ -61,6 +118,7 @@ create table foo
 Affected Rows: 0
 
 -- show tables in `my_db`
+-- SQLNESS PROTOCOL POSTGRES
 select relname
 from pg_catalog.pg_class
 where relnamespace = (
@@ -69,9 +127,14 @@ where relnamespace = (
     where nspname = 'my_db'
 );
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
++---------+
+| relname |
++---------+
+| foo     |
++---------+
 
 -- \dt
+-- SQLNESS PROTOCOL POSTGRES
 SELECT n.nspname as "Schema",
   c.relname as "Name",
   CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
@@ -85,9 +148,15 @@ WHERE c.relkind IN ('r','p','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
++--------+---------+-------+-------+
+| Schema | Name    | Type  | Owner |
++--------+---------+-------+-------+
+| my_db  | foo     | table |       |
+| public | numbers | table |       |
++--------+---------+-------+-------+
 
 -- show tables in `my_db`, `public`
+-- SQLNESS PROTOCOL POSTGRES
 select relname
 from pg_catalog.pg_class
 where relnamespace in (
@@ -97,8 +166,14 @@ where relnamespace in (
 )
 order by relname;
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
++---------+
+| relname |
++---------+
+| foo     |
+| numbers |
++---------+
 
+-- SQLNESS PROTOCOL POSTGRES
 select relname
 from pg_catalog.pg_class
 where relnamespace in (
@@ -107,8 +182,13 @@ where relnamespace in (
     where nspname like 'my%'
 );
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
++---------+
+| relname |
++---------+
+| foo     |
++---------+
 
+-- SQLNESS PROTOCOL POSTGRES
 select relnamespace, relname, relkind
 from pg_catalog.pg_class
 where relnamespace in (
@@ -120,34 +200,58 @@ where relnamespace in (
 )
 order by relnamespace, relname;
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
++--------------+---------+---------+
+| relnamespace | relname | relkind |
++--------------+---------+---------+
+| 434869349    | foo     | r       |
++--------------+---------+---------+
 
+-- SQLNESS PROTOCOL POSTGRES
 use public;
 
-Affected Rows: 0
 
+
+-- SQLNESS PROTOCOL POSTGRES
 drop schema my_db;
 
 Affected Rows: 0
 
+-- SQLNESS PROTOCOL POSTGRES
 use pg_catalog;
 
-Affected Rows: 0
+
 
 -- pg_class
+-- SQLNESS PROTOCOL POSTGRES
 desc table pg_class;
 
-Error: 4001(TableNotFound), Table not found: pg_class
++--------------+--------+-----+------+---------+---------------+
+| Column       | Type   | Key | Null | Default | Semantic Type |
++--------------+--------+-----+------+---------+---------------+
+| oid          | UInt32 |     | NO   |         | FIELD         |
+| relname      | String |     | NO   |         | FIELD         |
+| relnamespace | UInt32 |     | NO   |         | FIELD         |
+| relkind      | String |     | NO   |         | FIELD         |
+| relowner     | UInt32 |     | NO   |         | FIELD         |
++--------------+--------+-----+------+---------+---------------+
 
+-- SQLNESS PROTOCOL POSTGRES
 desc table pg_namespace;
 
-Error: 4001(TableNotFound), Table not found: pg_namespace
++---------+--------+-----+------+---------+---------------+
+| Column  | Type   | Key | Null | Default | Semantic Type |
++---------+--------+-----+------+---------+---------------+
+| oid     | UInt32 |     | NO   |         | FIELD         |
+| nspname | String |     | NO   |         | FIELD         |
++---------+--------+-----+------+---------+---------------+
 
+-- SQLNESS PROTOCOL POSTGRES
 drop table my_db.foo;
 
-Error: 4001(TableNotFound), Table not found: greptime.my_db.foo
+Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(E42P01), message: "Table not found: greptime.my_db.foo", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
 
+-- SQLNESS PROTOCOL POSTGRES
 use public;
 
-Affected Rows: 0
+
 
