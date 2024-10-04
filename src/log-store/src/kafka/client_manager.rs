@@ -182,7 +182,7 @@ mod tests {
 
     use super::*;
 
-    /// Creates `num_topiocs` number of topics each will be decorated by the given decorator.
+    /// Creates `num_topics` number of topics each will be decorated by the given decorator.
     pub async fn create_topics<F>(
         num_topics: usize,
         decorator: F,

@@ -54,6 +54,9 @@ pub struct LoggingOptions {
     /// The log format that can be one of "json" or "text". Default is "text".
     pub log_format: LogFormat,
 
+    /// The maximum number of log files set by default.
+    pub max_log_files: usize,
+
     /// Whether to append logs to stdout. Default is true.
     pub append_stdout: bool,
 
@@ -116,6 +119,8 @@ impl Default for LoggingOptions {
             tracing_sample_ratio: None,
             append_stdout: true,
             slow_query: SlowQueryOptions::default(),
+            // Rotation hourly, 24 files per day, keeps info log files of 30 days
+            max_log_files: 720,
         }
     }
 }
@@ -206,8 +211,17 @@ pub fn init_global_logging(
 
         // Configure the file logging layer with rolling policy.
         let file_logging_layer = if !opts.dir.is_empty() {
-            let rolling_appender =
-                RollingFileAppender::new(Rotation::HOURLY, &opts.dir, "greptimedb");
+            let rolling_appender = RollingFileAppender::builder()
+                .rotation(Rotation::HOURLY)
+                .filename_prefix("greptimedb")
+                .max_log_files(opts.max_log_files)
+                .build(&opts.dir)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "initializing rolling file appender at {} failed: {}",
+                        &opts.dir, e
+                    )
+                });
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -228,8 +242,17 @@ pub fn init_global_logging(
 
         // Configure the error file logging layer with rolling policy.
         let err_file_logging_layer = if !opts.dir.is_empty() {
-            let rolling_appender =
-                RollingFileAppender::new(Rotation::HOURLY, &opts.dir, "greptimedb-err");
+            let rolling_appender = RollingFileAppender::builder()
+                .rotation(Rotation::HOURLY)
+                .filename_prefix("greptimedb-err")
+                .max_log_files(opts.max_log_files)
+                .build(&opts.dir)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "initializing rolling file appender at {} failed: {}",
+                        &opts.dir, e
+                    )
+                });
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -256,8 +279,17 @@ pub fn init_global_logging(
         };
 
         let slow_query_logging_layer = if !opts.dir.is_empty() && opts.slow_query.enable {
-            let rolling_appender =
-                RollingFileAppender::new(Rotation::HOURLY, &opts.dir, "greptimedb-slow-queries");
+            let rolling_appender = RollingFileAppender::builder()
+                .rotation(Rotation::HOURLY)
+                .filename_prefix("greptimedb-slow-queries")
+                .max_log_files(opts.max_log_files)
+                .build(&opts.dir)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "initializing rolling file appender at {} failed: {}",
+                        &opts.dir, e
+                    )
+                });
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
