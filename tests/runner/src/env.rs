@@ -176,7 +176,7 @@ impl Env {
 
         // retry to connect to Postgres server until success
         const MAX_RETRY: usize = 3;
-        let mut backoff = Duration::from_micros(500);
+        let mut backoff = Duration::from_millis(500);
         for _ in 0..MAX_RETRY {
             if let Ok((pg_client, conn)) = config.connect(tokio_postgres::NoTls).await {
                 tokio::spawn(conn);
@@ -198,7 +198,7 @@ impl Env {
             .db_name(Some(DEFAULT_SCHEMA_NAME));
         // retry to connect to MySQL server until success
         const MAX_RETRY: usize = 3;
-        let mut backoff = Duration::from_micros(500);
+        let mut backoff = Duration::from_millis(500);
 
         for _ in 0..MAX_RETRY {
             // exponential backoff
