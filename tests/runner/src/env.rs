@@ -165,7 +165,7 @@ impl Env {
         }
     }
 
-    async fn create_pg_client(&self, pg_server_addr: &str, grpc_client: &DB) -> PgClient {
+    async fn create_pg_client(&self, pg_server_addr: &str) -> PgClient {
         let sockaddr: SocketAddr = pg_server_addr.parse().expect(
             "Failed to parse the Postgres server address. Please check if the address is in the format of `ip:port`.",
         );
@@ -173,28 +173,43 @@ impl Env {
         config.host(sockaddr.ip().to_string());
         config.port(sockaddr.port());
         config.dbname(DEFAULT_SCHEMA_NAME);
-        // wait for the server to start
-        grpc_client.sql("SELECT 1;").await.unwrap();
-        let (pg_client, conn) = config
-            .connect(tokio_postgres::NoTls)
-            .await
-            .expect("Failed to connect to Postgres server. Please check if the server is running.");
-        tokio::spawn(conn);
-        pg_client
+
+        // retry to connect to Postgres server until success
+        const MAX_RETRY: usize = 3;
+        let mut backoff = Duration::from_micros(500);
+        for _ in 0..MAX_RETRY {
+            if let Ok((pg_client, conn)) = config.connect(tokio_postgres::NoTls).await {
+                tokio::spawn(conn);
+                return pg_client;
+            }
+            tokio::time::sleep(backoff).await;
+            backoff *= 2;
+        }
+        panic!("Failed to connect to Postgres server. Please check if the server is running.");
     }
 
-    async fn create_mysql_client(&self, mysql_server_addr: &str, grpc_client: &DB) -> MySqlClient {
+    async fn create_mysql_client(&self, mysql_server_addr: &str) -> MySqlClient {
         let sockaddr: SocketAddr = mysql_server_addr.parse().expect(
             "Failed to parse the MySQL server address. Please check if the address is in the format of `ip:port`.",
         );
-        // wait for the server to start
-        grpc_client.sql("SELECT 1;").await.unwrap();
         let ops = mysql::OptsBuilder::new()
             .ip_or_hostname(Some(sockaddr.ip().to_string()))
             .tcp_port(sockaddr.port())
             .db_name(Some(DEFAULT_SCHEMA_NAME));
-        mysql::Conn::new(ops)
-            .expect("Failed to connect to MySQL server. Please check if the server is running.")
+        // retry to connect to MySQL server until success
+        const MAX_RETRY: usize = 3;
+        let mut backoff = Duration::from_micros(500);
+
+        for _ in 0..MAX_RETRY {
+            // exponential backoff
+            if let Ok(client) = mysql::Conn::new(ops.clone()) {
+                return client;
+            }
+            tokio::time::sleep(backoff).await;
+            backoff *= 2;
+        }
+
+        panic!("Failed to connect to MySQL server. Please check if the server is running.")
     }
 
     async fn connect_db(&self, server_addr: &ServerAddr) -> GreptimeDB {
@@ -213,9 +228,9 @@ impl Env {
 
         let grpc_client = Client::with_urls(vec![grpc_server_addr.clone()]);
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
-        let pg_client = self.create_pg_client(&pg_server_addr, &db).await;
+        let pg_client = self.create_pg_client(&pg_server_addr).await;
 
-        let mysql_client = self.create_mysql_client(&mysql_server_addr, &db).await;
+        let mysql_client = self.create_mysql_client(&mysql_server_addr).await;
 
         GreptimeDB {
             grpc_client: TokioMutex::new(db),
@@ -442,13 +457,9 @@ impl Env {
         };
 
         if let Some(server_process) = db.server_processes.clone() {
-            let grpc_client = db.grpc_client.lock().await;
-            *db.pg_client.lock().await = self
-                .create_pg_client(&self.pg_server_addr(), &grpc_client)
-                .await;
-            *db.mysql_client.lock().await = self
-                .create_mysql_client(&self.mysql_server_addr(), &grpc_client)
-                .await;
+            *db.pg_client.lock().await = self.create_pg_client(&self.pg_server_addr()).await;
+            *db.mysql_client.lock().await =
+                self.create_mysql_client(&self.mysql_server_addr()).await;
             let mut server_processes = server_process.lock().unwrap();
             *server_processes = new_server_processes;
         }
