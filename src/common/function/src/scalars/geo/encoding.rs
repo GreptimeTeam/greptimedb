@@ -53,18 +53,15 @@ impl Accumulator for GeojsonPathAccumulator {
     fn state(&self) -> Result<Vec<Value>> {
         Ok(vec![
             Value::List(ListValue::new(
-                self.lat.iter().map(|i| Value::from(i.clone())).collect(),
+                self.lat.iter().map(|i| Value::from(*i)).collect(),
                 ConcreteDataType::float64_datatype(),
             )),
             Value::List(ListValue::new(
-                self.lng.iter().map(|i| Value::from(i.clone())).collect(),
+                self.lng.iter().map(|i| Value::from(*i)).collect(),
                 ConcreteDataType::float64_datatype(),
             )),
             Value::List(ListValue::new(
-                self.timestamp
-                    .iter()
-                    .map(|i| Value::from(i.clone()))
-                    .collect(),
+                self.timestamp.iter().map(|i| Value::from(*i)).collect(),
                 self.timestamp_type.clone(),
             )),
         ])
@@ -119,7 +116,7 @@ impl Accumulator for GeojsonPathAccumulator {
             if let Some(lat_list) = lat_lists
                 .get(idx)
                 .as_list()
-                .map_err(|e| BoxedError::new(e))
+                .map_err(BoxedError::new)
                 .context(error::ExecuteSnafu)?
             {
                 for v in lat_list.items() {
@@ -130,7 +127,7 @@ impl Accumulator for GeojsonPathAccumulator {
             if let Some(lng_list) = lng_lists
                 .get(idx)
                 .as_list()
-                .map_err(|e| BoxedError::new(e))
+                .map_err(BoxedError::new)
                 .context(error::ExecuteSnafu)?
             {
                 for v in lng_list.items() {
@@ -141,7 +138,7 @@ impl Accumulator for GeojsonPathAccumulator {
             if let Some(ts_list) = ts_lists
                 .get(idx)
                 .as_list()
-                .map_err(|e| BoxedError::new(e))
+                .map_err(BoxedError::new)
                 .context(error::ExecuteSnafu)?
             {
                 for v in ts_list.items() {

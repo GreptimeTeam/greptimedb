@@ -47,7 +47,7 @@ pub(crate) fn impl_as_aggr_func_creator(_args: TokenStream, input: TokenStream) 
     let mut item_struct = parse_macro_input!(input as ItemStruct);
     if let syn::Fields::Named(ref mut fields) = item_struct.fields {
         let result = syn::Field::parse_named.parse2(quote! {
-            input_types: arc_swap::ArcSwapOption<Vec<ConcreteDataType>>
+            input_types: arc_swap::ArcSwapOption<Vec<datatypes::prelude::ConcreteDataType>>
         });
         match result {
             Ok(field) => fields.named.push(field),
