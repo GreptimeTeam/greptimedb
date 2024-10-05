@@ -59,11 +59,12 @@ WHERE c.relkind IN ('r','p','v','m','S','f','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-+--------+---------+-------+-------+
-| Schema | Name    | Type  | Owner |
-+--------+---------+-------+-------+
-| public | numbers | table |       |
-+--------+---------+-------+-------+
++--------+----------+-------+-------+
+| Schema | Name     | Type  | Owner |
++--------+----------+-------+-------+
+| public | caltrack | table |       |
+| public | numbers  | table |       |
++--------+----------+-------+-------+
 
 -- \dt
 -- SQLNESS PROTOCOL POSTGRES
@@ -80,11 +81,12 @@ WHERE c.relkind IN ('r','p','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-+--------+---------+-------+-------+
-| Schema | Name    | Type  | Owner |
-+--------+---------+-------+-------+
-| public | numbers | table |       |
-+--------+---------+-------+-------+
++--------+----------+-------+-------+
+| Schema | Name     | Type  | Owner |
++--------+----------+-------+-------+
+| public | caltrack | table |       |
+| public | numbers  | table |       |
++--------+----------+-------+-------+
 
 -- make sure oid of namespace keep stable
 -- SQLNESS PROTOCOL POSTGRES
@@ -148,12 +150,13 @@ WHERE c.relkind IN ('r','p','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-+--------+---------+-------+-------+
-| Schema | Name    | Type  | Owner |
-+--------+---------+-------+-------+
-| my_db  | foo     | table |       |
-| public | numbers | table |       |
-+--------+---------+-------+-------+
++--------+----------+-------+-------+
+| Schema | Name     | Type  | Owner |
++--------+----------+-------+-------+
+| my_db  | foo      | table |       |
+| public | caltrack | table |       |
+| public | numbers  | table |       |
++--------+----------+-------+-------+
 
 -- show tables in `my_db`, `public`
 -- SQLNESS PROTOCOL POSTGRES
@@ -166,12 +169,13 @@ where relnamespace in (
 )
 order by relname;
 
-+---------+
-| relname |
-+---------+
-| foo     |
-| numbers |
-+---------+
++----------+
+| relname  |
++----------+
+| caltrack |
+| foo      |
+| numbers  |
++----------+
 
 -- SQLNESS PROTOCOL POSTGRES
 select relname

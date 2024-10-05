@@ -17,11 +17,12 @@ Affected Rows: 0
 -- SQLNESS ARG restart=true
 show tables;
 
-+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+
++----------+
+| Tables   |
++----------+
+| caltrack |
+| numbers  |
++----------+
 
 create table t3 (c timestamp time index);
 

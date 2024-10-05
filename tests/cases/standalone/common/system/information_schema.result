@@ -47,6 +47,7 @@ order by table_schema, table_name;
 |greptime|information_schema|tables|LOCALTEMPORARY|3|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|||utf8_bin|0|||Y|
 |greptime|information_schema|triggers|LOCALTEMPORARY|24|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|||utf8_bin|0|||Y|
 |greptime|information_schema|views|LOCALTEMPORARY|32|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|||utf8_bin|0|||Y|
+|greptime|public|caltrack|BASETABLE|1190|0|0|0|0|0|mito|11|Fixed|0|0|0|DATETIME|||utf8_bin|0|||N|
 |greptime|public|numbers|LOCALTEMPORARY|2|0|0|0|0|0|test_engine|11|Fixed|0|0|0|DATETIME|||utf8_bin|0|||Y|
 +++++++++++++++++++++++++
 
@@ -426,6 +427,10 @@ select * from information_schema.columns order by table_schema, table_name, colu
 | greptime      | information_schema | views                                 | table_name                        | 3                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string          | FIELD         |                | No          | string          |                |        |
 | greptime      | information_schema | views                                 | table_schema                      | 2                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string          | FIELD         |                | No          | string          |                |        |
 | greptime      | information_schema | views                                 | view_definition                   | 4                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string          | FIELD         |                | No          | string          |                |        |
+| greptime      | public             | caltrack                              | lat                               | 2                |                          |                        | 12                |               |                    |                    |                |            |       | select,insert |                       | Float32              | float           | FIELD         |                | Yes         | float           |                |        |
+| greptime      | public             | caltrack                              | lon                               | 3                |                          |                        | 12                |               |                    |                    |                |            |       | select,insert |                       | Float32              | float           | FIELD         |                | Yes         | float           |                |        |
+| greptime      | public             | caltrack                              | recorder                          | 4                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       | PRI        |       | select,insert |                       | String               | string          | TAG           |                | Yes         | string          |                |        |
+| greptime      | public             | caltrack                              | ts                                | 1                |                          |                        |                   |               | 0                  |                    |                | TIME INDEX |       | select,insert |                       | TimestampSecond      | timestamp(0)    | TIMESTAMP     |                | No          | timestamp(0)    |                |        |
 | greptime      | public             | numbers                               | number                            | 1                |                          |                        | 10                | 0             |                    |                    |                | PRI        |       | select,insert |                       | UInt32               | int unsigned    | TAG           |                | No          | int unsigned    |                |        |
 +---------------+--------------------+---------------------------------------+-----------------------------------+------------------+--------------------------+------------------------+-------------------+---------------+--------------------+--------------------+----------------+------------+-------+---------------+-----------------------+----------------------+-----------------+---------------+----------------+-------------+-----------------+----------------+--------+
 
@@ -468,6 +473,7 @@ order by table_name;
 +------------+
 | table_name |
 +------------+
+| caltrack   |
 | foo        |
 | numbers    |
 +------------+
@@ -491,6 +497,7 @@ order by table_name;
 +------------+
 | table_name |
 +------------+
+| caltrack   |
 | numbers    |
 +------------+
 
@@ -535,6 +542,10 @@ order by table_schema, table_name, column_name;
 | table_catalog | table_schema | table_name | column_name | data_type    | semantic_type |
 +---------------+--------------+------------+-------------+--------------+---------------+
 | greptime      | my_db        | foo        | ts          | timestamp(3) | TIMESTAMP     |
+| greptime      | public       | caltrack   | lat         | float        | FIELD         |
+| greptime      | public       | caltrack   | lon         | float        | FIELD         |
+| greptime      | public       | caltrack   | recorder    | string       | TAG           |
+| greptime      | public       | caltrack   | ts          | timestamp(0) | TIMESTAMP     |
 | greptime      | public       | numbers    | number      | int unsigned | TAG           |
 +---------------+--------------+------------+-------------+--------------+---------------+
 
@@ -553,8 +564,11 @@ Affected Rows: 0
 -- test query filter for key_column_usage --
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME = 'TIME INDEX';
 
-++
-++
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name |
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| def                | public            | TIME INDEX      | def           | greptime           | public       | caltrack   | ts          | 1                |                               |                         |                       |                        |
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX';
 
@@ -562,12 +576,16 @@ select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX';
 | constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name |
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 | def                | public            | PRIMARY         | def           | greptime           | public       | numbers    | number      | 1                |                               |                         |                       |                        |
+| def                | public            | PRIMARY         | def           | greptime           | public       | caltrack   | recorder    | 1                |                               |                         |                       |                        |
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME LIKE '%INDEX';
 
-++
-++
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name |
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| def                | public            | TIME INDEX      | def           | greptime           | public       | caltrack   | ts          | 1                |                               |                         |                       |                        |
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX';
 
@@ -575,12 +593,16 @@ select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX';
 | constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name |
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 | def                | public            | PRIMARY         | def           | greptime           | public       | numbers    | number      | 1                |                               |                         |                       |                        |
+| def                | public            | PRIMARY         | def           | greptime           | public       | caltrack   | recorder    | 1                |                               |                         |                       |                        |
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME == 'TIME INDEX' AND CONSTRAINT_SCHEMA != 'my_db';
 
-++
-++
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name |
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| def                | public            | TIME INDEX      | def           | greptime           | public       | caltrack   | ts          | 1                |                               |                         |                       |                        |
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 
 -- schemata --
 desc table schemata;
@@ -661,6 +683,8 @@ select * from key_column_usage;
 | constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name |
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 | def                | public            | PRIMARY         | def           | greptime           | public       | numbers    | number      | 1                |                               |                         |                       |                        |
+| def                | public            | TIME INDEX      | def           | greptime           | public       | caltrack   | ts          | 1                |                               |                         |                       |                        |
+| def                | public            | PRIMARY         | def           | greptime           | public       | caltrack   | recorder    | 1                |                               |                         |                       |                        |
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 
 -- tables not implemented

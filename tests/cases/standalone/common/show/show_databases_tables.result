@@ -179,6 +179,7 @@ SHOW TABLE STATUS from public;
 +++++++++++++++++++
 |Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
 +++++++++++++++++++
+|caltrack|mito|11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |numbers|test_engine|11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 +++++++++++++++++++
 
