@@ -132,7 +132,7 @@ impl ClientManager {
     }
 
     async fn try_create_client(&self, provider: &Arc<KafkaProvider>) -> Result<Client> {
-        // Sets to Retry to retry connecting if the kafka cluter replies with an UnknownTopic error.
+        // Sets to Retry to retry connecting if the kafka cluster replies with an UnknownTopic error.
         // That's because the topic is believed to exist as the metasrv is expected to create required topics upon start.
         // The reconnecting won't stop until succeed or a different error returns.
         let client = self
@@ -182,7 +182,7 @@ mod tests {
 
     use super::*;
 
-    /// Creates `num_topiocs` number of topics each will be decorated by the given decorator.
+    /// Creates `num_topics` number of topics each will be decorated by the given decorator.
     pub async fn create_topics<F>(
         num_topics: usize,
         decorator: F,

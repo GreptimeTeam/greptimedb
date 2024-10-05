@@ -172,6 +172,9 @@ append_stdout = true
 ## The log format. Can be `text`/`json`.
 log_format = "text"
 
+## The maximum amount of log files.
+max_log_files = 720
+
 ## The percentage of tracing will be sampled and exported.
 ## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
 ## ratio > 1 are treated as 1. Fractions < 0 are treated as 0

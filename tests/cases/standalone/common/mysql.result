@@ -1,0 +1,29 @@
+-- SQLNESS PROTOCOL MYSQL
+SELECt @@tx_isolation;
+
++-----------------+
+| @@tx_isolation; |
++-----------------+
+| 0               |
++-----------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT @@version_comment;
+
++--------------------+
+| @@version_comment; |
++--------------------+
+| 0                  |
++--------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW DATABASES;
+
++--------------------+
+| Database           |
++--------------------+
+| greptime_private   |
+| information_schema |
+| public             |
++--------------------+
+
