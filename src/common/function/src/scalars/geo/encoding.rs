@@ -12,53 +12,158 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_query::error::{self, InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, TypeSignature};
+use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
+use common_query::error::{self, InvalidFuncArgsSnafu, InvalidInputStateSnafu, Result};
+use common_query::logical_plan::accumulator::AggrFuncTypeStore;
+use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
+use common_query::prelude::AccumulatorCreatorFunction;
 use common_time::Timestamp;
-use datafusion::logical_expr::Volatility;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{MutableVector, StringVectorBuilder, VectorRef};
-use derive_more::Display;
-use once_cell::sync::Lazy;
+use datatypes::value::{ListValue, Value};
+use datatypes::vectors::VectorRef;
 use snafu::{ensure, ResultExt};
 
 use super::helpers::{ensure_columns_len, ensure_columns_n};
-use crate::function::{Function, FunctionContext};
 
-static COORDINATE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::float32_datatype(),
-        ConcreteDataType::float64_datatype(),
-    ]
-});
+/// Accumulator of lat, lng, timestmap tuples
+#[derive(Debug)]
+pub struct GeojsonPathAccumulator {
+    timestamp_type: ConcreteDataType,
+    lat: Vec<Option<f64>>,
+    lng: Vec<Option<f64>>,
+    timestamp: Vec<Option<Timestamp>>,
+}
 
-fn build_sorted_path(
-    columns: &[VectorRef],
-) -> Result<Vec<(Option<f64>, Option<f64>, Option<Timestamp>)>> {
-    // this macro ensures column vectos has same size as well
-    ensure_columns_n!(columns, 3);
+impl GeojsonPathAccumulator {
+    fn new(timestamp_type: ConcreteDataType) -> Self {
+        Self {
+            lat: Vec::default(),
+            lng: Vec::default(),
+            timestamp: Vec::default(),
+            timestamp_type,
+        }
+    }
+}
 
-    let lat = &columns[0];
-    let lng = &columns[1];
-    let ts = &columns[2];
-
-    let size = lat.len();
-
-    let mut work_vec = Vec::with_capacity(size);
-    for idx in 0..size {
-        work_vec.push((
-            lat.get(idx).as_f64_lossy(),
-            lng.get(idx).as_f64_lossy(),
-            ts.get(idx).as_timestamp(),
-        ));
+impl Accumulator for GeojsonPathAccumulator {
+    fn state(&self) -> Result<Vec<Value>> {
+        Ok(vec![
+            Value::List(ListValue::new(
+                self.lat.iter().map(|i| Value::from(i.clone())).collect(),
+                ConcreteDataType::float64_datatype(),
+            )),
+            Value::List(ListValue::new(
+                self.lng.iter().map(|i| Value::from(i.clone())).collect(),
+                ConcreteDataType::float64_datatype(),
+            )),
+            Value::List(ListValue::new(
+                self.timestamp
+                    .iter()
+                    .map(|i| Value::from(i.clone()))
+                    .collect(),
+                self.timestamp_type.clone(),
+            )),
+        ])
     }
 
-    // sort by timestamp, we treat null timestamp as 0
-    work_vec.sort_unstable_by_key(|tuple| tuple.2.unwrap_or(Timestamp::new_second(0)));
-    Ok(work_vec)
+    fn update_batch(&mut self, columns: &[VectorRef]) -> Result<()> {
+        ensure_columns_n!(columns, 3);
+
+        let lat = &columns[0];
+        let lng = &columns[1];
+        let ts = &columns[2];
+
+        let size = lat.len();
+
+        for idx in 0..size {
+            self.lat.push(lat.get(idx).as_f64_lossy());
+            self.lng.push(lng.get(idx).as_f64_lossy());
+            self.timestamp.push(ts.get(idx).as_timestamp());
+        }
+
+        Ok(())
+    }
+
+    fn merge_batch(&mut self, states: &[VectorRef]) -> Result<()> {
+        ensure_columns_n!(states, 3);
+
+        let lat_lists = &states[0];
+        let lng_lists = &states[1];
+        let ts_lists = &states[2];
+
+        let len = lat_lists.len();
+
+        for idx in 0..len {
+            if let Some(lat_list) = lat_lists
+                .get(idx)
+                .as_list()
+                .map_err(|e| BoxedError::new(e))
+                .context(error::ExecuteSnafu)?
+            {
+                for v in lat_list.items() {
+                    self.lat.push(v.as_f64_lossy());
+                }
+            }
+
+            if let Some(lng_list) = lng_lists
+                .get(idx)
+                .as_list()
+                .map_err(|e| BoxedError::new(e))
+                .context(error::ExecuteSnafu)?
+            {
+                for v in lng_list.items() {
+                    self.lng.push(v.as_f64_lossy());
+                }
+            }
+
+            if let Some(ts_list) = ts_lists
+                .get(idx)
+                .as_list()
+                .map_err(|e| BoxedError::new(e))
+                .context(error::ExecuteSnafu)?
+            {
+                for v in ts_list.items() {
+                    self.timestamp.push(v.as_timestamp());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn evaluate(&self) -> Result<Value> {
+        let mut work_vec: Vec<(&Option<f64>, &Option<f64>, &Option<Timestamp>)> = self
+            .lat
+            .iter()
+            .zip(self.lng.iter())
+            .zip(self.timestamp.iter())
+            .map(|((a, b), c)| (a, b, c))
+            .collect();
+
+        // sort by timestamp, we treat null timestamp as 0
+        work_vec.sort_unstable_by_key(|tuple| tuple.2.unwrap_or_else(|| Timestamp::new_second(0)));
+
+        let result = serde_json::to_string(
+            &work_vec
+                .into_iter()
+                // note that we transform to lng,lat for geojson compatibility
+                .map(|(lat, lng, _)| vec![lng, lat])
+                .collect::<Vec<Vec<&Option<f64>>>>(),
+        )
+        .map_err(|e| {
+            BoxedError::new(PlainError::new(
+                format!("Serialization failure: {}", e),
+                StatusCode::EngineExecuteQuery,
+            ))
+        })
+        .context(error::ExecuteSnafu)?;
+
+        Ok(Value::String(result.into()))
+    }
 }
 
 /// This function accept rows of lat, lng and timestamp, sort with timestamp and
@@ -70,61 +175,34 @@ fn build_sorted_path(
 /// SELECT geojson_encode(lat, lon, timestamp) FROM table;
 /// ```
 ///
-#[derive(Clone, Debug, Default, Display)]
-#[display("{}", self.name())]
-pub struct GeojsonPathEncode;
+#[as_aggr_func_creator]
+#[derive(Debug, Default, AggrFuncTypeStore)]
+pub struct GeojsonPathEncodeFunctionCreator {}
 
-impl Function for GeojsonPathEncode {
-    fn name(&self) -> &str {
-        "geojson_encode"
+impl AggregateFunctionCreator for GeojsonPathEncodeFunctionCreator {
+    fn creator(&self) -> AccumulatorCreatorFunction {
+        let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
+            let ts_type = types[2].clone();
+            Ok(Box::new(GeojsonPathAccumulator::new(ts_type)))
+        });
+
+        creator
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+    fn output_type(&self) -> Result<ConcreteDataType> {
         Ok(ConcreteDataType::string_datatype())
     }
 
-    fn signature(&self) -> Signature {
-        let mut signatures = Vec::new();
-        let coord_types = COORDINATE_TYPES.as_slice();
+    fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
+        let input_types = self.input_types()?;
+        ensure!(input_types.len() == 3, InvalidInputStateSnafu);
 
-        let ts_types = ConcreteDataType::timestamps();
-        for lat_type in coord_types {
-            for lng_type in coord_types {
-                for ts_type in &ts_types {
-                    signatures.push(TypeSignature::Exact(vec![
-                        lat_type.clone(),
-                        lng_type.clone(),
-                        ts_type.clone(),
-                    ]));
-                }
-            }
-        }
+        let timestamp_type = input_types[2].clone();
 
-        Signature::one_of(signatures, Volatility::Stable)
-    }
-
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        let work_vec = build_sorted_path(columns)?;
-
-        let mut results = StringVectorBuilder::with_capacity(1);
-
-        let result = serde_json::to_string(
-            &work_vec
-                .into_iter()
-                // note that we transform to lng,lat for geojson compatibility
-                .map(|(lat, lng, _)| vec![lng, lat])
-                .collect::<Vec<Vec<Option<f64>>>>(),
-        )
-        .map_err(|e| {
-            BoxedError::new(PlainError::new(
-                format!("Serialization failure: {}", e),
-                StatusCode::EngineExecuteQuery,
-            ))
-        })
-        .context(error::ExecuteSnafu)?;
-
-        results.push(Some(&result));
-
-        Ok(results.to_vector())
+        Ok(vec![
+            ConcreteDataType::list_datatype(ConcreteDataType::float64_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::float64_datatype()),
+            ConcreteDataType::list_datatype(timestamp_type),
+        ])
     }
 }

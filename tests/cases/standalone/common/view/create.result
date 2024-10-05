@@ -48,7 +48,6 @@ SHOW TABLES;
 +------------+
 | Tables     |
 +------------+
-| caltrack   |
 | numbers    |
 | test_table |
 | test_view  |
@@ -59,7 +58,6 @@ SHOW FULL TABLES;
 +------------+-----------------+
 | Tables     | Table_type      |
 +------------+-----------------+
-| caltrack   | BASE TABLE      |
 | numbers    | LOCAL TEMPORARY |
 | test_table | BASE TABLE      |
 | test_view  | VIEW            |
@@ -90,7 +88,6 @@ SELECT * FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME, TABLE_TYPE;
 |table_catalog|table_schema|table_name|table_type|table_id|data_length|max_data_length|index_length|max_index_length|avg_row_length|engine|version|row_format|table_rows|data_free|auto_increment|create_time|update_time|check_time|table_collation|checksum|create_options|table_comment|temporary|
 +++++++++++++++++++++++++
 |greptime|information_schema|build_info|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
-|greptime|public|caltrack|BASETABLE|ID|ID|ID|ID|ID|ID|mito|ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||N|
 |greptime|information_schema|character_sets|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
 |greptime|information_schema|check_constraints|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
 |greptime|information_schema|cluster_info|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
@@ -183,12 +180,11 @@ Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public
 
 SHOW TABLES;
 
-+----------+
-| Tables   |
-+----------+
-| caltrack |
-| numbers  |
-+----------+
++---------+
+| Tables  |
++---------+
+| numbers |
++---------+
 
 -- psql: \dv
 SELECT n.nspname as "Schema",

@@ -236,15 +236,15 @@ SELECT geohash_neighbours(37.76938, -122.3889, 11);
 | [9q8yygxnefv, 9q8yygxnefu, 9q8yygxnefs, 9q8yygxnefk, 9q8yygxnefm, 9q8yygxnefq, 9q8yygxnefw, 9q8yygxnefy] |
 +----------------------------------------------------------------------------------------------------------+
 
-SELECT geojson_encode(37.76938, -122.3889, 1728083375::TimestampSecond);
+SELECT geojson_encode_path(37.76938, -122.3889, 1728083375::TimestampSecond);
 
-+--------------------------------------------------------------------------------------------------------------------+
-| geojson_encode(Float64(37.76938),Float64(-122.3889),arrow_cast(Int64(1728083375),Utf8("Timestamp(Second, None)"))) |
-+--------------------------------------------------------------------------------------------------------------------+
-| [[-122.3889,37.76938]]                                                                                             |
-+--------------------------------------------------------------------------------------------------------------------+
++-------------------------------------------------------------------------------------------------------------------------+
+| geojson_encode_path(Float64(37.76938),Float64(-122.3889),arrow_cast(Int64(1728083375),Utf8("Timestamp(Second, None)"))) |
++-------------------------------------------------------------------------------------------------------------------------+
+| [[-122.3889,37.76938]]                                                                                                  |
++-------------------------------------------------------------------------------------------------------------------------+
 
-SELECT geojson_encode(lat, lon, ts)
+SELECT geojson_encode_path(lat, lon, ts)
 FROM(
         SELECT 37.76938 AS lat, -122.3889 AS lon, 1728083375::TimestampSecond AS ts
         UNION ALL
@@ -255,35 +255,9 @@ FROM(
         SELECT 37.77001 AS lat, -122.3888 AS lon, 1728083372::TimestampSecond AS ts
 );
 
-+----------------------------+
-| geojson_encode(lat,lon,ts) |
-+----------------------------+
-| [[-122.3839,37.76928]]     |
-| [[-122.3888,37.77001]]     |
-| [[-122.382,37.7693]]       |
-| [[-122.3889,37.76938]]     |
-+----------------------------+
-
-CREATE TABLE caltrack (
-  ts TIMESTAMPSECOND TIME INDEX,
-  lat FLOAT32,
-  lon FLOAT32,
-  recorder STRING,
-  PRIMARY KEY (recorder)
-);
-
-Affected Rows: 0
-
-INSERT INTO caltrack(ts, lat, lon, recorder) VALUES
-  (1728083375, 37.76938, -122.3889, 'osmand'),
-  (1728083373, 37.76928, -122.3839, 'osmand'),
-  (1728083379, 37.76930, -122.3820, 'osmand'),
-  (1728083372, 37.77001, -122.3888, 'osmand');
-
-Affected Rows: 4
-
-SELECT geojson_encode(lat, lon, ts) FROM caltrack WHERE recorder = 'osmand';
-
-Error: 3001(EngineExecuteQuery), Internal error: UDF returned a different number of rows than expected. Expected: 4, Got: 1.
-This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
++-------------------------------------------------------------------------------------+
+| geojson_encode_path(lat,lon,ts)                                                     |
++-------------------------------------------------------------------------------------+
+| [[-122.3888,37.77001],[-122.3839,37.76928],[-122.3889,37.76938],[-122.382,37.7693]] |
++-------------------------------------------------------------------------------------+
 

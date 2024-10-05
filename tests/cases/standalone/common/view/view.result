@@ -83,12 +83,11 @@ Affected Rows: 0
 
 SHOW TABLES;
 
-+----------+
-| Tables   |
-+----------+
-| caltrack |
-| numbers  |
-+----------+
++---------+
+| Tables  |
++---------+
+| numbers |
++---------+
 
 SHOW VIEWS;
 

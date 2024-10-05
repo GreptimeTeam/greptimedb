@@ -32,7 +32,6 @@ SELECT region_id, peer_id, is_leader, status FROM information_schema.region_peer
 | REGION_ID | PEER_ID       | Yes       | ALIVE  |
 | REGION_ID | PEER_ID       | Yes       | ALIVE  |
 | REGION_ID | PEER_ID       | Yes       | ALIVE  |
-| REGION_ID | PEER_ID       | Yes       | ALIVE  |
 +---------------+---------+-----------+--------+
 
 INSERT INTO my_table VALUES
@@ -137,7 +136,6 @@ SELECT region_id, peer_id, is_leader, status FROM information_schema.region_peer
 +---------------+---------+-----------+--------+
 | region_id     | peer_id | is_leader | status |
 +---------------+---------+-----------+--------+
-| REGION_ID | PEER_ID       | Yes       | ALIVE  |
 | REGION_ID | PEER_ID       | Yes       | ALIVE  |
 +---------------+---------+-----------+--------+
 

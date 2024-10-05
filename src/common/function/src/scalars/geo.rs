@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
-mod encoding;
+pub(crate) mod encoding;
 mod geohash;
 mod h3;
 mod helpers;
@@ -42,8 +42,5 @@ impl GeoFunctions {
         registry.register(Arc::new(h3::H3CellToString));
         registry.register(Arc::new(h3::H3IsNeighbour));
         registry.register(Arc::new(h3::H3StringToCell));
-
-        // encodings
-        registry.register(Arc::new(encoding::GeojsonPathEncode));
     }
 }

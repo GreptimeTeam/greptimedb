@@ -30,7 +30,6 @@ select table_catalog, table_schema, table_name from information_schema.tables wh
 | greptime      | abc          | t          |
 | greptime      | abcde        | t          |
 | greptime      | public       | numbers    |
-| greptime      | public       | caltrack   |
 +---------------+--------------+------------+
 
 use public;

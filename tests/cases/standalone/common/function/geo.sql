@@ -67,9 +67,9 @@ SELECT geohash(37.76938, -122.3889, 11::UInt64);
 
 SELECT geohash_neighbours(37.76938, -122.3889, 11);
 
-SELECT geojson_encode(37.76938, -122.3889, 1728083375::TimestampSecond);
+SELECT geojson_encode_path(37.76938, -122.3889, 1728083375::TimestampSecond);
 
-SELECT geojson_encode(lat, lon, ts)
+SELECT geojson_encode_path(lat, lon, ts)
 FROM(
         SELECT 37.76938 AS lat, -122.3889 AS lon, 1728083375::TimestampSecond AS ts
         UNION ALL
@@ -79,19 +79,3 @@ FROM(
         UNION ALL
         SELECT 37.77001 AS lat, -122.3888 AS lon, 1728083372::TimestampSecond AS ts
 );
-
-CREATE TABLE caltrack (
-  ts TIMESTAMPSECOND TIME INDEX,
-  lat FLOAT32,
-  lon FLOAT32,
-  recorder STRING,
-  PRIMARY KEY (recorder)
-);
-
-INSERT INTO caltrack(ts, lat, lon, recorder) VALUES
-  (1728083375, 37.76938, -122.3889, 'osmand'),
-  (1728083373, 37.76928, -122.3839, 'osmand'),
-  (1728083379, 37.76930, -122.3820, 'osmand'),
-  (1728083372, 37.77001, -122.3888, 'osmand');
-
-SELECT geojson_encode(lat, lon, ts) FROM caltrack WHERE recorder = 'osmand';

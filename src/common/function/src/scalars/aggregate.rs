@@ -31,6 +31,7 @@ pub use polyval::PolyvalAccumulatorCreator;
 pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
 pub use scipy_stats_norm_pdf::ScipyStatsNormPdfAccumulatorCreator;
 
+use super::geo::encoding::GeojsonPathEncodeFunctionCreator;
 use crate::function_registry::FunctionRegistry;
 
 /// A function creates `AggregateFunctionCreator`.
@@ -91,5 +92,7 @@ impl AggregateFunctions {
         register_aggr_func!("argmin", 1, ArgminAccumulatorCreator);
         register_aggr_func!("scipystatsnormcdf", 2, ScipyStatsNormCdfAccumulatorCreator);
         register_aggr_func!("scipystatsnormpdf", 2, ScipyStatsNormPdfAccumulatorCreator);
+
+        register_aggr_func!("geojson_encode_path", 3, GeojsonPathEncodeFunctionCreator);
     }
 }
