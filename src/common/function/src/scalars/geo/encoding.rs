@@ -29,7 +29,7 @@ use snafu::{ensure, ResultExt};
 
 use super::helpers::{ensure_columns_len, ensure_columns_n};
 
-/// Accumulator of lat, lng, timestmap tuples
+/// Accumulator of lat, lng, timestamp tuples
 #[derive(Debug)]
 pub struct GeojsonPathAccumulator {
     timestamp_type: ConcreteDataType,
@@ -71,6 +71,14 @@ impl Accumulator for GeojsonPathAccumulator {
     }
 
     fn update_batch(&mut self, columns: &[VectorRef]) -> Result<()> {
+        // update batch as in datafusion just provides the accumulator original
+        //  input.
+        //
+        // columns is vec of [`lat`, `lng`, `timestamp`]
+        // where
+        // - `lat` is a vector of `Value::Float64` or similar type. Each item in
+        //  the vector is a row in given dataset.
+        // - so on so forth for `lng` and `timestamp`
         ensure_columns_n!(columns, 3);
 
         let lat = &columns[0];
@@ -89,6 +97,16 @@ impl Accumulator for GeojsonPathAccumulator {
     }
 
     fn merge_batch(&mut self, states: &[VectorRef]) -> Result<()> {
+        // merge batch as in datafusion gives state accumulated from the data
+        //  returned from child accumulators' state() call
+        // In our particular implementation, the data structure is like
+        //
+        // states is vec of [`lat`, `lng`, `timestamp`]
+        // where
+        // - `lat` is a vector of `Value::List`. Each item in the list is all
+        //  coordinates from a child accumulator.
+        // - so on so forth for `lng` and `timestamp`
+
         ensure_columns_n!(states, 3);
 
         let lat_lists = &states[0];
@@ -172,7 +190,7 @@ impl Accumulator for GeojsonPathAccumulator {
 /// Example:
 ///
 /// ```sql
-/// SELECT geojson_encode(lat, lon, timestamp) FROM table;
+/// SELECT geojson_encode_path(lat, lon, timestamp) FROM table [group by ...];
 /// ```
 ///
 #[as_aggr_func_creator]
