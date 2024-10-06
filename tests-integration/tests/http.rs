@@ -181,6 +181,22 @@ pub async fn test_sql_api(store_type: StorageType) {
         })).unwrap()
     );
 
+    // test json result format
+    let res = client
+        .get("/v1/sql?format=json&sql=select * from numbers limit 10")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = res.json::<Value>().await;
+    let data = body.get("data").expect("Missing 'data' field in response");
+
+    let expected = json!([
+        {"number": 0}, {"number": 1}, {"number": 2}, {"number": 3}, {"number": 4},
+        {"number": 5}, {"number": 6}, {"number": 7}, {"number": 8}, {"number": 9}
+    ]);
+    assert_eq!(data, &expected);
+
     // test insert and select
     let res = client
         .get("/v1/sql?sql=insert into demo values('host', 66.6, 1024, 0)")
@@ -1236,7 +1252,7 @@ transform:
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let body: serde_json::Value = res.json().await;
+    let body: Value = res.json().await;
     let schema = &body["schema"];
     let rows = &body["rows"];
     assert_eq!(
