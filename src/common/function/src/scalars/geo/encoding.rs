@@ -31,14 +31,14 @@ use super::helpers::{ensure_columns_len, ensure_columns_n};
 
 /// Accumulator of lat, lng, timestamp tuples
 #[derive(Debug)]
-pub struct GeojsonPathAccumulator {
+pub struct JsonPathAccumulator {
     timestamp_type: ConcreteDataType,
     lat: Vec<Option<f64>>,
     lng: Vec<Option<f64>>,
     timestamp: Vec<Option<Timestamp>>,
 }
 
-impl GeojsonPathAccumulator {
+impl JsonPathAccumulator {
     fn new(timestamp_type: ConcreteDataType) -> Self {
         Self {
             lat: Vec::default(),
@@ -49,7 +49,7 @@ impl GeojsonPathAccumulator {
     }
 }
 
-impl Accumulator for GeojsonPathAccumulator {
+impl Accumulator for JsonPathAccumulator {
     fn state(&self) -> Result<Vec<Value>> {
         Ok(vec![
             Value::List(ListValue::new(
@@ -187,18 +187,18 @@ impl Accumulator for GeojsonPathAccumulator {
 /// Example:
 ///
 /// ```sql
-/// SELECT geojson_encode_path(lat, lon, timestamp) FROM table [group by ...];
+/// SELECT json_encode_path(lat, lon, timestamp) FROM table [group by ...];
 /// ```
 ///
 #[as_aggr_func_creator]
 #[derive(Debug, Default, AggrFuncTypeStore)]
-pub struct GeojsonPathEncodeFunctionCreator {}
+pub struct JsonPathEncodeFunctionCreator {}
 
-impl AggregateFunctionCreator for GeojsonPathEncodeFunctionCreator {
+impl AggregateFunctionCreator for JsonPathEncodeFunctionCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
         let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
             let ts_type = types[2].clone();
-            Ok(Box::new(GeojsonPathAccumulator::new(ts_type)))
+            Ok(Box::new(JsonPathAccumulator::new(ts_type)))
         });
 
         creator
