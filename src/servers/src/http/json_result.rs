@@ -118,7 +118,7 @@ impl IntoResponse for JsonResponse {
             }
         };
 
-        let mut resp = (
+        (
             [
                 (
                     header::CONTENT_TYPE,
@@ -135,7 +135,6 @@ impl IntoResponse for JsonResponse {
             ],
             payload,
         )
-            .into_response();
-        resp
+            .into_response()
     }
 }
