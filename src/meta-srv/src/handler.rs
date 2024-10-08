@@ -528,14 +528,15 @@ impl HeartbeatHandlerGroupBuilder {
 
     /// Builds the group of heartbeat handlers.
     ///
-    /// Applies the finalizer if it exists.
+    /// Applies the customizer if it exists.
     pub fn build(mut self) -> Result<HeartbeatHandlerGroup> {
-        if let Some(finalizer) = self.plugins.as_ref().and_then(|plugins| {
-            plugins
-                .get::<HeartbeatHandlerGroupBuilderFinalizerRef>()
-                .clone()
-        }) {
-            finalizer.finalize(&mut self)?;
+        if let Some(customizer) = self
+            .plugins
+            .as_ref()
+            .and_then(|plugins| plugins.get::<HeartbeatHandlerGroupBuilderCustomizerRef>())
+        {
+            debug!("Customizing the heartbeat handler group builder");
+            customizer.customize(&mut self)?;
         }
 
         Ok(HeartbeatHandlerGroup {
@@ -592,11 +593,12 @@ impl HeartbeatHandlerGroupBuilder {
     }
 }
 
-pub type HeartbeatHandlerGroupBuilderFinalizerRef = Arc<dyn HeartbeatHandlerGroupBuilderFinalizer>;
+pub type HeartbeatHandlerGroupBuilderCustomizerRef =
+    Arc<dyn HeartbeatHandlerGroupBuilderCustomizer>;
 
-/// The finalizer of the [`HeartbeatHandlerGroupBuilder`].
-pub trait HeartbeatHandlerGroupBuilderFinalizer: Send + Sync {
-    fn finalize(&self, builder: &mut HeartbeatHandlerGroupBuilder) -> Result<()>;
+/// The customizer of the [`HeartbeatHandlerGroupBuilder`].
+pub trait HeartbeatHandlerGroupBuilderCustomizer: Send + Sync {
+    fn customize(&self, builder: &mut HeartbeatHandlerGroupBuilder) -> Result<()>;
 }
 
 #[cfg(test)]
