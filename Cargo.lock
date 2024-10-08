@@ -8141,6 +8141,7 @@ dependencies = [
  "futures",
  "greptime-proto",
  "itertools 0.10.5",
+ "jsonb",
  "lazy_static",
  "moka",
  "once_cell",

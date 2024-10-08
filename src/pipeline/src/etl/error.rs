@@ -40,7 +40,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("{processor} processor: missing field: {field}"))]
+    #[snafu(display("Processor {processor}: missing field: {field}"))]
     ProcessorMissingField {
         processor: String,
         field: String,
@@ -48,7 +48,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("{processor} processor: expect string value, but got {v:?}"))]
+    #[snafu(display("Processor {processor}: expect string value, but got {v:?}"))]
     ProcessorExpectString {
         processor: String,
         v: crate::etl::Value,
@@ -56,7 +56,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("{processor} processor: unsupported value {val}"))]
+    #[snafu(display("Processor {processor}: unsupported value {val}"))]
     ProcessorUnsupportedValue {
         processor: &'static str,
         val: String,
@@ -64,13 +64,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("processor key must be a string"))]
+    #[snafu(display("Processor key must be a string"))]
     ProcessorKeyMustBeString {
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("{kind} processor: failed to parse {value}"))]
+    #[snafu(display("Processor {kind}: failed to parse {value}"))]
     ProcessorFailedToParseString {
         kind: String,
         value: String,
@@ -78,13 +78,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("processor must have a string key"))]
+    #[snafu(display("Processor must have a string key"))]
     ProcessorMustHaveStringKey {
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("unsupported {processor} processor"))]
+    #[snafu(display("Unsupported {processor} processor"))]
     UnsupportedProcessor {
         processor: String,
         #[snafu(implicit)]
@@ -108,7 +108,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("failed to parse {key} as int: {value}"))]
+    #[snafu(display("Failed to parse {key} as int: {value}"))]
     FailedToParseIntKey {
         key: String,
         value: String,
@@ -126,7 +126,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("failed to parse {key} as float: {value}"))]
+    #[snafu(display("Failed to parse {key} as float: {value}"))]
     FailedToParseFloatKey {
         key: String,
         value: String,
@@ -136,7 +136,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("{kind} processor.{key} not found in intermediate keys"))]
+    #[snafu(display("Processor {kind}: {key} not found in intermediate keys"))]
     IntermediateKeyIndex {
         kind: String,
         key: String,
@@ -144,41 +144,41 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("{k} missing value in {s}"))]
+    #[snafu(display("Cmcd {k} missing value in {s}"))]
     CmcdMissingValue {
         k: String,
         s: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("{part} missing key in {s}"))]
+    #[snafu(display("Part: {part} missing key in {s}"))]
     CmcdMissingKey {
         part: String,
         s: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("key must be a string, but got {k:?}"))]
+    #[snafu(display("Key must be a string, but got {k:?}"))]
     KeyMustBeString {
         k: yaml_rust::Yaml,
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("csv read error"))]
+    #[snafu(display("Csv read error"))]
     CsvRead {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: csv::Error,
     },
-    #[snafu(display("expected at least one record from csv format, but got none"))]
+    #[snafu(display("Expected at least one record from csv format, but got none"))]
     CsvNoRecord {
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("'{separator}' must be a single character, but got '{value}'"))]
+    #[snafu(display("Separator '{separator}' must be a single character, but got '{value}'"))]
     CsvSeparatorName {
         separator: &'static str,
         value: String,
@@ -186,7 +186,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("'{quote}' must be a single character, but got '{value}'"))]
+    #[snafu(display("Quote '{quote}' must be a single character, but got '{value}'"))]
     CsvQuoteName {
         quote: &'static str,
         value: String,
@@ -212,19 +212,19 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("failed to get local timezone"))]
+    #[snafu(display("Failed to get local timezone"))]
     DateFailedToGetLocalTimezone {
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("failed to get timestamp"))]
+    #[snafu(display("Failed to get timestamp"))]
     DateFailedToGetTimestamp {
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("{processor} processor: invalid format {s}"))]
+    #[snafu(display("Processor {processor}: invalid format {s}"))]
     DateInvalidFormat {
         s: String,
         processor: String,
@@ -245,20 +245,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("'{split}' exceeds the input"))]
+    #[snafu(display("Split: '{split}' exceeds the input"))]
     DissectSplitExceedsInput {
         split: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("'{split}' does not match the input '{input}'"))]
+    #[snafu(display("Split: '{split}' does not match the input '{input}'"))]
     DissectSplitNotMatchInput {
         split: String,
         input: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("consecutive names are not allowed: '{name1}' '{name2}'"))]
+    #[snafu(display("Consecutive names are not allowed: '{name1}' '{name2}'"))]
     DissectConsecutiveNames {
         name1: String,
         name2: String,
@@ -270,7 +270,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("'{m}' modifier already set, but found {modifier}"))]
+    #[snafu(display("Modifier '{m}' already set, but found {modifier}"))]
     DissectModifierAlreadySet {
         m: String,
         modifier: String,
@@ -304,23 +304,23 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("invalid resolution: {resolution}"))]
+    #[snafu(display("Invalid resolution: {resolution}"))]
     EpochInvalidResolution {
         resolution: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("pattern is required"))]
+    #[snafu(display("Pattern is required"))]
     GsubPatternRequired {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("replacement is required"))]
+    #[snafu(display("Replacement is required"))]
     GsubReplacementRequired {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("invalid regex pattern: {pattern}"))]
+    #[snafu(display("Invalid regex pattern: {pattern}"))]
     Regex {
         #[snafu(source)]
         error: regex::Error,
@@ -328,72 +328,72 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("separator is required"))]
+    #[snafu(display("Separator is required"))]
     JoinSeparatorRequired {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("invalid method: {method}"))]
+    #[snafu(display("Invalid method: {method}"))]
     LetterInvalidMethod {
         method: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("no named group found in regex {origin}"))]
+    #[snafu(display("No named group found in regex {origin}"))]
     RegexNamedGroupNotFound {
         origin: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("no valid field found in {processor} processor"))]
+    #[snafu(display("No valid field found in {processor} processor"))]
     RegexNoValidField {
         processor: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("no valid pattern found in {processor} processor"))]
+    #[snafu(display("No valid pattern found in {processor} processor"))]
     RegexNoValidPattern {
         processor: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("invalid method: {s}"))]
+    #[snafu(display("Invalid method: {s}"))]
     UrlEncodingInvalidMethod {
         s: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("url decoding error"))]
+    #[snafu(display("Url decoding error"))]
     UrlEncodingDecode {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("invalid transform on_failure value: {value}"))]
+    #[snafu(display("Invalid transform on_failure value: {value}"))]
     TransformOnFailureInvalidValue {
         value: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("transform element must be a map"))]
+    #[snafu(display("Transform element must be a map"))]
     TransformElementMustBeMap {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("transform {fields:?} type MUST BE set before default {default}"))]
+    #[snafu(display("Transform {fields:?} type MUST BE set before default {default}"))]
     TransformTypeMustBeSet {
         fields: String,
         default: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("transform cannot be empty"))]
+    #[snafu(display("Transform cannot be empty"))]
     TransformEmpty {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("column name must be unique, but got duplicated: {duplicates}"))]
+    #[snafu(display("Column name must be unique, but got duplicated: {duplicates}"))]
     TransformColumnNameMustBeUnique {
         duplicates: String,
         #[snafu(implicit)]
@@ -407,7 +407,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("transform must have exactly one field specified as timestamp Index, but got {count}: {columns}"))]
+    #[snafu(display("Transform must have exactly one field specified as timestamp Index, but got {count}: {columns}"))]
     TransformTimestampIndexCount {
         count: usize,
         columns: String,
@@ -425,13 +425,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("{ty} value not supported for Epoch"))]
+    #[snafu(display("Type: {ty} value not supported for Epoch"))]
     CoerceUnsupportedEpochType {
         ty: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("failed to coerce string value '{s}' to type '{ty}'"))]
+    #[snafu(display("Failed to coerce string value '{s}' to type '{ty}'"))]
     CoerceStringToType {
         s: String,
         ty: String,
@@ -440,7 +440,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "invalid resolution: '{resolution}'. Available resolutions: {valid_resolution}"
+        "Invalid resolution: '{resolution}'. Available resolutions: {valid_resolution}"
     ))]
     ValueInvalidResolution {
         resolution: String,
@@ -449,14 +449,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("failed to parse type: '{t}'"))]
+    #[snafu(display("Failed to parse type: '{t}'"))]
     ValueParseType {
         t: String,
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("failed to parse {ty}: {v}"))]
+    #[snafu(display("Failed to parse {ty}: {v}"))]
     ValueParseInt {
         ty: String,
         v: String,
@@ -466,7 +466,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("failed to parse {ty}: {v}"))]
+    #[snafu(display("Failed to parse {ty}: {v}"))]
     ValueParseFloat {
         ty: String,
         v: String,
@@ -476,7 +476,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("failed to parse {ty}: {v}"))]
+    #[snafu(display("Failed to parse {ty}: {v}"))]
     ValueParseBoolean {
         ty: String,
         v: String,
@@ -485,19 +485,19 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("default value not unsupported for type {value}"))]
+    #[snafu(display("Default value not unsupported for type {value}"))]
     ValueDefaultValueUnsupported {
         value: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("unsupported number type: {value}"))]
+    #[snafu(display("Unsupported number type: {value}"))]
     ValueUnsupportedNumberType {
         value: serde_json::Number,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("unsupported yaml type: {value:?}"))]
+    #[snafu(display("Unsupported yaml type: {value:?}"))]
     ValueUnsupportedYamlType {
         value: yaml_rust::Yaml,
         #[snafu(implicit)]
@@ -531,9 +531,23 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("unsupported index type: {value}"))]
+    #[snafu(display("Unsupported index type: {value}"))]
     UnsupportedIndexType {
         value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Unsupported number type: {value:?}"))]
+    UnsupportedNumberType {
+        value: serde_json::Number,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Column datatype mismatch. For column: {column}, expected datatype: {expected}, actual datatype: {actual}"))]
+    IdentifyPipelineColumnTypeMismatch {
+        column: String,
+        expected: String,
+        actual: String,
         #[snafu(implicit)]
         location: Location,
     },

@@ -50,6 +50,9 @@ use crate::metrics::{
 };
 use crate::query_handler::LogHandlerRef;
 
+const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
+const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
+
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LogIngesterQueryParams {
     pub table: Option<String>,
@@ -119,6 +122,12 @@ pub async fn add_pipeline(
         !pipeline_name.is_empty(),
         InvalidParameterSnafu {
             reason: "pipeline_name is required in path",
+        }
+    );
+    ensure!(
+        !pipeline_name.starts_with(GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX),
+        InvalidParameterSnafu {
+            reason: "pipeline_name cannot start with greptime_",
         }
     );
     ensure!(
@@ -425,46 +434,53 @@ async fn ingest_logs_inner(
     let db = query_ctx.get_db_string();
     let exec_timer = std::time::Instant::now();
 
-    let pipeline = state
-        .get_pipeline(&pipeline_name, version, query_ctx.clone())
-        .await?;
-
-    let transform_timer = std::time::Instant::now();
-    let mut intermediate_state = pipeline.init_intermediate_state();
-
     let mut results = Vec::with_capacity(pipeline_data.len());
+    let transformed_data: Rows;
+    if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
+        let rows = pipeline::identity_pipeline(pipeline_data)
+            .context(PipelineTransformSnafu)
+            .context(PipelineSnafu)?;
+        transformed_data = rows;
+    } else {
+        let pipeline = state
+            .get_pipeline(&pipeline_name, version, query_ctx.clone())
+            .await?;
 
-    for v in pipeline_data {
-        pipeline
-            .prepare(v, &mut intermediate_state)
-            .inspect_err(|_| {
-                METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                    .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                    .observe(transform_timer.elapsed().as_secs_f64());
-            })
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?;
-        let r = pipeline
-            .exec_mut(&mut intermediate_state)
-            .inspect_err(|_| {
-                METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                    .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                    .observe(transform_timer.elapsed().as_secs_f64());
-            })
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?;
-        results.push(r);
-        pipeline.reset_intermediate_state(&mut intermediate_state);
+        let transform_timer = std::time::Instant::now();
+        let mut intermediate_state = pipeline.init_intermediate_state();
+
+        for v in pipeline_data {
+            pipeline
+                .prepare(v, &mut intermediate_state)
+                .inspect_err(|_| {
+                    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                        .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                        .observe(transform_timer.elapsed().as_secs_f64());
+                })
+                .context(PipelineTransformSnafu)
+                .context(PipelineSnafu)?;
+            let r = pipeline
+                .exec_mut(&mut intermediate_state)
+                .inspect_err(|_| {
+                    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                        .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                        .observe(transform_timer.elapsed().as_secs_f64());
+                })
+                .context(PipelineTransformSnafu)
+                .context(PipelineSnafu)?;
+            results.push(r);
+            pipeline.reset_intermediate_state(&mut intermediate_state);
+        }
+
+        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+            .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
+            .observe(transform_timer.elapsed().as_secs_f64());
+
+        transformed_data = Rows {
+            rows: results,
+            schema: pipeline.schemas().clone(),
+        };
     }
-
-    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-        .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
-        .observe(transform_timer.elapsed().as_secs_f64());
-
-    let transformed_data: Rows = Rows {
-        rows: results,
-        schema: pipeline.schemas().clone(),
-    };
 
     let insert_request = RowInsertRequest {
         rows: Some(transformed_data),
