@@ -42,6 +42,24 @@ pub struct Sender<T> {
 }
 
 impl<T> Sender<T> {
+    pub fn try_send_high(&self, item: T) -> error::Result<()> {
+        self.tx_high.try_send(item).map_err(|e| {
+            error::SendToChannelSnafu {
+                err_msg: format!("{:?}", e),
+            }
+            .build()
+        })
+    }
+
+    pub fn try_send_low(&self, item: T) -> error::Result<()> {
+        self.tx_high.try_send(item).map_err(|e| {
+            error::SendToChannelSnafu {
+                err_msg: format!("{:?}", e),
+            }
+            .build()
+        })
+    }
+
     pub async fn send_high(&self, item: T) -> error::Result<()> {
         self.tx_high.send(item).await.map_err(|e| {
             error::SendToChannelSnafu {
@@ -67,10 +85,18 @@ impl<T> Sender<T> {
     }
 }
 
-#[derive(Clone)]
 pub struct Receiver<T> {
     rx_low: async_channel::Receiver<(Instant, T)>,
     rx_high: async_channel::Receiver<T>,
+}
+
+impl<T> Clone for Receiver<T> {
+    fn clone(&self) -> Self {
+        Self {
+            rx_high: self.rx_high.clone(),
+            rx_low: self.rx_low.clone(),
+        }
+    }
 }
 
 impl<T> Receiver<T>

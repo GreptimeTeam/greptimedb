@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::warn;
+use futures::StreamExt;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -25,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{InvalidSchedulerStateSnafu, InvalidSenderSnafu, Result, StopSchedulerSnafu};
 use crate::metrics::SCHEDULER_TASK_ELAPSED;
+use crate::schedule::priority;
 
 pub struct Job {
     /// Job type.
@@ -67,7 +69,7 @@ pub type SchedulerRef = Arc<dyn Scheduler>;
 /// Request scheduler based on local state.
 pub struct LocalScheduler {
     /// Sends jobs to flume bounded channel
-    sender: RwLock<Option<async_channel::Sender<Job>>>,
+    sender: RwLock<Option<priority::Sender<Job>>>,
     /// Task handles
     handles: Mutex<Vec<JoinHandle<()>>>,
     /// Token used to halt the scheduler
@@ -81,7 +83,7 @@ impl LocalScheduler {
     ///
     /// concurrency: the number of bounded receiver
     pub fn new(concurrency: usize) -> Self {
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, rx) = priority::unbounded::<Job>();
         let token = CancellationToken::new();
         let state = Arc::new(AtomicU8::new(STATE_RUNNING));
 
@@ -89,7 +91,7 @@ impl LocalScheduler {
 
         for _ in 0..concurrency {
             let child = token.child_token();
-            let receiver: async_channel::Receiver<Job> = rx.clone();
+            let mut receiver_stream = rx.clone().into_stream();
             let state_clone = state.clone();
             let handle = common_runtime::spawn_global(async move {
                 while state_clone.load(Ordering::Relaxed) == STATE_RUNNING {
@@ -97,18 +99,16 @@ impl LocalScheduler {
                         _ = child.cancelled() => {
                             break;
                         }
-                        req_opt = receiver.recv() =>{
-                            if let Ok(job) = req_opt {
-                                let _timer = SCHEDULER_TASK_ELAPSED.with_label_values(&[job.r#type]).start_timer();
-                                job.task.await;
-                            }
+                        Some(job) = receiver_stream.next() =>{
+                            let _timer = SCHEDULER_TASK_ELAPSED.with_label_values(&[job.r#type]).start_timer();
+                            job.task.await;
                         }
                     }
                 }
                 // When task scheduler is cancelled, we will wait all task finished
                 if state_clone.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
                     // recv_async waits until all sender's been dropped.
-                    while let Ok(job) = receiver.recv().await {
+                    while let Some(job) = receiver_stream.next().await {
                         let _timer = SCHEDULER_TASK_ELAPSED
                             .with_label_values(&[job.r#type])
                             .start_timer();
@@ -144,7 +144,7 @@ impl Scheduler for LocalScheduler {
             .unwrap()
             .as_ref()
             .context(InvalidSchedulerStateSnafu)?
-            .try_send(job)
+            .try_send_high(job)
             .map_err(|_| InvalidSenderSnafu {}.build())
     }
 
