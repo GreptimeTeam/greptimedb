@@ -20,7 +20,7 @@ use common_telemetry::{error, info};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
-use crate::schedule::scheduler::{Job, SchedulerRef};
+use crate::schedule::scheduler::{Job, Priority, SchedulerRef};
 use crate::sst::file::FileMeta;
 
 /// Request to remove a file.
@@ -81,6 +81,7 @@ impl FilePurger for LocalFilePurger {
         let cache_manager = self.cache_manager.clone();
         let job = Job::new(
             "purge",
+            Priority::Low(None),
             Box::pin(async move {
                 if let Err(e) = sst_layer.delete_sst(&file_meta).await {
                     error!(e; "Failed to delete SST file, file_id: {}, region: {}",

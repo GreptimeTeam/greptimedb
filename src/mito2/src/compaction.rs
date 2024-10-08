@@ -63,7 +63,7 @@ use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
 };
-use crate::schedule::scheduler::{Job, SchedulerRef};
+use crate::schedule::scheduler::{Job, Priority, SchedulerRef};
 use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
@@ -362,12 +362,13 @@ impl CompactionScheduler {
 
         // Submit the compaction task.
         self.scheduler
-            .schedule(Job {
-                r#type: "compaction",
-                task: Box::pin(async move {
+            .schedule(Job::new(
+                "compaction",
+                Priority::Low(Some(Duration::from_secs(60))),
+                Box::pin(async move {
                     local_compaction_task.run().await;
                 }),
-            })
+            ))
             .map_err(|e| {
                 error!(e; "Failed to submit compaction request for region {}", region_id);
                 // If failed to submit the job, we need to remove the region from the scheduler.

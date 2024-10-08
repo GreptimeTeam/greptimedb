@@ -23,12 +23,14 @@ use tokio::time::Sleep;
 
 use crate::error;
 
+/// Creates an bounded channel.
 pub fn bounded<T>(size: usize) -> (Sender<T>, Receiver<T>) {
     let (tx_low, rx_low) = async_channel::bounded(size);
     let (tx_high, rx_high) = async_channel::bounded(size);
     (Sender { tx_low, tx_high }, Receiver { rx_low, rx_high })
 }
 
+/// Creates an unbounded channel.
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let (tx_low, rx_low) = async_channel::unbounded();
     let (tx_high, rx_high) = async_channel::unbounded();
@@ -37,11 +39,12 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 
 #[derive(Clone)]
 pub struct Sender<T> {
-    tx_low: async_channel::Sender<(Instant, T)>,
+    tx_low: async_channel::Sender<(Option<Instant>, T)>,
     tx_high: async_channel::Sender<T>,
 }
 
 impl<T> Sender<T> {
+    /// Tries to send a high priority item, returns `Err` if the channel is full or closed.
     pub fn try_send_high(&self, item: T) -> error::Result<()> {
         self.tx_high.try_send(item).map_err(|e| {
             error::SendToChannelSnafu {
@@ -51,15 +54,20 @@ impl<T> Sender<T> {
         })
     }
 
-    pub fn try_send_low(&self, item: T) -> error::Result<()> {
-        self.tx_high.try_send(item).map_err(|e| {
-            error::SendToChannelSnafu {
-                err_msg: format!("{:?}", e),
-            }
-            .build()
-        })
+    /// Tries to send a low priority item with optional deadline, returns `Err` if the channel is full or closed.
+    pub fn try_send_low(&self, item: T, deadline: Option<Duration>) -> error::Result<()> {
+        self.tx_low
+            .try_send((deadline.map(|d| Instant::now().add(d)), item))
+            .map_err(|e| {
+                error::SendToChannelSnafu {
+                    err_msg: format!("{:?}", e),
+                }
+                .build()
+            })
     }
 
+    /// Sends a high priority item waiting for the channel to be ready.
+    /// Returns `Err` if the channel is closed.
     pub async fn send_high(&self, item: T) -> error::Result<()> {
         self.tx_high.send(item).await.map_err(|e| {
             error::SendToChannelSnafu {
@@ -69,12 +77,11 @@ impl<T> Sender<T> {
         })
     }
 
+    /// Sends a low priority with optional deadline waiting for the channel to be ready.
+    /// Returns `Err` if the channel is closed.
     pub async fn send_low(&self, item: T, deadline: Option<Duration>) -> error::Result<()> {
         self.tx_low
-            .send((
-                Instant::now().add(deadline.unwrap_or(Duration::from_secs(0))),
-                item,
-            ))
+            .send((deadline.map(|d| Instant::now().add(d)), item))
             .await
             .map_err(|e| {
                 error::SendToChannelSnafu {
@@ -85,8 +92,9 @@ impl<T> Sender<T> {
     }
 }
 
+/// Channel receiver
 pub struct Receiver<T> {
-    rx_low: async_channel::Receiver<(Instant, T)>,
+    rx_low: async_channel::Receiver<(Option<Instant>, T)>,
     rx_high: async_channel::Receiver<T>,
 }
 
@@ -103,6 +111,7 @@ impl<T> Receiver<T>
 where
     T: Send + 'static,
 {
+    /// Converts the receiver into a async stream.
     pub fn into_stream(self) -> Pin<Box<dyn Stream<Item = T> + Send>> {
         let s = stream!({
             let mut timer: Option<Pin<Box<Sleep>>> = None;
@@ -120,11 +129,19 @@ where
                         // also check if low channel has pending.
                         if pending.is_none() && let Ok((deadline, low_item)) = self.rx_low.try_recv() {
                             let now = Instant::now();
-                            if deadline > now {
-                                let tta = deadline - now;
-                                timer = Some(Box::pin(tokio::time::sleep(tta)));
+                            if let Some(deadline) = deadline {
+                                if deadline > now {
+                                    let tta = deadline - now;
+                                    timer = Some(Box::pin(tokio::time::sleep(tta)));
+                                    pending = Some(low_item);
+                                } else {
+                                    // already
+                                    yield low_item;
+                                }
+                            } else {
+                                // deadline not set
+                                pending = Some(low_item);
                             }
-                            pending = Some(low_item);
                         }
                         yield high;
                     }
@@ -139,10 +156,14 @@ where
 
                     else => {
                         if self.rx_high.is_closed() && self.rx_low.is_closed() {
-                            return;
+                            break;
                         }
                     }
                 }
+            }
+
+            if let Some(low) = pending.take() {
+                yield low;
             }
         });
         Box::pin(s)
@@ -345,5 +366,63 @@ mod tests {
         }
         assert_eq!(low_send.load(Ordering::Relaxed), low_recv);
         assert_eq!(high_send.load(Ordering::Relaxed), high_recv);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_thread_recv() {
+        let low_send = Arc::new(AtomicUsize::new(0));
+        let high_send = Arc::new(AtomicUsize::new(0));
+
+        let (tx, rx) = unbounded();
+
+        let low_send_clone = low_send.clone();
+        let high_send_clone = high_send.clone();
+
+        let mut handles = Vec::with_capacity(5);
+        handles.push(tokio::spawn(async move {
+            for _ in 0..10000 {
+                let high: bool = rand::random();
+                if high {
+                    tx.send_high(high).await.unwrap();
+                    high_send_clone.fetch_add(1, Ordering::Release);
+                } else {
+                    tx.send_low(high, None).await.unwrap();
+                    low_send_clone.fetch_add(1, Ordering::Release);
+                }
+            }
+        }));
+        let high_recv = Arc::new(AtomicUsize::new(0));
+        let low_recv = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..4 {
+            let high_recv_cloned = high_recv.clone();
+            let low_recv_cloned = low_recv.clone();
+            let rx_cloned = rx.clone();
+
+            handles.push(tokio::spawn(async move {
+                let mut s = rx_cloned.into_stream();
+                while let Some(v) = s.next().await {
+                    if v {
+                        high_recv_cloned.fetch_add(1, Ordering::Release);
+                    } else {
+                        low_recv_cloned.fetch_add(1, Ordering::Release);
+                    }
+                }
+            }));
+        }
+
+        futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            high_send.load(Ordering::Acquire),
+            high_recv.load(Ordering::Acquire)
+        );
+        assert_eq!(
+            low_send.load(Ordering::Acquire),
+            low_recv.load(Ordering::Acquire)
+        );
     }
 }

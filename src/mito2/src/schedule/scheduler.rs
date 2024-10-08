@@ -16,6 +16,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use common_telemetry::warn;
 use futures::StreamExt;
@@ -28,22 +29,41 @@ use crate::error::{InvalidSchedulerStateSnafu, InvalidSenderSnafu, Result, StopS
 use crate::metrics::SCHEDULER_TASK_ELAPSED;
 use crate::schedule::priority;
 
+/// Priority of the job.
+pub enum Priority {
+    /// High priority job.
+    High,
+    /// Low priority job with an optional deadline.
+    Low(Option<Duration>),
+}
+
 pub struct Job {
     /// Job type.
-    pub(crate) r#type: &'static str,
+    r#type: &'static str,
+    /// Job priority.
+    priority: Priority,
     /// Async task to schedule.
-    pub(crate) task: Pin<Box<dyn Future<Output = ()> + Send>>,
+    task: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
 
 impl Job {
-    pub fn new(r#type: &'static str, task: Pin<Box<dyn Future<Output = ()> + Send>>) -> Self {
-        Self { r#type, task }
+    pub fn new(
+        r#type: &'static str,
+        priority: Priority,
+        task: Pin<Box<dyn Future<Output = ()> + Send>>,
+    ) -> Self {
+        Self {
+            r#type,
+            priority,
+            task,
+        }
     }
 
     #[cfg(test)]
     pub fn new_test(task: Pin<Box<dyn Future<Output = ()> + Send>>) -> Self {
         Self {
             r#type: "test",
+            priority: Priority::High,
             task,
         }
     }
@@ -139,13 +159,16 @@ impl Scheduler for LocalScheduler {
     fn schedule(&self, job: Job) -> Result<()> {
         ensure!(self.is_running(), InvalidSchedulerStateSnafu);
 
-        self.sender
-            .read()
-            .unwrap()
-            .as_ref()
-            .context(InvalidSchedulerStateSnafu)?
-            .try_send_high(job)
-            .map_err(|_| InvalidSenderSnafu {}.build())
+        let binding = self.sender.read().unwrap();
+        let sender = binding.as_ref().context(InvalidSchedulerStateSnafu)?;
+        match job.priority {
+            Priority::High => sender
+                .try_send_high(job)
+                .map_err(|_| InvalidSenderSnafu {}.build()),
+            Priority::Low(deadline) => sender
+                .try_send_low(job, deadline)
+                .map_err(|_| InvalidSenderSnafu {}.build()),
+        }
     }
 
     /// if await_termination is true, scheduler will wait all tasks finished before stopping
@@ -241,12 +264,9 @@ mod tests {
         for _ in 0..task_size {
             let barrier_clone = barrier.clone();
             local
-                .schedule(Job {
-                    r#type: "test",
-                    task: Box::pin(async move {
-                        barrier_clone.wait().await;
-                    }),
-                })
+                .schedule(Job::new_test(Box::pin(async move {
+                    barrier_clone.wait().await;
+                })))
                 .unwrap();
         }
         barrier.wait().await;
@@ -275,12 +295,9 @@ mod tests {
             loop {
                 let sum_c = sum_clone.clone();
                 let ok = local_task
-                    .schedule(Job {
-                        r#type: "test",
-                        task: Box::pin(async move {
-                            sum_c.fetch_add(1, Ordering::Relaxed);
-                        }),
-                    })
+                    .schedule(Job::new_test(Box::pin(async move {
+                        sum_c.fetch_add(1, Ordering::Relaxed);
+                    })))
                     .is_ok();
                 if ok {
                     target_clone.fetch_add(1, Ordering::Relaxed);

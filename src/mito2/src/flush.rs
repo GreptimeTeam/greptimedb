@@ -41,7 +41,7 @@ use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderDdlRequest,
     SenderWriteRequest, WorkerRequest,
 };
-use crate::schedule::scheduler::{Job, SchedulerRef};
+use crate::schedule::scheduler::{Job, Priority, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta, IndexType};
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
@@ -262,6 +262,7 @@ impl RegionFlushTask {
 
         Job::new(
             "flush",
+            Priority::High,
             Box::pin(async move {
                 self.do_flush(version_data).await;
             }),
