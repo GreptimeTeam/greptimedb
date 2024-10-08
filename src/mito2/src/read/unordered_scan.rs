@@ -149,8 +149,9 @@ impl UnorderedScan {
         }
     }
 
+    // TODO(yingwen): Move them.
     /// Scans memtable ranges at `index`.
-    fn scan_mem_ranges<'a>(
+    pub(crate) fn scan_mem_ranges<'a>(
         stream_ctx: &'a StreamContext,
         index: RowGroupIndex,
         ranges: &'a mut Vec<MemtableRange>,
@@ -181,7 +182,7 @@ impl UnorderedScan {
     }
 
     /// Scans file ranges at `index`.
-    fn scan_file_ranges<'a>(
+    pub(crate) fn scan_file_ranges<'a>(
         stream_ctx: &'a StreamContext,
         index: RowGroupIndex,
         ranges: &'a mut Vec<FileRange>,
