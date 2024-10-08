@@ -20,7 +20,8 @@ use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 use snafu::ResultExt;
 
 use crate::etl::error::{
-    CoerceStringToTypeSnafu, CoerceUnsupportedEpochTypeSnafu, CoerceUnsupportedNullTypeSnafu,
+    CoerceComplexTypeSnafu, CoerceIncompatibleTypesSnafu, CoerceStringToTypeSnafu,
+    CoerceUnsupportedEpochTypeSnafu, CoerceUnsupportedNullTypeSnafu,
     CoerceUnsupportedNullTypeToSnafu, ColumnOptionsSnafu, Error, Result,
 };
 use crate::etl::transform::index::Index;
@@ -61,8 +62,7 @@ impl TryFrom<Value> for ValueData {
             }
             Value::Timestamp(Timestamp::Second(s)) => Ok(ValueData::TimestampSecondValue(s)),
 
-            Value::Array(_) => unimplemented!("Array type not supported"),
-            Value::Map(_) => unimplemented!("Object type not supported"),
+            Value::Array(_) | Value::Map(_) => CoerceComplexTypeSnafu.fail(),
         }
     }
 }
@@ -134,8 +134,7 @@ fn coerce_type(transform: &Transform) -> Result<ColumnDataType> {
         Value::Timestamp(Timestamp::Millisecond(_)) => Ok(ColumnDataType::TimestampMillisecond),
         Value::Timestamp(Timestamp::Second(_)) => Ok(ColumnDataType::TimestampSecond),
 
-        Value::Array(_) => unimplemented!("Array"),
-        Value::Map(_) => unimplemented!("Object"),
+        Value::Array(_) | Value::Map(_) => CoerceComplexTypeSnafu.fail(),
 
         Value::Null => CoerceUnsupportedNullTypeToSnafu {
             ty: transform.type_.to_str_type(),
@@ -176,19 +175,28 @@ pub(crate) fn coerce_value(val: &Value, transform: &Transform) -> Result<Option<
         Value::Boolean(b) => coerce_bool_value(*b, transform),
         Value::String(s) => coerce_string_value(s, transform),
 
-        Value::Timestamp(Timestamp::Nanosecond(ns)) => {
-            Ok(Some(ValueData::TimestampNanosecondValue(*ns)))
-        }
-        Value::Timestamp(Timestamp::Microsecond(us)) => {
-            Ok(Some(ValueData::TimestampMicrosecondValue(*us)))
-        }
-        Value::Timestamp(Timestamp::Millisecond(ms)) => {
-            Ok(Some(ValueData::TimestampMillisecondValue(*ms)))
-        }
-        Value::Timestamp(Timestamp::Second(s)) => Ok(Some(ValueData::TimestampSecondValue(*s))),
+        Value::Timestamp(input_timestamp) => match &transform.type_ {
+            Value::Timestamp(target_timestamp) => match target_timestamp {
+                Timestamp::Nanosecond(_) => Ok(Some(ValueData::TimestampNanosecondValue(
+                    input_timestamp.timestamp_nanos(),
+                ))),
+                Timestamp::Microsecond(_) => Ok(Some(ValueData::TimestampMicrosecondValue(
+                    input_timestamp.timestamp_micros(),
+                ))),
+                Timestamp::Millisecond(_) => Ok(Some(ValueData::TimestampMillisecondValue(
+                    input_timestamp.timestamp_millis(),
+                ))),
+                Timestamp::Second(_) => Ok(Some(ValueData::TimestampSecondValue(
+                    input_timestamp.timestamp(),
+                ))),
+            },
+            _ => CoerceIncompatibleTypesSnafu {
+                msg: "Timestamp can only be coerced to another timestamp",
+            }
+            .fail(),
+        },
 
-        Value::Array(_) => unimplemented!("Array type not supported"),
-        Value::Map(_) => unimplemented!("Object type not supported"),
+        Value::Array(_) | Value::Map(_) => CoerceComplexTypeSnafu.fail(),
     }
 }
 
@@ -220,8 +228,7 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
             }
         },
 
-        Value::Array(_) => unimplemented!("Array type not supported"),
-        Value::Map(_) => unimplemented!("Object type not supported"),
+        Value::Array(_) | Value::Map(_) => return CoerceComplexTypeSnafu.fail(),
 
         Value::Null => return Ok(None),
     };
@@ -257,8 +264,7 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> 
             }
         },
 
-        Value::Array(_) => unimplemented!("Array type not supported"),
-        Value::Map(_) => unimplemented!("Object type not supported"),
+        Value::Array(_) | Value::Map(_) => return CoerceComplexTypeSnafu.fail(),
 
         Value::Null => return Ok(None),
     };
@@ -294,8 +300,7 @@ fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>> 
             }
         },
 
-        Value::Array(_) => unimplemented!("Array type not supported"),
-        Value::Map(_) => unimplemented!("Object type not supported"),
+        Value::Array(_) | Value::Map(_) => return CoerceComplexTypeSnafu.fail(),
 
         Value::Null => return Ok(None),
     };
@@ -331,8 +336,7 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>> 
             }
         },
 
-        Value::Array(_) => unimplemented!("Array type not supported"),
-        Value::Map(_) => unimplemented!("Object type not supported"),
+        Value::Array(_) | Value::Map(_) => return CoerceComplexTypeSnafu.fail(),
 
         Value::Null => return Ok(None),
     };
@@ -407,8 +411,7 @@ fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<Value
             None => CoerceUnsupportedEpochTypeSnafu { ty: "String" }.fail(),
         },
 
-        Value::Array(_) => unimplemented!("Array type not supported"),
-        Value::Map(_) => unimplemented!("Object type not supported"),
+        Value::Array(_) | Value::Map(_) => CoerceComplexTypeSnafu.fail(),
 
         Value::Null => Ok(None),
     }

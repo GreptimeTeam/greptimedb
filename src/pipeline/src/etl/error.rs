@@ -438,6 +438,17 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("failed to coerce complex value, not supported"))]
+    CoerceComplexType {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("failed to coerce value: {msg}"))]
+    CoerceIncompatibleTypes {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
         "Invalid resolution: '{resolution}'. Available resolutions: {valid_resolution}"
