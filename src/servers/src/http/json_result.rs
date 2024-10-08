@@ -19,14 +19,14 @@ use common_query::Output;
 use mime_guess::mime;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map};
+use serde_json::{json, Map, Value};
 
 use super::process_with_limit;
 use crate::http::error_result::ErrorResponse;
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 use crate::http::{handler, GreptimeQueryOutput, HttpResponse, ResponseFormat};
 
-/// The json format here is different from the default json output of greptime_result.
+/// The json format here is different from the default json output of `GreptimedbV1` result.
 /// `JsonResponse` is intended to make it easier for user to consume data.
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct JsonResponse {
@@ -87,7 +87,7 @@ impl IntoResponse for JsonResponse {
             Some(GreptimeQueryOutput::AffectedRows(n)) => json!({
                 "data": [
                     {
-                        "affectedrows": n
+                        "affected_rows": n
                     },
                 ],
                 "execution_time_ms": execution_time,
@@ -95,16 +95,20 @@ impl IntoResponse for JsonResponse {
             .to_string(),
 
             Some(GreptimeQueryOutput::Records(records)) => {
-                let mut data = Vec::new();
                 let schema = records.schema();
 
-                for row in records.rows.iter() {
-                    let mut row_map = Map::new();
-                    for (i, col) in schema.column_schemas.iter().enumerate() {
-                        row_map.insert(col.name.clone(), row[i].clone());
-                    }
-                    data.push(row_map);
-                }
+                let data: Vec<Map<String, Value>> = records
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        schema
+                            .column_schemas
+                            .iter()
+                            .enumerate()
+                            .map(|(i, col)| (col.name.clone(), row[i].clone()))
+                            .collect::<Map<String, Value>>()
+                    })
+                    .collect();
 
                 json!({
                     "data": data,
@@ -115,21 +119,23 @@ impl IntoResponse for JsonResponse {
         };
 
         let mut resp = (
-            [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static(mime::APPLICATION_JSON.as_ref()),
-            )],
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static(mime::APPLICATION_JSON.as_ref()),
+                ),
+                (
+                    GREPTIME_DB_HEADER_FORMAT.clone(),
+                    HeaderValue::from_static(ResponseFormat::Json.as_str()),
+                ),
+                (
+                    GREPTIME_DB_HEADER_EXECUTION_TIME.clone(),
+                    HeaderValue::from(execution_time),
+                ),
+            ],
             payload,
         )
             .into_response();
-        resp.headers_mut().insert(
-            &GREPTIME_DB_HEADER_FORMAT,
-            HeaderValue::from_static(ResponseFormat::Json.as_str()),
-        );
-        resp.headers_mut().insert(
-            &GREPTIME_DB_HEADER_EXECUTION_TIME,
-            HeaderValue::from(execution_time),
-        );
         resp
     }
 }
