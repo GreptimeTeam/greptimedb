@@ -493,7 +493,7 @@ mod test {
                     .into_iter(),
                 ),
             ),
-            // three or more overlaping range
+            // three or more overlapping range
             (
                 vec![
                     PartitionRange {
