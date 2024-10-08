@@ -527,11 +527,21 @@ impl HeartbeatHandlerGroupBuilder {
     }
 
     /// Builds the group of heartbeat handlers.
-    pub fn build(self) -> HeartbeatHandlerGroup {
-        HeartbeatHandlerGroup {
+    ///
+    /// Applies the finalizer if it exists.
+    pub fn build(mut self) -> Result<HeartbeatHandlerGroup> {
+        if let Some(finalizer) = self.plugins.as_ref().and_then(|plugins| {
+            plugins
+                .get::<HeartbeatHandlerGroupBuilderFinalizerRef>()
+                .clone()
+        }) {
+            finalizer.finalize(&mut self)?;
+        }
+
+        Ok(HeartbeatHandlerGroup {
             handlers: self.handlers.into_iter().collect(),
             pushers: self.pushers,
-        }
+        })
     }
 
     /// Adds the handler after the specified handler.
@@ -580,6 +590,13 @@ impl HeartbeatHandlerGroupBuilder {
     fn add_handler_last(&mut self, handler: impl HeartbeatHandler + 'static) {
         self.handlers.push(NameCachedHandler::new(handler));
     }
+}
+
+pub type HeartbeatHandlerGroupBuilderFinalizerRef = Arc<dyn HeartbeatHandlerGroupBuilderFinalizer>;
+
+/// The finalizer of the [`HeartbeatHandlerGroupBuilder`].
+pub trait HeartbeatHandlerGroupBuilderFinalizer: Send + Sync {
+    fn finalize(&self, builder: &mut HeartbeatHandlerGroupBuilder) -> Result<()>;
 }
 
 #[cfg(test)]
@@ -670,7 +687,8 @@ mod tests {
     fn test_handler_group_builder() {
         let group = HeartbeatHandlerGroupBuilder::new(Pushers::default())
             .add_default_handlers()
-            .build();
+            .build()
+            .unwrap();
 
         let handlers = group.handlers;
         assert_eq!(12, handlers.len());
@@ -706,7 +724,7 @@ mod tests {
             )
             .unwrap();
 
-        let group = builder.build();
+        let group = builder.build().unwrap();
         let handlers = group.handlers;
         assert_eq!(13, handlers.len());
 
@@ -739,7 +757,7 @@ mod tests {
             .add_handler_before("ResponseHeaderHandler", CollectStatsHandler::default())
             .unwrap();
 
-        let group = builder.build();
+        let group = builder.build().unwrap();
         let handlers = group.handlers;
         assert_eq!(13, handlers.len());
 
@@ -772,7 +790,7 @@ mod tests {
             .add_handler_after("MailboxHandler", CollectStatsHandler::default())
             .unwrap();
 
-        let group = builder.build();
+        let group = builder.build().unwrap();
         let handlers = group.handlers;
         assert_eq!(13, handlers.len());
 
@@ -805,7 +823,7 @@ mod tests {
             .add_handler_after("CollectStatsHandler", ResponseHeaderHandler)
             .unwrap();
 
-        let group = builder.build();
+        let group = builder.build().unwrap();
         let handlers = group.handlers;
         assert_eq!(13, handlers.len());
 
@@ -838,7 +856,7 @@ mod tests {
             .replace_handler("MailboxHandler", CollectStatsHandler::default())
             .unwrap();
 
-        let group = builder.build();
+        let group = builder.build().unwrap();
         let handlers = group.handlers;
         assert_eq!(12, handlers.len());
 
@@ -870,7 +888,7 @@ mod tests {
             .replace_handler("CollectStatsHandler", ResponseHeaderHandler)
             .unwrap();
 
-        let group = builder.build();
+        let group = builder.build().unwrap();
         let handlers = group.handlers;
         assert_eq!(12, handlers.len());
 
@@ -902,7 +920,7 @@ mod tests {
             .replace_handler("ResponseHeaderHandler", CollectStatsHandler::default())
             .unwrap();
 
-        let group = builder.build();
+        let group = builder.build().unwrap();
         let handlers = group.handlers;
         assert_eq!(12, handlers.len());
 
