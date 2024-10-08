@@ -870,6 +870,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Fail to send to async channel, err_msg: {}", err_msg))]
+    SendToChannel {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1002,6 +1009,7 @@ impl ErrorExt for Error {
             | ApplyFulltextIndex { source, .. } => source.status_code(),
             DecodeStats { .. } | StatsNotPresent { .. } => StatusCode::Internal,
             RegionBusy { .. } => StatusCode::RegionBusy,
+            SendToChannel { .. } => StatusCode::Internal,
         }
     }
 
