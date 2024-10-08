@@ -224,16 +224,15 @@ fn resolve_schema(
         let api_value = GreptimeValue {
             value_data: Some(value_data),
         };
-        let value_column_data_type = proto_value_type(&api_value);
+        // safety unwrap is fine here because api_value is always valid
+        let value_column_data_type = proto_value_type(&api_value).unwrap();
         // safety unwrap is fine here because index is always valid
         let schema_column_data_type = schema_info.schema.get(index).unwrap().datatype();
-        if value_column_data_type.is_some_and(|t| t != schema_column_data_type) {
+        if value_column_data_type != schema_column_data_type {
             IdentifyPipelineColumnTypeMismatchSnafu {
                 column: column_schema.column_name,
                 original: schema_column_data_type.as_str_name(),
-                now: value_column_data_type
-                    .map(|t| t.as_str_name())
-                    .unwrap_or_else(|| "null"),
+                now: value_column_data_type.as_str_name(),
             }
             .fail()
         } else {
