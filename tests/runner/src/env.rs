@@ -47,10 +47,10 @@ use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
 use crate::{util, ServerAddr};
 
-const METASRV_ADDR: &str = "127.0.0.1:3002";
-const GRPC_SERVER_ADDR: &str = "127.0.0.1:4001";
-const MYSQL_SERVER_ADDR: &str = "127.0.0.1:4002";
-const POSTGRES_SERVER_ADDR: &str = "127.0.0.1:4003";
+const METASRV_ADDR: &str = "127.0.0.1:29302";
+const GRPC_SERVER_ADDR: &str = "127.0.0.1:29401";
+const MYSQL_SERVER_ADDR: &str = "127.0.0.1:29402";
+const POSTGRES_SERVER_ADDR: &str = "127.0.0.1:29403";
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
 #[derive(Clone)]
@@ -305,34 +305,55 @@ impl Env {
                     ),
                     "-c".to_string(),
                     self.generate_config_file(subcommand, db_ctx),
-                    "--http-addr=127.0.0.1:5002".to_string(),
+                    "--http-addr=127.0.0.1:29502".to_string(),
                 ];
-                (args, vec![GRPC_SERVER_ADDR.to_string()])
+                (
+                    args,
+                    vec![
+                        GRPC_SERVER_ADDR.to_string(),
+                        MYSQL_SERVER_ADDR.to_string(),
+                        POSTGRES_SERVER_ADDR.to_string(),
+                    ],
+                )
             }
             "frontend" => {
                 let args = vec![
                     DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
-                    "--metasrv-addrs=127.0.0.1:3002".to_string(),
-                    "--http-addr=127.0.0.1:5003".to_string(),
+                    "--metasrv-addrs=127.0.0.1:29302".to_string(),
+                    "--http-addr=127.0.0.1:29503".to_string(),
+                    format!("--rpc-addr={}", GRPC_SERVER_ADDR),
+                    format!("--mysql-addr={}", MYSQL_SERVER_ADDR),
+                    format!("--postgres-addr={}", POSTGRES_SERVER_ADDR),
                     format!(
                         "--log-dir={}/greptimedb-frontend/logs",
                         self.sqlness_home.display()
                     ),
                 ];
-                (args, vec![GRPC_SERVER_ADDR.to_string()])
+                (
+                    args,
+                    vec![
+                        GRPC_SERVER_ADDR.to_string(),
+                        MYSQL_SERVER_ADDR.to_string(),
+                        POSTGRES_SERVER_ADDR.to_string(),
+                    ],
+                )
             }
             "metasrv" => {
                 let args = vec![
                     DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
+                    "--bind-addr".to_string(),
+                    "127.0.0.1:29302".to_string(),
+                    "--server-addr".to_string(),
+                    "127.0.0.1:29302".to_string(),
                     "--backend".to_string(),
                     "memory-store".to_string(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
-                    "--http-addr=127.0.0.1:5002".to_string(),
+                    "--http-addr=127.0.0.1:29502".to_string(),
                     format!(
                         "--log-dir={}/greptimedb-metasrv/logs",
                         self.sqlness_home.display()
@@ -396,15 +417,15 @@ impl Env {
             subcommand.to_string(),
             "start".to_string(),
         ];
-        args.push(format!("--rpc-addr=127.0.0.1:410{id}"));
-        args.push(format!("--http-addr=127.0.0.1:430{id}"));
+        args.push(format!("--rpc-addr=127.0.0.1:2941{id}"));
+        args.push(format!("--http-addr=127.0.0.1:2943{id}"));
         args.push(format!("--data-home={}", data_home.display()));
         args.push(format!("--log-dir={}/logs", data_home.display()));
         args.push(format!("--node-id={id}"));
         args.push("-c".to_string());
         args.push(self.generate_config_file(subcommand, db_ctx));
-        args.push("--metasrv-addrs=127.0.0.1:3002".to_string());
-        (args, format!("127.0.0.1:410{id}"))
+        args.push("--metasrv-addrs=127.0.0.1:29302".to_string());
+        (args, format!("127.0.0.1:2941{id}"))
     }
 
     fn flownode_start_args(
@@ -420,14 +441,14 @@ impl Env {
             subcommand.to_string(),
             "start".to_string(),
         ];
-        args.push(format!("--rpc-addr=127.0.0.1:680{id}"));
+        args.push(format!("--rpc-addr=127.0.0.1:2968{id}"));
         args.push(format!("--node-id={id}"));
         args.push(format!(
             "--log-dir={}/greptimedb-flownode/logs",
             sqlness_home.display()
         ));
-        args.push("--metasrv-addrs=127.0.0.1:3002".to_string());
-        (args, format!("127.0.0.1:680{id}"))
+        args.push("--metasrv-addrs=127.0.0.1:29302".to_string());
+        (args, format!("127.0.0.1:2968{id}"))
     }
 
     /// stop and restart the server process
