@@ -29,6 +29,7 @@ use serde_json::{Map, Number};
 use crate::etl::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, Result, TransformColumnNameMustBeUniqueSnafu,
     TransformEmptySnafu, TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
+    UnsupportedNumberTypeSnafu,
 };
 use crate::etl::field::{InputFieldInfo, OneInputOneOutputField};
 use crate::etl::transform::index::Index;
@@ -126,7 +127,7 @@ impl Transformer for GreptimeTransformer {
             if let Some(idx) = transform.index {
                 if idx == Index::Time {
                     match transform.real_fields.len() {
-                        //safety unwrap is fine here because we have checked the length of real_fields
+                        //Safety unwrap is fine here because we have checked the length of real_fields
                         1 => timestamp_columns
                             .push(transform.real_fields.first().unwrap().input_name()),
                         _ => {
@@ -224,15 +225,15 @@ fn resolve_schema(
         let api_value = GreptimeValue {
             value_data: Some(value_data),
         };
-        // safety unwrap is fine here because api_value is always valid
+        // Safety unwrap is fine here because api_value is always valid
         let value_column_data_type = proto_value_type(&api_value).unwrap();
-        // safety unwrap is fine here because index is always valid
+        // Safety unwrap is fine here because index is always valid
         let schema_column_data_type = schema_info.schema.get(index).unwrap().datatype();
         if value_column_data_type != schema_column_data_type {
             IdentifyPipelineColumnTypeMismatchSnafu {
                 column: column_schema.column_name,
-                original: schema_column_data_type.as_str_name(),
-                now: value_column_data_type.as_str_name(),
+                expected: schema_column_data_type.as_str_name(),
+                actual: value_column_data_type.as_str_name(),
             }
             .fail()
         } else {
@@ -277,7 +278,7 @@ fn resolve_number_schema(
             SemanticType::Field as i32,
         )
     } else {
-        unreachable!("unexpected number type");
+        return UnsupportedNumberTypeSnafu { value: n }.fail();
     };
     resolve_schema(
         index,
@@ -366,6 +367,13 @@ fn json_value_to_row(
     Ok(Row { values: row })
 }
 
+/// Identity pipeline for Greptime
+/// This pipeline will convert the input JSON array to Greptime Rows
+/// 1. The pipeline will add a default timestamp column to the schema
+/// 2. The pipeline not resolve NULL value
+/// 3. The pipeline assumes that the json format is fixed
+/// 4. The pipeline will return an error if the same column datatype is mismatched
+/// 5. The pipeline will analyze the schema of each json record and merge them to get the final schema.
 pub fn identity_pipeline(array: Vec<serde_json::Value>) -> Result<Rows> {
     let mut rows = Vec::with_capacity(array.len());
 
@@ -433,7 +441,7 @@ mod tests {
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
-                "Column type mismatch. column: score, original: FLOAT64, now: STRING".to_string(),
+                "Column datatype mismatch. For column: score, expected datatype: FLOAT64, actual datatype: STRING".to_string(),
             );
         }
         {
@@ -461,7 +469,7 @@ mod tests {
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
-                "Column type mismatch. column: score, original: FLOAT64, now: INT64".to_string(),
+                "Column datatype mismatch. For column: score, expected datatype: FLOAT64, actual datatype: INT64".to_string(),
             );
         }
         {
