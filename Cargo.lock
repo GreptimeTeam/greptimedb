@@ -8949,6 +8949,7 @@ dependencies = [
  "object-store",
  "once_cell",
  "paste",
+ "pretty_assertions",
  "prometheus",
  "promql",
  "promql-parser",

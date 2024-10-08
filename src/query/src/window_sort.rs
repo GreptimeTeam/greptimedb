@@ -19,7 +19,10 @@ use std::sync::Arc;
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
+use common_recordbatch::SendableRecordBatchStream;
 use common_time::Timestamp;
+use datafusion::execution::TaskContext;
+use datafusion::physical_plan::sorts::streaming_merge::streaming_merge;
 use datafusion::physical_plan::ExecutionPlan;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
@@ -28,6 +31,8 @@ use crate::error::{QueryExecutionSnafu, Result};
 
 /// A complex stream sort execution plan which accepts a list of `PartitionRange` and
 /// merge sort them whenever possible, and emit the sorted result as soon as possible.
+///
+/// internally, it use [`streaming_merge`] algorithm to merge multiple sorted ranges.
 #[derive(Debug, Clone)]
 pub struct WindowedSortExec {
     /// The input ranges indicate input stream will be composed of those ranges in given order
@@ -38,6 +43,10 @@ pub struct WindowedSortExec {
     overlap_counts: BTreeMap<(Timestamp, Timestamp), Vec<usize>>,
     /// record all existing timestamps in the input `ranges`
     all_exist_timestamps: BTreeSet<Timestamp>,
+    /// all currently possible still in range `PartitionRange`'s index
+    working_set: BTreeSet<usize>,
+    /// current range that we are working on
+    cur_range: Option<(Timestamp, Timestamp)>,
     input: Arc<dyn ExecutionPlan>,
 }
 
@@ -56,8 +65,20 @@ impl WindowedSortExec {
             ranges,
             overlap_counts,
             all_exist_timestamps,
+            working_set: BTreeSet::new(),
+            cur_range: None,
             input,
         })
+    }
+
+    /// During receiving partial-sorted RecordBatch, we need to update the working set which is the
+    /// `PartitionRange` we think those RecordBatch belongs to. And when we receive something outside of working set, we can merge results before whenever possible.
+    pub fn to_stream(
+        &self,
+        context: Arc<TaskContext>,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream> {
+        todo!()
     }
 }
 
@@ -101,6 +122,7 @@ fn range_difference(
     }
 }
 
+/// split input range by `split_by` range to one, two or three parts.
 fn split_range_by(
     input_range: &(Timestamp, Timestamp),
     input_parts: &[usize],
@@ -135,18 +157,36 @@ enum Action {
     Push((Timestamp, Timestamp), Vec<usize>),
 }
 
+/// return a map of non-overlapping ranges and their corresponding index(not PartitionRange.identifier) in the input ranges
 pub fn split_overlapping_ranges(
     ranges: &[PartitionRange],
 ) -> BTreeMap<(Timestamp, Timestamp), Vec<usize>> {
+    // invariant: the key ranges should not overlapping with each other by definition from `is_overlapping`
     let mut ret: BTreeMap<(Timestamp, Timestamp), Vec<usize>> = BTreeMap::new();
     for (idx, range) in ranges.iter().enumerate() {
         let key = (range.start, range.end);
-        let next = ret.range(key..).next();
-        let prev = ret.range(..=key).next_back();
         let mut actions = Vec::new();
-        for (range, parts) in [next, prev].into_iter().flatten() {
-            actions.extend(split_range_by(range, parts, &key, idx));
+        let mut untouched = vec![key];
+        // create a forward and backward iterator to find all overlapping ranges
+        // given that tuple is sorted in lexicographical order and promise to not overlap,
+        // since range is sorted that way, we can stop when we find a non-overlapping range
+        let forward_iter = ret
+            .range(key..)
+            .take_while(|(range, _)| is_overlapping(range, &key));
+        let backward_iter = ret
+            .range(..key)
+            .rev()
+            .take_while(|(range, _)| is_overlapping(range, &key));
+
+        for (range, parts) in forward_iter.chain(backward_iter) {
+            untouched = untouched
+                .iter()
+                .flat_map(|r| range_difference(r, range))
+                .collect();
+            let act = split_range_by(range, parts, &key, idx);
+            actions.extend(act.into_iter());
         }
+
         for action in actions {
             match action {
                 Action::Pop(range) => {
@@ -156,6 +196,11 @@ pub fn split_overlapping_ranges(
                     ret.insert(range, parts);
                 }
             }
+        }
+
+        // insert untouched ranges
+        for range in untouched {
+            ret.insert(range, vec![idx]);
         }
     }
     ret
@@ -179,8 +224,9 @@ pub fn check_lower_bound_monotonicity(ranges: &[PartitionRange]) -> bool {
 
 #[cfg(test)]
 mod test {
-    use super::*;
+    use pretty_assertions::assert_eq;
 
+    use super::*;
     #[test]
     fn test_overlapping() {
         let testcases = [
@@ -239,6 +285,7 @@ mod test {
     #[test]
     fn test_split() {
         let testcases = [
+            // no split
             (
                 (Timestamp::new_second(1), Timestamp::new_millisecond(1001)),
                 vec![0],
@@ -246,6 +293,7 @@ mod test {
                 1,
                 vec![],
             ),
+            // one part
             (
                 (Timestamp::new_second(1), Timestamp::new_millisecond(1001)),
                 vec![0],
@@ -291,6 +339,61 @@ mod test {
                     ),
                 ],
             ),
+            // two part
+            (
+                (Timestamp::new_second(1), Timestamp::new_millisecond(1002)),
+                vec![0],
+                (
+                    Timestamp::new_millisecond(1001),
+                    Timestamp::new_millisecond(1002),
+                ),
+                1,
+                vec![
+                    Action::Pop((Timestamp::new_second(1), Timestamp::new_millisecond(1002))),
+                    Action::Push(
+                        (
+                            Timestamp::new_millisecond(1001),
+                            Timestamp::new_millisecond(1002),
+                        ),
+                        vec![0, 1],
+                    ),
+                    Action::Push(
+                        (Timestamp::new_second(1), Timestamp::new_millisecond(1001)),
+                        vec![0],
+                    ),
+                ],
+            ),
+            // three part
+            (
+                (Timestamp::new_second(1), Timestamp::new_millisecond(1004)),
+                vec![0],
+                (
+                    Timestamp::new_millisecond(1001),
+                    Timestamp::new_millisecond(1002),
+                ),
+                1,
+                vec![
+                    Action::Pop((Timestamp::new_second(1), Timestamp::new_millisecond(1004))),
+                    Action::Push(
+                        (
+                            Timestamp::new_millisecond(1001),
+                            Timestamp::new_millisecond(1002),
+                        ),
+                        vec![0, 1],
+                    ),
+                    Action::Push(
+                        (Timestamp::new_second(1), Timestamp::new_millisecond(1001)),
+                        vec![0],
+                    ),
+                    Action::Push(
+                        (
+                            Timestamp::new_millisecond(1002),
+                            Timestamp::new_millisecond(1004),
+                        ),
+                        vec![0],
+                    ),
+                ],
+            ),
         ];
 
         for (range, parts, split_by, split_idx, expected) in testcases.iter() {
@@ -303,6 +406,129 @@ mod test {
                 split_by,
                 split_idx
             );
+        }
+    }
+
+    #[test]
+    fn test_split_overlap_range() {
+        let testcases = vec![
+            // simple one range
+            (
+                vec![PartitionRange {
+                    start: Timestamp::new_second(1),
+                    end: Timestamp::new_second(2),
+                    num_rows: 2,
+                    identifier: 0,
+                }],
+                BTreeMap::from_iter(
+                    vec![(
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        vec![0],
+                    )]
+                    .into_iter(),
+                ),
+            ),
+            // two overlapping range
+            (
+                vec![
+                    PartitionRange {
+                        start: Timestamp::new_second(1),
+                        end: Timestamp::new_second(2),
+                        num_rows: 2,
+                        identifier: 0,
+                    },
+                    PartitionRange {
+                        start: Timestamp::new_second(1),
+                        end: Timestamp::new_second(2),
+                        num_rows: 2,
+                        identifier: 1,
+                    },
+                ],
+                BTreeMap::from_iter(
+                    vec![(
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        vec![0, 1],
+                    )]
+                    .into_iter(),
+                ),
+            ),
+            (
+                vec![
+                    PartitionRange {
+                        start: Timestamp::new_second(1),
+                        end: Timestamp::new_second(3),
+                        num_rows: 2,
+                        identifier: 0,
+                    },
+                    PartitionRange {
+                        start: Timestamp::new_second(2),
+                        end: Timestamp::new_second(4),
+                        num_rows: 2,
+                        identifier: 1,
+                    },
+                ],
+                BTreeMap::from_iter(
+                    vec![
+                        (
+                            (Timestamp::new_second(1), Timestamp::new_second(2)),
+                            vec![0],
+                        ),
+                        (
+                            (Timestamp::new_second(2), Timestamp::new_second(3)),
+                            vec![0, 1],
+                        ),
+                        (
+                            (Timestamp::new_second(3), Timestamp::new_second(4)),
+                            vec![1],
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            ),
+            // three or more overlaping range
+            (
+                vec![
+                    PartitionRange {
+                        start: Timestamp::new_second(1),
+                        end: Timestamp::new_second(3),
+                        num_rows: 2,
+                        identifier: 0,
+                    },
+                    PartitionRange {
+                        start: Timestamp::new_second(2),
+                        end: Timestamp::new_second(4),
+                        num_rows: 2,
+                        identifier: 1,
+                    },
+                    PartitionRange {
+                        start: Timestamp::new_second(1),
+                        end: Timestamp::new_second(4),
+                        num_rows: 2,
+                        identifier: 2,
+                    },
+                ],
+                BTreeMap::from_iter(
+                    vec![
+                        (
+                            (Timestamp::new_second(1), Timestamp::new_second(2)),
+                            vec![0, 2],
+                        ),
+                        (
+                            (Timestamp::new_second(2), Timestamp::new_second(3)),
+                            vec![0, 1, 2],
+                        ),
+                        (
+                            (Timestamp::new_second(3), Timestamp::new_second(4)),
+                            vec![1, 2],
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            ),
+        ];
+
+        for (input, expected) in testcases {
+            assert_eq!(split_overlapping_ranges(&input), expected);
         }
     }
 }
