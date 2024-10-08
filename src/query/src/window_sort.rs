@@ -24,6 +24,7 @@ use common_time::Timestamp;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::sorts::streaming_merge::streaming_merge;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_physical_expr::PhysicalSortExpr;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
 
@@ -35,6 +36,8 @@ use crate::error::{QueryExecutionSnafu, Result};
 /// internally, it use [`streaming_merge`] algorithm to merge multiple sorted ranges.
 #[derive(Debug, Clone)]
 pub struct WindowedSortExec {
+    /// Physical sort expressions
+    expressions: Vec<PhysicalSortExpr>,
     /// The input ranges indicate input stream will be composed of those ranges in given order
     ranges: Vec<PartitionRange>,
     /// Overlapping Timestamp Ranges'index given the input ranges
@@ -51,7 +54,11 @@ pub struct WindowedSortExec {
 }
 
 impl WindowedSortExec {
-    pub fn try_new(ranges: Vec<PartitionRange>, input: Arc<dyn ExecutionPlan>) -> Result<Self> {
+    pub fn try_new(
+        expressions: Vec<PhysicalSortExpr>,
+        ranges: Vec<PartitionRange>,
+        input: Arc<dyn ExecutionPlan>,
+    ) -> Result<Self> {
         if !check_lower_bound_monotonicity(&ranges) {
             let plain_error = PlainError::new(
                 "Input `PartitionRange`s's lower bound is not monotonic non-decrease".to_string(),
@@ -62,6 +69,7 @@ impl WindowedSortExec {
         let all_exist_timestamps = find_all_exist_timestamps(&ranges);
         let overlap_counts = split_overlapping_ranges(&ranges);
         Ok(Self {
+            expressions,
             ranges,
             overlap_counts,
             all_exist_timestamps,
