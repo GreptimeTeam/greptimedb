@@ -19,7 +19,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use arrow::array::{
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
+};
 use arrow::compute::SortColumn;
+use arrow_schema::{DataType, SortOptions, TimeUnit};
 use async_stream::stream;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
@@ -188,13 +193,88 @@ impl WindowedSortStream {
     }
 }
 
+fn cmp_with_opts<T: Ord>(
+    a: &Option<T>,
+    b: &Option<T>,
+    opt: &Option<SortOptions>,
+) -> std::cmp::Ordering {
+    if let Some(opt) = opt {
+        if let (Some(a), Some(b)) = (a, b) {
+            if opt.descending {
+                b.cmp(a)
+            } else {
+                a.cmp(b)
+            }
+        } else {
+            match (opt.nulls_first, a.is_none()) {
+                (true, true) => std::cmp::Ordering::Less,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Greater,
+                (false, false) => std::cmp::Ordering::Less,
+            }
+        }
+    } else {
+        a.cmp(b)
+    }
+}
+
+/// find all successive runs in the input iterator
+fn find_successive_runs<T: Iterator<Item = (usize, Option<N>)>, N: Ord>(
+    iter: T,
+    sort_opts: &Option<SortOptions>,
+) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut last_value = None;
+    let mut cur_offset = 0;
+    for (idx, t) in iter {
+        if let Some(last_value) = &last_value {
+            if cmp_with_opts(last_value, &t, sort_opts) == std::cmp::Ordering::Greater {
+                // we found a boundary
+                let len = idx - cur_offset;
+                runs.push((cur_offset, len));
+                cur_offset = idx;
+            }
+        }
+        last_value = Some(t);
+    }
+    runs
+}
+
+macro_rules! cast_ts_array {
+    ($datatype:expr,$sort_column:expr, $($pat:pat => $pty:ty),+) => {
+        match $datatype{
+            $(
+                $pat => {
+                    let arr = $sort_column
+                        .values
+                        .as_any()
+                        .downcast_ref::<$pty>()
+                        .unwrap();
+                    let iter = arr.iter().enumerate();
+                    Ok(find_successive_runs(iter, &$sort_column.options))
+                }
+            )+
+        }
+    };
+}
+
 /// return a list of non-overlaping (offset, length) which represent sorted runs, and
 /// can be used to call [`DfRecordBatch::slice`] to get sorted runs
-fn get_sorted_runs(sort_column: SortColumn) -> Vec<(usize, usize)> {
-    let mut ret_runs = vec![];
-    // TODO: cast to timestamp array and get sorted runs
-    let mut cur_offset = 0;
-    todo!()
+fn get_sorted_runs(sort_column: SortColumn) -> datafusion_common::Result<Vec<(usize, usize)>> {
+    let ty = sort_column.values.data_type();
+    if let DataType::Timestamp(unit, _) = ty {
+        cast_ts_array!(
+            unit, sort_column,
+            TimeUnit::Second => TimestampSecondArray,
+            TimeUnit::Millisecond => TimestampMillisecondArray,
+            TimeUnit::Microsecond => TimestampMicrosecondArray,
+            TimeUnit::Nanosecond => TimestampNanosecondArray
+        )
+    } else {
+        Err(DataFusionError::Internal(format!(
+            "Unsupported sort column type: {ty}"
+        )))
+    }
 }
 
 /// Check if two timestamp ranges are overlapping, if only end of range1 is equal to start of range2 or verse visa, they are not overlapping.
