@@ -15,15 +15,21 @@
 //! A physical plan for window sort(Which is sorting multiple sorted ranges according to input `PartitionRange`).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
+use arrow::compute::SortColumn;
+use async_stream::stream;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
 use common_time::Timestamp;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::sorts::streaming_merge::streaming_merge;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_common::{internal_err, DataFusionError, ScalarValue};
 use datafusion_physical_expr::PhysicalSortExpr;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
@@ -32,12 +38,13 @@ use crate::error::{QueryExecutionSnafu, Result};
 
 /// A complex stream sort execution plan which accepts a list of `PartitionRange` and
 /// merge sort them whenever possible, and emit the sorted result as soon as possible.
+/// This sorting plan only accept sort by ts and will not sort by other fields.
 ///
-/// internally, it use [`streaming_merge`] algorithm to merge multiple sorted ranges.
+/// internally, it call [`streaming_merge`] multiple times to merge multiple sorted ranges
 #[derive(Debug, Clone)]
 pub struct WindowedSortExec {
-    /// Physical sort expressions
-    expressions: Vec<PhysicalSortExpr>,
+    /// Physical sort expressions(that is, sort by timestamp)
+    expression: PhysicalSortExpr,
     /// The input ranges indicate input stream will be composed of those ranges in given order
     ranges: Vec<PartitionRange>,
     /// Overlapping Timestamp Ranges'index given the input ranges
@@ -46,16 +53,12 @@ pub struct WindowedSortExec {
     overlap_counts: BTreeMap<(Timestamp, Timestamp), Vec<usize>>,
     /// record all existing timestamps in the input `ranges`
     all_exist_timestamps: BTreeSet<Timestamp>,
-    /// all currently possible still in range `PartitionRange`'s index
-    working_set: BTreeSet<usize>,
-    /// current range that we are working on
-    cur_range: Option<(Timestamp, Timestamp)>,
     input: Arc<dyn ExecutionPlan>,
 }
 
 impl WindowedSortExec {
     pub fn try_new(
-        expressions: Vec<PhysicalSortExpr>,
+        expression: PhysicalSortExpr,
         ranges: Vec<PartitionRange>,
         input: Arc<dyn ExecutionPlan>,
     ) -> Result<Self> {
@@ -69,12 +72,10 @@ impl WindowedSortExec {
         let all_exist_timestamps = find_all_exist_timestamps(&ranges);
         let overlap_counts = split_overlapping_ranges(&ranges);
         Ok(Self {
-            expressions,
+            expression,
             ranges,
             overlap_counts,
             all_exist_timestamps,
-            working_set: BTreeSet::new(),
-            cur_range: None,
             input,
         })
     }
@@ -85,9 +86,115 @@ impl WindowedSortExec {
         &self,
         context: Arc<TaskContext>,
         partition: usize,
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> datafusion_common::Result<SendableRecordBatchStream> {
+        if 0 != partition {
+            return Err(DataFusionError::Internal(format!(
+                "WindowedSortExec invalid partition {partition}"
+            )));
+        }
+
+        let input_stream: DfSendableRecordBatchStream =
+            self.input.execute(partition, context.clone())?;
+
+        // we need to build batch using `BatchBuilder` thus need large memory reservation
+        let reservation = MemoryConsumer::new(format!("WindowedSortExec[{partition}]"))
+            .register(&context.runtime_env().memory_pool);
+
         todo!()
     }
+}
+
+pub struct WindowedSortStream {
+    /// Accounts for memory used by buffered batches
+    reservation: MemoryReservation,
+    /// currently assembling RecordBatches, will be put to `sort_partition_rbs` when it's done
+    in_progress: Vec<DfRecordBatch>,
+    /// last value of the last RecordBatch in `in_progress`, use to found partial sorted run's boundary
+    last_value: Option<ScalarValue>,
+    /// Current working set of `PartitionRange` sorted RecordBatches
+    sort_partition_rbs: Vec<DfSendableRecordBatchStream>,
+    /// Merge-sorted result stream, should be polled to end before start a new merge sort again
+    merge_stream: Option<DfSendableRecordBatchStream>,
+    /// Current working set of `PartitionRange`, update when need to merge sort more PartitionRange
+    current_working_set: BTreeSet<usize>,
+    /// Current working set of `PartitionRange`'s timestamp range
+    ///
+    /// expand upper bound by checking if next range in `overlap_counts` contain at least two index and at least one of them are in `current_working_set`(Since one index is not enough to merge and can be emitted directly)
+    current_range: Option<(Timestamp, Timestamp)>,
+    /// input stream assumed reading in order of `PartitionRange`
+    input: DfSendableRecordBatchStream,
+    /// Physical sort expressions(that is, sort by timestamp)
+    expression: PhysicalSortExpr,
+    /// The input ranges indicate input stream will be composed of those ranges in given order
+    ranges: Vec<PartitionRange>,
+    /// Overlapping Timestamp Ranges'index given the input ranges
+    ///
+    /// note the key ranges here should not overlapping with each other
+    overlap_counts: BTreeMap<(Timestamp, Timestamp), Vec<usize>>,
+}
+
+impl WindowedSortStream {
+    pub fn poll_next_inner(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
+        // first check and send out the merge result
+        if let Some(merge_stream) = &mut self.merge_stream {
+            match merge_stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    return Poll::Ready(Some(Ok(batch)));
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    return Poll::Ready(Some(Err(e)));
+                }
+                Poll::Ready(None) => {
+                    self.merge_stream = None;
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
+                }
+            }
+        }
+        // then we get a new RecordBatch from input stream
+        let new_input_rb = match self.input.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                // split input rb to sorted runs
+                let sort_column = self.expression.evaluate_to_sort_column(&batch)?;
+                Some(batch)
+            }
+            Poll::Ready(Some(Err(e))) => {
+                return Poll::Ready(Some(Err(e)));
+            }
+            Poll::Ready(None) => {
+                // input stream is done, we need to merge sort the remaining working set
+                None
+            }
+            Poll::Pending => return Poll::Pending,
+        };
+
+        match (&mut self.last_value, new_input_rb) {
+            (Some(last_value), Some(new_input_rb)) => {
+                todo!("check if new_input_rb is in order");
+            }
+            (None, Some(new_input_rb)) => {
+                todo!("initialize last_value");
+            }
+            (_, None) => {
+                todo!("merge sort the rest of the working set");
+            }
+        }
+
+        todo!()
+    }
+}
+
+/// return a list of non-overlaping (offset, length) which represent sorted runs, and
+/// can be used to call [`DfRecordBatch::slice`] to get sorted runs
+fn get_sorted_runs(sort_column: SortColumn) -> Vec<(usize, usize)> {
+    let mut ret_runs = vec![];
+    // TODO: cast to timestamp array and get sorted runs
+    let mut cur_offset = 0;
+    todo!()
 }
 
 /// Check if two timestamp ranges are overlapping, if only end of range1 is equal to start of range2 or verse visa, they are not overlapping.
@@ -139,8 +246,6 @@ fn split_range_by(
 ) -> Vec<Action> {
     let mut ret = Vec::new();
     if is_overlapping(input_range, split_by) {
-        let (i_start, i_end) = *input_range;
-        let (s_start, s_end) = *split_by;
         let input_parts = input_parts.to_vec();
         let new_parts = {
             let mut new_parts = input_parts.clone();
@@ -232,6 +337,7 @@ pub fn check_lower_bound_monotonicity(ranges: &[PartitionRange]) -> bool {
 
 #[cfg(test)]
 mod test {
+    use chrono::format;
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -520,6 +626,45 @@ mod test {
                         (
                             (Timestamp::new_second(1), Timestamp::new_second(2)),
                             vec![0, 2],
+                        ),
+                        (
+                            (Timestamp::new_second(2), Timestamp::new_second(3)),
+                            vec![0, 1, 2],
+                        ),
+                        (
+                            (Timestamp::new_second(3), Timestamp::new_second(4)),
+                            vec![1, 2],
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            ),
+            (
+                vec![
+                    PartitionRange {
+                        start: Timestamp::new_second(1),
+                        end: Timestamp::new_second(3),
+                        num_rows: 2,
+                        identifier: 0,
+                    },
+                    PartitionRange {
+                        start: Timestamp::new_second(1),
+                        end: Timestamp::new_second(4),
+                        num_rows: 2,
+                        identifier: 1,
+                    },
+                    PartitionRange {
+                        start: Timestamp::new_second(2),
+                        end: Timestamp::new_second(4),
+                        num_rows: 2,
+                        identifier: 2,
+                    },
+                ],
+                BTreeMap::from_iter(
+                    vec![
+                        (
+                            (Timestamp::new_second(1), Timestamp::new_second(2)),
+                            vec![0, 1],
                         ),
                         (
                             (Timestamp::new_second(2), Timestamp::new_second(3)),
