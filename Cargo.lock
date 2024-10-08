@@ -2394,7 +2394,6 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "num_cpus",
- "rate_limit",
  "rskafka",
  "rustls 0.23.13",
  "rustls-native-certs 0.7.3",
@@ -9147,12 +9146,6 @@ dependencies = [
  "num-traits",
  "rand",
 ]
-
-[[package]]
-name = "rate_limit"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22b369104f6b45d4a91867e59b5a9c9fec8bc1d36ba7a3ac7eb60876ae6c1fca"
 
 [[package]]
 name = "raw-cpuid"

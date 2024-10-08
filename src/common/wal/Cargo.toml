@@ -26,7 +26,6 @@ serde.workspace = true
 serde_with.workspace = true
 snafu.workspace = true
 tokio.workspace = true
-rate_limit = "0.1.1"
 
 [dev-dependencies]
 serde_json.workspace = true
