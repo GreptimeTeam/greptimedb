@@ -149,7 +149,7 @@ impl UnorderedScan {
         }
     }
 
-    // TODO(yingwen): Move them.
+    // TODO(yingwen): Move them or refactor them to collect metrics later.
     /// Scans memtable ranges at `index`.
     pub(crate) fn scan_mem_ranges<'a>(
         stream_ctx: &'a StreamContext,
@@ -165,7 +165,7 @@ impl UnorderedScan {
             for range in ranges {
                 let build_reader_start = Instant::now();
                 let iter = range.build_iter().map_err(BoxedError::new).context(ExternalSnafu)?;
-                metrics.build_reader_cost = build_reader_start.elapsed();
+                metrics.build_reader_cost += build_reader_start.elapsed();
 
                 let mut source = Source::Iter(iter);
                 while let Some(batch) =
