@@ -47,6 +47,7 @@ impl PartitionMetricsInner {
         if self.metrics.total_cost.is_zero() {
             self.metrics.total_cost = self.query_start.elapsed();
         }
+        self.metrics.build_parts_cost = self.reader_metrics.build_cost;
     }
 }
 

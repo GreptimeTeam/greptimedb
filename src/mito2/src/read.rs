@@ -58,7 +58,6 @@ use crate::error::{
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::prune::PruneReader;
-use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -739,8 +738,7 @@ impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
 pub(crate) struct ScannerMetrics {
     /// Duration to prepare the scan task.
     prepare_scan_cost: Duration,
-    // TODO(yingwen): remove build part cost.
-    /// Duration to build parts.
+    /// Duration to build file ranges.
     build_parts_cost: Duration,
     /// Duration to build the (merge) reader.
     build_reader_cost: Duration,
@@ -760,51 +758,9 @@ pub(crate) struct ScannerMetrics {
     num_mem_ranges: usize,
     /// Number of file ranges scanned.
     num_file_ranges: usize,
-    // TODO(yingwen): Remove filter metrics.
-    /// Filter related metrics for readers.
-    filter_metrics: ReaderFilterMetrics,
 }
 
 impl ScannerMetrics {
-    /// Sets and observes metrics on initializing parts.
-    fn observe_init_part(&mut self, build_parts_cost: Duration, reader_metrics: &ReaderMetrics) {
-        self.build_parts_cost = build_parts_cost;
-
-        // Observes metrics.
-        READ_STAGE_ELAPSED
-            .with_label_values(&["prepare_scan"])
-            .observe(self.prepare_scan_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["build_parts"])
-            .observe(self.build_parts_cost.as_secs_f64());
-
-        // We only call this once so we overwrite it directly.
-        self.filter_metrics = reader_metrics.filter_metrics;
-        // Observes filter metrics.
-        self.filter_metrics.observe();
-    }
-
-    /// Observes metrics on scanner finish.
-    fn observe_metrics_on_finish(&self) {
-        READ_STAGE_ELAPSED
-            .with_label_values(&["build_reader"])
-            .observe(self.build_reader_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["convert_rb"])
-            .observe(self.convert_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["scan"])
-            .observe(self.scan_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["yield"])
-            .observe(self.yield_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["total"])
-            .observe(self.total_cost.as_secs_f64());
-        READ_ROWS_RETURN.observe(self.num_rows as f64);
-        READ_BATCHES_RETURN.observe(self.num_batches as f64);
-    }
-
     /// Observes metrics.
     fn observe_metrics(&self) {
         READ_STAGE_ELAPSED
@@ -845,7 +801,6 @@ impl ScannerMetrics {
         self.num_rows += other.num_rows;
         self.num_mem_ranges += other.num_mem_ranges;
         self.num_file_ranges += other.num_file_ranges;
-        self.filter_metrics.merge_from(&other.filter_metrics);
     }
 }
 
