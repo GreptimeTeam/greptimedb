@@ -806,10 +806,7 @@ impl ScanInput {
     pub(crate) fn predicate(&self) -> Option<Predicate> {
         self.predicate.clone()
     }
-}
 
-#[cfg(test)]
-impl ScanInput {
     /// Returns number of memtables to scan.
     pub(crate) fn num_memtables(&self) -> usize {
         self.memtables.len()
@@ -819,7 +816,10 @@ impl ScanInput {
     pub(crate) fn num_files(&self) -> usize {
         self.files.len()
     }
+}
 
+#[cfg(test)]
+impl ScanInput {
     /// Returns SST file ids to scan.
     pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
         self.files.iter().map(|file| file.file_id()).collect()
@@ -970,15 +970,10 @@ impl ScanPartList {
 }
 
 /// Context shared by different streams from a scanner.
-/// It contains the input and distributes input to multiple parts
-/// to scan.
+/// It contains the input and ranges to scan.
 pub(crate) struct StreamContext {
     /// Input memtables and files.
     pub(crate) input: ScanInput,
-    /// Parts to scan and the cost to build parts.
-    /// The scanner builds parts to scan from the input lazily.
-    /// The mutex is used to ensure the parts are only built once.
-    pub(crate) parts: Mutex<(ScanPartList, Duration)>,
     /// Metadata for partition ranges.
     pub(crate) ranges: Vec<RangeMeta>,
     /// Lists of range builders.
@@ -994,12 +989,11 @@ impl StreamContext {
     pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
-        READ_SST_COUNT.observe(input.files.len() as f64);
-        let range_builders = RangeBuilderList::new(input.memtables.len(), input.files.len());
+        READ_SST_COUNT.observe(input.num_files() as f64);
+        let range_builders = RangeBuilderList::new(input.num_memtables(), input.num_files());
 
         Self {
             input,
-            parts: Mutex::new((ScanPartList::default(), Duration::default())),
             ranges,
             range_builders,
             query_start,
@@ -1010,12 +1004,11 @@ impl StreamContext {
     pub(crate) fn unordered_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::unordered_scan_ranges(&input);
-        READ_SST_COUNT.observe(input.files.len() as f64);
-        let range_builders = RangeBuilderList::new(input.memtables.len(), input.files.len());
+        READ_SST_COUNT.observe(input.num_files() as f64);
+        let range_builders = RangeBuilderList::new(input.num_memtables(), input.num_files());
 
         Self {
             input,
-            parts: Mutex::new((ScanPartList::default(), Duration::default())),
             ranges,
             range_builders,
             query_start,
@@ -1024,7 +1017,7 @@ impl StreamContext {
 
     /// Returns true if the index refers to a memtable.
     pub(crate) fn is_mem_range_index(&self, index: RowGroupIndex) -> bool {
-        self.input.memtables.len() > index.index
+        self.input.num_memtables() > index.index
     }
 
     /// Creates file ranges to scan.
@@ -1063,25 +1056,25 @@ impl StreamContext {
     }
 
     /// Format the context for explain.
-    pub(crate) fn format_for_explain(
-        &self,
-        t: DisplayFormatType,
-        f: &mut fmt::Formatter,
-    ) -> fmt::Result {
-        match self.parts.try_lock() {
-            Ok(inner) => match t {
-                DisplayFormatType::Default => write!(
-                    f,
-                    "partition_count={} ({} memtable ranges, {} file {} ranges)",
-                    inner.0.len(),
-                    inner.0.num_mem_ranges(),
-                    inner.0.num_files(),
-                    inner.0.num_file_ranges()
-                )?,
-                DisplayFormatType::Verbose => write!(f, "{:?}", inner.0)?,
-            },
-            Err(_) => write!(f, "<locked>")?,
+    pub(crate) fn format_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let (mut num_mem_ranges, mut num_file_ranges) = (0, 0);
+        for range_meta in &self.ranges {
+            for idx in &range_meta.row_group_indices {
+                if self.is_mem_range_index(*idx) {
+                    num_mem_ranges += 1;
+                } else {
+                    num_file_ranges += 1;
+                }
+            }
         }
+        write!(
+            f,
+            "partition_count={} ({} memtable ranges, {} file {} ranges)",
+            self.ranges.len(),
+            num_mem_ranges,
+            self.input.num_files(),
+            num_file_ranges,
+        )?;
         if let Some(selector) = &self.input.series_row_selector {
             write!(f, ", selector={}", selector)?;
         }
