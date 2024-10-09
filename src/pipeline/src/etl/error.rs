@@ -452,11 +452,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Failed to coerce complex value, not supported"))]
-    CoerceComplexType {
-        #[snafu(implicit)]
-        location: Location,
-    },
     #[snafu(display("Failed to coerce value: {msg}"))]
     CoerceIncompatibleTypes {
         msg: String,
