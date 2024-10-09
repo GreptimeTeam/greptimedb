@@ -21,22 +21,17 @@ use std::time::Instant;
 use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
-use common_telemetry::debug;
+use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
 use snafu::ResultExt;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
 
-use crate::cache::CacheManager;
-use crate::error::Result;
-use crate::read::compat::CompatBatch;
-use crate::read::projection::ProjectionMapper;
+use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
-use crate::read::{Batch, ScannerMetrics, Source};
-use crate::sst::parquet::reader::ReaderMetrics;
+use crate::read::{Batch, ScannerMetrics};
 
 /// Scans a region without providing any output ordering guarantee.
 ///
@@ -83,42 +78,6 @@ impl UnorderedScan {
         Ok(stream)
     }
 
-    // /// Fetch a batch from the source and convert it into a record batch.
-    // async fn fetch_from_source(
-    //     source: &mut Source,
-    //     mapper: &ProjectionMapper,
-    //     cache: Option<&CacheManager>,
-    //     compat_batch: Option<&CompatBatch>,
-    //     metrics: &mut ScannerMetrics,
-    // ) -> common_recordbatch::error::Result<Option<RecordBatch>> {
-    //     let start = Instant::now();
-
-    //     let Some(mut batch) = source
-    //         .next_batch()
-    //         .await
-    //         .map_err(BoxedError::new)
-    //         .context(ExternalSnafu)?
-    //     else {
-    //         metrics.scan_cost += start.elapsed();
-
-    //         return Ok(None);
-    //     };
-
-    //     if let Some(compat) = compat_batch {
-    //         batch = compat
-    //             .compat_batch(batch)
-    //             .map_err(BoxedError::new)
-    //             .context(ExternalSnafu)?;
-    //     }
-    //     metrics.scan_cost += start.elapsed();
-
-    //     let convert_start = Instant::now();
-    //     let record_batch = mapper.convert(&batch, cache)?;
-    //     metrics.convert_cost += convert_start.elapsed();
-
-    //     Ok(Some(record_batch))
-    // }
-
     /// Scans a [PartitionRange] by its `identifier` and returns a stream.
     fn scan_partition_range(
         stream_ctx: Arc<StreamContext>,
@@ -144,109 +103,47 @@ impl UnorderedScan {
         }
     }
 
-    // // TODO(yingwen): Move them or refactor them to collect metrics later.
-    // /// Scans memtable ranges at `index`.
-    // pub(crate) fn scan_mem_ranges<'a>(
-    //     stream_ctx: &'a StreamContext,
-    //     index: RowGroupIndex,
-    //     metrics: &'a mut ScannerMetrics,
-    // ) -> impl Stream<Item = common_recordbatch::error::Result<RecordBatch>> + 'a {
-    //     try_stream! {
-    //         let mapper = &stream_ctx.input.mapper;
-    //         let cache = stream_ctx.input.cache_manager.as_deref();
-    //         let ranges = stream_ctx.build_mem_ranges(index);
-    //         metrics.num_mem_ranges += ranges.len();
-    //         for range in ranges {
-    //             let build_reader_start = Instant::now();
-    //             let iter = range.build_iter().map_err(BoxedError::new).context(ExternalSnafu)?;
-    //             metrics.build_reader_cost += build_reader_start.elapsed();
-
-    //             let mut source = Source::Iter(iter);
-    //             while let Some(batch) =
-    //                 Self::fetch_from_source(&mut source, mapper, cache, None, metrics).await?
-    //             {
-    //                 metrics.num_batches += 1;
-    //                 metrics.num_rows += batch.num_rows();
-    //                 let yield_start = Instant::now();
-    //                 yield batch;
-    //                 metrics.yield_cost += yield_start.elapsed();
-    //             }
-    //         }
-    //     }
-    // }
-
-    // /// Scans file ranges at `index`.
-    // pub(crate) fn scan_file_ranges<'a>(
-    //     stream_ctx: &'a StreamContext,
-    //     index: RowGroupIndex,
-    //     reader_metrics: &'a mut ReaderMetrics,
-    //     metrics: &'a mut ScannerMetrics,
-    // ) -> impl Stream<Item = common_recordbatch::error::Result<RecordBatch>> + 'a {
-    //     try_stream! {
-    //         let mapper = &stream_ctx.input.mapper;
-    //         let cache = stream_ctx.input.cache_manager.as_deref();
-    //         let ranges= stream_ctx
-    //             .build_file_ranges(index, reader_metrics)
-    //             .await
-    //             .map_err(BoxedError::new)
-    //             .context(ExternalSnafu)?;
-    //         metrics.num_file_ranges += ranges.len();
-    //         for range in ranges {
-    //             let build_reader_start = Instant::now();
-    //             let reader = range
-    //                 .reader(None)
-    //                 .await
-    //                 .map_err(BoxedError::new)
-    //                 .context(ExternalSnafu)?;
-    //             metrics.build_reader_cost += build_reader_start.elapsed();
-    //             let compat_batch = range.compat_batch();
-    //             let mut source = Source::PruneReader(reader);
-    //             while let Some(batch) =
-    //                 Self::fetch_from_source(&mut source, mapper, cache, compat_batch, metrics)
-    //                     .await?
-    //             {
-    //                 metrics.num_batches += 1;
-    //                 metrics.num_rows += batch.num_rows();
-    //                 let yield_start = Instant::now();
-    //                 yield batch;
-    //                 metrics.yield_cost += yield_start.elapsed();
-    //             }
-    //             if let Source::PruneReader(mut reader) = source {
-    //                 reader_metrics.merge_from(reader.metrics());
-    //             }
-    //         }
-    //     }
-    // }
-
     fn scan_partition_impl(
         &self,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
-        let part_metrics = PartitionMetrics::from_metrics(ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
-            ..Default::default()
-        });
+        if partition >= self.properties.partitions.len() {
+            return Err(BoxedError::new(
+                PartitionOutOfRangeSnafu {
+                    given: partition,
+                    all: self.properties.partitions.len(),
+                }
+                .build(),
+            ));
+        }
+
+        let part_metrics = PartitionMetrics::new(
+            self.stream_ctx.input.mapper.metadata().region_id,
+            partition,
+            "UnorderedScan",
+            self.stream_ctx.query_start,
+            ScannerMetrics {
+                prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
+                ..Default::default()
+            },
+        );
         let stream_ctx = self.stream_ctx.clone();
-        let ranges_opt = self.properties.partitions.get(partition).cloned();
+        let part_ranges = self.properties.partitions[partition].clone();
 
         let stream = try_stream! {
-            let first_poll = stream_ctx.query_start.elapsed();
-            let Some(part_ranges) = ranges_opt else {
-                return;
-            };
+            part_metrics.on_first_poll();
 
-            let mut metrics = ScannerMetrics::default();
-            let reader_metrics = ReaderMetrics::default();
-            let mut fetch_start = Instant::now();
             let cache = stream_ctx.input.cache_manager.as_deref();
             // Scans each part.
             for part_range in part_ranges {
+                let mut metrics = ScannerMetrics::default();
+                let mut fetch_start = Instant::now();
+
                 let stream = Self::scan_partition_range(
                     stream_ctx.clone(),
                     part_range.identifier,
                     part_metrics.clone(),
                 );
-                // TODO(yingwen): metrics and convert.
                 for await batch in stream {
                     let batch = batch.map_err(BoxedError::new).context(ExternalSnafu)?;
                     metrics.scan_cost += fetch_start.elapsed();
@@ -262,17 +159,12 @@ impl UnorderedScan {
 
                     fetch_start = Instant::now();
                 }
+
+                metrics.scan_cost += fetch_start.elapsed();
+                part_metrics.merge_metrics(&metrics);
             }
 
-            // TODO(yingwen): remove this.
-            // reader_metrics.observe_rows("unordered_scan_files");
-            metrics.total_cost = stream_ctx.query_start.elapsed();
-            metrics.observe_metrics_on_finish();
-            let mapper = &stream_ctx.input.mapper;
-            debug!(
-                "Unordered scan partition {} finished, region_id: {}, metrics: {:?}, reader_metrics: {:?}, first_poll: {:?}",
-                partition, mapper.metadata().region_id, metrics, reader_metrics, first_poll,
-            );
+            part_metrics.on_finish();
         };
         let stream = Box::pin(RecordBatchStreamWrapper::new(
             self.stream_ctx.input.mapper.output_schema(),

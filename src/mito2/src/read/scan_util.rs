@@ -18,7 +18,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
+use common_telemetry::debug;
 use futures::Stream;
+use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::read::range::RowGroupIndex;
@@ -27,13 +29,36 @@ use crate::read::{Batch, ScannerMetrics, Source};
 use crate::sst::parquet::reader::ReaderMetrics;
 
 struct PartitionMetricsInner {
+    region_id: RegionId,
+    /// Index of the partition to scan.
+    partition: usize,
+    /// Label to distinguish different scan operation.
+    scanner_type: &'static str,
+    /// Query start time.
+    query_start: Instant,
+    /// Elapsed time before the first poll operation.
+    first_poll: Duration,
     metrics: ScannerMetrics,
     reader_metrics: ReaderMetrics,
 }
 
+impl PartitionMetricsInner {
+    fn on_finish(&mut self) {
+        if self.metrics.total_cost.is_zero() {
+            self.metrics.total_cost = self.query_start.elapsed();
+        }
+    }
+}
+
 impl Drop for PartitionMetricsInner {
     fn drop(&mut self) {
+        self.on_finish();
         self.metrics.observe_metrics();
+
+        debug!(
+            "{} finished, region_id: {}, partition: {}, first_poll: {:?}, metrics: {:?}, reader_metrics: {:?}",
+            self.scanner_type, self.region_id, self.partition, self.first_poll, self.metrics, self.reader_metrics
+        );
     }
 }
 
@@ -42,12 +67,28 @@ impl Drop for PartitionMetricsInner {
 pub(crate) struct PartitionMetrics(Arc<Mutex<PartitionMetricsInner>>);
 
 impl PartitionMetrics {
-    pub(crate) fn from_metrics(metrics: ScannerMetrics) -> Self {
+    pub(crate) fn new(
+        region_id: RegionId,
+        partition: usize,
+        scanner_type: &'static str,
+        query_start: Instant,
+        metrics: ScannerMetrics,
+    ) -> Self {
         let inner = PartitionMetricsInner {
+            region_id,
+            partition,
+            scanner_type,
+            query_start,
+            first_poll: Duration::default(),
             metrics,
             reader_metrics: ReaderMetrics::default(),
         };
         Self(Arc::new(Mutex::new(inner)))
+    }
+
+    pub(crate) fn on_first_poll(&self) {
+        let mut inner = self.0.lock().unwrap();
+        inner.first_poll = inner.query_start.elapsed();
     }
 
     pub(crate) fn inc_num_mem_ranges(&self, num: usize) {
@@ -73,6 +114,11 @@ impl PartitionMetrics {
     pub(crate) fn merge_reader_metrics(&self, metrics: &ReaderMetrics) {
         let mut inner = self.0.lock().unwrap();
         inner.reader_metrics.merge_from(metrics);
+    }
+
+    pub(crate) fn on_finish(&self) {
+        let mut inner = self.0.lock().unwrap();
+        inner.on_finish();
     }
 }
 
@@ -128,7 +174,6 @@ pub(crate) fn scan_file_ranges(
             }
         }
 
-        // TODO(yingwen): Should we report metrics here?
         // Reports metrics.
         reader_metrics.observe_rows(read_type);
         part_metrics.merge_reader_metrics(&reader_metrics);

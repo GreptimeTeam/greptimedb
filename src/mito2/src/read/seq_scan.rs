@@ -23,7 +23,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
-use common_telemetry::{debug, tracing};
+use common_telemetry::tracing;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
@@ -59,6 +59,8 @@ pub struct SeqScan {
 impl SeqScan {
     /// Creates a new [SeqScan].
     pub(crate) fn new(input: ScanInput) -> Self {
+        // TODO(yingwen): Set permits according to partition num. But we need to support file
+        // level parallelism.
         let parallelism = input.parallelism.parallelism.max(1);
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
@@ -95,10 +97,16 @@ impl SeqScan {
 
     /// Builds a [BoxedBatchReader] from sequential scan for compaction.
     pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
-        let part_metrics = PartitionMetrics::from_metrics(ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
-            ..Default::default()
-        });
+        let part_metrics = PartitionMetrics::new(
+            self.stream_ctx.input.mapper.metadata().region_id,
+            0,
+            get_scanner_type(self.compaction),
+            self.stream_ctx.query_start,
+            ScannerMetrics {
+                prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
+                ..Default::default()
+            },
+        );
         debug_assert_eq!(1, self.properties.partitions.len());
         let partition_ranges = &self.properties.partitions[0];
 
@@ -177,7 +185,6 @@ impl SeqScan {
 
     /// Scans the given partition when the part list is set properly.
     /// Otherwise the returned stream might not contains any data.
-    // TODO: refactor out `uncached_scan_part_impl`.
     fn scan_partition_impl(
         &self,
         partition: usize,
@@ -196,14 +203,20 @@ impl SeqScan {
         let semaphore = self.semaphore.clone();
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
-
-        let first_poll = stream_ctx.query_start.elapsed();
-        let part_metrics = PartitionMetrics::from_metrics(ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
-            ..Default::default()
-        });
+        let part_metrics = PartitionMetrics::new(
+            self.stream_ctx.input.mapper.metadata().region_id,
+            partition,
+            get_scanner_type(self.compaction),
+            stream_ctx.query_start,
+            ScannerMetrics {
+                prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
+                ..Default::default()
+            },
+        );
 
         let stream = try_stream! {
+            part_metrics.on_first_poll();
+
             // Scans each part.
             for part_range in partition_ranges {
                 let mut sources = Vec::new();
@@ -223,7 +236,6 @@ impl SeqScan {
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?
                 {
-                    // TODO(yingwen): Only one place observes this.
                     metrics.scan_cost += fetch_start.elapsed();
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
@@ -238,20 +250,10 @@ impl SeqScan {
                     fetch_start = Instant::now();
                 }
                 metrics.scan_cost += fetch_start.elapsed();
-                metrics.total_cost = stream_ctx.query_start.elapsed();
-
                 part_metrics.merge_metrics(&metrics);
-
-                // TODO(yingwen): log in drop part metrics?
-                debug!(
-                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}, first_poll: {:?}, compaction: {}",
-                    stream_ctx.input.mapper.metadata().region_id,
-                    partition,
-                    metrics,
-                    first_poll,
-                    compaction,
-                );
             }
+
+            part_metrics.on_finish();
         };
 
         let stream = Box::pin(RecordBatchStreamWrapper::new(
@@ -340,6 +342,15 @@ impl SeqScan {
     /// Returns the input.
     pub(crate) fn input(&self) -> &ScanInput {
         &self.stream_ctx.input
+    }
+}
+
+/// Returns the scanner type.
+fn get_scanner_type(compaction: bool) -> &'static str {
+    if compaction {
+        "SeqScan(compaction)"
+    } else {
+        "SeqScan"
     }
 }
 
