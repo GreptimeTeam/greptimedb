@@ -39,7 +39,7 @@ pub enum Priority {
 
 pub struct Job {
     /// Job type.
-    r#type: &'static str,
+    job_type: &'static str,
     /// Job priority.
     priority: Priority,
     /// Async task to schedule.
@@ -48,12 +48,12 @@ pub struct Job {
 
 impl Job {
     pub fn new(
-        r#type: &'static str,
+        job_type: &'static str,
         priority: Priority,
         task: Pin<Box<dyn Future<Output = ()> + Send>>,
     ) -> Self {
         Self {
-            r#type,
+            job_type,
             priority,
             task,
         }
@@ -62,7 +62,7 @@ impl Job {
     #[cfg(test)]
     pub fn new_test(task: Pin<Box<dyn Future<Output = ()> + Send>>) -> Self {
         Self {
-            r#type: "test",
+            job_type: "test",
             priority: Priority::High,
             task,
         }
@@ -120,7 +120,7 @@ impl LocalScheduler {
                             break;
                         }
                         Some(job) = receiver_stream.next() =>{
-                            let _timer = SCHEDULER_TASK_ELAPSED.with_label_values(&[job.r#type]).start_timer();
+                            let _timer = SCHEDULER_TASK_ELAPSED.with_label_values(&[job.job_type]).start_timer();
                             job.task.await;
                         }
                     }
@@ -130,7 +130,7 @@ impl LocalScheduler {
                     // recv_async waits until all sender's been dropped.
                     while let Some(job) = receiver_stream.next().await {
                         let _timer = SCHEDULER_TASK_ELAPSED
-                            .with_label_values(&[job.r#type])
+                            .with_label_values(&[job.job_type])
                             .start_timer();
                         job.task.await;
                     }

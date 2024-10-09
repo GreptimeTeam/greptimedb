@@ -364,7 +364,7 @@ impl CompactionScheduler {
         self.scheduler
             .schedule(Job::new(
                 "compaction",
-                Priority::Low(Some(Duration::from_secs(60))),
+                Priority::Low(Some(Duration::from_secs(5 * 60))),
                 Box::pin(async move {
                     local_compaction_task.run().await;
                 }),

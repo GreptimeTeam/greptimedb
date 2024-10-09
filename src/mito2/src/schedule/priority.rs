@@ -55,21 +55,6 @@ impl<T> Sender<T> {
             .try_send((deadline.map(|d| Instant::now().add(d)), item))
             .map_err(map_send_error)
     }
-
-    /// Sends a high priority item waiting for the channel to be ready.
-    /// Returns `Err` if the channel is closed.
-    pub async fn send_high(&self, item: T) -> error::Result<()> {
-        self.tx_high.send(item).await.map_err(map_send_error)
-    }
-
-    /// Sends a low priority with optional deadline waiting for the channel to be ready.
-    /// Returns `Err` if the channel is closed.
-    pub async fn send_low(&self, item: T, deadline: Option<Duration>) -> error::Result<()> {
-        self.tx_low
-            .send((deadline.map(|d| Instant::now().add(d)), item))
-            .await
-            .map_err(map_send_error)
-    }
 }
 
 fn map_send_error<E>(e: E) -> error::Error
