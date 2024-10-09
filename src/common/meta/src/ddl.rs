@@ -31,6 +31,7 @@ use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 use crate::{ClusterId, DatanodeId};
 
+pub mod alter_database;
 pub mod alter_logical_tables;
 pub mod alter_table;
 pub mod create_database;

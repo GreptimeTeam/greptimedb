@@ -23,6 +23,7 @@ use derive_builder::Builder;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::TableId;
 
+use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_database::CreateDatabaseProcedure;
@@ -126,6 +127,7 @@ impl DdlManager {
             CreateLogicalTablesProcedure,
             CreateViewProcedure,
             CreateFlowProcedure,
+            AlterDatabaseProcedure,
             AlterTableProcedure,
             AlterLogicalTablesProcedure,
             DropTableProcedure,
