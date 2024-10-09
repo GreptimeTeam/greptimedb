@@ -14,6 +14,9 @@
 
 //! A physical plan for window sort(Which is sorting multiple sorted ranges according to input `PartitionRange`).
 
+// TODO(discord9): remove allow(unused) after implementation is done
+#![allow(unused)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,18 +27,20 @@ use arrow::array::{
     TimestampNanosecondArray, TimestampSecondArray,
 };
 use arrow::compute::SortColumn;
-use arrow_schema::{DataType, SortOptions, TimeUnit};
+use arrow_schema::{DataType, SchemaRef, SortOptions, TimeUnit};
 use async_stream::stream;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
+use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
-use datafusion::execution::TaskContext;
+use datafusion::execution::{RecordBatchStream, TaskContext};
 use datafusion::physical_plan::sorts::streaming_merge::streaming_merge;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::{internal_err, DataFusionError, ScalarValue};
 use datafusion_physical_expr::PhysicalSortExpr;
+use futures::Stream;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
 
@@ -91,7 +96,7 @@ impl WindowedSortExec {
         &self,
         context: Arc<TaskContext>,
         partition: usize,
-    ) -> datafusion_common::Result<SendableRecordBatchStream> {
+    ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
         if 0 != partition {
             return Err(DataFusionError::Internal(format!(
                 "WindowedSortExec invalid partition {partition}"
@@ -101,11 +106,19 @@ impl WindowedSortExec {
         let input_stream: DfSendableRecordBatchStream =
             self.input.execute(partition, context.clone())?;
 
-        // we need to build batch using `BatchBuilder` thus need large memory reservation
+        // we need to build batch thus might need large memory reservation
         let reservation = MemoryConsumer::new(format!("WindowedSortExec[{partition}]"))
             .register(&context.runtime_env().memory_pool);
 
-        todo!()
+        let df_stream = Box::pin(WindowedSortStream::new(
+            reservation,
+            input_stream,
+            self.expression.clone(),
+            self.ranges.clone(),
+            self.overlap_counts.clone(),
+        )) as _;
+
+        Ok(df_stream)
     }
 }
 
@@ -114,7 +127,7 @@ pub struct WindowedSortStream {
     reservation: MemoryReservation,
     /// currently assembling RecordBatches, will be put to `sort_partition_rbs` when it's done
     in_progress: Vec<DfRecordBatch>,
-    /// last value of the last RecordBatch in `in_progress`, use to found partial sorted run's boundary
+    /// last value of the last input RecordBatch in `in_progress`, use to found partial sorted run's boundary
     last_value: Option<ArrayRef>,
     /// Current working set of `PartitionRange` sorted RecordBatches
     sort_partition_rbs: Vec<DfSendableRecordBatchStream>,
@@ -128,6 +141,8 @@ pub struct WindowedSortStream {
     current_range: Option<(Timestamp, Timestamp)>,
     /// input stream assumed reading in order of `PartitionRange`
     input: DfSendableRecordBatchStream,
+    /// sOutput Schema, which is the same as input schema, since this is a sort plan
+    schema: SchemaRef,
     /// Physical sort expressions(that is, sort by timestamp)
     expression: PhysicalSortExpr,
     /// The input ranges indicate input stream will be composed of those ranges in given order
@@ -139,6 +154,34 @@ pub struct WindowedSortStream {
 }
 
 impl WindowedSortStream {
+    pub fn new(
+        reservation: MemoryReservation,
+        input: DfSendableRecordBatchStream,
+        expression: PhysicalSortExpr,
+        ranges: Vec<PartitionRange>,
+        overlap_counts: BTreeMap<(Timestamp, Timestamp), Vec<usize>>,
+    ) -> Self {
+        Self {
+            reservation,
+            in_progress: Vec::new(),
+            last_value: None,
+            sort_partition_rbs: Vec::new(),
+            merge_stream: None,
+            current_working_set: BTreeSet::new(),
+            current_range: None,
+            schema: input.schema(),
+            input,
+            expression,
+            ranges,
+            overlap_counts,
+        }
+    }
+}
+
+impl WindowedSortStream {
+    /// The core logic of merging sort multiple sorted ranges
+    ///
+    /// We try to maximize the number of sorted runs we can merge in one go, and emit the result as soon as possible.
     pub fn poll_next_inner(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -160,6 +203,7 @@ impl WindowedSortStream {
                 }
             }
         }
+
         // then we get a new RecordBatch from input stream
         let new_input_rbs = match self.input.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
@@ -189,8 +233,11 @@ impl WindowedSortStream {
             Poll::Pending => return Poll::Pending,
         };
 
+        // The core logic to eargerly merge sort the working set
         match (&mut self.last_value, new_input_rbs) {
             (Some(last_value), Some((new_rb, sort_column))) => {
+                // compare with last_value to find boundary, then merge runs if needed
+
                 self.last_value = Some(sort_column.values.slice(sort_column.values.len(), 1));
                 todo!("compare with last_value to find boundary");
             }
@@ -203,6 +250,23 @@ impl WindowedSortStream {
         }
 
         todo!()
+    }
+}
+
+impl Stream for WindowedSortStream {
+    type Item = datafusion_common::Result<DfRecordBatch>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
+        self.poll_next_inner(cx)
+    }
+}
+
+impl RecordBatchStream for WindowedSortStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 }
 
@@ -221,6 +285,45 @@ macro_rules! cast_as_ts_array_iter {
             )+
         }
     };
+}
+
+/// Get timestamp from array at offset
+fn get_timestamp_from(
+    array: &ArrayRef,
+    offset: usize,
+) -> datafusion_common::Result<Option<Timestamp>> {
+    let time_unit = if let DataType::Timestamp(unit, _) = array.data_type() {
+        unit
+    } else {
+        return Err(DataFusionError::Internal(format!(
+            "Unsupported sort column type: {}",
+            array.data_type()
+        )));
+    };
+
+    let array = array.slice(offset, 1);
+    let mut iter = cast_as_ts_array_iter!(
+        time_unit, array,
+        TimeUnit::Second => TimestampSecondArray,
+        TimeUnit::Millisecond => TimestampMillisecondArray,
+        TimeUnit::Microsecond => TimestampMicrosecondArray,
+        TimeUnit::Nanosecond => TimestampNanosecondArray
+    );
+    let (_idx, val) = iter.next().ok_or_else(|| {
+        DataFusionError::Internal("Empty array in get_timestamp_from".to_string())
+    })?;
+    let val = if let Some(val) = val {
+        val
+    } else {
+        return Ok(None);
+    };
+    let gt_timestamp = match time_unit {
+        TimeUnit::Second => Timestamp::new_second(val),
+        TimeUnit::Millisecond => Timestamp::new_millisecond(val),
+        TimeUnit::Microsecond => Timestamp::new_microsecond(val),
+        TimeUnit::Nanosecond => Timestamp::new_nanosecond(val),
+    };
+    Ok(Some(gt_timestamp))
 }
 
 fn cmp_two_val_in_arr(
@@ -877,14 +980,53 @@ mod test {
 
     #[test]
     fn test_cmp_with_opts() {
-        let testcases = vec![(
-            Some(1),
-            Some(2),
-            Some(SortOptions {
-                descending: false,
-                nulls_first: false,
-            }),
-            std::cmp::Ordering::Less,
-        )];
+        let testcases = vec![
+            (
+                Some(1),
+                Some(2),
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                }),
+                std::cmp::Ordering::Less,
+            ),
+            (
+                Some(1),
+                Some(2),
+                Some(SortOptions {
+                    descending: true,
+                    nulls_first: false,
+                }),
+                std::cmp::Ordering::Greater,
+            ),
+            (
+                Some(1),
+                None,
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                }),
+                std::cmp::Ordering::Greater,
+            ),
+            (
+                Some(1),
+                None,
+                Some(SortOptions {
+                    descending: true,
+                    nulls_first: true,
+                }),
+                std::cmp::Ordering::Greater,
+            ),
+        ];
+        for (a, b, opts, expected) in testcases {
+            assert_eq!(
+                cmp_with_opts(&a, &b, &opts),
+                expected,
+                "a: {:?}, b: {:?}, opts: {:?}",
+                a,
+                b,
+                opts
+            );
+        }
     }
 }
