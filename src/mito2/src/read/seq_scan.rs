@@ -15,8 +15,8 @@
 //! Sequential scan.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Instant;
 
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
@@ -26,7 +26,6 @@ use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::{debug, tracing};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
-use futures::Stream;
 use snafu::ResultExt;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
 use store_api::storage::TimeSeriesRowSelector;
@@ -36,11 +35,10 @@ use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
-use crate::read::range::RowGroupIndex;
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::{Batch, BatchReader, BoxedBatchReader, ScannerMetrics, Source};
+use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
+use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::region::options::MergeMode;
-use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
@@ -305,115 +303,6 @@ impl fmt::Debug for SeqScan {
         f.debug_struct("SeqScan")
             .field("parts", &self.stream_ctx.parts)
             .finish()
-    }
-}
-
-struct PartitionMetricsInner {
-    metrics: ScannerMetrics,
-    reader_metrics: ReaderMetrics,
-}
-
-impl Drop for PartitionMetricsInner {
-    fn drop(&mut self) {
-        self.metrics.observe_metrics();
-    }
-}
-
-/// Metrics for reading a partition.
-#[derive(Clone)]
-struct PartitionMetrics(Arc<Mutex<PartitionMetricsInner>>);
-
-impl PartitionMetrics {
-    fn from_metrics(metrics: ScannerMetrics) -> Self {
-        let inner = PartitionMetricsInner {
-            metrics,
-            reader_metrics: ReaderMetrics::default(),
-        };
-        Self(Arc::new(Mutex::new(inner)))
-    }
-
-    fn inc_num_mem_ranges(&self, num: usize) {
-        let mut inner = self.0.lock().unwrap();
-        inner.metrics.num_mem_ranges += num;
-    }
-
-    fn inc_num_file_ranges(&self, num: usize) {
-        let mut inner = self.0.lock().unwrap();
-        inner.metrics.num_file_ranges += num;
-    }
-
-    fn inc_build_reader_cost(&self, cost: Duration) {
-        let mut inner = self.0.lock().unwrap();
-        inner.metrics.build_reader_cost += cost;
-    }
-
-    fn merge_metrics(&self, metrics: &ScannerMetrics) {
-        let mut inner = self.0.lock().unwrap();
-        inner.metrics.merge_from(metrics);
-    }
-
-    fn merge_reader_metrics(&self, metrics: &ReaderMetrics) {
-        let mut inner = self.0.lock().unwrap();
-        inner.reader_metrics.merge_from(metrics);
-    }
-}
-
-/// Scans memtable ranges at `index`.
-fn scan_mem_ranges(
-    stream_ctx: Arc<StreamContext>,
-    part_metrics: PartitionMetrics,
-    index: RowGroupIndex,
-) -> impl Stream<Item = Result<Batch>> {
-    try_stream! {
-        let ranges = stream_ctx.build_mem_ranges(index);
-        part_metrics.inc_num_mem_ranges(ranges.len());
-        for range in ranges {
-            let build_reader_start = Instant::now();
-            let iter = range.build_iter()?;
-            part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
-
-            let mut source = Source::Iter(iter);
-            while let Some(batch) = source.next_batch().await? {
-                yield batch;
-            }
-        }
-    }
-}
-
-/// Scans file ranges at `index`.
-fn scan_file_ranges(
-    stream_ctx: Arc<StreamContext>,
-    part_metrics: PartitionMetrics,
-    index: RowGroupIndex,
-    read_type: &'static str,
-) -> impl Stream<Item = Result<Batch>> {
-    try_stream! {
-        let mut reader_metrics = ReaderMetrics::default();
-        let ranges = stream_ctx
-            .build_file_ranges(index, &mut reader_metrics)
-            .await?;
-        part_metrics.inc_num_file_ranges(ranges.len());
-        for range in ranges {
-            let build_reader_start = Instant::now();
-            let reader = range.reader(None).await?;
-            part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
-            let compat_batch = range.compat_batch();
-            let mut source = Source::PruneReader(reader);
-            while let Some(mut batch) = source.next_batch().await? {
-                if let Some(compact_batch) = compat_batch {
-                    batch = compact_batch.compat_batch(batch)?;
-                }
-                yield batch;
-            }
-            if let Source::PruneReader(mut reader) = source {
-                reader_metrics.merge_from(reader.metrics());
-            }
-        }
-
-        // TODO(yingwen): Should we report metrics here?
-        // Reports metrics.
-        reader_metrics.observe_rows(read_type);
-        part_metrics.merge_reader_metrics(&reader_metrics);
     }
 }
 
