@@ -115,7 +115,7 @@ impl<T> Receiver<T> {
                                     timer = Some(Box::pin(tokio::time::sleep(tta)));
                                     pending = Some(low_item);
                                 } else {
-                                    // already
+                                    // already expired
                                     yield low_item;
                                 }
                             } else {
@@ -404,6 +404,44 @@ mod tests {
         assert_eq!(
             low_send.load(Ordering::Acquire),
             low_recv.load(Ordering::Acquire)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_overloading_low() {
+        #[derive(PartialEq, Eq, Debug)]
+        enum Item {
+            Low,
+            High,
+        }
+
+        let (tx, rx) = unbounded();
+        tx.send_low(Item::Low, Some(Duration::from_millis(0)))
+            .await
+            .unwrap();
+        tx.send_low(Item::Low, Some(Duration::from_millis(0)))
+            .await
+            .unwrap();
+        tx.send_low(Item::Low, Some(Duration::from_millis(0)))
+            .await
+            .unwrap();
+        // ensures all low-priority tasks expires.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        tx.send_high(Item::High).await.unwrap();
+        tx.send_high(Item::High).await.unwrap();
+        tx.send_high(Item::High).await.unwrap();
+        drop(tx);
+        let res = rx.into_stream().collect::<Vec<_>>().await;
+        assert_eq!(
+            &[
+                Item::Low,
+                Item::High,
+                Item::Low,
+                Item::High,
+                Item::Low,
+                Item::High,
+            ],
+            res.as_slice()
         );
     }
 }
