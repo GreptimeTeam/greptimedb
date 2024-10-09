@@ -99,8 +99,8 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Receiver<T> {
     /// Converts the receiver into a async stream.
-    pub fn into_stream(self) -> Pin<Box<impl Stream<Item = T>>> {
-        let s = stream!({
+    pub fn into_stream(self) -> impl Stream<Item = T> {
+        stream!({
             let mut timer: Option<Pin<Box<Sleep>>> = None;
             let mut pending: Option<T> = None;
             loop {
@@ -152,8 +152,7 @@ impl<T> Receiver<T> {
             if let Some(low) = pending.take() {
                 yield low;
             }
-        });
-        Box::pin(s)
+        })
     }
 }
 
@@ -235,7 +234,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut s = rx.into_stream();
+        let mut s = Box::pin(rx.into_stream());
         let mut res = vec![];
         drop(tx);
         while let Some(v) = s.next().await {
@@ -299,7 +298,7 @@ mod tests {
             }
         });
 
-        let mut rx = rx.into_stream();
+        let mut rx = Box::pin(rx.into_stream());
         let mut low_count = 0;
         let mut high_count = 0;
         drop(tx);
@@ -345,7 +344,7 @@ mod tests {
         });
         let mut high_recv = 0;
         let mut low_recv = 0;
-        let mut s = rx.into_stream();
+        let mut s = Box::pin(rx.into_stream());
         while let Some(v) = s.next().await {
             if v.high {
                 high_recv += 1;
@@ -389,7 +388,7 @@ mod tests {
             let rx_cloned = rx.clone();
 
             handles.push(tokio::spawn(async move {
-                let mut s = rx_cloned.into_stream();
+                let mut s = Box::pin(rx_cloned.into_stream());
                 while let Some(v) = s.next().await {
                     if v {
                         high_recv_cloned.fetch_add(1, Ordering::Release);

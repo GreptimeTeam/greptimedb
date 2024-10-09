@@ -111,7 +111,7 @@ impl LocalScheduler {
 
         for _ in 0..concurrency {
             let child = token.child_token();
-            let mut receiver_stream = rx.clone().into_stream();
+            let mut receiver_stream = Box::pin(rx.clone().into_stream());
             let state_clone = state.clone();
             let handle = common_runtime::spawn_global(async move {
                 while state_clone.load(Ordering::Relaxed) == STATE_RUNNING {
