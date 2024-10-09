@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use std::sync::Arc;
+pub(crate) mod encoding;
 mod geohash;
 mod h3;
+mod helpers;
 
 use geohash::{GeohashFunction, GeohashNeighboursFunction};
 

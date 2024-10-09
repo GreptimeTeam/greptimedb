@@ -66,3 +66,16 @@ SELECT geohash(37.76938, -122.3889, 11::UInt32);
 SELECT geohash(37.76938, -122.3889, 11::UInt64);
 
 SELECT geohash_neighbours(37.76938, -122.3889, 11);
+
+SELECT json_encode_path(37.76938, -122.3889, 1728083375::TimestampSecond);
+
+SELECT json_encode_path(lat, lon, ts)
+FROM(
+        SELECT 37.76938 AS lat, -122.3889 AS lon, 1728083375::TimestampSecond AS ts
+        UNION ALL
+        SELECT 37.76928 AS lat, -122.3839 AS lon, 1728083373::TimestampSecond AS ts
+        UNION ALL
+        SELECT 37.76930 AS lat, -122.3820 AS lon, 1728083379::TimestampSecond AS ts
+        UNION ALL
+        SELECT 37.77001 AS lat, -122.3888 AS lon, 1728083372::TimestampSecond AS ts
+);

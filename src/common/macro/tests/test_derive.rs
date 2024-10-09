@@ -24,5 +24,5 @@ struct Foo {}
 fn test_derive() {
     let _ = Foo::default();
     assert_fields!(Foo: input_types);
-    assert_impl_all!(Foo: std::fmt::Debug, Default, AggrFuncTypeStore);
+    assert_impl_all!(Foo: std::fmt::Debug, Default, common_query::logical_plan::accumulator::AggrFuncTypeStore);
 }
