@@ -359,11 +359,11 @@ impl PartitionMetrics {
 }
 
 /// Scans memtable ranges at `index`.
-fn scan_mem_ranges<'a>(
+fn scan_mem_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
-) -> impl Stream<Item = Result<Batch>> + 'a {
+) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
         let mut ranges = Vec::new();
         stream_ctx.build_mem_ranges(index, &mut ranges);
@@ -374,8 +374,7 @@ fn scan_mem_ranges<'a>(
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
 
             let mut source = Source::Iter(iter);
-            while let Some(batch) = source.next_batch().await?
-            {
+            while let Some(batch) = source.next_batch().await? {
                 yield batch;
             }
         }
@@ -383,12 +382,12 @@ fn scan_mem_ranges<'a>(
 }
 
 /// Scans file ranges at `index`.
-fn scan_file_ranges<'a>(
+fn scan_file_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
     read_type: &'static str,
-) -> impl Stream<Item = Result<Batch>> + 'a {
+) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
         let mut reader_metrics = ReaderMetrics::default();
         let mut ranges = Vec::new();
@@ -398,14 +397,11 @@ fn scan_file_ranges<'a>(
         part_metrics.inc_num_file_ranges(ranges.len());
         for range in ranges {
             let build_reader_start = Instant::now();
-            let reader = range
-                .reader(None)
-                .await?;
+            let reader = range.reader(None).await?;
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
             let compat_batch = range.compat_batch();
             let mut source = Source::PruneReader(reader);
-            while let Some(mut batch) = source.next_batch().await?
-            {
+            while let Some(mut batch) = source.next_batch().await? {
                 if let Some(compact_batch) = compat_batch {
                     batch = compact_batch.compat_batch(batch)?;
                 }
