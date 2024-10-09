@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow::array::{
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
+    Array, ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray,
 };
 use arrow::compute::SortColumn;
 use arrow_schema::{DataType, SortOptions, TimeUnit};
@@ -115,7 +115,7 @@ pub struct WindowedSortStream {
     /// currently assembling RecordBatches, will be put to `sort_partition_rbs` when it's done
     in_progress: Vec<DfRecordBatch>,
     /// last value of the last RecordBatch in `in_progress`, use to found partial sorted run's boundary
-    last_value: Option<ScalarValue>,
+    last_value: Option<ArrayRef>,
     /// Current working set of `PartitionRange` sorted RecordBatches
     sort_partition_rbs: Vec<DfSendableRecordBatchStream>,
     /// Merge-sorted result stream, should be polled to end before start a new merge sort again
@@ -161,11 +161,23 @@ impl WindowedSortStream {
             }
         }
         // then we get a new RecordBatch from input stream
-        let new_input_rb = match self.input.as_mut().poll_next(cx) {
+        let new_input_rbs = match self.input.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
                 // split input rb to sorted runs
                 let sort_column = self.expression.evaluate_to_sort_column(&batch)?;
-                Some(batch)
+                let sorted_runs_offset = get_sorted_runs(sort_column.clone())?;
+                if sorted_runs_offset.first() == Some(&(0, batch.num_rows())) {
+                    // input rb is already sorted, we can emit it directly
+                    Some((vec![batch], sort_column))
+                } else {
+                    // those slice should be zero copy, so supposely no new reservation needed
+                    let mut ret = Vec::new();
+                    for (offset, len) in sorted_runs_offset {
+                        let new_rb = batch.slice(offset, len);
+                        ret.push(new_rb);
+                    }
+                    Some((ret, sort_column))
+                }
             }
             Poll::Ready(Some(Err(e))) => {
                 return Poll::Ready(Some(Err(e)));
@@ -177,20 +189,88 @@ impl WindowedSortStream {
             Poll::Pending => return Poll::Pending,
         };
 
-        match (&mut self.last_value, new_input_rb) {
-            (Some(last_value), Some(new_input_rb)) => {
-                todo!("check if new_input_rb is in order");
+        match (&mut self.last_value, new_input_rbs) {
+            (Some(last_value), Some((new_rb, sort_column))) => {
+                self.last_value = Some(sort_column.values.slice(sort_column.values.len(), 1));
+                todo!("compare with last_value to find boundary");
             }
-            (None, Some(new_input_rb)) => {
-                todo!("initialize last_value");
+            (None, Some((new_rb, sort_column))) => {
+                self.last_value = Some(sort_column.values.slice(sort_column.values.len(), 1));
             }
             (_, None) => {
-                todo!("merge sort the rest of the working set");
+                todo!("Input complete, merge sort the rest of the working set");
             }
         }
 
         todo!()
     }
+}
+
+macro_rules! cast_as_ts_array_iter {
+    ($datatype:expr,$array:expr, $($pat:pat => $pty:ty),+) => {
+        match $datatype{
+            $(
+                $pat => {
+                    let arr = $array
+                        .as_any()
+                        .downcast_ref::<$pty>()
+                        .unwrap();
+                    let iter = arr.iter().enumerate();
+                    Box::new(iter) as Box<dyn Iterator<Item = (usize, Option<i64>)>>
+                }
+            )+
+        }
+    };
+}
+
+fn cmp_two_val_in_arr(
+    a: &ArrayRef,
+    a_offset: usize,
+    b: &ArrayRef,
+    b_offset: usize,
+    opts: Option<SortOptions>,
+) -> datafusion_common::Result<std::cmp::Ordering> {
+    let time_unit = if a.data_type() == b.data_type() {
+        if let DataType::Timestamp(unit, _) = a.data_type() {
+            unit
+        } else {
+            return Err(DataFusionError::Internal(format!(
+                "Unsupported sort column type: {} and {}",
+                a.data_type(),
+                b.data_type()
+            )));
+        }
+    } else {
+        return Err(DataFusionError::Internal(format!(
+            "Unsupported sort column type: {} and {}",
+            a.data_type(),
+            b.data_type()
+        )));
+    };
+
+    let a = a.slice(a_offset, 1);
+    let b = b.slice(b_offset, 1);
+    let mut ret = Vec::new();
+    for arr in [a, b] {
+        let mut iter = cast_as_ts_array_iter!(
+            time_unit, arr,
+            TimeUnit::Second => TimestampSecondArray,
+            TimeUnit::Millisecond => TimestampMillisecondArray,
+            TimeUnit::Microsecond => TimestampMicrosecondArray,
+            TimeUnit::Nanosecond => TimestampNanosecondArray
+        );
+        let (_idx, val) = iter.next().ok_or_else(|| {
+            DataFusionError::Internal("Empty array in cmp_two_val_in_arr".to_string())
+        })?;
+        ret.push(val);
+    }
+    if ret.len() != 2 {
+        return Err(DataFusionError::Internal(
+            "cmp_two_val_in_arr should return two values".to_string(),
+        ));
+    }
+    let res = cmp_with_opts(&ret[0], &ret[1], &opts);
+    Ok(res)
 }
 
 fn cmp_with_opts<T: Ord>(
@@ -225,37 +305,24 @@ fn find_successive_runs<T: Iterator<Item = (usize, Option<N>)>, N: Ord>(
 ) -> Vec<(usize, usize)> {
     let mut runs = Vec::new();
     let mut last_value = None;
-    let mut cur_offset = 0;
+    let mut last_offset = 0;
+    let mut len = 0;
     for (idx, t) in iter {
         if let Some(last_value) = &last_value {
             if cmp_with_opts(last_value, &t, sort_opts) == std::cmp::Ordering::Greater {
                 // we found a boundary
-                let len = idx - cur_offset;
-                runs.push((cur_offset, len));
-                cur_offset = idx;
+                let len = idx - last_offset;
+                runs.push((last_offset, len));
+                last_offset = idx;
             }
         }
         last_value = Some(t);
+        len = idx;
     }
-    runs
-}
 
-macro_rules! cast_ts_array {
-    ($datatype:expr,$sort_column:expr, $($pat:pat => $pty:ty),+) => {
-        match $datatype{
-            $(
-                $pat => {
-                    let arr = $sort_column
-                        .values
-                        .as_any()
-                        .downcast_ref::<$pty>()
-                        .unwrap();
-                    let iter = arr.iter().enumerate();
-                    Ok(find_successive_runs(iter, &$sort_column.options))
-                }
-            )+
-        }
-    };
+    runs.push((last_offset, len - last_offset + 1));
+
+    runs
 }
 
 /// return a list of non-overlaping (offset, length) which represent sorted runs, and
@@ -263,13 +330,14 @@ macro_rules! cast_ts_array {
 fn get_sorted_runs(sort_column: SortColumn) -> datafusion_common::Result<Vec<(usize, usize)>> {
     let ty = sort_column.values.data_type();
     if let DataType::Timestamp(unit, _) = ty {
-        cast_ts_array!(
-            unit, sort_column,
+        let iter = cast_as_ts_array_iter!(
+            unit, sort_column.values,
             TimeUnit::Second => TimestampSecondArray,
             TimeUnit::Millisecond => TimestampMillisecondArray,
             TimeUnit::Microsecond => TimestampMicrosecondArray,
             TimeUnit::Nanosecond => TimestampNanosecondArray
-        )
+        );
+        Ok(find_successive_runs(iter, &sort_column.options))
     } else {
         Err(DataFusionError::Internal(format!(
             "Unsupported sort column type: {ty}"
@@ -763,5 +831,60 @@ mod test {
         for (input, expected) in testcases {
             assert_eq!(split_overlapping_ranges(&input), expected);
         }
+    }
+
+    #[test]
+    fn test_find_successive_runs() {
+        let testcases = vec![
+            (
+                vec![Some(1), Some(2), Some(1), Some(3)],
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                }),
+                vec![(0, 2), (2, 2)],
+            ),
+            (
+                vec![Some(1), Some(2), Some(1), Some(3)],
+                Some(SortOptions {
+                    descending: true,
+                    nulls_first: false,
+                }),
+                vec![(0, 1), (1, 2), (3, 1)],
+            ),
+            (
+                vec![Some(1), Some(2), None, Some(3)],
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                }),
+                vec![(0, 2), (2, 2)],
+            ),
+            (
+                vec![Some(2), Some(1), None, Some(3)],
+                Some(SortOptions {
+                    descending: true,
+                    nulls_first: true,
+                }),
+                vec![(0, 2), (2, 2)],
+            ),
+        ];
+        for (input, sort_opts, expected) in testcases {
+            let ret = find_successive_runs(input.into_iter().enumerate(), &sort_opts);
+            assert_eq!(ret, expected);
+        }
+    }
+
+    #[test]
+    fn test_cmp_with_opts() {
+        let testcases = vec![(
+            Some(1),
+            Some(2),
+            Some(SortOptions {
+                descending: false,
+                nulls_first: false,
+            }),
+            std::cmp::Ordering::Less,
+        )];
     }
 }
