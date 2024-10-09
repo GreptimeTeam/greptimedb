@@ -24,12 +24,14 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, Json, TypedHeader};
+use bytes::Bytes;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::PipelineVersion;
+use prost::Message;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Map, Value};
@@ -37,11 +39,12 @@ use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result,
+    DecodeOtlpRequestSnafu, Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result,
     UnsupportedContentTypeSnafu,
 };
 use crate::http::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
+use crate::http::json_result::JsonResponse;
 use crate::http::HttpResponse;
 use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{
@@ -350,6 +353,25 @@ pub async fn pipeline_dryrun(
     result.insert("rows".to_string(), Value::Array(rows));
     let result = Value::Object(result);
     Ok(Json(result).into_response())
+}
+
+#[axum_macros::debug_handler]
+pub async fn loki_ingest(
+    State(_log_state): State<LogState>,
+    // Query(query_params): Query<LogIngesterQueryParams>,
+    Extension(mut _query_ctx): Extension<QueryContext>,
+    TypedHeader(content_type): TypedHeader<ContentType>,
+    bytes: Bytes,
+) -> Result<HttpResponse> {
+    ensure!(
+        &content_type.to_string() == "application/x-protobuf",
+        UnsupportedContentTypeSnafu { content_type }
+    );
+
+    let a = loki_api::logproto::PushRequest::decode(bytes).context(DecodeOtlpRequestSnafu)?;
+    warn!("loki ingest: {:?}", a);
+
+    Ok(JsonResponse::from_output(vec![]).await)
 }
 
 #[axum_macros::debug_handler]

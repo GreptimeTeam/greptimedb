@@ -65,6 +65,7 @@ influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", bran
 itertools.workspace = true
 jsonb.workspace = true
 lazy_static.workspace = true
+loki-api = "0.1"
 mime_guess = "2.0"
 notify.workspace = true
 object-pool = "0.5"

@@ -771,6 +771,7 @@ impl HttpServer {
     fn route_log<S>(log_state: LogState) -> Router<S> {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
+            .route("/loki/api/v1/push", routing::post(event::loki_ingest))
             .route(
                 "/pipelines/:pipeline_name",
                 routing::post(event::add_pipeline),
