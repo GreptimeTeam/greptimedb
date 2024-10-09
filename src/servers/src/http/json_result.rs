@@ -85,11 +85,8 @@ impl IntoResponse for JsonResponse {
         let payload = match self.output.pop() {
             None => String::default(),
             Some(GreptimeQueryOutput::AffectedRows(n)) => json!({
-                "data": [
-                    {
-                        "affected_rows": n
-                    },
-                ],
+                "data": [],
+                "affected_rows": n,
                 "execution_time_ms": execution_time,
             })
             .to_string(),
