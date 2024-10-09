@@ -46,35 +46,20 @@ pub struct Sender<T> {
 impl<T> Sender<T> {
     /// Tries to send a high priority item, returns `Err` if the channel is full or closed.
     pub fn try_send_high(&self, item: T) -> error::Result<()> {
-        self.tx_high.try_send(item).map_err(|e| {
-            error::SendToChannelSnafu {
-                err_msg: format!("{:?}", e),
-            }
-            .build()
-        })
+        self.tx_high.try_send(item).map_err(map_send_error)
     }
 
     /// Tries to send a low priority item with optional deadline, returns `Err` if the channel is full or closed.
     pub fn try_send_low(&self, item: T, deadline: Option<Duration>) -> error::Result<()> {
         self.tx_low
             .try_send((deadline.map(|d| Instant::now().add(d)), item))
-            .map_err(|e| {
-                error::SendToChannelSnafu {
-                    err_msg: format!("{:?}", e),
-                }
-                .build()
-            })
+            .map_err(map_send_error)
     }
 
     /// Sends a high priority item waiting for the channel to be ready.
     /// Returns `Err` if the channel is closed.
     pub async fn send_high(&self, item: T) -> error::Result<()> {
-        self.tx_high.send(item).await.map_err(|e| {
-            error::SendToChannelSnafu {
-                err_msg: format!("{:?}", e),
-            }
-            .build()
-        })
+        self.tx_high.send(item).await.map_err(map_send_error)
     }
 
     /// Sends a low priority with optional deadline waiting for the channel to be ready.
@@ -83,13 +68,18 @@ impl<T> Sender<T> {
         self.tx_low
             .send((deadline.map(|d| Instant::now().add(d)), item))
             .await
-            .map_err(|e| {
-                error::SendToChannelSnafu {
-                    err_msg: format!("{:?}", e),
-                }
-                .build()
-            })
+            .map_err(map_send_error)
     }
+}
+
+fn map_send_error<E>(e: E) -> error::Error
+where
+    E: std::fmt::Debug,
+{
+    error::SendToChannelSnafu {
+        err_msg: format!("{:?}", e),
+    }
+    .build()
 }
 
 /// Channel receiver
@@ -107,12 +97,9 @@ impl<T> Clone for Receiver<T> {
     }
 }
 
-impl<T> Receiver<T>
-where
-    T: Send + 'static,
-{
+impl<T> Receiver<T> {
     /// Converts the receiver into a async stream.
-    pub fn into_stream(self) -> Pin<Box<dyn Stream<Item = T> + Send>> {
+    pub fn into_stream(self) -> Pin<Box<impl Stream<Item = T>>> {
         let s = stream!({
             let mut timer: Option<Pin<Box<Sleep>>> = None;
             let mut pending: Option<T> = None;
@@ -255,6 +242,8 @@ mod tests {
             res.push(v);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+
+        assert_eq!(&[0, 1, 11, 2, 3, 4, 5, 6, 7, 8, 9], res.as_slice());
     }
 
     #[tokio::test(flavor = "multi_thread")]
