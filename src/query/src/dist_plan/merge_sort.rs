@@ -69,8 +69,7 @@ impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
         Self::name()
     }
 
-    // Prevent further optimization.
-    // The input can be retrieved by `self.input()`
+    // Allow optimization here
     fn inputs(&self) -> Vec<&LogicalPlan> {
         vec![self.input.as_ref()]
     }
@@ -79,7 +78,7 @@ impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
         self.input.schema()
     }
 
-    // Prevent further optimization
+    // Allow further optimization
     fn expressions(&self) -> Vec<datafusion_expr::Expr> {
         self.expr.clone()
     }
