@@ -137,11 +137,14 @@ pub struct WindowedSortStream {
     /// The number of times merge sort has been called
     merge_count: usize,
     /// Current working set of `PartitionRange`, update when need to merge sort more PartitionRange
-    current_working_set: BTreeSet<usize>,
+    working_set: BTreeSet<usize>,
     /// Current working set of `PartitionRange`'s timestamp range
     ///
-    /// expand upper bound(and add to working set if needed) by checking if next range in `overlap_counts` contain at least two index and at least one of them are in `current_working_set`(Since one index is not enough to merge and can be emitted directly)
-    current_range: Option<(Timestamp, Timestamp)>,
+    /// expand upper bound(and add to working set if needed) by checking if next range in `overlap_counts` contain at least two index and only one range is not in `working_set`
+    /// (Since one index is not enough to merge and can be emitted directly)
+    ///
+    /// Hence, `working_range` might not be a union of all ranges in working set
+    working_range: Option<(Timestamp, Timestamp)>,
     /// input stream assumed reading in order of `PartitionRange`
     input: DfSendableRecordBatchStream,
     /// sOutput Schema, which is the same as input schema, since this is a sort plan
@@ -175,8 +178,8 @@ impl WindowedSortStream {
             sort_partition_rbs: Vec::new(),
             merge_stream: None,
             merge_count: 0,
-            current_working_set: BTreeSet::new(),
-            current_range: None,
+            working_set: BTreeSet::new(),
+            working_range: None,
             schema: input.schema(),
             input,
             expression: exec.expression.clone(),
@@ -263,33 +266,47 @@ impl WindowedSortStream {
         };
 
         // The core logic to eargerly merge sort the working set
-        match (&mut self.last_value, new_input_rbs) {
-            (
-                last_value,
-                Some(SortedRunSet {
-                    runs_with_batch,
-                    sort_column,
-                }),
-            ) => {
+        match new_input_rbs {
+            Some(SortedRunSet {
+                runs_with_batch,
+                sort_column,
+            }) => {
                 // compare with last_value to find boundary, then merge runs if needed
-                let mut is_first = true;
+
+                // iterate over runs_with_batch to merge sort, might create zero or more stream to put to `sort_partition_rbs`
                 for (cur_rb, run_info) in &runs_with_batch {
-                    if is_first {
-                        is_first = false;
-                        let is_ok_to_concat =
-                            cmp_with_opts(last_value, &run_info.first_val, &sort_column.options)
-                                <= std::cmp::Ordering::Equal;
+                    // TODO: precompute all available working ranges and iter over them!
+                    {
+                        let mut cur_range = None;
+                        let mut cur_set = BTreeSet::new();
+                        for (range, set) in &self.overlap_counts {
+                            if cur_range.is_none() {
+                                cur_range = Some(*range);
+                                cur_set.extend(set.clone().into_iter());
+                            } else if let Some(cur_range) = &mut cur_range
+                                && set.len() >= 2
+                            {
+                                // expand working range on those condition
+                                cur_range.1 = range.1;
+                                cur_set.extend(set.into_iter());
+                            }
+                        }
                     }
-                }
-                // update last_value
-                if let Some((last_rb, last_run)) = runs_with_batch.last() {
-                    if let Some(last_val) = last_run.last_val {
-                        self.last_value = Some(last_val);
+                    // determine if we can concat the current run to `in_progress`
+                    // TODO: maintain `current_range` and `current_working_set` to determine if we can concat the current run
+                    let is_ok_to_concat =
+                        cmp_with_opts(&self.last_value, &run_info.first_val, &sort_column.options)
+                            <= std::cmp::Ordering::Equal;
+                    if is_ok_to_concat {
+                        self.in_progress.push((cur_rb.clone(), run_info.clone()));
+                    } else {
+                        // we need to merge sort the current working set
                     }
+                    self.last_value = run_info.last_val;
                 }
                 todo!("iterate over runs_with_batch to merge sort");
             }
-            (_, None) => {
+            None => {
                 todo!("Input complete, merge sort the rest of the working set");
             }
         }
@@ -613,6 +630,39 @@ fn split_range_by(
 enum Action {
     Pop((Timestamp, Timestamp)),
     Push((Timestamp, Timestamp), Vec<usize>),
+}
+
+/// Compute all working ranges and corrseponding working sets from given `overlap_counts` computed from `split_overlapping_ranges`
+///
+/// TODO: test this
+pub fn compute_all_working_ranges(
+    overlap_counts: &BTreeMap<(Timestamp, Timestamp), Vec<usize>>,
+) -> Vec<((Timestamp, Timestamp), BTreeSet<usize>)> {
+    let mut ret = Vec::new();
+    let mut cur_range_set: Option<((Timestamp, Timestamp), BTreeSet<usize>)> = None;
+    for (range, set) in overlap_counts.iter() {
+        match &mut cur_range_set {
+            None => cur_range_set = Some((*range, BTreeSet::from_iter(set.iter().cloned()))),
+            Some((cur_range, cur_set)) => {
+                // if next overlap range have Partition tha's is in `cur_set` but not the last one in `cur_set`
+                // we have to expand current working range to cover it(and add it's `set` to `cur_set`)
+                // so that merge sort is possible
+                let last_part = cur_set.last();
+                let need_expand = set
+                    .iter()
+                    .any(|new_part| cur_set.contains(new_part) && last_part != Some(new_part));
+
+                if need_expand {
+                    cur_range.1 = range.1;
+                    cur_set.extend(set.iter().cloned());
+                } else {
+                    ret.push((*cur_range, std::mem::take(cur_set)));
+                }
+            }
+        }
+    }
+
+    ret
 }
 
 /// return a map of non-overlapping ranges and their corresponding index
