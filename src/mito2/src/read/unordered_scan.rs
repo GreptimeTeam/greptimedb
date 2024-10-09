@@ -125,8 +125,6 @@ impl UnorderedScan {
     fn scan_partition_range<'a>(
         stream_ctx: &'a StreamContext,
         part_range: &'a PartitionRange,
-        mem_ranges: &'a mut Vec<MemtableRange>,
-        file_ranges: &'a mut Vec<FileRange>,
         reader_metrics: &'a mut ReaderMetrics,
         metrics: &'a mut ScannerMetrics,
     ) -> impl Stream<Item = common_recordbatch::error::Result<RecordBatch>> + 'a {
@@ -135,12 +133,12 @@ impl UnorderedScan {
             let range_meta = &stream_ctx.ranges[part_range.identifier];
             for index in &range_meta.row_group_indices {
                 if stream_ctx.is_mem_range_index(*index) {
-                    let stream = Self::scan_mem_ranges(stream_ctx, *index, mem_ranges, metrics);
+                    let stream = Self::scan_mem_ranges(stream_ctx, *index, metrics);
                     for await batch in stream {
                         yield batch;
                     }
                 } else {
-                    let stream = Self::scan_file_ranges(stream_ctx, *index, file_ranges, reader_metrics, metrics);
+                    let stream = Self::scan_file_ranges(stream_ctx, *index, reader_metrics, metrics);
                     for await batch in stream {
                         yield batch;
                     }
@@ -154,13 +152,12 @@ impl UnorderedScan {
     pub(crate) fn scan_mem_ranges<'a>(
         stream_ctx: &'a StreamContext,
         index: RowGroupIndex,
-        ranges: &'a mut Vec<MemtableRange>,
         metrics: &'a mut ScannerMetrics,
     ) -> impl Stream<Item = common_recordbatch::error::Result<RecordBatch>> + 'a {
         try_stream! {
             let mapper = &stream_ctx.input.mapper;
             let cache = stream_ctx.input.cache_manager.as_deref();
-            stream_ctx.build_mem_ranges(index, ranges);
+            let ranges = stream_ctx.build_mem_ranges(index);
             metrics.num_mem_ranges += ranges.len();
             for range in ranges {
                 let build_reader_start = Instant::now();
@@ -185,15 +182,14 @@ impl UnorderedScan {
     pub(crate) fn scan_file_ranges<'a>(
         stream_ctx: &'a StreamContext,
         index: RowGroupIndex,
-        ranges: &'a mut Vec<FileRange>,
         reader_metrics: &'a mut ReaderMetrics,
         metrics: &'a mut ScannerMetrics,
     ) -> impl Stream<Item = common_recordbatch::error::Result<RecordBatch>> + 'a {
         try_stream! {
             let mapper = &stream_ctx.input.mapper;
             let cache = stream_ctx.input.cache_manager.as_deref();
-            stream_ctx
-                .build_file_ranges(index, ranges, reader_metrics)
+            let ranges= stream_ctx
+                .build_file_ranges(index, reader_metrics)
                 .await
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
@@ -242,16 +238,12 @@ impl UnorderedScan {
                 return;
             };
 
-            let mut mem_ranges = Vec::new();
-            let mut file_ranges = Vec::new();
             let mut reader_metrics = ReaderMetrics::default();
             // Scans each part.
             for part_range in part_ranges {
                 let stream = Self::scan_partition_range(
                     &stream_ctx,
                     &part_range,
-                    &mut mem_ranges,
-                    &mut file_ranges,
                     &mut reader_metrics,
                     &mut metrics,
                 );

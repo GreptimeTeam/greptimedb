@@ -365,8 +365,7 @@ fn scan_mem_ranges(
     index: RowGroupIndex,
 ) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
-        let mut ranges = Vec::new();
-        stream_ctx.build_mem_ranges(index, &mut ranges);
+        let ranges = stream_ctx.build_mem_ranges(index);
         part_metrics.inc_num_mem_ranges(ranges.len());
         for range in ranges {
             let build_reader_start = Instant::now();
@@ -390,9 +389,8 @@ fn scan_file_ranges(
 ) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
         let mut reader_metrics = ReaderMetrics::default();
-        let mut ranges = Vec::new();
-        stream_ctx
-            .build_file_ranges(index, &mut ranges, &mut reader_metrics)
+        let ranges = stream_ctx
+            .build_file_ranges(index, &mut reader_metrics)
             .await?;
         part_metrics.inc_num_file_ranges(ranges.len());
         for range in ranges {

@@ -1031,20 +1031,21 @@ impl StreamContext {
     pub(crate) async fn build_file_ranges(
         &self,
         index: RowGroupIndex,
-        ranges: &mut Vec<FileRange>,
         reader_metrics: &mut ReaderMetrics,
-    ) -> Result<()> {
-        ranges.clear();
+    ) -> Result<SmallVec<[FileRange; 2]>> {
+        let mut ranges = SmallVec::new();
         self.range_builders
-            .build_file_ranges(&self.input, index, ranges, reader_metrics)
-            .await
+            .build_file_ranges(&self.input, index, &mut ranges, reader_metrics)
+            .await?;
+        Ok(ranges)
     }
 
     /// Creates memtable ranges to scan.
-    pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex, ranges: &mut Vec<MemtableRange>) {
-        ranges.clear();
+    pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex) -> SmallVec<[MemtableRange; 2]> {
+        let mut ranges = SmallVec::new();
         self.range_builders
-            .build_mem_ranges(&self.input, index, ranges)
+            .build_mem_ranges(&self.input, index, &mut ranges);
+        ranges
     }
 
     /// Retrieves the partition ranges.
@@ -1110,7 +1111,7 @@ impl RangeBuilderList {
         &self,
         input: &ScanInput,
         index: RowGroupIndex,
-        ranges: &mut Vec<FileRange>,
+        ranges: &mut SmallVec<[FileRange; 2]>,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<()> {
         let file_index = index.index - self.mem_builders.len();
@@ -1131,7 +1132,7 @@ impl RangeBuilderList {
         &self,
         input: &ScanInput,
         index: RowGroupIndex,
-        ranges: &mut Vec<MemtableRange>,
+        ranges: &mut SmallVec<[MemtableRange; 2]>,
     ) {
         let mut builder_opt = self.mem_builders[index.index].lock().unwrap();
         match &mut *builder_opt {
@@ -1159,7 +1160,7 @@ struct FileRangeBuilder {
 impl FileRangeBuilder {
     /// Builds file ranges to read.
     /// Negative `row_group_index` indicates all row groups.
-    fn build_ranges(&self, row_group_index: i64, ranges: &mut Vec<FileRange>) {
+    fn build_ranges(&self, row_group_index: i64, ranges: &mut SmallVec<[FileRange; 2]>) {
         let Some(context) = self.context.clone() else {
             return;
         };
@@ -1196,7 +1197,7 @@ struct MemRangeBuilder {
 impl MemRangeBuilder {
     /// Builds mem ranges to read in the memtable.
     /// Negative `row_group_index` indicates all row groups.
-    fn build_ranges(&self, row_group_index: i64, ranges: &mut Vec<MemtableRange>) {
+    fn build_ranges(&self, row_group_index: i64, ranges: &mut SmallVec<[MemtableRange; 2]>) {
         if row_group_index >= 0 {
             let row_group_index = row_group_index as usize;
             // Scans one row group.
