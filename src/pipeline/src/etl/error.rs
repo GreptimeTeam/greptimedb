@@ -438,18 +438,31 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("failed to coerce complex value, not supported"))]
+    #[snafu(display("Can not coerce json type to {ty}"))]
+    CoerceJsonTypeTo {
+        ty: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "Can not coerce {ty} to json type. we only consider object and array to be json types."
+    ))]
+    CoerceTypeToJson {
+        ty: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Failed to coerce complex value, not supported"))]
     CoerceComplexType {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("failed to coerce value: {msg}"))]
+    #[snafu(display("Failed to coerce value: {msg}"))]
     CoerceIncompatibleTypes {
         msg: String,
         #[snafu(implicit)]
         location: Location,
     },
-
     #[snafu(display(
         "Invalid resolution: '{resolution}'. Available resolutions: {valid_resolution}"
     ))]

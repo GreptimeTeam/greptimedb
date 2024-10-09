@@ -63,6 +63,16 @@ impl std::ops::DerefMut for Map {
     }
 }
 
+impl std::iter::IntoIterator for Map {
+    type Item = (String, Value);
+
+    type IntoIter = std::collections::btree_map::IntoIter<String, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.into_iter()
+    }
+}
+
 impl std::fmt::Display for Map {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let values = self

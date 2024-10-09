@@ -59,6 +59,7 @@ pub enum Value {
 
     Timestamp(Timestamp),
 
+    /// We only consider object and array to be json types.
     Array(Array),
     Map(Map),
 }
@@ -112,8 +113,7 @@ impl Value {
                 _ => Ok(Value::Timestamp(Timestamp::Nanosecond(0))),
             },
 
-            "array" => Ok(Value::Array(Array::default())),
-            "map" => Ok(Value::Map(Map::default())),
+            // We only consider object and array to be json types. and use Map to represent json
             "json" => Ok(Value::Map(Map::default())),
 
             _ => ValueParseTypeSnafu { t }.fail(),
@@ -224,8 +224,7 @@ impl Value {
 
             Value::Timestamp(_) => "epoch",
 
-            Value::Array(_) => "array",
-            Value::Map(_) => "map",
+            Value::Array(_) | Value::Map(_) => "json",
 
             Value::Null => "null",
         }
@@ -366,6 +365,44 @@ impl<'a> From<&Value> for JsonbValue<'a> {
                 for (k, v) in obj.iter() {
                     let val: JsonbValue = v.into();
                     map.insert(k.to_string(), val);
+                }
+                JsonbValue::Object(map)
+            }
+        }
+    }
+}
+
+impl<'a> From<Value> for JsonbValue<'a> {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Null => JsonbValue::Null,
+            Value::Boolean(v) => JsonbValue::Bool(v),
+
+            Value::Int8(v) => JsonbValue::Number(JsonbNumber::Int64(v as i64)),
+            Value::Int16(v) => JsonbValue::Number(JsonbNumber::Int64(v as i64)),
+            Value::Int32(v) => JsonbValue::Number(JsonbNumber::Int64(v as i64)),
+            Value::Int64(v) => JsonbValue::Number(JsonbNumber::Int64(v)),
+
+            Value::Uint8(v) => JsonbValue::Number(JsonbNumber::UInt64(v as u64)),
+            Value::Uint16(v) => JsonbValue::Number(JsonbNumber::UInt64(v as u64)),
+            Value::Uint32(v) => JsonbValue::Number(JsonbNumber::UInt64(v as u64)),
+            Value::Uint64(v) => JsonbValue::Number(JsonbNumber::UInt64(v)),
+            Value::Float32(v) => JsonbValue::Number(JsonbNumber::Float64(v as f64)),
+            Value::Float64(v) => JsonbValue::Number(JsonbNumber::Float64(v)),
+            Value::String(v) => JsonbValue::String(v.into()),
+            Value::Timestamp(v) => JsonbValue::String(v.to_string().into()),
+            Value::Array(arr) => {
+                let mut vals: Vec<JsonbValue> = Vec::with_capacity(arr.len());
+                for val in arr.into_iter() {
+                    vals.push(val.into());
+                }
+                JsonbValue::Array(vals)
+            }
+            Value::Map(obj) => {
+                let mut map = JsonbObject::new();
+                for (k, v) in obj.into_iter() {
+                    let val: JsonbValue = v.into();
+                    map.insert(k, val);
                 }
                 JsonbValue::Object(map)
             }
