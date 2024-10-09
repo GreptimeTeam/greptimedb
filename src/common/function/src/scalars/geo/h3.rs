@@ -31,6 +31,7 @@ use h3o::{CellIndex, LatLng, Resolution};
 use once_cell::sync::Lazy;
 use snafu::{ensure, ResultExt};
 
+use super::helpers::{ensure_columns_len, ensure_columns_n};
 use crate::function::{Function, FunctionContext};
 
 static CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
@@ -83,50 +84,6 @@ static POSITION_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
         ConcreteDataType::uint64_datatype(),
     ]
 });
-
-macro_rules! ensure_columns_len {
-    ($columns:ident) => {
-        ensure!(
-            $columns.windows(2).all(|c| c[0].len() == c[1].len()),
-            InvalidFuncArgsSnafu {
-                err_msg: "The length of input columns are in different size"
-            }
-        )
-    };
-    ($column_a:ident, $column_b:ident, $($column_n:ident),*) => {
-        ensure!(
-            {
-                let mut result = $column_a.len() == $column_b.len();
-                $(
-                result = result && ($column_a.len() == $column_n.len());
-                )*
-                result
-            }
-            InvalidFuncArgsSnafu {
-                err_msg: "The length of input columns are in different size"
-            }
-        )
-    };
-}
-
-macro_rules! ensure_columns_n {
-    ($columns:ident, $n:literal) => {
-        ensure!(
-            $columns.len() == $n,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of arguments is not correct, expect {}, provided : {}",
-                    stringify!($n),
-                    $columns.len()
-                ),
-            }
-        );
-
-        if $n > 1 {
-            ensure_columns_len!($columns);
-        }
-    };
-}
 
 /// Function that returns [h3] encoding cellid for a given geospatial coordinate.
 ///
