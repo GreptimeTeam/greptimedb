@@ -26,7 +26,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{InvalidSchedulerStateSnafu, InvalidSenderSnafu, Result, StopSchedulerSnafu};
-use crate::metrics::SCHEDULER_TASK_ELAPSED;
+use crate::metrics::{SCHEDULER_PENDING_JOBS, SCHEDULER_TASK_ELAPSED};
 use crate::schedule::priority;
 
 /// Priority of the job.
@@ -120,6 +120,7 @@ impl LocalScheduler {
                             break;
                         }
                         Some(job) = receiver_stream.next() =>{
+                            SCHEDULER_PENDING_JOBS.with_label_values(&[job.job_type]).sub(1);
                             let _timer = SCHEDULER_TASK_ELAPSED.with_label_values(&[job.job_type]).start_timer();
                             job.task.await;
                         }
@@ -129,6 +130,9 @@ impl LocalScheduler {
                 if state_clone.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
                     // recv_async waits until all sender's been dropped.
                     while let Some(job) = receiver_stream.next().await {
+                        SCHEDULER_PENDING_JOBS
+                            .with_label_values(&[job.job_type])
+                            .sub(1);
                         let _timer = SCHEDULER_TASK_ELAPSED
                             .with_label_values(&[job.job_type])
                             .start_timer();
@@ -161,13 +165,16 @@ impl Scheduler for LocalScheduler {
 
         let binding = self.sender.read().unwrap();
         let sender = binding.as_ref().context(InvalidSchedulerStateSnafu)?;
-        match job.priority {
-            Priority::High => sender
-                .try_send_high(job)
-                .map_err(|_| InvalidSenderSnafu {}.build()),
-            Priority::Low(deadline) => sender
-                .try_send_low(job, deadline)
-                .map_err(|_| InvalidSenderSnafu {}.build()),
+        let job_type = job.job_type;
+        let res = match job.priority {
+            Priority::High => sender.try_send_high(job),
+            Priority::Low(deadline) => sender.try_send_low(job, deadline),
+        };
+        if res.is_ok() {
+            SCHEDULER_PENDING_JOBS.with_label_values(&[job_type]).add(1);
+            Ok(())
+        } else {
+            InvalidSenderSnafu {}.fail()
         }
     }
 

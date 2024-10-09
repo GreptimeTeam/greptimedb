@@ -23,13 +23,6 @@ use tokio::time::Sleep;
 
 use crate::error;
 
-/// Creates an bounded channel.
-pub fn bounded<T>(size: usize) -> (Sender<T>, Receiver<T>) {
-    let (tx_low, rx_low) = async_channel::bounded(size);
-    let (tx_high, rx_high) = async_channel::bounded(size);
-    (Sender { tx_low, tx_high }, Receiver { rx_low, rx_high })
-}
-
 /// Creates an unbounded channel.
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let (tx_low, rx_low) = async_channel::unbounded();
@@ -53,6 +46,21 @@ impl<T> Sender<T> {
     pub fn try_send_low(&self, item: T, deadline: Option<Duration>) -> error::Result<()> {
         self.tx_low
             .try_send((deadline.map(|d| Instant::now().add(d)), item))
+            .map_err(map_send_error)
+    }
+
+    /// Tries to send a high priority item, returns `Err` if the channel is full or closed.
+    #[cfg(test)]
+    pub async fn send_high(&self, item: T) -> error::Result<()> {
+        self.tx_high.send(item).await.map_err(map_send_error)
+    }
+
+    /// Tries to send a low priority item with optional deadline, returns `Err` if the channel is full or closed.
+    #[cfg(test)]
+    pub async fn send_low(&self, item: T, deadline: Option<Duration>) -> error::Result<()> {
+        self.tx_low
+            .send((deadline.map(|d| Instant::now().add(d)), item))
+            .await
             .map_err(map_send_error)
     }
 }
@@ -166,9 +174,9 @@ mod tests {
     #[tokio::test]
     async fn test_high() {
         let (tx, rx) = unbounded();
-        tx.send_high(1).await.unwrap();
-        tx.send_high(2).await.unwrap();
-        tx.send_high(3).await.unwrap();
+        tx.try_send_high(1).unwrap();
+        tx.try_send_high(2).unwrap();
+        tx.try_send_high(3).unwrap();
 
         drop(tx);
         let s = rx.into_stream();

@@ -348,4 +348,12 @@ lazy_static! {
         "mito manifest operation elapsed",
         &["op"]
     ).unwrap();
+
+    /// Scheduler pending jobs
+    pub static ref SCHEDULER_PENDING_JOBS: IntGaugeVec =
+        register_int_gauge_vec!(
+            "greptime_scheduler_pending",
+            "pending jobs in scheduler",
+            &[TYPE_LABEL],
+        ).unwrap();
 }
