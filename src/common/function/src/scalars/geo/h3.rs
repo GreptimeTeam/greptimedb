@@ -697,7 +697,7 @@ impl Function for H3ChildPosToCell {
     }
 
     fn signature(&self) -> Signature {
-        let mut signatures = Vec::new();
+        let mut signatures = Vec::with_capacity(POSITION_TYPES.len() * CELL_TYPES.len() * RESOLUTION_TYPES.len());
         for position_type in POSITION_TYPES.as_slice() {
             for cell_type in CELL_TYPES.as_slice() {
                 for resolution_type in RESOLUTION_TYPES.as_slice() {
@@ -1029,7 +1029,7 @@ fn value_to_distance(v: Value) -> Result<u32> {
 }
 
 fn signature_of_cell() -> Signature {
-    let mut signatures = Vec::new();
+    let mut signatures = Vec::with_capacity(CELL_TYPES.len());
     for cell_type in CELL_TYPES.as_slice() {
         signatures.push(TypeSignature::Exact(vec![cell_type.clone()]));
     }
@@ -1038,7 +1038,7 @@ fn signature_of_cell() -> Signature {
 }
 
 fn signature_of_double_cells() -> Signature {
-    let mut signatures = Vec::new();
+    let mut signatures = Vec::with_capacity(CELL_TYPES.len() * CELL_TYPES.len());
     for cell_type in CELL_TYPES.as_slice() {
         for cell_type2 in CELL_TYPES.as_slice() {
             signatures.push(TypeSignature::Exact(vec![
@@ -1052,7 +1052,7 @@ fn signature_of_double_cells() -> Signature {
 }
 
 fn signature_of_cell_and_resolution() -> Signature {
-    let mut signatures = Vec::new();
+    let mut signatures = Vec::with_capacity(CELL_TYPES.len() * RESOLUTION_TYPES.len());
     for cell_type in CELL_TYPES.as_slice() {
         for resolution_type in RESOLUTION_TYPES.as_slice() {
             signatures.push(TypeSignature::Exact(vec![
@@ -1065,7 +1065,7 @@ fn signature_of_cell_and_resolution() -> Signature {
 }
 
 fn signature_of_cell_and_distance() -> Signature {
-    let mut signatures = Vec::new();
+    let mut signatures = Vec::with_capacity(CELL_TYPES.len() * DISTANCE_TYPES.len());
     for cell_type in CELL_TYPES.as_slice() {
         for distance_type in DISTANCE_TYPES.as_slice() {
             signatures.push(TypeSignature::Exact(vec![
