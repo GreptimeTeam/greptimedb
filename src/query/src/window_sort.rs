@@ -17,14 +17,19 @@
 // TODO(discord9): remove allow(unused) after implementation is done
 #![allow(unused)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use arrow::array::types::{
+    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    TimestampSecondType,
+};
 use arrow::array::{
-    Array, ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray,
+    downcast_temporal_array, Array, ArrayRef, ArrowPrimitiveType, PrimitiveArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
 };
 use arrow::compute::SortColumn;
 use arrow_schema::{DataType, SchemaRef, SortOptions, TimeUnit};
@@ -40,8 +45,10 @@ use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet};
 use datafusion::physical_plan::sorts::streaming_merge::streaming_merge;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_common::utils::bisect;
 use datafusion_common::{internal_err, DataFusionError, ScalarValue};
 use datafusion_physical_expr::PhysicalSortExpr;
+use datatypes::value::Value;
 use futures::Stream;
 use itertools::Itertools;
 use snafu::ResultExt;
@@ -145,21 +152,21 @@ pub struct WindowedSortStream {
     /// Memory pool for this stream
     memory_pool: Arc<dyn MemoryPool>,
     /// currently assembling RecordBatches, will be put to `sort_partition_rbs` when it's done
-    in_progress: Vec<(DfRecordBatch, SucRun<Timestamp>)>,
+    ///
+    /// TODO(discord9): remove `SucRun` from the tuple
+    in_progress: Vec<DfRecordBatch>,
     /// last `Timestamp` of the last input RecordBatch in `in_progress`, use to found partial sorted run's boundary
     last_value: Option<Timestamp>,
     /// Current working set of `PartitionRange` sorted RecordBatches
     sort_partition_rbs: Vec<DfSendableRecordBatchStream>,
     /// Merge-sorted result stream, should be polled to end before start a new merge sort again
-    merge_stream: Option<DfSendableRecordBatchStream>,
+    ///
+    /// TODO(discord9): make this a queue to buffer multiple merge outputs
+    merge_stream: VecDeque<DfSendableRecordBatchStream>,
     /// The number of times merge sort has been called
     merge_count: usize,
     /// Index into current `working_range` in `all_avail_working_range`
     working_idx: usize,
-    /// Current working set of `PartitionRange`'s timestamp range
-    ///
-    /// update from `all_avail_working_range[working_idx].0` when needed
-    working_range: Option<TimeRange>,
     /// input stream assumed reading in order of `PartitionRange`
     input: DfSendableRecordBatchStream,
     /// sOutput Schema, which is the same as input schema, since this is a sort plan
@@ -197,14 +204,9 @@ impl WindowedSortStream {
             in_progress: Vec::new(),
             last_value: None,
             sort_partition_rbs: Vec::new(),
-            merge_stream: None,
+            merge_stream: VecDeque::new(),
             merge_count: 0,
             working_idx: 0,
-            working_range: exec
-                .all_avail_working_range
-                .first()
-                .map(|(k, _)| k)
-                .cloned(),
             schema: input.schema(),
             input,
             expression: exec.expression.clone(),
@@ -260,7 +262,7 @@ impl WindowedSortStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
         // first check and send out the merge result
-        if let Some(merge_stream) = &mut self.merge_stream {
+        if let Some(merge_stream) = &mut self.merge_stream.front_mut() {
             match merge_stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
                     return Poll::Ready(Some(Ok(batch)));
@@ -269,7 +271,7 @@ impl WindowedSortStream {
                     return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
-                    self.merge_stream = None;
+                    self.merge_stream.pop_front();
                 }
                 Poll::Pending => {
                     return Poll::Pending;
@@ -301,22 +303,68 @@ impl WindowedSortStream {
                 // compare with last_value to find boundary, then merge runs if needed
 
                 // iterate over runs_with_batch to merge sort, might create zero or more stream to put to `sort_partition_rbs`
-                for (cur_rb, run_info) in &runs_with_batch {
-                    if cur_rb.num_rows() == 0 {
+                for (sorted_rb, run_info) in &runs_with_batch {
+                    if sorted_rb.num_rows() == 0 {
                         continue;
                     }
                     // TODO: determine if this batch is in current working range
-                    let cur_range = { todo!() };
-
-                    // determine if we can concat the current run to `in_progress`
-                    // TODO: maintain `current_range` and `current_working_set` to determine if we can concat the current run
-                    let is_ok_to_concat =
-                        cmp_with_opts(&self.last_value, &run_info.first_val, &sort_column.options)
-                            <= std::cmp::Ordering::Equal;
-                    if is_ok_to_concat {
-                        self.in_progress.push((cur_rb.clone(), run_info.clone()));
+                    let cur_range = {
+                        match (run_info.first_val, run_info.last_val) {
+                            (Some(f), Some(l)) => TimeRange::new(f, l),
+                            _ => internal_err!("Found NULL in time index column")?,
+                        }
+                    };
+                    let working_range = if let Some(r) = self.get_working_range() {
+                        r
                     } else {
-                        // we need to merge sort the current working set
+                        internal_err!("No working range found")?
+                    };
+                    if cur_range.is_subset(&working_range) {
+                        // data still in range, can't merge sort yet
+                        // see if can concat entire sorted rb, merge sort need to wait
+                        let is_ok_to_concat = cmp_with_opts(
+                            &self.last_value,
+                            &run_info.first_val,
+                            &sort_column.options,
+                        ) <= std::cmp::Ordering::Equal;
+                        if is_ok_to_concat {
+                            self.in_progress.push(sorted_rb.clone());
+                            // the next run is promised to not be able to concat, so we can build a stream now
+                            self.build_stream()?;
+                        } else {
+                            // no more sorted data, build stream now
+                            self.build_stream()?;
+                            self.in_progress.push(sorted_rb.clone());
+                        }
+                    } else if let Some(intersection) = cur_range.intersection(&working_range) {
+                        // TODO: slice rb by intersection and concat it then merge sort
+                        let cur_sort_column =
+                            sort_column.values.slice(run_info.offset, run_info.len);
+                        let (offset, len) = find_slice_from_range(
+                            &SortColumn {
+                                values: cur_sort_column,
+                                options: sort_column.options,
+                            },
+                            &intersection,
+                        )?;
+                        let sliced_rb = sorted_rb.slice(offset, len);
+                        self.in_progress.push(sliced_rb);
+                        self.build_stream()?;
+                        self.start_new_merge_sort()?;
+                        if offset != 0 {
+                            self.in_progress.push(sorted_rb.slice(0, offset));
+                        }
+                        if offset + len != sorted_rb.num_rows() {
+                            self.in_progress.push(
+                                sorted_rb.slice(offset + len, sorted_rb.num_rows() - offset - len),
+                            );
+                        }
+                    } else {
+                        // no overlap, we can merge sort the working set
+                        self.build_stream()?;
+                        self.start_new_merge_sort()?;
+
+                        self.in_progress.push(sorted_rb.clone());
                     }
                     self.last_value = run_info.last_val;
                 }
@@ -330,29 +378,28 @@ impl WindowedSortStream {
         todo!()
     }
 
+    /// Get the current working range
+    fn get_working_range(&self) -> Option<TimeRange> {
+        self.all_avail_working_range
+            .get(self.working_idx)
+            .map(|(range, _)| *range)
+    }
+
+    /// Set current working range to the next working range
+    fn set_next_working_range(&mut self) {
+        self.working_idx += 1;
+    }
+
     /// make `in_progress` as a new `DfSendableRecordBatchStream` and put into `sort_partition_rbs`
-    fn build_recordbatch(&mut self) -> datafusion_common::Result<()> {
-        let done = std::mem::take(&mut self.in_progress);
-        let data = done.into_iter().map(|(rb, _)| rb).collect_vec();
+    fn build_stream(&mut self) -> datafusion_common::Result<()> {
+        let data = std::mem::take(&mut self.in_progress);
         let new_stream = MemoryStream::try_new(data, self.schema(), None)?;
         self.sort_partition_rbs.push(Box::pin(new_stream));
         Ok(())
     }
 
-    /// make a new `DfSendableRecordBatchStream` from `in_progress` until a given Timestamp(sorted by `sort_opts`) and put them  and put into `sort_partition_rbs`
-    fn build_recordbatch_until(
-        &mut self,
-        until: Timestamp,
-        sort_opts: &Option<SortOptions>,
-    ) -> datafusion_common::Result<()> {
-        todo!("Binary search to find the boundary");
-    }
-
     /// Start merging sort the current working set
-    fn start_merge_sort(&mut self) -> datafusion_common::Result<()> {
-        if self.merge_stream.is_some() {
-            return internal_err!("Merge stream already exists");
-        }
+    fn start_new_merge_sort(&mut self) -> datafusion_common::Result<()> {
         let fetch = if let Some(fetch) = self.remaining_fetch() {
             Some(fetch)
         } else {
@@ -370,12 +417,13 @@ impl WindowedSortStream {
             self.batch_size,
             fetch,
             reservation,
-        );
+        )?;
+        self.merge_stream.push_back(resulting_stream);
         Ok(())
     }
 
     fn in_progress_row_cnt(&self) -> usize {
-        self.in_progress.iter().map(|(rb, _)| rb.num_rows()).sum()
+        self.in_progress.iter().map(|rb| rb.num_rows()).sum()
     }
 
     fn fetch_reached(&mut self) -> bool {
@@ -408,21 +456,69 @@ impl RecordBatchStream for WindowedSortStream {
     }
 }
 
-macro_rules! cast_as_ts_array_iter {
-    ($datatype:expr,$array:expr, $($pat:pat => $pty:ty),+) => {
-        match $datatype{
-            $(
-                $pat => {
-                    let arr = $array
-                        .as_any()
-                        .downcast_ref::<$pty>()
-                        .unwrap();
-                    let iter = arr.iter().enumerate();
-                    Box::new(iter) as Box<dyn Iterator<Item = (usize, Option<i64>)>>
-                }
-            )+
+/// Downcast a temporal array to a specific type
+///
+/// usage similar to `downcast_primitive!` in `arrow-array` crate
+macro_rules! downcast_ts_array {
+    ($data_type:expr => ($m:path $(, $args:tt)*), $($p:pat => $fallback:expr $(,)*)*) =>
+    {
+        match $data_type {
+            arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Second, _) => {
+                $m!(TimestampSecondType $(, $args)*)
+            }
+            arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, _) => {
+                $m!(TimestampMillisecondType $(, $args)*)
+            }
+            arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, _) => {
+                $m!(TimestampMicrosecondType $(, $args)*)
+            }
+            arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, _) => {
+                $m!(TimestampNanosecondType $(, $args)*)
+            }
+            $($p => $fallback,)*
         }
     };
+}
+
+/// Find the slice from the given range
+///
+/// Return the offset and length of the slice
+fn find_slice_from_range(
+    sort_column: &SortColumn,
+    range: &TimeRange,
+) -> datafusion_common::Result<(usize, usize)> {
+    let ty = sort_column.values.data_type();
+    let time_unit = if let DataType::Timestamp(unit, _) = ty {
+        unit
+    } else {
+        return Err(DataFusionError::Internal(format!(
+            "Unsupported sort column type: {}",
+            sort_column.values.data_type()
+        )));
+    };
+    let array = &sort_column.values;
+    let opt = &sort_column.options.unwrap_or_default();
+    let mut res_indices = Vec::new();
+    for target in [range.start, range.end] {
+        let value = Value::Timestamp(target);
+        let scalar = value
+            .try_to_scalar_value(&value.data_type())
+            .map_err(|e| DataFusionError::External(Box::new(e) as _))?;
+        let index = bisect::<true>(&[array.clone()], &[scalar], &[*opt])?;
+        res_indices.push(index);
+    }
+    res_indices.sort_unstable();
+    // TODO: check if off by one
+    let slice = (res_indices[0], res_indices[1] - res_indices[0]);
+    Ok(slice)
+}
+
+macro_rules! array_iter_helper {
+    ($t:ty, $arr:expr) => {{
+        let typed = $arr.as_any().downcast_ref::<PrimitiveArray<$t>>().unwrap();
+        let iter = typed.iter().enumerate();
+        Box::new(iter) as Box<dyn Iterator<Item = (usize, Option<i64>)>>
+    }};
 }
 
 /// Get timestamp from array at offset
@@ -438,14 +534,11 @@ fn get_timestamp_from(
             array.data_type()
         )));
     };
-
+    let ty = array.data_type();
     let array = array.slice(offset, 1);
-    let mut iter = cast_as_ts_array_iter!(
-        time_unit, array,
-        TimeUnit::Second => TimestampSecondArray,
-        TimeUnit::Millisecond => TimestampMillisecondArray,
-        TimeUnit::Microsecond => TimestampMicrosecondArray,
-        TimeUnit::Nanosecond => TimestampNanosecondArray
+    let mut iter = downcast_ts_array!(
+        array.data_type() => (array_iter_helper, array),
+        _ => internal_err!("Unsupported sort column type: {ty}")?
     );
     let (_idx, val) = iter.next().ok_or_else(|| {
         DataFusionError::Internal("Empty array in get_timestamp_from".to_string())
@@ -570,12 +663,10 @@ fn find_successive_runs<T: Iterator<Item = (usize, Option<N>)>, N: Ord + Copy>(
 fn get_sorted_runs(sort_column: SortColumn) -> datafusion_common::Result<Vec<SucRun<Timestamp>>> {
     let ty = sort_column.values.data_type();
     if let DataType::Timestamp(unit, _) = ty {
-        let iter = cast_as_ts_array_iter!(
-            unit, sort_column.values,
-            TimeUnit::Second => TimestampSecondArray,
-            TimeUnit::Millisecond => TimestampMillisecondArray,
-            TimeUnit::Microsecond => TimestampMicrosecondArray,
-            TimeUnit::Nanosecond => TimestampNanosecondArray
+        let array = &sort_column.values;
+        let iter = downcast_ts_array!(
+            array.data_type() => (array_iter_helper, array),
+            _ => internal_err!("Unsupported sort column type: {ty}")?
         );
 
         let raw = find_successive_runs(iter, &sort_column.options);
