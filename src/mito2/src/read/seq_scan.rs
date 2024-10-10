@@ -133,13 +133,13 @@ impl SeqScan {
         for part_range in partition_ranges {
             build_sources(
                 stream_ctx,
-                &part_range,
+                part_range,
                 compaction,
                 part_metrics,
                 &mut sources,
             );
         }
-        Self::build_reader_from_sources(&stream_ctx, sources, semaphore).await
+        Self::build_reader_from_sources(stream_ctx, sources, semaphore).await
     }
 
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
