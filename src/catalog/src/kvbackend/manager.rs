@@ -21,7 +21,6 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
     PG_CATALOG_NAME,
 };
-use common_config::Mode;
 use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, ViewInfoCacheRef};
 use common_meta::key::catalog_name::CatalogNameKey;
@@ -34,7 +33,6 @@ use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
-use meta_client::client::MetaClient;
 use moka::sync::Cache;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use session::context::{Channel, QueryContext};
@@ -50,7 +48,7 @@ use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
 };
-use crate::information_schema::InformationSchemaProvider;
+use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
 use crate::kvbackend::TableCacheRef;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
 use crate::system_schema::SystemSchemaProvider;
@@ -63,9 +61,8 @@ use crate::CatalogManager;
 /// comes from `SystemCatalog`, which is static and read-only.
 #[derive(Clone)]
 pub struct KvBackendCatalogManager {
-    mode: Mode,
-    /// Only available in `Distributed` mode.
-    meta_client: Option<Arc<MetaClient>>,
+    /// Provides the extension methods for the `information_schema` tables
+    information_extension: InformationExtensionRef,
     /// Manages partition rules.
     partition_manager: PartitionRuleManagerRef,
     /// Manages table metadata.
@@ -82,15 +79,13 @@ const CATALOG_CACHE_MAX_CAPACITY: u64 = 128;
 
 impl KvBackendCatalogManager {
     pub fn new(
-        mode: Mode,
-        meta_client: Option<Arc<MetaClient>>,
+        information_extension: InformationExtensionRef,
         backend: KvBackendRef,
         cache_registry: LayeredCacheRegistryRef,
         procedure_manager: Option<ProcedureManagerRef>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
-            mode,
-            meta_client,
+            information_extension,
             partition_manager: Arc::new(PartitionRuleManager::new(
                 backend.clone(),
                 cache_registry
@@ -118,20 +113,15 @@ impl KvBackendCatalogManager {
         })
     }
 
-    /// Returns the server running mode.
-    pub fn running_mode(&self) -> &Mode {
-        &self.mode
-    }
-
     pub fn view_info_cache(&self) -> Result<ViewInfoCacheRef> {
         self.cache_registry.get().context(CacheNotFoundSnafu {
             name: "view_info_cache",
         })
     }
 
-    /// Returns the `[MetaClient]`.
-    pub fn meta_client(&self) -> Option<Arc<MetaClient>> {
-        self.meta_client.clone()
+    /// Returns the `[InformationExtension]`.
+    pub fn information_extension(&self) -> InformationExtensionRef {
+        self.information_extension.clone()
     }
 
     pub fn partition_manager(&self) -> PartitionRuleManagerRef {

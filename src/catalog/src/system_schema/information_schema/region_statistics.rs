@@ -16,13 +16,10 @@ use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::INFORMATION_SCHEMA_REGION_STATISTICS_TABLE_ID;
-use common_config::Mode;
 use common_error::ext::BoxedError;
-use common_meta::cluster::ClusterInfo;
 use common_meta::datanode::RegionStat;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{DfSendableRecordBatchStream, RecordBatch, SendableRecordBatchStream};
-use common_telemetry::tracing::warn;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
@@ -30,11 +27,11 @@ use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
 use super::{InformationTable, REGION_STATISTICS};
-use crate::error::{CreateRecordBatchSnafu, InternalSnafu, ListRegionStatsSnafu, Result};
+use crate::error::{CreateRecordBatchSnafu, GetInformationExtensionSnafu, InternalSnafu, Result};
 use crate::information_schema::Predicates;
 use crate::system_schema::utils;
 use crate::CatalogManager;
@@ -167,28 +164,12 @@ impl InformationSchemaRegionStatisticsBuilder {
         request: Option<ScanRequest>,
     ) -> Result<RecordBatch> {
         let predicates = Predicates::from_scan_request(&request);
-        let mode = utils::running_mode(&self.catalog_manager)?.unwrap_or(Mode::Standalone);
-
-        match mode {
-            Mode::Standalone => {
-                // TODO(weny): implement it
-            }
-            Mode::Distributed => {
-                if let Some(meta_client) = utils::meta_client(&self.catalog_manager)? {
-                    let region_stats = meta_client
-                        .list_region_stats()
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(ListRegionStatsSnafu)?;
-                    for region_stat in region_stats {
-                        self.add_region_statistic(&predicates, region_stat);
-                    }
-                } else {
-                    warn!("Meta client is not available");
-                }
-            }
+        let information_extension = utils::information_extension(&self.catalog_manager)?
+            .context(GetInformationExtensionSnafu)?;
+        let region_stats = information_extension.region_stats().await?;
+        for region_stat in region_stats {
+            self.add_region_statistic(&predicates, region_stat);
         }
-
         self.finish()
     }
 
