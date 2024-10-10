@@ -38,6 +38,7 @@ use snafu::{ensure, ResultExt};
 
 use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Error, Result, TryFromValueSnafu};
 use crate::prelude::*;
+use crate::schema::ColumnSchema;
 use crate::type_id::LogicalTypeId;
 use crate::types::{IntervalType, ListType};
 use crate::vectors::ListVector;
@@ -1237,10 +1238,16 @@ impl<'a> From<Option<ListValueRef<'a>>> for ValueRef<'a> {
     }
 }
 
-impl<'a> TryFrom<ValueRef<'a>> for serde_json::Value {
+pub struct ColumnPair<'a> {
+    pub value: ValueRef<'a>,
+    pub schema: &'a ColumnSchema,
+}
+
+impl<'a> TryFrom<ColumnPair<'a>> for serde_json::Value {
     type Error = serde_json::Error;
 
-    fn try_from(value: ValueRef<'a>) -> serde_json::Result<serde_json::Value> {
+    fn try_from(value: ColumnPair<'a>) -> serde_json::Result<serde_json::Value> {
+        let ColumnPair { value, schema } = value;
         let json_value = match value {
             ValueRef::Null => serde_json::Value::Null,
             ValueRef::Boolean(v) => serde_json::Value::Bool(v),
@@ -1255,7 +1262,19 @@ impl<'a> TryFrom<ValueRef<'a>> for serde_json::Value {
             ValueRef::Float32(v) => serde_json::Value::from(v.0),
             ValueRef::Float64(v) => serde_json::Value::from(v.0),
             ValueRef::String(bytes) => serde_json::Value::String(bytes.to_string()),
-            ValueRef::Binary(bytes) => serde_json::to_value(bytes)?,
+            ValueRef::Binary(bytes) => {
+                if let ConcreteDataType::Json(_) = schema.data_type {
+                    match jsonb::from_slice(bytes) {
+                        Ok(json) => json.into(),
+                        Err(e) => {
+                            error!(e; "Failed to parse jsonb");
+                            serde_json::Value::Null
+                        }
+                    }
+                } else {
+                    serde_json::to_value(bytes)?
+                }
+            }
             ValueRef::Date(v) => serde_json::Value::Number(v.val().into()),
             ValueRef::DateTime(v) => serde_json::Value::Number(v.val().into()),
             ValueRef::List(v) => serde_json::to_value(v)?,

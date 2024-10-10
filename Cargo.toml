@@ -137,6 +137,7 @@ opentelemetry-proto = { version = "0.5", features = [
     "metrics",
     "trace",
     "with-serde",
+    "logs",
 ] }
 parquet = { version = "51.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"

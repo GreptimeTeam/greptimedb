@@ -383,6 +383,8 @@ impl Processor for RegexProcessor {
 }
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use ahash::{HashMap, HashMapExt};
     use itertools::Itertools;
 
@@ -475,14 +477,14 @@ ignore_missing: false"#;
             .map(|k| k.to_string())
             .collect_vec();
             let processor = builder.build(&intermediate_keys).unwrap();
-            let mut result = HashMap::new();
+            let mut result = BTreeMap::new();
             for (index, pattern) in processor.patterns.iter().enumerate() {
                 let r = processor
                     .process(&breadcrumbs_str, pattern, (0, index))
                     .unwrap()
                     .into_iter()
                     .map(|(k, v)| (intermediate_keys[k].clone(), v))
-                    .collect::<HashMap<_, _>>();
+                    .collect::<BTreeMap<_, _>>();
                 result.extend(r);
             }
             let map = Map { values: result };

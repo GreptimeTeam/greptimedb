@@ -533,6 +533,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("OpenTelemetry log error"))]
+    OpenTelemetryLog {
+        source: pipeline::etl_error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -597,7 +604,8 @@ impl ErrorExt for Error {
             | MysqlValueConversion { .. }
             | ParseJson { .. }
             | UnsupportedContentType { .. }
-            | TimestampOverflow { .. } => StatusCode::InvalidArguments,
+            | TimestampOverflow { .. }
+            | OpenTelemetryLog { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
