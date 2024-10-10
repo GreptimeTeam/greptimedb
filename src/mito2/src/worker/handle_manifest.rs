@@ -170,7 +170,7 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         if need_compaction {
-            self.schedule_compaction(&region).await;
+            self.schedule_compaction(&region, false).await;
         }
     }
 

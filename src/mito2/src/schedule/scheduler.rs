@@ -30,7 +30,7 @@ use crate::metrics::{SCHEDULER_PENDING_JOBS, SCHEDULER_TASK_ELAPSED};
 use crate::schedule::priority;
 
 /// Priority of the job.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Priority {
     /// High priority job.
     High,
