@@ -929,14 +929,7 @@ impl Function for H3GridPathCells {
                 (Some(cell_this), Some(cell_that)) => {
                     let cells = cell_this
                         .grid_path_cells(cell_that)
-                        .map_err(|e| {
-                            BoxedError::new(PlainError::new(
-                                format!("H3 error: {}", e),
-                                StatusCode::EngineExecuteQuery,
-                            ))
-                        })
-                        .context(error::ExecuteSnafu)?
-                        .collect::<std::result::Result<Vec<CellIndex>, _>>()
+                        .and_then(|x| x.collect::<std::result::Result<Vec<CellIndex>, _>>())
                         .map_err(|e| {
                             BoxedError::new(PlainError::new(
                                 format!("H3 error: {}", e),
