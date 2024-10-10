@@ -730,6 +730,7 @@ impl HttpServer {
                         authorize::check_http_auth,
                     )),
             )
+            // Handlers for debug, we don't expect a timeout.
             .nest(
                 "/debug",
                 Router::new()
@@ -737,20 +738,26 @@ impl HttpServer {
                     .route(
                         "/log_level",
                         routing::get(dyn_log::dyn_log_handler).post(dyn_log::dyn_log_handler),
+                    )
+                    .nest(
+                        "/prof",
+                        Router::new()
+                            .route(
+                                "/cpu",
+                                routing::get(pprof::pprof_handler).post(pprof::pprof_handler),
+                            )
+                            .route(
+                                "/mem",
+                                routing::get(mem_prof::mem_prof_handler)
+                                    .post(mem_prof::mem_prof_handler),
+                            ),
                     ),
             )
-            // Handlers for debug, we don't expect a timeout.
             .nest(
                 &format!("/{HTTP_API_VERSION}/prof"),
                 Router::new()
-                    .route(
-                        "/cpu",
-                        routing::get(pprof::pprof_handler).post(pprof::pprof_handler),
-                    )
-                    .route(
-                        "/mem",
-                        routing::get(mem_prof::mem_prof_handler).post(mem_prof::mem_prof_handler),
-                    ),
+                    .route("/cpu", routing::get(v1_prof_handler).post(v1_prof_handler))
+                    .route("/mem", routing::get(v1_prof_handler).post(v1_prof_handler)),
             )
     }
 
@@ -894,6 +901,14 @@ impl HttpServer {
             .route("/config", apirouting::get(handler::config))
             .with_state(state)
     }
+}
+
+#[axum_macros::debug_handler]
+async fn v1_prof_handler() -> Result<impl IntoResponse> {
+    Ok((
+        axum::http::StatusCode::MOVED_PERMANENTLY,
+        "The 'v1/prof' API is moved to 'debug/prof'",
+    ))
 }
 
 pub const HTTP_SERVER: &str = "HTTP_SERVER";
