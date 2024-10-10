@@ -370,12 +370,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid sender",))]
-    InvalidSender {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid scheduler state"))]
     InvalidSchedulerState {
         #[snafu(implicit)]
@@ -870,6 +864,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Fail to send to async channel, err_msg: {}", err_msg))]
+    SendToChannel {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -955,7 +956,6 @@ impl ErrorExt for Error {
             ConvertVector { source, .. } => source.status_code(),
 
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
-            InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             DeleteSst { .. } | DeleteIndex { .. } => StatusCode::StorageUnavailable,
             FlushRegion { source, .. } => source.status_code(),
@@ -1002,6 +1002,7 @@ impl ErrorExt for Error {
             | ApplyFulltextIndex { source, .. } => source.status_code(),
             DecodeStats { .. } | StatsNotPresent { .. } => StatusCode::Internal,
             RegionBusy { .. } => StatusCode::RegionBusy,
+            SendToChannel { .. } => StatusCode::Internal,
         }
     }
 
