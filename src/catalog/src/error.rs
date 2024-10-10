@@ -89,9 +89,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to get procedure client in {mode} mode"))]
-    GetProcedureClient {
-        mode: String,
+    #[snafu(display("Failed to get information extension client"))]
+    GetInformationExtension {
         #[snafu(implicit)]
         location: Location,
     },
@@ -301,7 +300,7 @@ impl ErrorExt for Error {
             | Error::CacheNotFound { .. }
             | Error::CastManager { .. }
             | Error::Json { .. }
-            | Error::GetProcedureClient { .. }
+            | Error::GetInformationExtension { .. }
             | Error::ProcedureIdNotFound { .. } => StatusCode::Unexpected,
 
             Error::ViewPlanColumnsChanged { .. } => StatusCode::InvalidArguments,

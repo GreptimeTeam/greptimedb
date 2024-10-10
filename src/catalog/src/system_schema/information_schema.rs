@@ -32,7 +32,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
+use common_error::ext::ErrorExt;
+use common_meta::cluster::NodeInfo;
+use common_meta::datanode::RegionStat;
 use common_meta::key::flow::FlowMetadataManager;
+use common_procedure::ProcedureInfo;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
@@ -45,7 +49,7 @@ use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
 use super::{SystemSchemaProviderInner, SystemTable, SystemTableRef};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
 use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
@@ -316,5 +320,41 @@ where
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         InformationTable::to_stream(self, request)
+    }
+}
+
+pub type InformationExtensionRef = Arc<dyn InformationExtension<Error = Error> + Send + Sync>;
+
+/// The `InformationExtension` trait provides the extension methods for the `information_schema` tables.
+#[async_trait::async_trait]
+pub trait InformationExtension {
+    type Error: ErrorExt;
+
+    /// Gets the nodes information.
+    async fn nodes(&self) -> std::result::Result<Vec<NodeInfo>, Self::Error>;
+
+    /// Gets the procedures information.
+    async fn procedures(&self) -> std::result::Result<Vec<(String, ProcedureInfo)>, Self::Error>;
+
+    /// Gets the region statistics.
+    async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error>;
+}
+
+pub struct NoopInformationExtension;
+
+#[async_trait::async_trait]
+impl InformationExtension for NoopInformationExtension {
+    type Error = Error;
+
+    async fn nodes(&self) -> std::result::Result<Vec<NodeInfo>, Self::Error> {
+        Ok(vec![])
+    }
+
+    async fn procedures(&self) -> std::result::Result<Vec<(String, ProcedureInfo)>, Self::Error> {
+        Ok(vec![])
+    }
+
+    async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error> {
+        Ok(vec![])
     }
 }

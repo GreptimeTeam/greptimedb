@@ -17,14 +17,18 @@ use std::{fs, path};
 
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::information_schema::InformationExtension;
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
+use client::api::v1::meta::RegionRole;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, Configurable, KvBackendConfig};
 use common_error::ext::BoxedError;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::cluster::{NodeInfo, NodeStatus};
+use common_meta::datanode::RegionStat;
 use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureExecutorRef};
@@ -33,10 +37,11 @@ use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{WalOptionsAllocator, WalOptionsAllocatorRef};
-use common_procedure::ProcedureManagerRef;
+use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_telemetry::info;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_time::timezone::set_default_timezone;
@@ -44,6 +49,7 @@ use common_version::{short_version, version};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
+use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::{FlowWorkerManager, FlownodeBuilder, FrontendInvoker};
 use frontend::frontend::FrontendOptions;
@@ -478,9 +484,18 @@ impl StartCommand {
             .build(),
         );
 
+        let datanode = DatanodeBuilder::new(dn_opts, plugins.clone())
+            .with_kv_backend(kv_backend.clone())
+            .build()
+            .await
+            .context(StartDatanodeSnafu)?;
+
+        let information_extension = Arc::new(StandaloneInformationExtension::new(
+            datanode.region_server(),
+            procedure_manager.clone(),
+        ));
         let catalog_manager = KvBackendCatalogManager::new(
-            dn_opts.mode,
-            None,
+            information_extension,
             kv_backend.clone(),
             layered_cache_registry.clone(),
             Some(procedure_manager.clone()),
@@ -488,12 +503,6 @@ impl StartCommand {
 
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
-
-        let datanode = DatanodeBuilder::new(dn_opts, plugins.clone())
-            .with_kv_backend(kv_backend.clone())
-            .build()
-            .await
-            .context(StartDatanodeSnafu)?;
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let flow_builder = FlownodeBuilder::new(
@@ -641,6 +650,91 @@ impl StartCommand {
             .context(InitMetadataSnafu)?;
 
         Ok(table_metadata_manager)
+    }
+}
+
+struct StandaloneInformationExtension {
+    region_server: RegionServer,
+    procedure_manager: ProcedureManagerRef,
+    start_time_ms: u64,
+}
+
+impl StandaloneInformationExtension {
+    pub fn new(region_server: RegionServer, procedure_manager: ProcedureManagerRef) -> Self {
+        Self {
+            region_server,
+            procedure_manager,
+            start_time_ms: common_time::util::current_time_millis() as u64,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl InformationExtension for StandaloneInformationExtension {
+    type Error = catalog::error::Error;
+
+    async fn nodes(&self) -> std::result::Result<Vec<NodeInfo>, Self::Error> {
+        let build_info = common_version::build_info();
+        let node_info = NodeInfo {
+            // For the standalone:
+            // - id always 0
+            // - empty string for peer_addr
+            peer: Peer {
+                id: 0,
+                addr: "".to_string(),
+            },
+            last_activity_ts: -1,
+            status: NodeStatus::Standalone,
+            version: build_info.version.to_string(),
+            git_commit: build_info.commit_short.to_string(),
+            // Use `self.start_time_ms` instead.
+            // It's not precise but enough.
+            start_time_ms: self.start_time_ms,
+        };
+        Ok(vec![node_info])
+    }
+
+    async fn procedures(&self) -> std::result::Result<Vec<(String, ProcedureInfo)>, Self::Error> {
+        self.procedure_manager
+            .list_procedures()
+            .await
+            .map_err(BoxedError::new)
+            .map(|procedures| {
+                procedures
+                    .into_iter()
+                    .map(|procedure| {
+                        let status = procedure.state.as_str_name().to_string();
+                        (status, procedure)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .context(catalog::error::ListProceduresSnafu)
+    }
+
+    async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error> {
+        let stats = self
+            .region_server
+            .reportable_regions()
+            .into_iter()
+            .map(|stat| {
+                let region_stat = self
+                    .region_server
+                    .region_statistic(stat.region_id)
+                    .unwrap_or_default();
+                RegionStat {
+                    id: stat.region_id,
+                    rcus: 0,
+                    wcus: 0,
+                    approximate_bytes: region_stat.estimated_disk_size() as i64,
+                    engine: stat.engine,
+                    role: RegionRole::from(stat.role).into(),
+                    memtable_size: region_stat.memtable_size,
+                    manifest_size: region_stat.manifest_size,
+                    sst_size: region_stat.sst_size,
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(stats)
     }
 }
 

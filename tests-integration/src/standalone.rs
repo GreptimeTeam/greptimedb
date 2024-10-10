@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManager;
 use cmd::error::StartFlownodeSnafu;
 use cmd::standalone::StandaloneOptions;
@@ -146,8 +147,7 @@ impl GreptimeDbStandaloneBuilder {
         );
 
         let catalog_manager = KvBackendCatalogManager::new(
-            Mode::Standalone,
-            None,
+            Arc::new(NoopInformationExtension),
             kv_backend.clone(),
             cache_registry.clone(),
             Some(procedure_manager.clone()),
