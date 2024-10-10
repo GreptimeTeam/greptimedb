@@ -697,7 +697,8 @@ impl Function for H3ChildPosToCell {
     }
 
     fn signature(&self) -> Signature {
-        let mut signatures = Vec::with_capacity(POSITION_TYPES.len() * CELL_TYPES.len() * RESOLUTION_TYPES.len());
+        let mut signatures =
+            Vec::with_capacity(POSITION_TYPES.len() * CELL_TYPES.len() * RESOLUTION_TYPES.len());
         for position_type in POSITION_TYPES.as_slice() {
             for cell_type in CELL_TYPES.as_slice() {
                 for resolution_type in RESOLUTION_TYPES.as_slice() {
