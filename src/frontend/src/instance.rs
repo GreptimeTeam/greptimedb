@@ -445,7 +445,7 @@ pub fn check_permission(
         // TODO(dennis): add a hook for admin commands.
         Statement::Admin(_) => {}
         // These are executed by query engine, and will be checked there.
-        Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
+        Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) |  Statement::Tqls(_) | Statement::HybridTql(_,_) | Statement::Delete(_) => {}
         // database ops won't be checked
         Statement::CreateDatabase(_)
         | Statement::ShowDatabases(_)

@@ -141,6 +141,7 @@ pub struct TqlParameters {
     lookback: Option<String>,
     query: String,
     pub is_verbose: bool,
+    name: Option<String>,
 }
 
 impl TqlParameters {
@@ -158,6 +159,19 @@ impl TqlParameters {
             lookback,
             query,
             is_verbose: false,
+            name: None,
+        }
+    }
+
+    pub fn with_name(self, name: Option<String>) -> Self {
+        TqlParameters {
+            start: self.start,
+            end: self.end,
+            step: self.step,
+            lookback: self.lookback,
+            query: self.query,
+            is_verbose: false,
+            name,
         }
     }
 }
