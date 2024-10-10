@@ -177,7 +177,7 @@ impl RangeMeta {
     }
 
     fn push_seq_mem_ranges(memtables: &[MemtableRef], ranges: &mut Vec<RangeMeta>) {
-        // For non append-only mode, each range only contains one memtable.
+        // For non append-only mode, each range only contains one memtable by default.
         for (i, memtable) in memtables.iter().enumerate() {
             let stats = memtable.stats();
             let Some(time_range) = stats.time_range() else {
@@ -195,6 +195,7 @@ impl RangeMeta {
         }
     }
 
+    // TODO(yingwen): Support multiple row groups in a range so we can split them later.
     fn push_seq_file_ranges(
         num_memtables: usize,
         files: &[FileHandle],
@@ -263,4 +264,78 @@ fn maybe_split_ranges_for_seq_scan(ranges: Vec<RangeMeta>) -> Vec<RangeMeta> {
     }
 
     new_ranges
+}
+
+#[cfg(test)]
+mod tests {
+    use common_time::timestamp::TimeUnit;
+    use common_time::Timestamp;
+
+    use super::*;
+
+    type Output = (Vec<usize>, i64, i64);
+
+    fn run_group_ranges_test(input: &[(usize, i64, i64)], expect: &[Output]) {
+        let ranges = input
+            .iter()
+            .map(|(idx, start, end)| {
+                let time_range = (
+                    Timestamp::new(*start, TimeUnit::Second),
+                    Timestamp::new(*end, TimeUnit::Second),
+                );
+                RangeMeta {
+                    time_range,
+                    indices: smallvec![*idx],
+                    row_group_indices: smallvec![RowGroupIndex {
+                        index: *idx,
+                        row_group_index: 0
+                    }],
+                    num_rows: 1,
+                }
+            })
+            .collect();
+        let output = group_ranges_for_seq_scan(ranges);
+        let actual: Vec<_> = output
+            .iter()
+            .map(|range| {
+                let indices = range.indices.to_vec();
+                let group_indices: Vec<_> = range
+                    .row_group_indices
+                    .iter()
+                    .map(|idx| idx.index)
+                    .collect();
+                assert_eq!(indices, group_indices);
+                let range = range.time_range;
+                (indices, range.0.value(), range.1.value())
+            })
+            .collect();
+        assert_eq!(expect, actual);
+    }
+
+    #[test]
+    fn test_group_ranges() {
+        // Group 1 part.
+        run_group_ranges_test(&[(1, 0, 2000)], &[(vec![1], 0, 2000)]);
+
+        // 1, 2, 3, 4 => [3, 1, 4], [2]
+        run_group_ranges_test(
+            &[
+                (1, 1000, 2000),
+                (2, 6000, 7000),
+                (3, 0, 1500),
+                (4, 1500, 3000),
+            ],
+            &[(vec![3, 1, 4], 0, 3000), (vec![2], 6000, 7000)],
+        );
+
+        // 1, 2, 3 => [3], [1], [2],
+        run_group_ranges_test(
+            &[(1, 3000, 4000), (2, 4001, 6000), (3, 0, 1000)],
+            &[
+                (vec![3], 0, 1000),
+                (vec![1], 3000, 4000),
+                (vec![2], 4001, 6000),
+            ],
+        );
+    }
 }

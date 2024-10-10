@@ -238,9 +238,6 @@ impl ParquetReaderBuilder {
             cache_manager: self.cache_manager.clone(),
         };
 
-        // TODO(yingwen): count the cost of the method.
-        metrics.build_cost = start.elapsed();
-
         let mut filters = if let Some(predicate) = &self.predicate {
             predicate
                 .exprs()
@@ -270,6 +267,9 @@ impl ParquetReaderBuilder {
         );
 
         let context = FileRangeContext::new(reader_builder, filters, read_format, codec);
+
+        metrics.build_cost += start.elapsed();
+
         Ok((context, row_groups))
     }
 

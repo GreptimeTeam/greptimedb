@@ -361,11 +361,3 @@ pub(crate) fn collect_iter_timestamps(iter: BoxedBatchIterator) -> Vec<i64> {
     .map(|v| v.unwrap().0.value())
     .collect()
 }
-
-/// Builds a memtable range for test.
-pub(crate) fn mem_range_for_test(id: MemtableId) -> MemtableRange {
-    let builder = Box::new(EmptyIterBuilder::default());
-
-    let context = Arc::new(MemtableRangeContext::new(id, builder));
-    MemtableRange::new(context)
-}
