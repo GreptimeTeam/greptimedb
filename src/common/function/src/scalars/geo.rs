@@ -29,18 +29,31 @@ impl GeoFunctions {
         // geohash
         registry.register(Arc::new(GeohashFunction));
         registry.register(Arc::new(GeohashNeighboursFunction));
-        // h3 family
+
+        // h3 index
         registry.register(Arc::new(h3::H3LatLngToCell));
         registry.register(Arc::new(h3::H3LatLngToCellString));
+
+        // h3 index inspection
         registry.register(Arc::new(h3::H3CellBase));
-        registry.register(Arc::new(h3::H3CellCenterChild));
-        registry.register(Arc::new(h3::H3CellCenterLat));
-        registry.register(Arc::new(h3::H3CellCenterLng));
         registry.register(Arc::new(h3::H3CellIsPentagon));
-        registry.register(Arc::new(h3::H3CellParent));
-        registry.register(Arc::new(h3::H3CellResolution));
-        registry.register(Arc::new(h3::H3CellToString));
-        registry.register(Arc::new(h3::H3IsNeighbour));
         registry.register(Arc::new(h3::H3StringToCell));
+        registry.register(Arc::new(h3::H3CellToString));
+        registry.register(Arc::new(h3::H3CellCenterLatLng));
+        registry.register(Arc::new(h3::H3CellResolution));
+
+        // h3 hierarchical grid
+        registry.register(Arc::new(h3::H3CellCenterChild));
+        registry.register(Arc::new(h3::H3CellParent));
+        registry.register(Arc::new(h3::H3CellToChildren));
+        registry.register(Arc::new(h3::H3CellToChildrenSize));
+        registry.register(Arc::new(h3::H3CellToChildPos));
+        registry.register(Arc::new(h3::H3ChildPosToCell));
+
+        // h3 grid traversal
+        registry.register(Arc::new(h3::H3GridDisk));
+        registry.register(Arc::new(h3::H3GridDiskDistances));
+        registry.register(Arc::new(h3::H3GridDistance));
+        registry.register(Arc::new(h3::H3GridPathCells));
     }
 }
