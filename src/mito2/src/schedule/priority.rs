@@ -14,7 +14,7 @@
 
 use std::ops::Add;
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_stream::stream;
 use futures::Stream;
@@ -22,6 +22,7 @@ use tokio::select;
 use tokio::time::Sleep;
 
 use crate::error;
+use crate::schedule::scheduler::Priority;
 
 /// Creates an unbounded channel.
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
@@ -37,31 +38,28 @@ pub struct Sender<T> {
 }
 
 impl<T> Sender<T> {
-    /// Tries to send a high priority item, returns `Err` if the channel is full or closed.
-    pub fn try_send_high(&self, item: T) -> error::Result<()> {
-        self.tx_high.try_send(item).map_err(map_send_error)
-    }
-
-    /// Tries to send a low priority item with optional deadline, returns `Err` if the channel is full or closed.
-    pub fn try_send_low(&self, item: T, deadline: Option<Duration>) -> error::Result<()> {
-        self.tx_low
-            .try_send((deadline.map(|d| Instant::now().add(d)), item))
-            .map_err(map_send_error)
+    /// Tries to send an item with given priority, returns `Err` if the channel is full or closed.
+    pub fn try_send(&self, item: T, priority: Priority) -> error::Result<()> {
+        match priority {
+            Priority::High => self.tx_high.try_send(item).map_err(map_send_error),
+            Priority::Low(deadline) => self
+                .tx_low
+                .try_send((deadline.map(|d| Instant::now().add(d)), item))
+                .map_err(map_send_error),
+        }
     }
 
     /// Tries to send a high priority item, returns `Err` if the channel is full or closed.
     #[cfg(test)]
-    pub async fn send_high(&self, item: T) -> error::Result<()> {
-        self.tx_high.send(item).await.map_err(map_send_error)
-    }
-
-    /// Tries to send a low priority item with optional deadline, returns `Err` if the channel is full or closed.
-    #[cfg(test)]
-    pub async fn send_low(&self, item: T, deadline: Option<Duration>) -> error::Result<()> {
-        self.tx_low
-            .send((deadline.map(|d| Instant::now().add(d)), item))
-            .await
-            .map_err(map_send_error)
+    pub async fn send(&self, item: T, priority: Priority) -> error::Result<()> {
+        match priority {
+            Priority::High => self.tx_high.send(item).await.map_err(map_send_error),
+            Priority::Low(deadline) => self
+                .tx_low
+                .send((deadline.map(|d| Instant::now().add(d)), item))
+                .await
+                .map_err(map_send_error),
+        }
     }
 }
 
@@ -174,9 +172,9 @@ mod tests {
     #[tokio::test]
     async fn test_high() {
         let (tx, rx) = unbounded();
-        tx.try_send_high(1).unwrap();
-        tx.try_send_high(2).unwrap();
-        tx.try_send_high(3).unwrap();
+        tx.try_send(1, Priority::High).unwrap();
+        tx.try_send(2, Priority::High).unwrap();
+        tx.try_send(3, Priority::High).unwrap();
 
         drop(tx);
         let s = rx.into_stream();
@@ -186,9 +184,9 @@ mod tests {
     #[tokio::test]
     async fn test_low() {
         let (tx, rx) = unbounded();
-        tx.send_low(1, None).await.unwrap();
-        tx.send_low(2, None).await.unwrap();
-        tx.send_low(3, None).await.unwrap();
+        tx.send(1, Priority::Low(None)).await.unwrap();
+        tx.send(2, Priority::Low(None)).await.unwrap();
+        tx.send(3, Priority::Low(None)).await.unwrap();
 
         drop(tx);
         let s = rx.into_stream();
@@ -198,13 +196,13 @@ mod tests {
     #[tokio::test]
     async fn test_high_and_low() {
         let (tx, rx) = unbounded();
-        tx.send_low(1, None).await.unwrap();
-        tx.send_low(2, None).await.unwrap();
-        tx.send_low(3, None).await.unwrap();
+        tx.send(1, Priority::Low(None)).await.unwrap();
+        tx.send(2, Priority::Low(None)).await.unwrap();
+        tx.send(3, Priority::Low(None)).await.unwrap();
 
-        tx.send_high(4).await.unwrap();
-        tx.send_high(5).await.unwrap();
-        tx.send_high(6).await.unwrap();
+        tx.send(4, Priority::High).await.unwrap();
+        tx.send(5, Priority::High).await.unwrap();
+        tx.send(6, Priority::High).await.unwrap();
         drop(tx);
         let s = rx.into_stream();
         assert_eq!(
@@ -220,10 +218,10 @@ mod tests {
         let (tx, rx) = unbounded();
 
         for i in 0..10 {
-            tx.send_high(i).await.unwrap();
+            tx.send(i, Priority::High).await.unwrap();
         }
 
-        tx.send_low(11, Some(Duration::from_millis(10)))
+        tx.send(11, Priority::Low(Some(Duration::from_millis(10))))
             .await
             .unwrap();
 
@@ -241,7 +239,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_empty() {
         let (tx, rx) = unbounded();
-        tx.send_low(1, None).await.unwrap();
+        tx.send(1, Priority::Low(None)).await.unwrap();
         drop(tx);
         assert_eq!(vec![1], rx.into_stream().collect::<Vec<_>>().await);
     }
@@ -272,7 +270,7 @@ mod tests {
         let sender = tx.clone();
         tokio::spawn(async move {
             for _ in 0..HIGH_COUNT {
-                sender.send_high(Item::new(true)).await.unwrap();
+                sender.send(Item::new(true), Priority::High).await.unwrap();
                 tokio::task::yield_now().await;
             }
         });
@@ -281,9 +279,9 @@ mod tests {
         tokio::spawn(async move {
             for _ in 0..LOW_COUNT {
                 sender
-                    .send_low(
+                    .send(
                         Item::new(false),
-                        Some(Duration::from_micros(LOW_DEADLINE_US)),
+                        Priority::Low(Some(Duration::from_micros(LOW_DEADLINE_US))),
                     )
                     .await
                     .unwrap();
@@ -327,10 +325,12 @@ mod tests {
             for _ in 0..10000 {
                 let p: bool = rand::random();
                 if p {
-                    tx.send_high(Item::new(true)).await.unwrap();
+                    tx.send(Item::new(true), Priority::High).await.unwrap();
                     high_send_clone.fetch_add(1, Ordering::Relaxed);
                 } else {
-                    tx.send_low(Item::new(false), None).await.unwrap();
+                    tx.send(Item::new(false), Priority::Low(None))
+                        .await
+                        .unwrap();
                     low_send_clone.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -364,10 +364,10 @@ mod tests {
             for _ in 0..10000 {
                 let high: bool = rand::random();
                 if high {
-                    tx.send_high(high).await.unwrap();
+                    tx.send(high, Priority::High).await.unwrap();
                     high_send_clone.fetch_add(1, Ordering::Release);
                 } else {
-                    tx.send_low(high, None).await.unwrap();
+                    tx.send(high, Priority::Low(None)).await.unwrap();
                     low_send_clone.fetch_add(1, Ordering::Release);
                 }
             }
@@ -416,20 +416,20 @@ mod tests {
         }
 
         let (tx, rx) = unbounded();
-        tx.send_low(Item::Low, Some(Duration::from_millis(0)))
+        tx.send(Item::Low, Priority::Low(Some(Duration::from_millis(0))))
             .await
             .unwrap();
-        tx.send_low(Item::Low, Some(Duration::from_millis(0)))
+        tx.send(Item::Low, Priority::Low(Some(Duration::from_millis(0))))
             .await
             .unwrap();
-        tx.send_low(Item::Low, Some(Duration::from_millis(0)))
+        tx.send(Item::Low, Priority::Low(Some(Duration::from_millis(0))))
             .await
             .unwrap();
         // ensures all low-priority tasks expires.
         tokio::time::sleep(Duration::from_millis(1)).await;
-        tx.send_high(Item::High).await.unwrap();
-        tx.send_high(Item::High).await.unwrap();
-        tx.send_high(Item::High).await.unwrap();
+        tx.send(Item::High, Priority::High).await.unwrap();
+        tx.send(Item::High, Priority::High).await.unwrap();
+        tx.send(Item::High, Priority::High).await.unwrap();
         drop(tx);
         let res = rx.into_stream().collect::<Vec<_>>().await;
         assert_eq!(

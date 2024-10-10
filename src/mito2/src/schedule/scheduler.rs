@@ -25,11 +25,12 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::{InvalidSchedulerStateSnafu, InvalidSenderSnafu, Result, StopSchedulerSnafu};
+use crate::error::{InvalidSchedulerStateSnafu, Result, StopSchedulerSnafu};
 use crate::metrics::{SCHEDULER_PENDING_JOBS, SCHEDULER_TASK_ELAPSED};
 use crate::schedule::priority;
 
 /// Priority of the job.
+#[derive(Clone, Copy)]
 pub enum Priority {
     /// High priority job.
     High,
@@ -166,16 +167,11 @@ impl Scheduler for LocalScheduler {
         let binding = self.sender.read().unwrap();
         let sender = binding.as_ref().context(InvalidSchedulerStateSnafu)?;
         let job_type = job.job_type;
-        let res = match job.priority {
-            Priority::High => sender.try_send_high(job),
-            Priority::Low(deadline) => sender.try_send_low(job, deadline),
-        };
-        if res.is_ok() {
+        let priority = job.priority;
+        sender.try_send(job, priority).map(|r| {
             SCHEDULER_PENDING_JOBS.with_label_values(&[job_type]).add(1);
-            Ok(())
-        } else {
-            InvalidSenderSnafu {}.fail()
-        }
+            r
+        })
     }
 
     /// if await_termination is true, scheduler will wait all tasks finished before stopping

@@ -370,12 +370,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid sender",))]
-    InvalidSender {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid scheduler state"))]
     InvalidSchedulerState {
         #[snafu(implicit)]
@@ -962,7 +956,6 @@ impl ErrorExt for Error {
             ConvertVector { source, .. } => source.status_code(),
 
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
-            InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             DeleteSst { .. } | DeleteIndex { .. } => StatusCode::StorageUnavailable,
             FlushRegion { source, .. } => source.status_code(),
