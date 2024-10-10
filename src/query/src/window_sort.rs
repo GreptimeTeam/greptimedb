@@ -651,12 +651,32 @@ pub fn compute_all_working_ranges(
                 // if next overlap range have Partition tha's is not last one in `working_set`(hence need to be read before merge sorting), and `working_set` have >1 count
                 // we have to expand current working range to cover it(and add it's `set` to `working_set`)
                 // so that merge sort is possible
-                let last_part = working_set.last();
-                
-                let next_have_smaller_than_last_part =
-                    set.iter().any(|new_part| last_part != Some(new_part));
-                // if only one PartitionRange in current working set, we can just emit it so no need to expand working range
-                let need_expand = working_set.len() > 1 && next_have_smaller_than_last_part;
+                let need_expand = {
+                    let last_part = working_set.last();
+                    let inter: BTreeSet<usize> = working_set
+                        .intersection(&BTreeSet::from_iter(set.iter().cloned()))
+                        .cloned()
+                        .collect();
+                    if let Some(one) = inter.first()
+                        && inter.len() == 1
+                        && Some(one) == last_part
+                    {
+                        // if only the last PartitionRange in current working set, we can just emit it so no need to expand working range
+                        if set.iter().all(|p| Some(p) >= last_part) {
+                            // if all PartitionRange in next overlap range is after the last one in current working set, we can just emit current working set
+                            false
+                        } else {
+                            // elsewise, we need to expand working range to include next overlap range
+                            true
+                        }
+                    } else if inter.is_empty() {
+                        // if no common PartitionRange in current working set and next overlap range, we can just emit current working set
+                        false
+                    } else {
+                        // have multiple intersection, we need to expand working range to include next overlap range
+                        true
+                    }
+                };
 
                 if need_expand {
                     working_range.1 = range.1;
@@ -953,6 +973,50 @@ mod test {
                     BTreeSet::from([0, 1]),
                 )],
             ),
+            (
+                BTreeMap::from([
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        vec![0, 1],
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        vec![1],
+                    ),
+                ]),
+                vec![
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        BTreeSet::from([0, 1]),
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        BTreeSet::from([1]),
+                    ),
+                ],
+            ),
+            (
+                BTreeMap::from([
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        vec![0],
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        vec![0, 1],
+                    ),
+                ]),
+                vec![
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        BTreeSet::from([0]),
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        BTreeSet::from([0, 1]),
+                    ),
+                ],
+            ),
             // test if only one count in working set get it's own working range
             (
                 BTreeMap::from([
@@ -1040,10 +1104,60 @@ mod test {
                     BTreeSet::from([0, 1, 2]),
                 )],
             ),
+            (
+                BTreeMap::from([
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        vec![0, 1],
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        vec![1, 2],
+                    ),
+                ]),
+                vec![
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        BTreeSet::from([0, 1]),
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        BTreeSet::from([1, 2]),
+                    ),
+                ],
+            ),
+            // non-overlapping
+            (
+                BTreeMap::from([
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        vec![0, 1],
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        vec![2],
+                    ),
+                ]),
+                vec![
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        BTreeSet::from([0, 1]),
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        BTreeSet::from([2]),
+                    ),
+                ],
+            ),
         ];
 
         for (input, expected) in testcases {
-            assert_eq!(compute_all_working_ranges(&input), expected);
+            assert_eq!(
+                compute_all_working_ranges(&input),
+                expected,
+                "input: {:?}",
+                input
+            );
         }
     }
 
