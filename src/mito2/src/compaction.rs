@@ -68,6 +68,9 @@ use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
 
+/// Compaction tasks deadline
+const COMPACTION_TASK_DEADLINE: Duration = Duration::from_secs(5 * 60);
+
 /// Region compaction request.
 pub struct CompactionRequest {
     pub(crate) engine_config: Arc<MitoConfig>,
@@ -364,7 +367,7 @@ impl CompactionScheduler {
         self.scheduler
             .schedule(Job::new(
                 "compaction",
-                Priority::Low(Some(Duration::from_secs(5 * 60))),
+                Priority::Low(Some(COMPACTION_TASK_DEADLINE)),
                 Box::pin(async move {
                     local_compaction_task.run().await;
                 }),
