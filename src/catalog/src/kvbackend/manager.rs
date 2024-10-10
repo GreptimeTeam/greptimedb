@@ -119,7 +119,7 @@ impl KvBackendCatalogManager {
         })
     }
 
-    /// Returns the `[InformationExtension]`.
+    /// Returns the [`InformationExtension`].
     pub fn information_extension(&self) -> InformationExtensionRef {
         self.information_extension.clone()
     }
