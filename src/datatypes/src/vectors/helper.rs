@@ -421,7 +421,7 @@ mod tests {
     use common_decimal::Decimal128;
     use common_time::time::Time;
     use common_time::timestamp::TimeUnit;
-    use common_time::{Date, DateTime, Duration, Interval};
+    use common_time::{Date, DateTime, Duration, IntervalMonthDayNano};
 
     use super::*;
     use crate::value::Value;
@@ -689,7 +689,10 @@ mod tests {
         );
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
-            assert_eq!(Value::Interval(Interval::from_i128(2000)), vector.get(i));
+            assert_eq!(
+                Value::IntervalMonthDayNano(IntervalMonthDayNano::from_i128(2000)),
+                vector.get(i)
+            );
         }
     }
 

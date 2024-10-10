@@ -15,31 +15,51 @@
 use std::fmt::Display;
 
 use bytes::{Buf, BufMut};
-use common_time::Interval;
+use common_time::interval::IntervalFormat;
+use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use pgwire::types::ToSqlText;
 use postgres_types::{to_sql_checked, FromSql, IsNull, ToSql, Type};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PgInterval {
-    months: i32,
-    days: i32,
-    microseconds: i64,
+    pub(crate) months: i32,
+    pub(crate) days: i32,
+    pub(crate) microseconds: i64,
 }
 
-impl From<Interval> for PgInterval {
-    fn from(interval: Interval) -> Self {
-        let (months, days, nanos) = interval.to_month_day_nano();
+impl From<IntervalYearMonth> for PgInterval {
+    fn from(interval: IntervalYearMonth) -> Self {
         Self {
-            months,
-            days,
-            microseconds: nanos / 1000,
+            months: interval.months,
+            days: 0,
+            microseconds: 0,
         }
     }
 }
 
-impl From<PgInterval> for Interval {
+impl From<IntervalDayTime> for PgInterval {
+    fn from(interval: IntervalDayTime) -> Self {
+        Self {
+            months: 0,
+            days: interval.days,
+            microseconds: interval.milliseconds as i64 * 1000,
+        }
+    }
+}
+
+impl From<IntervalMonthDayNano> for PgInterval {
+    fn from(interval: IntervalMonthDayNano) -> Self {
+        Self {
+            months: interval.months,
+            days: interval.days,
+            microseconds: interval.nanoseconds / 1000,
+        }
+    }
+}
+
+impl From<PgInterval> for IntervalMonthDayNano {
     fn from(interval: PgInterval) -> Self {
-        Interval::from_month_day_nano(
+        IntervalMonthDayNano::new(
             interval.months,
             interval.days,
             // Maybe overflow, but most scenarios ok.
@@ -56,7 +76,11 @@ impl From<PgInterval> for Interval {
 
 impl Display for PgInterval {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", Interval::from(*self).to_postgres_string())
+        write!(
+            f,
+            "{}",
+            IntervalFormat::from(IntervalMonthDayNano::from(*self)).to_postgres_string()
+        )
     }
 }
 

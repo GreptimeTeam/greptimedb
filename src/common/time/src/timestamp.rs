@@ -20,16 +20,17 @@ use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use chrono::{
-    DateTime, Days, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime,
+    DateTime, Days, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta,
     TimeZone as ChronoTimeZone, Utc,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
+use crate::error;
 use crate::error::{ArithmeticOverflowSnafu, ParseTimestampSnafu, Result, TimestampOverflowSnafu};
+use crate::interval::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use crate::timezone::{get_timezone, Timezone};
 use crate::util::{datetime_to_utc, div_ceil};
-use crate::{error, Interval};
 
 /// Timestamp represents the value of units(seconds/milliseconds/microseconds/nanoseconds) elapsed
 /// since UNIX epoch. The valid value range of [Timestamp] depends on it's unit (all in UTC timezone):
@@ -140,40 +141,77 @@ impl Timestamp {
         })
     }
 
-    /// Adds given Interval to the current timestamp.
-    /// Returns None if the resulting timestamp would be out of range.
-    pub fn add_interval(&self, interval: Interval) -> Option<Timestamp> {
+    // FIXME(yingwen): remove add/sub intervals later
+    /// Adds given [IntervalYearMonth] to the current timestamp.
+    pub fn add_year_month(&self, interval: IntervalYearMonth) -> Option<Timestamp> {
         let naive_datetime = self.to_chrono_datetime()?;
-        let (months, days, nsecs) = interval.to_month_day_nano();
 
-        let naive_datetime = naive_datetime
-            .checked_add_months(Months::new(months as u32))?
-            .checked_add_days(Days::new(days as u64))?
-            + Duration::from_nanos(nsecs as u64);
+        let naive_datetime =
+            naive_datetime.checked_add_months(Months::new(interval.months as u32))?;
 
-        match Timestamp::from_chrono_datetime(naive_datetime) {
-            // Have to convert the new timestamp by the current unit.
-            Some(ts) => ts.convert_to(self.unit),
-            None => None,
-        }
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
     }
 
-    /// Subtracts given Interval to the current timestamp.
-    /// Returns None if the resulting timestamp would be out of range.
-    pub fn sub_interval(&self, interval: Interval) -> Option<Timestamp> {
+    /// Adds given [IntervalDayTime] to the current timestamp.
+    pub fn add_day_time(&self, interval: IntervalDayTime) -> Option<Timestamp> {
         let naive_datetime = self.to_chrono_datetime()?;
-        let (months, days, nsecs) = interval.to_month_day_nano();
 
         let naive_datetime = naive_datetime
-            .checked_sub_months(Months::new(months as u32))?
-            .checked_sub_days(Days::new(days as u64))?
-            - Duration::from_nanos(nsecs as u64);
+            .checked_add_days(Days::new(interval.days as u64))?
+            .checked_add_signed(TimeDelta::milliseconds(interval.milliseconds as i64))?;
 
-        match Timestamp::from_chrono_datetime(naive_datetime) {
-            // Have to convert the new timestamp by the current unit.
-            Some(ts) => ts.convert_to(self.unit),
-            None => None,
-        }
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
+    }
+
+    /// Adds given [IntervalMonthDayNano] to the current timestamp.
+    pub fn add_month_day_nano(&self, interval: IntervalMonthDayNano) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+
+        let naive_datetime = naive_datetime
+            .checked_add_months(Months::new(interval.months as u32))?
+            .checked_add_days(Days::new(interval.days as u64))?
+            .checked_add_signed(TimeDelta::nanoseconds(interval.nanoseconds))?;
+
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
+    }
+
+    /// Subtracts given [IntervalYearMonth] to the current timestamp.
+    pub fn sub_year_month(&self, interval: IntervalYearMonth) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+
+        let naive_datetime =
+            naive_datetime.checked_sub_months(Months::new(interval.months as u32))?;
+
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
+    }
+
+    /// Subtracts given [IntervalDayTime] to the current timestamp.
+    pub fn sub_day_time(&self, interval: IntervalDayTime) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+
+        let naive_datetime = naive_datetime
+            .checked_sub_days(Days::new(interval.days as u64))?
+            .checked_sub_signed(TimeDelta::milliseconds(interval.milliseconds as i64))?;
+
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
+    }
+
+    /// Subtracts given [IntervalMonthDayNano] to the current timestamp.
+    pub fn sub_month_day_nano(&self, interval: IntervalMonthDayNano) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+
+        let naive_datetime = naive_datetime
+            .checked_sub_months(Months::new(interval.months as u32))?
+            .checked_sub_days(Days::new(interval.days as u64))?
+            .checked_sub_signed(TimeDelta::nanoseconds(interval.nanoseconds))?;
+
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
     }
 
     /// Subtracts current timestamp with another timestamp, yielding a duration.
@@ -688,13 +726,13 @@ mod tests {
     fn test_add_sub_interval() {
         let ts = Timestamp::new(1000, TimeUnit::Millisecond);
 
-        let interval = Interval::from_day_time(1, 200);
+        let interval = IntervalDayTime::new(1, 200);
 
-        let new_ts = ts.add_interval(interval).unwrap();
+        let new_ts = ts.add_day_time(interval).unwrap();
         assert_eq!(new_ts.unit(), TimeUnit::Millisecond);
         assert_eq!(new_ts.value(), 1000 + 3600 * 24 * 1000 + 200);
 
-        assert_eq!(ts, new_ts.sub_interval(interval).unwrap());
+        assert_eq!(ts, new_ts.sub_day_time(interval).unwrap());
     }
 
     #[test]

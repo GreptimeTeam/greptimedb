@@ -14,18 +14,19 @@
 
 use std::fmt;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
+use common_query::error::{ArrowComputeSnafu, IntoVectorSnafu, InvalidFuncArgsSnafu, Result};
 use common_query::prelude::Signature;
-use datatypes::data_type::DataType;
+use datatypes::arrow::compute::kernels::numeric;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::value::ValueRef;
-use datatypes::vectors::VectorRef;
-use snafu::ensure;
+use datatypes::vectors::{Helper, VectorRef};
+use snafu::{ensure, ResultExt};
 
 use crate::function::{Function, FunctionContext};
 use crate::helper;
 
-/// A function adds an interval value to Timestamp, Date or DateTime, and return the result.
+/// A function adds an interval value to Timestamp, Date, and return the result.
+/// The implementation of datetime type is based on Date64 which is incorrect so this function
+/// doesn't support the datetime type.
 #[derive(Clone, Debug, Default)]
 pub struct DateAddFunction;
 
@@ -44,7 +45,6 @@ impl Function for DateAddFunction {
         helper::one_of_sigs2(
             vec![
                 ConcreteDataType::date_datatype(),
-                ConcreteDataType::datetime_datatype(),
                 ConcreteDataType::timestamp_second_datatype(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 ConcreteDataType::timestamp_microsecond_datatype(),
@@ -69,64 +69,14 @@ impl Function for DateAddFunction {
             }
         );
 
-        let left = &columns[0];
-        let right = &columns[1];
+        let left = columns[0].to_arrow_array();
+        let right = columns[1].to_arrow_array();
 
-        let size = left.len();
-        let left_datatype = columns[0].data_type();
-        match left_datatype {
-            ConcreteDataType::Timestamp(_) => {
-                let mut result = left_datatype.create_mutable_vector(size);
-                for i in 0..size {
-                    let ts = left.get(i).as_timestamp();
-                    let interval = right.get(i).as_interval();
-
-                    let new_ts = match (ts, interval) {
-                        (Some(ts), Some(interval)) => ts.add_interval(interval),
-                        _ => ts,
-                    };
-
-                    result.push_value_ref(ValueRef::from(new_ts));
-                }
-
-                Ok(result.to_vector())
-            }
-            ConcreteDataType::Date(_) => {
-                let mut result = left_datatype.create_mutable_vector(size);
-                for i in 0..size {
-                    let date = left.get(i).as_date();
-                    let interval = right.get(i).as_interval();
-                    let new_date = match (date, interval) {
-                        (Some(date), Some(interval)) => date.add_interval(interval),
-                        _ => date,
-                    };
-
-                    result.push_value_ref(ValueRef::from(new_date));
-                }
-
-                Ok(result.to_vector())
-            }
-            ConcreteDataType::DateTime(_) => {
-                let mut result = left_datatype.create_mutable_vector(size);
-                for i in 0..size {
-                    let datetime = left.get(i).as_datetime();
-                    let interval = right.get(i).as_interval();
-                    let new_datetime = match (datetime, interval) {
-                        (Some(datetime), Some(interval)) => datetime.add_interval(interval),
-                        _ => datetime,
-                    };
-
-                    result.push_value_ref(ValueRef::from(new_datetime));
-                }
-
-                Ok(result.to_vector())
-            }
-            _ => UnsupportedInputDataTypeSnafu {
-                function: NAME,
-                datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-            }
-            .fail(),
-        }
+        let result = numeric::add(&left, &right).context(ArrowComputeSnafu)?;
+        let arrow_type = result.data_type().clone();
+        Helper::try_into_vector(result).context(IntoVectorSnafu {
+            data_type: arrow_type,
+        })
     }
 }
 
@@ -144,8 +94,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
     use datatypes::vectors::{
-        DateTimeVector, DateVector, IntervalDayTimeVector, IntervalYearMonthVector,
-        TimestampSecondVector,
+        DateVector, IntervalDayTimeVector, IntervalYearMonthVector, TimestampSecondVector,
     };
 
     use super::{DateAddFunction, *};
@@ -168,16 +117,15 @@ mod tests {
             ConcreteDataType::date_datatype(),
             f.return_type(&[ConcreteDataType::date_datatype()]).unwrap()
         );
-        assert_eq!(
-            ConcreteDataType::datetime_datatype(),
-            f.return_type(&[ConcreteDataType::datetime_datatype()])
-                .unwrap()
-        );
-        assert!(matches!(f.signature(),
+        assert!(
+            matches!(f.signature(),
                          Signature {
                              type_signature: TypeSignature::OneOf(sigs),
                              volatility: Volatility::Immutable
-                         } if  sigs.len() == 18));
+                         } if  sigs.len() == 15),
+            "{:?}",
+            f.signature()
+        );
     }
 
     #[test]
@@ -237,38 +185,6 @@ mod tests {
             }
             match v {
                 Value::Date(date) => {
-                    assert_eq!(date.val(), result.unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    #[test]
-    fn test_datetime_date_add() {
-        let f = DateAddFunction;
-
-        let dates = vec![Some(123), None, Some(42), None];
-        // Intervals in months
-        let intervals = vec![1, 2, 3, 1];
-        let results = [Some(2678400123), None, Some(7776000042), None];
-
-        let date_vector = DateTimeVector::from(dates.clone());
-        let interval_vector = IntervalYearMonthVector::from_vec(intervals);
-        let args: Vec<VectorRef> = vec![Arc::new(date_vector), Arc::new(interval_vector)];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
-
-        assert_eq!(4, vector.len());
-        for (i, _t) in dates.iter().enumerate() {
-            let v = vector.get(i);
-            let result = results.get(i).unwrap();
-
-            if result.is_none() {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::DateTime(date) => {
                     assert_eq!(date.val(), result.unwrap());
                 }
                 _ => unreachable!(),

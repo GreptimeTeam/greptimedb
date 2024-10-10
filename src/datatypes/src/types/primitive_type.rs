@@ -16,7 +16,6 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
-use common_time::interval::IntervalUnit;
 use common_time::{Date, DateTime};
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -30,6 +29,7 @@ use crate::types::{DateTimeType, DateType};
 use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
+// TODO(yingwen): Can we remove `Into<serde_json::Value>`?
 /// Represents the wrapper type that wraps a native type using the `newtype pattern`,
 /// such as [Date](`common_time::Date`) is a wrapper type for the underlying native
 /// type `i32`.
@@ -364,11 +364,7 @@ impl DataType for Int64Type {
             Value::DateTime(v) => Some(Value::Int64(v.val())),
             Value::Timestamp(v) => Some(Value::Int64(v.value())),
             Value::Time(v) => Some(Value::Int64(v.value())),
-            Value::Interval(v) => match v.unit() {
-                IntervalUnit::DayTime => Some(Value::Int64(v.to_i64())),
-                IntervalUnit::YearMonth => None,
-                IntervalUnit::MonthDayNano => None,
-            },
+            // We don't allow casting interval type to int.
             _ => None,
         }
     }
@@ -410,11 +406,7 @@ impl DataType for Int32Type {
             Value::Float64(v) => num::cast::cast(v).map(Value::Int32),
             Value::String(v) => v.as_utf8().parse::<i32>().map(Value::Int32).ok(),
             Value::Date(v) => Some(Value::Int32(v.val())),
-            Value::Interval(v) => match v.unit() {
-                IntervalUnit::YearMonth => Some(Value::Int32(v.to_i32())),
-                IntervalUnit::DayTime => None,
-                IntervalUnit::MonthDayNano => None,
-            },
+            // We don't allow casting interval type to int.
             _ => None,
         }
     }
