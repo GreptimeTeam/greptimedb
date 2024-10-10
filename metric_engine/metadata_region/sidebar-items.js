@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COLUMN_PREFIX","REGION_PREFIX"],"struct":["MetadataRegion"]};

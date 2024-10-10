@@ -1,0 +1,1 @@
+searchState.loadedDescShard("mito2", 1, "A queue for temporary store region edit requests, if the …\nChecks the edit, writes and applies it.\nReturns the argument unchanged.\nCalls <code>U::from(self)</code>.\nRejects delete request under append mode.\nChecks the schema and fill missing columns.\nSend rejected error to all <code>write_requests</code>.")

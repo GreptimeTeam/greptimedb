@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_string_data_rows","matches","process"],"static":["SET_TRANSACTION_PATTERN","SHOW_PATTERN","TRANSACTION_PATTERN","VAR_VALUES"]};

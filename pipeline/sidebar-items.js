@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Content","Value"],"fn":["identity_pipeline","parse"],"mod":["error","etl","manager","metrics","pipeline_operator","table","util"],"struct":["Array","GreptimeTransformer","Map","Pipeline"],"trait":["Processor","Transformer"],"type":["PipelineInfo","PipelineRef","PipelineTableRef","PipelineVersion","Result"]};

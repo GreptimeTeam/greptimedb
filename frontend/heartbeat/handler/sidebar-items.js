@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["invalidate_table_cache"]};

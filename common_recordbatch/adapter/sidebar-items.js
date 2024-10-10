@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AsyncRecordBatchStreamAdapterState","Metrics"],"struct":["AsyncRecordBatchStreamAdapter","DfRecordBatchStreamAdapter","MetricCollector","PlanMetrics","RecordBatchMetrics","RecordBatchStreamAdapter","RecordBatchStreamTypeAdapter"],"type":["FutureStream"]};

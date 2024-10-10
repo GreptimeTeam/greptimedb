@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COMMENT_KEY","DEFAULT_CONSTRAINT_KEY","FULLTEXT_KEY","TIME_INDEX_KEY"],"enum":["FulltextAnalyzer"],"struct":["ColumnSchema","FulltextOptions"],"type":["Metadata"]};

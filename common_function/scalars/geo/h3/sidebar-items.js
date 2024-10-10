@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cell_from_value","signature_of_cell","signature_of_cell_and_resolution","signature_of_double_cell","value_to_resolution"],"struct":["H3CellBase","H3CellCenterChild","H3CellCenterLat","H3CellCenterLng","H3CellIsPentagon","H3CellParent","H3CellResolution","H3CellToString","H3IsNeighbour","H3LatLngToCell","H3LatLngToCellString","H3StringToCell"]};

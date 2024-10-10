@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DAYS_PER_MONTH","NANOS_PER_DAY","NANOS_PER_HOUR","NANOS_PER_MICRO","NANOS_PER_MILLI","NANOS_PER_MONTH","NANOS_PER_SEC"],"enum":["IntervalUnit"],"fn":["get_time_part","get_year_month"],"struct":["Interval","IntervalCompare","IntervalFormat"]};

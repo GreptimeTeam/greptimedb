@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["error","global","metrics","repeated_task","runtime"],"struct":["JoinError","JoinHandle","RepeatedTask"],"trait":["TaskFunction"],"type":["BoxedTaskFunction"]};

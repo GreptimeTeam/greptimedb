@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["to_df_scalar_func"],"struct":["DfUdfAdapter","ScalarUdf"]};

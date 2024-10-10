@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["JSON_TYPE_NAME"],"struct":["JsonType"]};
