@@ -288,7 +288,7 @@ impl WindowedSortStream {
                             {
                                 // expand working range on those condition
                                 cur_range.1 = range.1;
-                                cur_set.extend(set.into_iter());
+                                cur_set.extend(set);
                             }
                         }
                     }
@@ -635,6 +635,10 @@ enum Action {
 /// Compute all working ranges and corrseponding working sets from given `overlap_counts` computed from `split_overlapping_ranges`
 ///
 /// TODO: test this
+///
+/// working ranges promise once input stream get a value out of current range, future values will never be in this range
+///
+/// hence we can merge sort current working range once that happens
 pub fn compute_all_working_ranges(
     overlap_counts: &BTreeMap<(Timestamp, Timestamp), Vec<usize>>,
 ) -> Vec<((Timestamp, Timestamp), BTreeSet<usize>)> {
@@ -643,23 +647,30 @@ pub fn compute_all_working_ranges(
     for (range, set) in overlap_counts.iter() {
         match &mut cur_range_set {
             None => cur_range_set = Some((*range, BTreeSet::from_iter(set.iter().cloned()))),
-            Some((cur_range, cur_set)) => {
-                // if next overlap range have Partition tha's is in `cur_set` but not the last one in `cur_set`
-                // we have to expand current working range to cover it(and add it's `set` to `cur_set`)
+            Some((working_range, working_set)) => {
+                // if next overlap range have Partition tha's is not last one in `working_set`(hence need to be read before merge sorting), and `working_set` have >1 count
+                // we have to expand current working range to cover it(and add it's `set` to `working_set`)
                 // so that merge sort is possible
-                let last_part = cur_set.last();
-                let need_expand = set
-                    .iter()
-                    .any(|new_part| cur_set.contains(new_part) && last_part != Some(new_part));
+                let last_part = working_set.last();
+                
+                let next_have_smaller_than_last_part =
+                    set.iter().any(|new_part| last_part != Some(new_part));
+                // if only one PartitionRange in current working set, we can just emit it so no need to expand working range
+                let need_expand = working_set.len() > 1 && next_have_smaller_than_last_part;
 
                 if need_expand {
-                    cur_range.1 = range.1;
-                    cur_set.extend(set.iter().cloned());
+                    working_range.1 = range.1;
+                    working_set.extend(set.iter().cloned());
                 } else {
-                    ret.push((*cur_range, std::mem::take(cur_set)));
+                    ret.push((*working_range, std::mem::take(working_set)));
+                    cur_range_set = Some((*range, BTreeSet::from_iter(set.iter().cloned())));
                 }
             }
         }
+    }
+
+    if let Some(cur_range_set) = cur_range_set {
+        ret.push(cur_range_set)
     }
 
     ret
@@ -916,6 +927,123 @@ mod test {
                 split_by,
                 split_idx
             );
+        }
+    }
+
+    #[test]
+    fn test_compute_working_ranges() {
+        let testcases = vec![
+            (
+                BTreeMap::from([(
+                    (Timestamp::new_second(1), Timestamp::new_second(2)),
+                    vec![0],
+                )]),
+                vec![(
+                    (Timestamp::new_second(1), Timestamp::new_second(2)),
+                    BTreeSet::from([0]),
+                )],
+            ),
+            (
+                BTreeMap::from([(
+                    (Timestamp::new_second(1), Timestamp::new_second(2)),
+                    vec![0, 1],
+                )]),
+                vec![(
+                    (Timestamp::new_second(1), Timestamp::new_second(2)),
+                    BTreeSet::from([0, 1]),
+                )],
+            ),
+            // test if only one count in working set get it's own working range
+            (
+                BTreeMap::from([
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        vec![0],
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        vec![0, 1],
+                    ),
+                    (
+                        (Timestamp::new_second(3), Timestamp::new_second(4)),
+                        vec![1],
+                    ),
+                ]),
+                vec![
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        BTreeSet::from([0]),
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        BTreeSet::from([0, 1]),
+                    ),
+                    (
+                        (Timestamp::new_second(3), Timestamp::new_second(4)),
+                        BTreeSet::from([1]),
+                    ),
+                ],
+            ),
+            (
+                BTreeMap::from([
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        vec![0, 2],
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        vec![0, 1, 2],
+                    ),
+                    (
+                        (Timestamp::new_second(3), Timestamp::new_second(4)),
+                        vec![1, 2],
+                    ),
+                ]),
+                vec![(
+                    (Timestamp::new_second(1), Timestamp::new_second(4)),
+                    BTreeSet::from([0, 1, 2]),
+                )],
+            ),
+            (
+                BTreeMap::from([
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        vec![0, 2],
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        vec![1, 2],
+                    ),
+                ]),
+                vec![(
+                    (Timestamp::new_second(1), Timestamp::new_second(3)),
+                    BTreeSet::from([0, 1, 2]),
+                )],
+            ),
+            (
+                BTreeMap::from([
+                    (
+                        (Timestamp::new_second(1), Timestamp::new_second(2)),
+                        vec![0, 1],
+                    ),
+                    (
+                        (Timestamp::new_second(2), Timestamp::new_second(3)),
+                        vec![0, 1, 2],
+                    ),
+                    (
+                        (Timestamp::new_second(3), Timestamp::new_second(4)),
+                        vec![1, 2],
+                    ),
+                ]),
+                vec![(
+                    (Timestamp::new_second(1), Timestamp::new_second(4)),
+                    BTreeSet::from([0, 1, 2]),
+                )],
+            ),
+        ];
+
+        for (input, expected) in testcases {
+            assert_eq!(compute_all_working_ranges(&input), expected);
         }
     }
 
