@@ -37,7 +37,7 @@ impl Function for JsonPathExistsFunction {
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+        Ok(ConcreteDataType::boolean_datatype())
     }
 
     fn signature(&self) -> Signature {
@@ -125,7 +125,7 @@ mod tests {
 
         assert_eq!("json_path_exists", json_path_exists.name());
         assert_eq!(
-            ConcreteDataType::string_datatype(),
+            ConcreteDataType::boolean_datatype(),
             json_path_exists
                 .return_type(&[ConcreteDataType::json_datatype()])
                 .unwrap()
@@ -135,7 +135,7 @@ mod tests {
                          Signature {
                              type_signature: TypeSignature::Exact(valid_types),
                              volatility: Volatility::Immutable
-                         } if  valid_types == vec![ConcreteDataType::json_datatype()]
+                         } if  valid_types == vec![ConcreteDataType::json_datatype(), ConcreteDataType::string_datatype()]
         ));
 
         let json_strings = [
