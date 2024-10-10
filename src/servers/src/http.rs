@@ -907,7 +907,7 @@ impl HttpServer {
 async fn v1_prof_handler() -> Result<impl IntoResponse> {
     Ok((
         axum::http::StatusCode::MOVED_PERMANENTLY,
-        "The 'v1/prof' API is moved to 'debug/prof'",
+        "'v1/prof' API is moved to 'debug/prof', please use 'debug/prof/cpu' or 'debug/prof/mem'",
     ))
 }
 
