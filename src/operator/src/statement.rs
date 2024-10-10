@@ -49,6 +49,7 @@ use query::stats::StatementStatistics;
 use query::QueryEngineRef;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
+use set::set_query_timeout;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::set_variables::SetVariables;
@@ -64,8 +65,8 @@ use table::TableRef;
 use self::set::{set_bytea_output, set_datestyle, set_timezone, validate_client_encoding};
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, SchemaNotFoundSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UpgradeCatalogManagerRefSnafu,
+    PlanStatementSnafu, QueryTimeoutSnafu, Result, SchemaNotFoundSnafu, TableMetadataManagerSnafu,
+    TableNotFoundSnafu, UpgradeCatalogManagerRefSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -120,7 +121,15 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let _slow_query_timer = self.stats.start_slow_query_timer(stmt.clone());
         match stmt {
-            QueryStatement::Sql(stmt) => self.execute_sql(stmt, query_ctx).await,
+            QueryStatement::Sql(stmt) => {
+                if let Some(timeout) = query_ctx.query_timeout() {
+                    return tokio::time::timeout(timeout, self.execute_sql(stmt, query_ctx))
+                        .await
+                        .context(QueryTimeoutSnafu)?;
+                } else {
+                    self.execute_sql(stmt, query_ctx).await
+                }
+            }
             QueryStatement::Promql(_) => self.plan_exec(stmt, query_ctx).await,
         }
     }
@@ -343,6 +352,26 @@ impl StatementExecutor {
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
+            // TODO: write sqlness test for query timeout variables
+            // once the proper channel is configured in the test infra.
+            // The current sqlness test channel is default to Unknown.
+            "MAX_EXECUTION_TIME" => {
+                if query_ctx.channel() == Channel::Mysql {
+                    set_query_timeout(set_var.value, query_ctx)?
+                } else {
+                    return NotSupportedSnafu {
+                        feat: format!("Unsupported set variable {}", var_name),
+                    }
+                    .fail();
+                }
+            }
+            "STATEMENT_TIMEOUT" => {
+                if query_ctx.channel() == Channel::Postgres {
+                    set_query_timeout(set_var.value, query_ctx)?
+                } else {
+                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
+                }
+            }
             _ => {
                 // for postgres, we give unknown SET statements a warning with
                 //  success, this is prevent the SET call becoming a blocker

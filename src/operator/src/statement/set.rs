@@ -12,14 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use common_time::Timezone;
+use session::context::Channel::Postgres;
 use session::context::QueryContextRef;
 use session::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{Expr, Ident, Value};
 use sql::statements::set_variables::SetVariables;
 
-use crate::error::{InvalidConfigValueSnafu, InvalidSqlSnafu, NotSupportedSnafu, Result};
+use crate::error::{
+    BuildRegexSnafu, InvalidConfigValueSnafu, InvalidSqlSnafu, NotSupportedSnafu, Result,
+};
 
 pub fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     let tz_expr = exprs.first().context(NotSupportedSnafu {
@@ -176,4 +181,94 @@ pub fn set_datestyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     ctx.configuration_parameter()
         .set_pg_datetime_style(style.unwrap_or(old_style), order.unwrap_or(older_order));
     Ok(())
+}
+
+pub fn set_query_timeout(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let timeout_expr = exprs.first().context(NotSupportedSnafu {
+        feat: "No timeout value find in set query timeout statement",
+    })?;
+    match timeout_expr {
+        Expr::Value(Value::Number(timeout, _)) => {
+            match timeout.parse::<u64>() {
+                Ok(timeout) => ctx.set_query_timeout(Duration::from_millis(timeout)),
+                Err(_) => {
+                    return NotSupportedSnafu {
+                        feat: format!("Invalid timeout expr {} in set variable statement", timeout),
+                    }
+                    .fail()
+                }
+            }
+            Ok(())
+        }
+        // postgres support time units i.e. SET STATEMENT_TIMEOUT = '50ms';
+        Expr::Value(Value::SingleQuotedString(timeout))
+        | Expr::Value(Value::DoubleQuotedString(timeout)) => {
+            if ctx.channel() != Postgres {
+                return NotSupportedSnafu {
+                    feat: format!("Invalid timeout expr {} in set variable statement", timeout),
+                }
+                .fail();
+            }
+            let timeout = parse_pg_query_timeout_input(timeout)?;
+            ctx.set_query_timeout(Duration::from_millis(timeout));
+            Ok(())
+        }
+        expr => NotSupportedSnafu {
+            feat: format!(
+                "Unsupported timeout expr {} in set variable statement",
+                expr
+            ),
+        }
+        .fail(),
+    }
+}
+
+// support time units in ms, s, min, h, d for postgres protocol.
+// https://www.postgresql.org/docs/8.4/config-setting.html#:~:text=Valid%20memory%20units%20are%20kB,%2C%20and%20d%20(days).
+fn parse_pg_query_timeout_input(input: &str) -> Result<u64> {
+    // Regex rules:
+    // The string must start with a number (one or more digits).
+    // The number must be followed by one of the valid time units (ms, s, min, h, d).
+    // The string must end immediately after the unit, meaning there can be no extra
+    // characters or spaces after the valid time specification.
+    let re = regex::Regex::new(r"^(\d+)(ms|s|min|h|d)$").context(BuildRegexSnafu)?;
+    if let Some(captures) = re.captures(input) {
+        let value = captures[1].parse::<u64>().expect("regex failed");
+        let unit = &captures[2];
+
+        match unit {
+            "ms" => Ok(value),
+            "s" => Ok(value * 1000),
+            "min" => Ok(value * 60 * 1000),
+            "h" => Ok(value * 60 * 60 * 1000),
+            "d" => Ok(value * 24 * 60 * 60 * 1000),
+            _ => unreachable!("regex failed"),
+        }
+    } else {
+        NotSupportedSnafu {
+            feat: format!(
+                "Unsupported timeout expr {} in set variable statement",
+                input
+            ),
+        }
+        .fail()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::statement::set::parse_pg_query_timeout_input;
+
+    #[test]
+    fn test_parse_pg_query_timeout_input() {
+        assert!(parse_pg_query_timeout_input("").is_err());
+        assert!(parse_pg_query_timeout_input(" 50 ms").is_err());
+        assert!(parse_pg_query_timeout_input("5s 1ms").is_err());
+        assert!(parse_pg_query_timeout_input("3a").is_err());
+        assert!(parse_pg_query_timeout_input("1.5min").is_err());
+
+        assert_eq!(12, parse_pg_query_timeout_input("12ms").unwrap());
+        assert_eq!(2000, parse_pg_query_timeout_input("2s").unwrap());
+        assert_eq!(60000, parse_pg_query_timeout_input("1min").unwrap());
+    }
 }
