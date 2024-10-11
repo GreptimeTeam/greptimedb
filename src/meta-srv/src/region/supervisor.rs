@@ -16,10 +16,12 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::MAINTENANCE_KEY;
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::leadership_notifier::LeadershipChangeListener;
 use common_meta::peer::PeerLookupServiceRef;
 use common_meta::{ClusterId, DatanodeId};
 use common_runtime::JoinHandle;
@@ -127,6 +129,23 @@ pub struct RegionSupervisorTicker {
 
     /// Sends [Event]s.
     sender: Sender<Event>,
+}
+
+#[async_trait]
+impl LeadershipChangeListener for RegionSupervisorTicker {
+    fn name(&self) -> &'static str {
+        "RegionSupervisorTicker"
+    }
+
+    async fn on_become_leader(&self) -> common_meta::error::Result<()> {
+        self.start();
+        Ok(())
+    }
+
+    async fn on_become_follower(&self) -> common_meta::error::Result<()> {
+        self.stop();
+        Ok(())
+    }
 }
 
 impl RegionSupervisorTicker {

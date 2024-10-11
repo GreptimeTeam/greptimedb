@@ -40,17 +40,12 @@ pub trait LeadershipChangeListener: Send + Sync {
 }
 
 /// A notifier for leadership change events.
+#[derive(Default)]
 pub struct LeadershipChangeNotifier {
     listeners: Vec<Arc<dyn LeadershipChangeListener>>,
 }
 
 impl LeadershipChangeNotifier {
-    pub fn new() -> Self {
-        LeadershipChangeNotifier {
-            listeners: Vec::new(),
-        }
-    }
-
     /// Adds a listener to the notifier.
     pub fn add_listener(&mut self, listener: Arc<dyn LeadershipChangeListener>) {
         self.listeners.push(listener);
@@ -119,7 +114,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_leadership_change_notifier() {
-        let mut notifier = LeadershipChangeNotifier::new();
+        let mut notifier = LeadershipChangeNotifier::default();
         let listener1 = Arc::new(MockListener {
             name: "listener1".to_string(),
             on_become_leader_fn: None,
@@ -144,18 +139,18 @@ mod tests {
         notifier.add_listener(listener1);
         notifier.add_listener(listener2);
 
-        let listener1 = notifier.listeners.get(0).unwrap();
+        let listener1 = notifier.listeners.first().unwrap();
         let listener2 = notifier.listeners.get(1).unwrap();
 
         assert_eq!(listener1.name(), "listener1");
         assert_eq!(listener2.name(), "listener2");
 
         notifier.notify_become_leader().await;
-        assert_eq!(called_become_follower.load(Ordering::Relaxed), false);
-        assert_eq!(called_become_leader.load(Ordering::Relaxed), true);
+        assert!(!called_become_follower.load(Ordering::Relaxed));
+        assert!(called_become_leader.load(Ordering::Relaxed));
 
         notifier.notify_become_follower().await;
-        assert_eq!(called_become_follower.load(Ordering::Relaxed), true);
-        assert_eq!(called_become_leader.load(Ordering::Relaxed), true);
+        assert!(called_become_follower.load(Ordering::Relaxed));
+        assert!(called_become_leader.load(Ordering::Relaxed));
     }
 }

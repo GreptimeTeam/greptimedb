@@ -29,6 +29,9 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
+use common_meta::leadership_notifier::{
+    LeadershipChangeNotifier, LeadershipChangeNotifierCustomizerRef,
+};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
@@ -56,6 +59,7 @@ use crate::handler::HeartbeatHandlerGroupRef;
 use crate::lease::lookup_datanode_peer;
 use crate::lock::DistLockRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
+use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
 use crate::region::supervisor::RegionSupervisorTickerRef;
 use crate::selector::{Selector, SelectorType};
@@ -291,12 +295,10 @@ pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<
 pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 
 pub struct MetaStateHandler {
-    procedure_manager: ProcedureManagerRef,
-    wal_options_allocator: WalOptionsAllocatorRef,
     subscribe_manager: Option<SubscriptionManagerRef>,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
-    region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
+    leadership_change_notifier: LeadershipChangeNotifier,
     state: StateRef,
 }
 
@@ -310,17 +312,7 @@ impl MetaStateHandler {
             self.state.write().unwrap().next_state(become_leader(true));
         }
 
-        if let Some(ticker) = self.region_supervisor_ticker.as_ref() {
-            ticker.start();
-        }
-
-        if let Err(e) = self.procedure_manager.start().await {
-            error!(e; "Failed to start procedure manager");
-        }
-
-        if let Err(e) = self.wal_options_allocator.start().await {
-            error!(e; "Failed to start wal options allocator");
-        }
+        self.leadership_change_notifier.notify_become_leader().await;
 
         self.greptimedb_telemetry_task.should_report(true);
     }
@@ -328,15 +320,9 @@ impl MetaStateHandler {
     pub async fn on_become_follower(&self) {
         self.state.write().unwrap().next_state(become_follower());
 
-        // Stops the procedures.
-        if let Err(e) = self.procedure_manager.stop().await {
-            error!(e; "Failed to stop procedure manager");
-        }
-
-        if let Some(ticker) = self.region_supervisor_ticker.as_ref() {
-            // Stops the supervisor ticker.
-            ticker.stop();
-        }
+        self.leadership_change_notifier
+            .notify_become_follower()
+            .await;
 
         // Suspends reporting.
         self.greptimedb_telemetry_task.should_report(false);
@@ -410,15 +396,25 @@ impl Metasrv {
             greptimedb_telemetry_task
                 .start()
                 .context(StartTelemetryTaskSnafu)?;
-            let region_supervisor_ticker = self.region_supervisor_ticker.clone();
+
+            // Builds leadership change notifier.
+            let mut leadership_change_notifier = LeadershipChangeNotifier::default();
+            leadership_change_notifier.add_listener(self.wal_options_allocator.clone());
+            leadership_change_notifier
+                .add_listener(Arc::new(ProcedureManagerListenerAdapter(procedure_manager)));
+            if let Some(region_supervisor_ticker) = &self.region_supervisor_ticker {
+                leadership_change_notifier.add_listener(region_supervisor_ticker.clone() as _);
+            }
+            if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
+                customizer.customize(&mut leadership_change_notifier);
+            }
+
             let state_handler = MetaStateHandler {
                 greptimedb_telemetry_task,
                 subscribe_manager,
-                procedure_manager,
-                wal_options_allocator: self.wal_options_allocator.clone(),
                 state: self.state.clone(),
                 leader_cached_kv_backend: leader_cached_kv_backend.clone(),
-                region_supervisor_ticker,
+                leadership_change_notifier,
             };
             let _handle = common_runtime::spawn_global(async move {
                 loop {
