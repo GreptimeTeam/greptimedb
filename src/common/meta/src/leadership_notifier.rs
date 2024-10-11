@@ -57,7 +57,7 @@ impl LeadershipChangeNotifier {
             if let Err(err) = listener.on_leader_start().await {
                 error!(
                     err;
-                    "Failed to notify 'on_leader_start' event, listener: {}",
+                    "Failed to notify listener: {}, event 'on_leader_start'",
                     listener.name()
                 );
             }
@@ -70,7 +70,7 @@ impl LeadershipChangeNotifier {
             if let Err(err) = listener.on_leader_stop().await {
                 error!(
                     err;
-                    "Failed to notify 'on_follower_start' event, listener: {}",
+                    "Failed to notify listener: {}, event: 'on_follower_start'",
                     listener.name()
                 );
             }
