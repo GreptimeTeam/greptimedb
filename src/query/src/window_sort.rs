@@ -77,8 +77,6 @@ pub struct WindowedSortExec {
     ///
     /// working ranges promise once input stream get a value out of current range, future values will never be in this range
     all_avail_working_range: Vec<(TimeRange, BTreeSet<usize>)>,
-    /// record all existing timestamps in the input `ranges`
-    all_exist_timestamps: BTreeSet<Timestamp>,
     input: Arc<dyn ExecutionPlan>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
@@ -109,7 +107,6 @@ impl WindowedSortExec {
             return Err(BoxedError::new(plain_error)).context(QueryExecutionSnafu {});
         }
 
-        let all_exist_timestamps = find_all_exist_timestamps(&ranges);
         let overlap_counts = split_overlapping_ranges(&ranges);
         let all_avail_working_range =
             compute_all_working_ranges(&overlap_counts, expression.options.descending);
@@ -119,7 +116,6 @@ impl WindowedSortExec {
             ranges,
             overlap_counts,
             all_avail_working_range,
-            all_exist_timestamps,
             input,
             metrics: ExecutionPlanMetricsSet::new(),
         })
@@ -240,7 +236,7 @@ fn split_batch_to_sorted_run(
             sort_column,
         })
     } else {
-        // those slice should be zero copy, so supposely no new reservation needed
+        // those slice should be zero copy, so supposedly no new reservation needed
         let mut ret = Vec::new();
         for run in sorted_runs_offset {
             let new_rb = batch.slice(run.offset, run.len);
@@ -321,7 +317,7 @@ impl WindowedSortStream {
                     if sorted_rb.num_rows() == 0 {
                         continue;
                     }
-                    // TODO: determine if this batch is in current working range
+                    // determine if this batch is in current working range
                     let cur_range = {
                         match (run_info.first_val, run_info.last_val) {
                             (Some(f), Some(l)) => TimeRange::new(f, l),
@@ -351,7 +347,7 @@ impl WindowedSortStream {
                             self.in_progress.push(sorted_rb.clone());
                         }
                     } else if let Some(intersection) = cur_range.intersection(&working_range) {
-                        // TODO: slice rb by intersection and concat it then merge sort
+                        // slice rb by intersection and concat it then merge sort
                         let cur_sort_column =
                             sort_column.values.slice(run_info.offset, run_info.len);
                         let (offset, len) = find_slice_from_range(
@@ -558,37 +554,6 @@ macro_rules! array_iter_helper {
         let iter = typed.iter().enumerate();
         Box::new(iter) as Box<dyn Iterator<Item = (usize, Option<i64>)>>
     }};
-}
-
-/// Get timestamp from array at offset
-fn get_timestamp_from(
-    array: &ArrayRef,
-    offset: usize,
-) -> datafusion_common::Result<Option<Timestamp>> {
-    let time_unit = if let DataType::Timestamp(unit, _) = array.data_type() {
-        unit
-    } else {
-        return Err(DataFusionError::Internal(format!(
-            "Unsupported sort column type: {}",
-            array.data_type()
-        )));
-    };
-    let ty = array.data_type();
-    let array = array.slice(offset, 1);
-    let mut iter = downcast_ts_array!(
-        array.data_type() => (array_iter_helper, array),
-        _ => internal_err!("Unsupported sort column type: {ty}")?
-    );
-    let (_idx, val) = iter.next().ok_or_else(|| {
-        DataFusionError::Internal("Empty array in get_timestamp_from".to_string())
-    })?;
-    let val = if let Some(val) = val {
-        val
-    } else {
-        return Ok(None);
-    };
-    let gt_timestamp = new_timestamp_from(time_unit, val);
-    Ok(Some(gt_timestamp))
 }
 
 fn new_timestamp_from(time_unit: &TimeUnit, value: i64) -> Timestamp {
