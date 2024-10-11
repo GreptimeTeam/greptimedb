@@ -59,7 +59,7 @@ impl StatementExecutor {
             .map(|arg| {
                 let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = arg else {
                     return error::BuildAdminFunctionArgsSnafu {
-                        msg: "unsupported function arg {arg}",
+                        msg: format!("unsupported function arg {arg}"),
                     }
                     .fail();
                 };
@@ -200,7 +200,7 @@ fn values_to_vectors_by_valid_types(
             }
 
             error::BuildAdminFunctionArgsSnafu {
-                msg: "failed to cast {value}",
+                msg: format!("failed to cast {value}"),
             }
             .fail()
         })
