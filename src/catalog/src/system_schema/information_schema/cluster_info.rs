@@ -33,11 +33,11 @@ use datatypes::value::Value;
 use datatypes::vectors::{
     Int64VectorBuilder, StringVectorBuilder, TimestampMillisecondVectorBuilder,
 };
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
 use super::CLUSTER_INFO;
-use crate::error::{CreateRecordBatchSnafu, GetInformationExtensionSnafu, InternalSnafu, Result};
+use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::system_schema::information_schema::{InformationTable, Predicates};
 use crate::system_schema::utils;
 use crate::CatalogManager;
@@ -166,8 +166,7 @@ impl InformationSchemaClusterInfoBuilder {
     /// Construct the `information_schema.cluster_info` virtual table
     async fn make_cluster_info(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let predicates = Predicates::from_scan_request(&request);
-        let information_extension = utils::information_extension(&self.catalog_manager)?
-            .context(GetInformationExtensionSnafu)?;
+        let information_extension = utils::information_extension(&self.catalog_manager)?;
         let node_infos = information_extension.nodes().await?;
         for node_info in node_infos {
             self.add_node_info(&predicates, node_info);

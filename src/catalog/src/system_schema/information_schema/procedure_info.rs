@@ -30,11 +30,11 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, TimestampMillisecondVectorBuilder};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
 use super::PROCEDURE_INFO;
-use crate::error::{CreateRecordBatchSnafu, GetInformationExtensionSnafu, InternalSnafu, Result};
+use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::system_schema::information_schema::{InformationTable, Predicates};
 use crate::system_schema::utils;
 use crate::CatalogManager;
@@ -160,8 +160,7 @@ impl InformationSchemaProcedureInfoBuilder {
     /// Construct the `information_schema.procedure_info` virtual table
     async fn make_procedure_info(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let predicates = Predicates::from_scan_request(&request);
-        let information_extension = utils::information_extension(&self.catalog_manager)?
-            .context(GetInformationExtensionSnafu)?;
+        let information_extension = utils::information_extension(&self.catalog_manager)?;
         let procedures = information_extension.procedures().await?;
         for (status, procedure_info) in procedures {
             self.add_procedure(&predicates, status, procedure_info);

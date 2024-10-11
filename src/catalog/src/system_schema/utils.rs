@@ -17,7 +17,7 @@ use std::sync::Weak;
 use common_meta::key::TableMetadataManagerRef;
 use snafu::OptionExt;
 
-use crate::error::{Result, UpgradeWeakCatalogManagerRefSnafu};
+use crate::error::{GetInformationExtensionSnafu, Result, UpgradeWeakCatalogManagerRefSnafu};
 use crate::information_schema::InformationExtensionRef;
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::CatalogManager;
@@ -27,7 +27,7 @@ pub mod tables;
 /// Try to get the `[InformationExtension]` from `[CatalogManager]` weak reference.
 pub fn information_extension(
     catalog_manager: &Weak<dyn CatalogManager>,
-) -> Result<Option<InformationExtensionRef>> {
+) -> Result<InformationExtensionRef> {
     let catalog_manager = catalog_manager
         .upgrade()
         .context(UpgradeWeakCatalogManagerRefSnafu)?;
@@ -35,7 +35,8 @@ pub fn information_extension(
     let information_extension = catalog_manager
         .as_any()
         .downcast_ref::<KvBackendCatalogManager>()
-        .map(|manager| manager.information_extension());
+        .map(|manager| manager.information_extension())
+        .context(GetInformationExtensionSnafu)?;
 
     Ok(information_extension)
 }
