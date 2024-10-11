@@ -45,5 +45,9 @@ You can periodically dump profiling data and compare them to find the delta memo
 To create flamegraph according to dumped profiling data:
 
 ```bash
-jeprof --svg <path_to_greptimedb_binary> --base=<baseline_prof> <profile_data> > output.svg
+sudo apt install -y libjemalloc-dev
+
+jeprof <path_to_greptime_binary> <profile_data> --collapse | ./flamegraph.pl > mem-prof.svg
+
+jeprof <path_to_greptime_binary> --base <baseline_prof> <profile_data> --collapse | ./flamegraph.pl > output.svg
 ```
