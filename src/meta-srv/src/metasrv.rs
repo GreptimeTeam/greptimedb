@@ -303,7 +303,7 @@ pub struct MetaStateHandler {
 }
 
 impl MetaStateHandler {
-    pub async fn on_become_leader(&self) {
+    pub async fn on_leader_start(&self) {
         self.state.write().unwrap().next_state(become_leader(false));
 
         if let Err(e) = self.leader_cached_kv_backend.load().await {
@@ -312,16 +312,18 @@ impl MetaStateHandler {
             self.state.write().unwrap().next_state(become_leader(true));
         }
 
-        self.leadership_change_notifier.notify_become_leader().await;
+        self.leadership_change_notifier
+            .notify_on_leader_start()
+            .await;
 
         self.greptimedb_telemetry_task.should_report(true);
     }
 
-    pub async fn on_become_follower(&self) {
+    pub async fn on_follower_start(&self) {
         self.state.write().unwrap().next_state(become_follower());
 
         self.leadership_change_notifier
-            .notify_become_follower()
+            .notify_on_follower_start()
             .await;
 
         // Suspends reporting.
@@ -425,12 +427,12 @@ impl Metasrv {
                             info!("Leader's cache has bean cleared on leader change: {msg}");
                             match msg {
                                 LeaderChangeMessage::Elected(_) => {
-                                    state_handler.on_become_leader().await;
+                                    state_handler.on_leader_start().await;
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
                                     error!("Leader :{:?} step down", leader);
 
-                                    state_handler.on_become_follower().await;
+                                    state_handler.on_follower_start().await;
                                 }
                             }
                         }
@@ -444,7 +446,7 @@ impl Metasrv {
                     }
                 }
 
-                state_handler.on_become_follower().await;
+                state_handler.on_follower_start().await;
             });
 
             // Register candidate and keep lease in background.

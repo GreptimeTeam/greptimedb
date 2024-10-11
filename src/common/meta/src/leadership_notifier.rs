@@ -32,11 +32,11 @@ pub trait LeadershipChangeListener: Send + Sync {
     /// Returns the listener name.
     fn name(&self) -> &str;
 
-    /// Called after a node has become the leader.
-    async fn on_become_leader(&self) -> Result<()>;
+    /// Called when the node transitions to the leader role.
+    async fn on_leader_start(&self) -> Result<()>;
 
-    /// Called after a node has become the follower.
-    async fn on_become_follower(&self) -> Result<()>;
+    /// Called when the node transitions to the follower role.
+    async fn on_follower_start(&self) -> Result<()>;
 }
 
 /// A notifier for leadership change events.
@@ -52,12 +52,12 @@ impl LeadershipChangeNotifier {
     }
 
     /// Notify all listeners that the node has become a leader.
-    pub async fn notify_become_leader(&self) {
+    pub async fn notify_on_leader_start(&self) {
         for listener in &self.listeners {
-            if let Err(err) = listener.on_become_leader().await {
+            if let Err(err) = listener.on_leader_start().await {
                 error!(
                     err;
-                    "Failed to notify become leader event, listener: {}",
+                    "Failed to notify 'on_leader_start' event, listener: {}",
                     listener.name()
                 );
             }
@@ -65,12 +65,12 @@ impl LeadershipChangeNotifier {
     }
 
     /// Notify all listeners that the node has become a follower.
-    pub async fn notify_become_follower(&self) {
+    pub async fn notify_on_follower_start(&self) {
         for listener in &self.listeners {
-            if let Err(err) = listener.on_become_follower().await {
+            if let Err(err) = listener.on_follower_start().await {
                 error!(
                     err;
-                    "Failed to notify become follower event, listener: {}",
+                    "Failed to notify 'on_follower_start' event, listener: {}",
                     listener.name()
                 );
             }
@@ -87,8 +87,8 @@ mod tests {
 
     struct MockListener {
         name: String,
-        on_become_leader_fn: Option<Box<dyn Fn() -> Result<()> + Send + Sync>>,
-        on_become_follower_fn: Option<Box<dyn Fn() -> Result<()> + Send + Sync>>,
+        on_leader_start_fn: Option<Box<dyn Fn() -> Result<()> + Send + Sync>>,
+        on_follower_start_fn: Option<Box<dyn Fn() -> Result<()> + Send + Sync>>,
     }
 
     #[async_trait::async_trait]
@@ -97,15 +97,15 @@ mod tests {
             &self.name
         }
 
-        async fn on_become_leader(&self) -> Result<()> {
-            if let Some(f) = &self.on_become_leader_fn {
+        async fn on_leader_start(&self) -> Result<()> {
+            if let Some(f) = &self.on_leader_start_fn {
                 return f();
             }
             Ok(())
         }
 
-        async fn on_become_follower(&self) -> Result<()> {
-            if let Some(f) = &self.on_become_follower_fn {
+        async fn on_follower_start(&self) -> Result<()> {
+            if let Some(f) = &self.on_follower_start_fn {
                 return f();
             }
             Ok(())
@@ -117,21 +117,21 @@ mod tests {
         let mut notifier = LeadershipChangeNotifier::default();
         let listener1 = Arc::new(MockListener {
             name: "listener1".to_string(),
-            on_become_leader_fn: None,
-            on_become_follower_fn: None,
+            on_leader_start_fn: None,
+            on_follower_start_fn: None,
         });
-        let called_become_leader = Arc::new(AtomicBool::new(false));
-        let called_become_follower = Arc::new(AtomicBool::new(false));
-        let called_become_leader_moved = called_become_leader.clone();
-        let called_become_follower_moved = called_become_follower.clone();
+        let called_on_leader_start = Arc::new(AtomicBool::new(false));
+        let called_on_follower_start = Arc::new(AtomicBool::new(false));
+        let called_on_leader_start_moved = called_on_leader_start.clone();
+        let called_on_follower_start_moved = called_on_follower_start.clone();
         let listener2 = Arc::new(MockListener {
             name: "listener2".to_string(),
-            on_become_leader_fn: Some(Box::new(move || {
-                called_become_leader_moved.store(true, Ordering::Relaxed);
+            on_leader_start_fn: Some(Box::new(move || {
+                called_on_leader_start_moved.store(true, Ordering::Relaxed);
                 Ok(())
             })),
-            on_become_follower_fn: Some(Box::new(move || {
-                called_become_follower_moved.store(true, Ordering::Relaxed);
+            on_follower_start_fn: Some(Box::new(move || {
+                called_on_follower_start_moved.store(true, Ordering::Relaxed);
                 Ok(())
             })),
         });
@@ -145,12 +145,12 @@ mod tests {
         assert_eq!(listener1.name(), "listener1");
         assert_eq!(listener2.name(), "listener2");
 
-        notifier.notify_become_leader().await;
-        assert!(!called_become_follower.load(Ordering::Relaxed));
-        assert!(called_become_leader.load(Ordering::Relaxed));
+        notifier.notify_on_leader_start().await;
+        assert!(!called_on_follower_start.load(Ordering::Relaxed));
+        assert!(called_on_leader_start.load(Ordering::Relaxed));
 
-        notifier.notify_become_follower().await;
-        assert!(called_become_follower.load(Ordering::Relaxed));
-        assert!(called_become_leader.load(Ordering::Relaxed));
+        notifier.notify_on_follower_start().await;
+        assert!(called_on_follower_start.load(Ordering::Relaxed));
+        assert!(called_on_leader_start.load(Ordering::Relaxed));
     }
 }

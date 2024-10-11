@@ -32,14 +32,14 @@ impl LeadershipChangeListener for ProcedureManagerListenerAdapter {
         "ProcedureManager"
     }
 
-    async fn on_become_leader(&self) -> Result<()> {
+    async fn on_leader_start(&self) -> Result<()> {
         self.0
             .start()
             .await
             .context(error::StartProcedureManagerSnafu)
     }
 
-    async fn on_become_follower(&self) -> Result<()> {
+    async fn on_follower_start(&self) -> Result<()> {
         self.0
             .stop()
             .await
