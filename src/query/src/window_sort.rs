@@ -518,26 +518,38 @@ fn find_slice_from_range(
     };
     let array = &sort_column.values;
     let opt = &sort_column.options.unwrap_or_default();
-    let mut res_indices = Vec::new();
-    for target in [range.start, range.end] {
-        let typed_ts = target.convert_to(time_unit.into()).ok_or_else(|| {
-            DataFusionError::Internal(format!(
-                "Failed to convert timestamp from {:?} to {:?}",
-                target.unit(),
-                time_unit
-            ))
-        })?;
-        let value = Value::Timestamp(typed_ts);
-        let scalar = value
-            .try_to_scalar_value(&value.data_type())
-            .map_err(|e| DataFusionError::External(Box::new(e) as _))?;
-        let index = bisect::<true>(&[array.clone()], &[scalar], &[*opt])?;
-        res_indices.push(index);
-    }
-    res_indices.sort_unstable();
-    // TODO: check if off by one
-    let slice = (res_indices[0], res_indices[1] - res_indices[0]);
-    Ok(slice)
+
+    let sorted_range = if opt.descending {
+        [range.end, range.start]
+    } else {
+        [range.start, range.end]
+    };
+    let typed_sorted_range = sorted_range
+        .iter()
+        .map(|t| {
+            t.convert_to(time_unit.into())
+                .ok_or_else(|| {
+                    DataFusionError::Internal(format!(
+                        "Failed to convert timestamp from {:?} to {:?}",
+                        t.unit(),
+                        time_unit
+                    ))
+                })
+                .and_then(|typed_ts| {
+                    let value = Value::Timestamp(typed_ts);
+                    value
+                        .try_to_scalar_value(&value.data_type())
+                        .map_err(|e| DataFusionError::External(Box::new(e) as _))
+                })
+        })
+        .try_collect::<_, Vec<_>, _>()?;
+
+    let (start_val, end_val) = (typed_sorted_range[0].clone(), typed_sorted_range[1].clone());
+
+    let start = bisect::<true>(&[array.clone()], &[start_val.clone()], &[*opt])?;
+    let end = bisect::<false>(&[array.clone()], &[end_val.clone()], &[*opt])?;
+
+    Ok((start, end - start))
 }
 
 macro_rules! array_iter_helper {
@@ -966,6 +978,8 @@ pub fn check_upper_bound_monotonicity(ranges: &[PartitionRange]) -> bool {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use chrono::format;
     use pretty_assertions::assert_eq;
 
@@ -1871,6 +1885,68 @@ mod test {
 
     #[test]
     fn test_find_slice_from_range() {
-        todo!()
+        let test_cases = vec![
+            // test for off by one case
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([1, 2, 3, 4, 5])) as ArrayRef,
+                false,
+                TimeRange {
+                    start: Timestamp::new_millisecond(2),
+                    end: Timestamp::new_millisecond(4),
+                },
+                Ok((1, 3)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([1, 3, 4, 6])) as ArrayRef,
+                false,
+                TimeRange {
+                    start: Timestamp::new_millisecond(2),
+                    end: Timestamp::new_millisecond(5),
+                },
+                Ok((1, 2)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([1, 2, 3, 4, 6])) as ArrayRef,
+                false,
+                TimeRange {
+                    start: Timestamp::new_millisecond(2),
+                    end: Timestamp::new_millisecond(5),
+                },
+                Ok((1, 3)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([1, 3, 4, 5, 6])) as ArrayRef,
+                false,
+                TimeRange {
+                    start: Timestamp::new_millisecond(2),
+                    end: Timestamp::new_millisecond(5),
+                },
+                Ok((1, 3)),
+            ),
+        ];
+
+        for (sort_vals, descending, range, expected) in test_cases {
+            let sort_column = SortColumn {
+                values: sort_vals,
+                options: Some(SortOptions {
+                    descending,
+                    ..Default::default()
+                }),
+            };
+            let ret = find_slice_from_range(&sort_column, &range);
+            match (ret, expected) {
+                (Ok(ret), Ok(expected)) => assert_eq!(ret, expected),
+                (Err(err), Err(expected)) => {
+                    let expected: &str = expected;
+                    assert!(
+                        err.to_string().contains(expected),
+                        "err: {:?}, expected: {:?}",
+                        err,
+                        expected
+                    );
+                }
+                (r, e) => panic!("unexpected result: {:?}, expected: {:?}", r, e),
+            }
+        }
     }
 }
