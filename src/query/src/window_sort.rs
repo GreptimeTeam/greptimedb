@@ -254,15 +254,12 @@ fn split_batch_to_sorted_run(
 }
 
 impl WindowedSortStream {
-    /// The core logic of merging sort multiple sorted ranges
-    ///
-    /// We try to maximize the number of sorted runs we can merge in one go, while emit the result as soon as possible.
-    pub fn poll_next_inner(
-        mut self: Pin<&mut Self>,
+    /// Poll the next RecordBatch from the merge-sort's output stream
+    fn poll_result_stream(
+        &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
-        // first check and send out the merge result
-        if let Some(merge_stream) = &mut self.merge_stream.front_mut() {
+        while let Some(merge_stream) = &mut self.merge_stream.front_mut() {
             match merge_stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
                     return Poll::Ready(Some(Ok(batch)));
@@ -271,13 +268,30 @@ impl WindowedSortStream {
                     return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
+                    // current merge stream is done, we can start polling the next one
                     self.merge_stream.pop_front();
+                    continue;
                 }
                 Poll::Pending => {
                     return Poll::Pending;
                 }
             }
         }
+        // if no output stream is available
+        Poll::Ready(None)
+    }
+    /// The core logic of merging sort multiple sorted ranges
+    ///
+    /// We try to maximize the number of sorted runs we can merge in one go, while emit the result as soon as possible.
+    pub fn poll_next_inner(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
+        // first check and send out the merge result
+        match self.poll_result_stream(cx) {
+            Poll::Ready(None) => (),
+            x => return x,
+        };
 
         // then we get a new RecordBatch from input stream
         let new_input_rbs = match self.input.as_mut().poll_next(cx) {
@@ -368,14 +382,17 @@ impl WindowedSortStream {
                     }
                     self.last_value = run_info.last_val;
                 }
-                todo!("iterate over runs_with_batch to merge sort");
             }
             None => {
-                todo!("Input complete, merge sort the rest of the working set");
+                // input stream is done, we need to merge sort the remaining working set
+                // and emit the result
+                self.build_stream()?;
+                self.start_new_merge_sort()?;
             }
         }
 
-        todo!()
+        // emit the merge result
+        self.poll_result_stream(cx)
     }
 
     /// Get the current working range
@@ -392,6 +409,9 @@ impl WindowedSortStream {
 
     /// make `in_progress` as a new `DfSendableRecordBatchStream` and put into `sort_partition_rbs`
     fn build_stream(&mut self) -> datafusion_common::Result<()> {
+        if self.in_progress.is_empty() {
+            return Ok(());
+        }
         let data = std::mem::take(&mut self.in_progress);
         let new_stream = MemoryStream::try_new(data, self.schema(), None)?;
         self.sort_partition_rbs.push(Box::pin(new_stream));
@@ -500,7 +520,14 @@ fn find_slice_from_range(
     let opt = &sort_column.options.unwrap_or_default();
     let mut res_indices = Vec::new();
     for target in [range.start, range.end] {
-        let value = Value::Timestamp(target);
+        let typed_ts = target.convert_to(time_unit.into()).ok_or_else(|| {
+            DataFusionError::Internal(format!(
+                "Failed to convert timestamp from {:?} to {:?}",
+                target.unit(),
+                time_unit
+            ))
+        })?;
+        let value = Value::Timestamp(typed_ts);
         let scalar = value
             .try_to_scalar_value(&value.data_type())
             .map_err(|e| DataFusionError::External(Box::new(e) as _))?;
@@ -1840,5 +1867,10 @@ mod test {
                 opts
             );
         }
+    }
+
+    #[test]
+    fn test_find_slice_from_range() {
+        todo!()
     }
 }
