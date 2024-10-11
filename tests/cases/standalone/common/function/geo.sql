@@ -83,6 +83,14 @@ SELECT geohash(37.76938, -122.3889, 11::UInt64);
 
 SELECT geohash_neighbours(37.76938, -122.3889, 11);
 
+WITH cell_cte AS (
+  SELECT s2_latlng_to_cell(37.76938, -122.3889) AS cell
+)
+SELECT cell,
+       s2_cell_level(cell),
+       s2_cell_parent(cell, 3)
+FROM cell_cte;
+
 SELECT json_encode_path(37.76938, -122.3889, 1728083375::TimestampSecond);
 
 SELECT json_encode_path(lat, lon, ts)
