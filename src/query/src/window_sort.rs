@@ -593,7 +593,7 @@ fn cmp_with_opts<T: Ord>(
 
 #[derive(Debug, Clone)]
 struct SortedRunSet<N: Ord> {
-    /// sorted runs with batch corrseponding to them
+    /// sorted runs with batch corresponding to them
     runs_with_batch: Vec<(DfRecordBatch, SucRun<N>)>,
     /// sorted column from eval sorting expr
     sort_column: SortColumn,
@@ -661,7 +661,7 @@ fn find_successive_runs<T: Iterator<Item = (usize, Option<N>)>, N: Ord + Copy>(
     runs
 }
 
-/// return a list of non-overlaping (offset, length) which represent sorted runs, and
+/// return a list of non-overlapping (offset, length) which represent sorted runs, and
 /// can be used to call [`DfRecordBatch::slice`] to get sorted runs
 /// Returned runs will be as long as possible, and will not overlap with each other
 fn get_sorted_runs(sort_column: SortColumn) -> datafusion_common::Result<Vec<SucRun<Timestamp>>> {
@@ -798,7 +798,7 @@ enum Action {
     Push(TimeRange, Vec<usize>),
 }
 
-/// Compute all working ranges and corrseponding working sets from given `overlap_counts` computed from `split_overlapping_ranges`
+/// Compute all working ranges and corresponding working sets from given `overlap_counts` computed from `split_overlapping_ranges`
 ///
 /// working ranges promise once input stream get a value out of current range, future values will never be in this range
 ///
@@ -820,7 +820,7 @@ fn compute_all_working_ranges(
         match &mut cur_range_set {
             None => cur_range_set = Some((*range, BTreeSet::from_iter(set.iter().cloned()))),
             Some((working_range, working_set)) => {
-                // if next overlap range have Partition tha's is not last one in `working_set`(hence need to be read before merge sorting), and `working_set` have >1 count
+                // if next overlap range have Partition that's is not last one in `working_set`(hence need to be read before merge sorting), and `working_set` have >1 count
                 // we have to expand current working range to cover it(and add it's `set` to `working_set`)
                 // so that merge sort is possible
                 let need_expand = {
