@@ -753,12 +753,6 @@ impl HttpServer {
                             ),
                     ),
             )
-            .nest(
-                &format!("/{HTTP_API_VERSION}/prof"),
-                Router::new()
-                    .route("/cpu", routing::get(v1_prof_handler).post(v1_prof_handler))
-                    .route("/mem", routing::get(v1_prof_handler).post(v1_prof_handler)),
-            )
     }
 
     fn route_metrics<S>(metrics_handler: MetricsHandler) -> Router<S> {
@@ -901,14 +895,6 @@ impl HttpServer {
             .route("/config", apirouting::get(handler::config))
             .with_state(state)
     }
-}
-
-#[axum_macros::debug_handler]
-async fn v1_prof_handler() -> Result<impl IntoResponse> {
-    Ok((
-        axum::http::StatusCode::MOVED_PERMANENTLY,
-        "'v1/prof' API is moved to 'debug/prof', please use 'debug/prof/cpu' or 'debug/prof/mem'",
-    ))
 }
 
 pub const HTTP_SERVER: &str = "HTTP_SERVER";
