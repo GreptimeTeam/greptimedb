@@ -46,12 +46,12 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use crate::cli::cmd::ReplCommand;
 use crate::cli::helper::RustylineHelper;
 use crate::cli::AttachCommand;
-use crate::error;
 use crate::error::{
     CollectRecordBatchesSnafu, ParseSqlSnafu, PlanStatementSnafu, PrettyPrintRecordBatchesSnafu,
     ReadlineSnafu, ReplCreationSnafu, RequestDatabaseSnafu, Result, StartMetaClientSnafu,
     SubstraitEncodeLogicalPlanSnafu,
 };
+use crate::{error, DistributedInformationExtension};
 
 /// Captures the state of the repl, gathers commands and executes them one by one
 pub struct Repl {
@@ -275,9 +275,9 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         .build(),
     );
 
+    let information_extension = Arc::new(DistributedInformationExtension::new(meta_client.clone()));
     let catalog_manager = KvBackendCatalogManager::new(
-        Mode::Distributed,
-        Some(meta_client.clone()),
+        information_extension,
         cached_meta_backend.clone(),
         layered_cache_registry,
         None,

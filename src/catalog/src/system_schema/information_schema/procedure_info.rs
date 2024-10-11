@@ -14,14 +14,10 @@
 
 use std::sync::{Arc, Weak};
 
-use api::v1::meta::{ProcedureMeta, ProcedureStatus};
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::INFORMATION_SCHEMA_PROCEDURE_INFO_TABLE_ID;
-use common_config::Mode;
 use common_error::ext::BoxedError;
-use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
-use common_meta::rpc::procedure;
-use common_procedure::{ProcedureInfo, ProcedureState};
+use common_procedure::ProcedureInfo;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::timestamp::Timestamp;
@@ -38,10 +34,7 @@ use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
 use super::PROCEDURE_INFO;
-use crate::error::{
-    ConvertProtoDataSnafu, CreateRecordBatchSnafu, GetProcedureClientSnafu, InternalSnafu,
-    ListProceduresSnafu, ProcedureIdNotFoundSnafu, Result,
-};
+use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::system_schema::information_schema::{InformationTable, Predicates};
 use crate::system_schema::utils;
 use crate::CatalogManager;
@@ -167,45 +160,11 @@ impl InformationSchemaProcedureInfoBuilder {
     /// Construct the `information_schema.procedure_info` virtual table
     async fn make_procedure_info(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let predicates = Predicates::from_scan_request(&request);
-        let mode = utils::running_mode(&self.catalog_manager)?.unwrap_or(Mode::Standalone);
-        match mode {
-            Mode::Standalone => {
-                if let Some(procedure_manager) = utils::procedure_manager(&self.catalog_manager)? {
-                    let procedures = procedure_manager
-                        .list_procedures()
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(ListProceduresSnafu)?;
-                    for procedure in procedures {
-                        self.add_procedure(
-                            &predicates,
-                            procedure.state.as_str_name().to_string(),
-                            procedure,
-                        );
-                    }
-                } else {
-                    return GetProcedureClientSnafu { mode: "standalone" }.fail();
-                }
-            }
-            Mode::Distributed => {
-                if let Some(meta_client) = utils::meta_client(&self.catalog_manager)? {
-                    let procedures = meta_client
-                        .list_procedures(&ExecutorContext::default())
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(ListProceduresSnafu)?;
-                    for procedure in procedures.procedures {
-                        self.add_procedure_info(&predicates, procedure)?;
-                    }
-                } else {
-                    return GetProcedureClientSnafu {
-                        mode: "distributed",
-                    }
-                    .fail();
-                }
-            }
-        };
-
+        let information_extension = utils::information_extension(&self.catalog_manager)?;
+        let procedures = information_extension.procedures().await?;
+        for (status, procedure_info) in procedures {
+            self.add_procedure(&predicates, status, procedure_info);
+        }
         self.finish()
     }
 
@@ -245,34 +204,6 @@ impl InformationSchemaProcedureInfoBuilder {
         self.end_times.push(Some(end_time));
         self.statuses.push(Some(&status));
         self.lock_keys.push(Some(&lock_keys));
-    }
-
-    fn add_procedure_info(
-        &mut self,
-        predicates: &Predicates,
-        procedure: ProcedureMeta,
-    ) -> Result<()> {
-        let pid = match procedure.id {
-            Some(pid) => pid,
-            None => return ProcedureIdNotFoundSnafu {}.fail(),
-        };
-        let pid = procedure::pb_pid_to_pid(&pid)
-            .map_err(BoxedError::new)
-            .context(ConvertProtoDataSnafu)?;
-        let status = ProcedureStatus::try_from(procedure.status)
-            .map(|v| v.as_str_name())
-            .unwrap_or("Unknown")
-            .to_string();
-        let procedure_info = ProcedureInfo {
-            id: pid,
-            type_name: procedure.type_name,
-            start_time_ms: procedure.start_time_ms,
-            end_time_ms: procedure.end_time_ms,
-            state: ProcedureState::Running,
-            lock_keys: procedure.lock_keys,
-        };
-        self.add_procedure(predicates, status, procedure_info);
-        Ok(())
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {

@@ -23,6 +23,7 @@ use cache::{build_fundamental_cache_registry, with_default_composite_cache_regis
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use client::client_manager::NodeClients;
 use client::Client;
+use cmd::DistributedInformationExtension;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -366,9 +367,10 @@ impl GreptimeDbClusterBuilder {
             .build(),
         );
 
+        let information_extension =
+            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
         let catalog_manager = KvBackendCatalogManager::new(
-            Mode::Distributed,
-            Some(meta_client.clone()),
+            information_extension,
             cached_meta_backend.clone(),
             cache_registry.clone(),
             None,
