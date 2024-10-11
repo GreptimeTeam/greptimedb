@@ -1014,7 +1014,12 @@ pub fn check_upper_bound_monotonicity(ranges: &[PartitionRange]) -> bool {
 mod test {
     use std::sync::Arc;
 
+    use arrow::array::new_empty_array;
+    use arrow::compute::concat_batches;
+    use arrow_schema::{Field, Schema};
     use chrono::format;
+    use datafusion::physical_plan::ExecutionMode;
+    use futures::StreamExt;
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -1993,17 +1998,218 @@ mod test {
         }
     }
 
-    #[test]
-    fn test_window_sort_stream() {
-        struct TestStream {
-            expression: PhysicalSortExpr,
+    struct TestStream {
+        expression: PhysicalSortExpr,
+        fetch: Option<usize>,
+        input: Vec<(PartitionRange, DfRecordBatch)>,
+        output: DfRecordBatch,
+    }
+    use datafusion::catalog::schema;
+    use datafusion::physical_plan::expressions::Column;
+    impl TestStream {
+        fn new(
+            ts_col: Column,
+            opt: SortOptions,
             fetch: Option<usize>,
-            input: Vec<(PartitionRange, ArrayRef)>,
-            output: ArrayRef,
+            schema: impl Into<arrow_schema::Fields>,
+            input: Vec<(PartitionRange, Vec<ArrayRef>)>,
+            expected: Vec<ArrayRef>,
+        ) -> Self {
+            let expression = PhysicalSortExpr {
+                expr: Arc::new(ts_col),
+                options: opt,
+            };
+            let schema = Schema::new(schema.into());
+            let schema = Arc::new(schema);
+            let input = input
+                .into_iter()
+                .map(|(k, v)| (k, DfRecordBatch::try_new(schema.clone(), v).unwrap()))
+                .collect_vec();
+            let output = DfRecordBatch::try_new(schema, expected).unwrap();
+            Self {
+                expression,
+                fetch,
+                input,
+                output,
+            }
         }
 
-        struct MockInput {
-            input: Vec<ArrayRef>,
+        async fn run_test(&self) {
+            let (ranges, batches): (Vec<_>, Vec<_>) = self.input.clone().into_iter().unzip();
+
+            let mock_input = MockInputExec::new(
+                batches,
+                self.output.schema(),
+                self.expression.options.clone(),
+            );
+
+            let exec = WindowedSortExec::try_new(
+                self.expression.clone(),
+                self.fetch,
+                ranges,
+                Arc::new(mock_input),
+            )
+            .unwrap();
+
+            let exec_stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
+
+            let real_output = exec_stream.collect::<Vec<_>>().await;
+            let real_output: Vec<_> = real_output.into_iter().try_collect().unwrap();
+            let concat_batch = concat_batches(&self.output.schema(), &real_output).unwrap();
+            assert_eq!(concat_batch, self.output);
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockInputExec {
+        input: Vec<DfRecordBatch>,
+        schema: SchemaRef,
+        properties: PlanProperties,
+    }
+
+    impl MockInputExec {
+        fn new(input: Vec<DfRecordBatch>, schema: SchemaRef, opt: SortOptions) -> Self {
+            Self {
+                properties: PlanProperties::new(
+                    EquivalenceProperties::new(schema.clone()),
+                    Partitioning::UnknownPartitioning(1),
+                    ExecutionMode::Bounded,
+                ),
+                input,
+                schema,
+            }
+        }
+    }
+
+    impl DisplayAs for MockInputExec {
+        fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            todo!()
+        }
+    }
+
+    impl ExecutionPlan for MockInputExec {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn properties(&self) -> &PlanProperties {
+            &self.properties
+        }
+
+        fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+            vec![]
+        }
+
+        fn with_new_children(
+            self: Arc<Self>,
+            _children: Vec<Arc<dyn ExecutionPlan>>,
+        ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
+            Ok(self)
+        }
+
+        fn execute(
+            &self,
+            partition: usize,
+            context: Arc<TaskContext>,
+        ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
+            let stream = MockStream {
+                stream: self.input.clone(),
+                schema: self.schema.clone(),
+                idx: 0,
+            };
+            Ok(Box::pin(stream))
+        }
+    }
+
+    struct MockStream {
+        stream: Vec<DfRecordBatch>,
+        schema: SchemaRef,
+        idx: usize,
+    }
+
+    impl Stream for MockStream {
+        type Item = datafusion_common::Result<DfRecordBatch>;
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
+            if self.idx < self.stream.len() {
+                let ret = self.stream[self.idx].clone();
+                self.idx += 1;
+                Poll::Ready(Some(Ok(ret)))
+            } else {
+                Poll::Ready(None)
+            }
+        }
+    }
+
+    impl RecordBatchStream for MockStream {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_window_sort_stream() {
+        let test_cases = vec![
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                None,
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![],
+                vec![new_empty_array(&DataType::Timestamp(
+                    TimeUnit::Millisecond,
+                    None,
+                ))],
+            ),
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                None,
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(2),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([1]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(3),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([2]))],
+                    ),
+                ],
+                vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                    1, 2,
+                ]))],
+            ),
+        ];
+
+        for testcase in test_cases {
+            testcase.run_test().await;
         }
     }
 }
