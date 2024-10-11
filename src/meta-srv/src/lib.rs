@@ -40,7 +40,6 @@ pub mod selector;
 pub mod service;
 pub mod state;
 pub mod table_meta_alloc;
-
 pub use crate::error::Result;
 
 mod greptimedb_telemetry;
