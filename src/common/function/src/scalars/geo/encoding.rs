@@ -17,7 +17,7 @@ use std::sync::Arc;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
-use common_query::error::{self, InvalidFuncArgsSnafu, InvalidInputStateSnafu, Result};
+use common_query::error::{self, InvalidInputStateSnafu, Result};
 use common_query::logical_plan::accumulator::AggrFuncTypeStore;
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::AccumulatorCreatorFunction;

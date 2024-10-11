@@ -12,24 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
-use common_query::error::{self, InvalidFuncArgsSnafu, Result};
+use common_query::error::{InvalidFuncArgsSnafu, Result};
 use common_query::prelude::{Signature, TypeSignature};
 use datafusion::logical_expr::Volatility;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::value::Value;
-use datatypes::vectors::{
-    BooleanVectorBuilder, Float64VectorBuilder, MutableVector, StringVectorBuilder,
-    UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
-};
+use datatypes::vectors::{MutableVector, UInt64VectorBuilder, VectorRef};
 use derive_more::Display;
+use once_cell::sync::Lazy;
 use s2::cellid::{CellID, MAX_LEVEL};
 use s2::latlng::LatLng;
-use snafu::{ensure, ResultExt};
+use snafu::ensure;
 
+use super::helpers::{ensure_and_coerce, ensure_columns_len, ensure_columns_n};
 use crate::function::{Function, FunctionContext};
+
+static CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
+    vec![
+        ConcreteDataType::int64_datatype(),
+        ConcreteDataType::uint64_datatype(),
+    ]
+});
+
+static COORDINATE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
+    vec![
+        ConcreteDataType::float32_datatype(),
+        ConcreteDataType::float64_datatype(),
+    ]
+});
+
+static LEVEL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
+    vec![
+        ConcreteDataType::int8_datatype(),
+        ConcreteDataType::int16_datatype(),
+        ConcreteDataType::int32_datatype(),
+        ConcreteDataType::int64_datatype(),
+        ConcreteDataType::uint8_datatype(),
+        ConcreteDataType::uint16_datatype(),
+        ConcreteDataType::uint32_datatype(),
+        ConcreteDataType::uint64_datatype(),
+    ]
+});
 
 /// Function that returns [s2] encoding cellid for a given geospatial coordinate.
 ///
@@ -48,11 +72,8 @@ impl Function for S2LatLngToCell {
     }
 
     fn signature(&self) -> Signature {
-        let mut signatures = Vec::new();
-        for coord_type in &[
-            ConcreteDataType::float32_datatype(),
-            ConcreteDataType::float64_datatype(),
-        ] {
+        let mut signatures = Vec::with_capacity(COORDINATE_TYPES.len());
+        for coord_type in COORDINATE_TYPES.as_slice() {
             signatures.push(TypeSignature::Exact(vec![
                 // latitude
                 coord_type.clone(),
@@ -64,15 +85,7 @@ impl Function for S2LatLngToCell {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 2);
 
         let lat_vec = &columns[0];
         let lon_vec = &columns[1];
@@ -126,15 +139,7 @@ impl Function for S2CellLevel {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 1, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
         let size = cell_vec.len();
@@ -142,7 +147,7 @@ impl Function for S2CellLevel {
 
         for i in 0..size {
             let cell = cell_from_value(cell_vec.get(i))?;
-            let res = cell.map(|cell| cell.level().into());
+            let res = cell.map(|cell| cell.level());
 
             results.push(res);
         }
@@ -166,28 +171,20 @@ impl Function for S2CellParent {
     }
 
     fn signature(&self) -> Signature {
-        signature_of_cell()
+        signature_of_cell_and_level()
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
-        let res_vec = &columns[1];
+        let level_vec = &columns[1];
         let size = cell_vec.len();
         let mut results = UInt64VectorBuilder::with_capacity(size);
 
         for i in 0..size {
             let cell = cell_from_value(cell_vec.get(i))?;
-            let level = value_to_level(res_vec.get(i))?;
+            let level = value_to_level(level_vec.get(i))?;
             let result = cell.map(|cell| cell.parent(level).0);
 
             results.push(result);
@@ -198,11 +195,8 @@ impl Function for S2CellParent {
 }
 
 fn signature_of_cell() -> Signature {
-    let mut signatures = Vec::new();
-    for cell_type in &[
-        ConcreteDataType::uint64_datatype(),
-        ConcreteDataType::int64_datatype(),
-    ] {
+    let mut signatures = Vec::with_capacity(CELL_TYPES.len());
+    for cell_type in CELL_TYPES.as_slice() {
         signatures.push(TypeSignature::Exact(vec![cell_type.clone()]));
     }
 
@@ -210,21 +204,9 @@ fn signature_of_cell() -> Signature {
 }
 
 fn signature_of_cell_and_level() -> Signature {
-    let mut signatures = Vec::new();
-    for cell_type in &[
-        ConcreteDataType::uint64_datatype(),
-        ConcreteDataType::int64_datatype(),
-    ] {
-        for level_type in &[
-            ConcreteDataType::int8_datatype(),
-            ConcreteDataType::int16_datatype(),
-            ConcreteDataType::int32_datatype(),
-            ConcreteDataType::int64_datatype(),
-            ConcreteDataType::uint8_datatype(),
-            ConcreteDataType::uint16_datatype(),
-            ConcreteDataType::uint32_datatype(),
-            ConcreteDataType::uint64_datatype(),
-        ] {
+    let mut signatures = Vec::with_capacity(CELL_TYPES.len() * LEVEL_TYPES.len());
+    for cell_type in CELL_TYPES.as_slice() {
+        for level_type in LEVEL_TYPES.as_slice() {
             signatures.push(TypeSignature::Exact(vec![
                 cell_type.clone(),
                 level_type.clone(),
@@ -241,18 +223,6 @@ fn cell_from_value(v: Value) -> Result<Option<CellID>> {
         _ => None,
     };
     Ok(cell)
-}
-
-macro_rules! ensure_and_coerce {
-    ($compare:expr, $coerce:expr) => {{
-        ensure!(
-            $compare,
-            InvalidFuncArgsSnafu {
-                err_msg: "Argument was outside of acceptable range "
-            }
-        );
-        Ok($coerce)
-    }};
 }
 
 fn value_to_level(v: Value) -> Result<u64> {
