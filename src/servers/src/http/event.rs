@@ -372,7 +372,7 @@ pub async fn loki_ingest(
     let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
     let req = loki_api::logproto::PushRequest::decode(&decompressed[..])
         .context(DecodeOtlpRequestSnafu)?;
-    warn!("loki ingest: {:?}", req);
+    warn!("loki ingest: {:#?}", req);
 
     Ok(JsonResponse::from_output(vec![]).await)
 }
