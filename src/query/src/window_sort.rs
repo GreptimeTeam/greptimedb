@@ -17,6 +17,7 @@
 // TODO(discord9): remove allow(unused) after implementation is done
 #![allow(unused)]
 
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -42,12 +43,14 @@ use common_time::Timestamp;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion::execution::{RecordBatchStream, TaskContext};
 use datafusion::physical_plan::memory::MemoryStream;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet};
+use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::sorts::streaming_merge::streaming_merge;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
+};
 use datafusion_common::utils::bisect;
 use datafusion_common::{internal_err, DataFusionError, ScalarValue};
-use datafusion_physical_expr::PhysicalSortExpr;
+use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datatypes::value::Value;
 use futures::Stream;
 use itertools::Itertools;
@@ -80,6 +83,7 @@ pub struct WindowedSortExec {
     input: Arc<dyn ExecutionPlan>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
+    properties: PlanProperties,
 }
 
 fn check_partition_range_monotonicity(ranges: &[PartitionRange], descending: bool) -> bool {
@@ -107,6 +111,14 @@ impl WindowedSortExec {
             return Err(BoxedError::new(plain_error)).context(QueryExecutionSnafu {});
         }
 
+        let arrow_schema = input.schema();
+
+        let properties = PlanProperties::new(
+            input.equivalence_properties().clone(),
+            Partitioning::UnknownPartitioning(1),
+            input.execution_mode(),
+        );
+
         let overlap_counts = split_overlapping_ranges(&ranges);
         let all_avail_working_range =
             compute_all_working_ranges(&overlap_counts, expression.options.descending);
@@ -118,6 +130,7 @@ impl WindowedSortExec {
             all_avail_working_range,
             input,
             metrics: ExecutionPlanMetricsSet::new(),
+            properties,
         })
     }
 
@@ -140,6 +153,62 @@ impl WindowedSortExec {
         let df_stream = Box::pin(WindowedSortStream::new(context, self, input_stream)) as _;
 
         Ok(df_stream)
+    }
+}
+
+impl DisplayAs for WindowedSortExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WindowedSortExec")
+    }
+}
+
+impl ExecutionPlan for WindowedSortExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.input.schema()
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    // DataFusion will swap children unconditionally.
+    // But since this node is leaf node, it's safe to just return self.
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
+        let new_input = if let Some(first) = children.first() {
+            first
+        } else {
+            internal_err!("No children found")?
+        };
+        let new = Self::try_new(
+            self.expression.clone(),
+            self.fetch,
+            self.ranges.clone(),
+            new_input.clone(),
+        )?;
+        Ok(Arc::new(new))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
+        self.to_stream(context, partition)
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
     }
 }
 
@@ -214,38 +283,6 @@ impl WindowedSortStream {
             all_avail_working_range: exec.all_avail_working_range.clone(),
             metrics: exec.metrics.clone(),
         }
-    }
-}
-
-/// split batch to sorted runs
-fn split_batch_to_sorted_run(
-    batch: DfRecordBatch,
-    expression: &PhysicalSortExpr,
-) -> datafusion_common::Result<SortedRunSet<Timestamp>> {
-    // split input rb to sorted runs
-    let sort_column = expression.evaluate_to_sort_column(&batch)?;
-    let sorted_runs_offset = get_sorted_runs(sort_column.clone())?;
-    if let Some(run) = sorted_runs_offset.first()
-        && run.offset == 0
-        && run.len == batch.num_rows()
-        && sorted_runs_offset.len() == 1
-    {
-        // input rb is already sorted, we can emit it directly
-        Ok(SortedRunSet {
-            runs_with_batch: vec![(batch, run.clone())],
-            sort_column,
-        })
-    } else {
-        // those slice should be zero copy, so supposedly no new reservation needed
-        let mut ret = Vec::new();
-        for run in sorted_runs_offset {
-            let new_rb = batch.slice(run.offset, run.len);
-            ret.push((new_rb, run));
-        }
-        Ok(SortedRunSet {
-            runs_with_batch: ret,
-            sort_column,
-        })
     }
 }
 
@@ -469,6 +506,38 @@ impl Stream for WindowedSortStream {
 impl RecordBatchStream for WindowedSortStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+}
+
+/// split batch to sorted runs
+fn split_batch_to_sorted_run(
+    batch: DfRecordBatch,
+    expression: &PhysicalSortExpr,
+) -> datafusion_common::Result<SortedRunSet<Timestamp>> {
+    // split input rb to sorted runs
+    let sort_column = expression.evaluate_to_sort_column(&batch)?;
+    let sorted_runs_offset = get_sorted_runs(sort_column.clone())?;
+    if let Some(run) = sorted_runs_offset.first()
+        && run.offset == 0
+        && run.len == batch.num_rows()
+        && sorted_runs_offset.len() == 1
+    {
+        // input rb is already sorted, we can emit it directly
+        Ok(SortedRunSet {
+            runs_with_batch: vec![(batch, run.clone())],
+            sort_column,
+        })
+    } else {
+        // those slice should be zero copy, so supposedly no new reservation needed
+        let mut ret = Vec::new();
+        for run in sorted_runs_offset {
+            let new_rb = batch.slice(run.offset, run.len);
+            ret.push((new_rb, run));
+        }
+        Ok(SortedRunSet {
+            runs_with_batch: ret,
+            sort_column,
+        })
     }
 }
 
@@ -1888,6 +1957,15 @@ mod test {
                 },
                 Ok((1, 3)),
             ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([1, 2, 3, 4, 5])) as ArrayRef,
+                false,
+                TimeRange {
+                    start: Timestamp::new_millisecond(6),
+                    end: Timestamp::new_millisecond(7),
+                },
+                Ok((5, 0)),
+            ),
         ];
 
         for (sort_vals, descending, range, expected) in test_cases {
@@ -1912,6 +1990,20 @@ mod test {
                 }
                 (r, e) => panic!("unexpected result: {:?}, expected: {:?}", r, e),
             }
+        }
+    }
+
+    #[test]
+    fn test_window_sort_stream() {
+        struct TestStream {
+            expression: PhysicalSortExpr,
+            fetch: Option<usize>,
+            input: Vec<(PartitionRange, ArrayRef)>,
+            output: ArrayRef,
+        }
+
+        struct MockInput {
+            input: Vec<ArrayRef>,
         }
     }
 }
