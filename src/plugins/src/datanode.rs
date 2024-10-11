@@ -21,6 +21,7 @@ use datanode::error::Result;
 pub async fn setup_datanode_plugins(
     plugins: &mut Plugins,
     dn_opts: &DatanodeOptions,
+    _config_file: Option<&String>,
 ) -> Result<()> {
     Ok(())
 }

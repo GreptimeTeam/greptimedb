@@ -449,11 +449,11 @@ impl StartCommand {
         let fe_opts = opts.frontend_options();
         let dn_opts = opts.datanode_options();
 
-        plugins::setup_frontend_plugins(&mut plugins, &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &fe_opts, self.config_file.as_ref())
             .await
             .context(StartFrontendSnafu)?;
 
-        plugins::setup_datanode_plugins(&mut plugins, &dn_opts)
+        plugins::setup_datanode_plugins(&mut plugins, &dn_opts, self.config_file.as_ref())
             .await
             .context(StartDatanodeSnafu)?;
 
@@ -762,7 +762,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &fe_opts, None)
             .await
             .unwrap();
 

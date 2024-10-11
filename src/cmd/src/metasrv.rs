@@ -251,7 +251,7 @@ impl StartCommand {
 
         let opts = opts.component;
         let mut plugins = Plugins::new();
-        plugins::setup_metasrv_plugins(&mut plugins, &opts)
+        plugins::setup_metasrv_plugins(&mut plugins, &opts, self.config_file.as_ref())
             .await
             .context(StartMetaServerSnafu)?;
 

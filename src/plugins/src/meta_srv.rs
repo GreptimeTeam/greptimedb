@@ -20,6 +20,7 @@ use meta_srv::metasrv::MetasrvOptions;
 pub async fn setup_metasrv_plugins(
     _plugins: &mut Plugins,
     metasrv_opts: &MetasrvOptions,
+    _config_file: Option<&String>,
 ) -> Result<()> {
     Ok(())
 }

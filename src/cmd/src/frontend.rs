@@ -268,7 +268,7 @@ impl StartCommand {
 
         let opts = opts.component;
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &opts)
+        plugins::setup_frontend_plugins(&mut plugins, &opts, self.config_file.as_ref())
             .await
             .context(StartFrontendSnafu)?;
 
@@ -472,7 +472,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &fe_opts, None)
             .await
             .unwrap();
 
