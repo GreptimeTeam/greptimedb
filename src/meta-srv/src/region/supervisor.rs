@@ -223,7 +223,7 @@ impl RegionFailureDetectorController for RegionFailureDetectorControl {
             .send(Event::RegisterFailureDetectors(detecting_regions))
             .await
         {
-            error!(err; "RegionSupervisor is stop receiving heartbeat");
+            error!(err; "RegionSupervisor has stop receiving heartbeat.");
         }
     }
 
@@ -233,7 +233,7 @@ impl RegionFailureDetectorController for RegionFailureDetectorControl {
             .send(Event::DeregisterFailureDetectors(detecting_regions))
             .await
         {
-            error!(err; "RegionSupervisor is stop receiving heartbeat");
+            error!(err; "RegionSupervisor has stop receiving heartbeat.");
         }
     }
 }
@@ -251,13 +251,13 @@ impl HeartbeatAcceptor {
     /// Accepts heartbeats from datanodes.
     pub(crate) async fn accept(&self, heartbeat: DatanodeHeartbeat) {
         if let Err(err) = self.sender.send(Event::HeartbeatArrived(heartbeat)).await {
-            error!(err; "RegionSupervisor is stop receiving heartbeat");
+            error!(err; "RegionSupervisor has stop receiving heartbeat.");
         }
     }
 }
 
 impl RegionSupervisor {
-    /// Returns a a mpsc channel with a buffer capacity of 1024 for sending and receiving `Event` messages.
+    /// Returns a mpsc channel with a buffer capacity of 1024 for sending and receiving `Event` messages.
     pub(crate) fn channel() -> (Sender<Event>, Receiver<Event>) {
         tokio::sync::mpsc::channel(1024)
     }

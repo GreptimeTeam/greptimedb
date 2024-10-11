@@ -44,7 +44,7 @@ pub struct RegionMigrationManager {
 }
 
 #[derive(Default, Clone)]
-pub(crate) struct RegionMigrationProcedureTracker {
+pub struct RegionMigrationProcedureTracker {
     running_procedures: Arc<RwLock<HashMap<RegionId, RegionMigrationProcedureTask>>>,
 }
 
@@ -149,7 +149,7 @@ impl RegionMigrationManager {
     }
 
     /// Returns the [`RegionMigrationProcedureTracker`].
-    pub(crate) fn tracker(&self) -> &RegionMigrationProcedureTracker {
+    pub fn tracker(&self) -> &RegionMigrationProcedureTracker {
         &self.tracker
     }
 
