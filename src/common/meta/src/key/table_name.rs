@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
 use table::table_name::TableName;
+use table::table_reference::TableReference;
 
 use super::{MetadataKey, MetadataValue, TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
 use crate::error::{Error, InvalidMetadataSnafu, Result};
@@ -118,6 +119,16 @@ impl From<TableNameKey<'_>> for TableName {
             catalog_name: value.catalog.to_string(),
             schema_name: value.schema.to_string(),
             table_name: value.table.to_string(),
+        }
+    }
+}
+
+impl<'a> From<TableNameKey<'a>> for TableReference<'a> {
+    fn from(value: TableNameKey<'a>) -> Self {
+        Self {
+            catalog: value.catalog,
+            schema: value.schema,
+            table: value.table,
         }
     }
 }

@@ -18,6 +18,7 @@ use common_procedure::error::Error as ProcedureError;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use table::metadata::TableId;
+use table::table_reference::TableReference;
 
 use crate::ddl::DetectingRegion;
 use crate::error::{Error, OperateDatanodeSnafu, Result, TableNotFoundSnafu, UnsupportedSnafu};
@@ -109,8 +110,8 @@ pub async fn check_and_get_physical_table_id(
         .table_name_manager()
         .get(physical_table_name)
         .await?
-        .context(TableNotFoundSnafu {
-            table_name: physical_table_name.to_string(),
+        .with_context(|| TableNotFoundSnafu {
+            table_name: TableReference::from(physical_table_name).to_string(),
         })
         .map(|table| table.table_id())
 }
@@ -123,8 +124,8 @@ pub async fn get_physical_table_id(
         .table_name_manager()
         .get(logical_table_name)
         .await?
-        .context(TableNotFoundSnafu {
-            table_name: logical_table_name.to_string(),
+        .with_context(|| TableNotFoundSnafu {
+            table_name: TableReference::from(logical_table_name).to_string(),
         })
         .map(|table| table.table_id())?;
 
