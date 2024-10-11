@@ -51,6 +51,7 @@ use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_INGESTION_COUNTER, METRIC_HTTP_LOGS_INGESTION_ELAPSED,
     METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
 };
+use crate::prom_store;
 use crate::query_handler::LogHandlerRef;
 
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
@@ -368,8 +369,10 @@ pub async fn loki_ingest(
         UnsupportedContentTypeSnafu { content_type }
     );
 
-    let a = loki_api::logproto::PushRequest::decode(bytes).context(DecodeOtlpRequestSnafu)?;
-    warn!("loki ingest: {:?}", a);
+    let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
+    let req = loki_api::logproto::PushRequest::decode(&decompressed[..])
+        .context(DecodeOtlpRequestSnafu)?;
+    warn!("loki ingest: {:?}", req);
 
     Ok(JsonResponse::from_output(vec![]).await)
 }
