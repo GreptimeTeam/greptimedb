@@ -19,8 +19,6 @@ mod h3;
 mod helpers;
 mod s2;
 
-use geohash::{GeohashFunction, GeohashNeighboursFunction};
-
 use crate::function_registry::FunctionRegistry;
 
 pub(crate) struct GeoFunctions;
@@ -28,8 +26,8 @@ pub(crate) struct GeoFunctions;
 impl GeoFunctions {
     pub fn register(registry: &FunctionRegistry) {
         // geohash
-        registry.register(Arc::new(GeohashFunction));
-        registry.register(Arc::new(GeohashNeighboursFunction));
+        registry.register(Arc::new(geohash::GeohashFunction));
+        registry.register(Arc::new(geohash::GeohashNeighboursFunction));
 
         // h3 index
         registry.register(Arc::new(h3::H3LatLngToCell));
@@ -60,6 +58,7 @@ impl GeoFunctions {
         //s2
         registry.register(Arc::new(s2::S2LatLngToCell));
         registry.register(Arc::new(s2::S2CellLevel));
+        registry.register(Arc::new(s2::S2CellToToken));
         registry.register(Arc::new(s2::S2CellParent));
     }
 }

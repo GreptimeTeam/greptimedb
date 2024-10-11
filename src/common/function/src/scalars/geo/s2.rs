@@ -18,7 +18,7 @@ use datafusion::logical_expr::Volatility;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::value::Value;
-use datatypes::vectors::{MutableVector, UInt64VectorBuilder, VectorRef};
+use datatypes::vectors::{MutableVector, StringVectorBuilder, UInt64VectorBuilder, VectorRef};
 use derive_more::Display;
 use once_cell::sync::Lazy;
 use s2::cellid::{CellID, MAX_LEVEL};
@@ -150,6 +150,42 @@ impl Function for S2CellLevel {
             let res = cell.map(|cell| cell.level());
 
             results.push(res);
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
+/// Return the string presentation of the cell
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct S2CellToToken;
+
+impl Function for S2CellToToken {
+    fn name(&self) -> &str {
+        "s2_cell_to_token"
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::string_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        signature_of_cell()
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure_columns_n!(columns, 1);
+
+        let cell_vec = &columns[0];
+        let size = cell_vec.len();
+        let mut results = StringVectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let cell = cell_from_value(cell_vec.get(i))?;
+            let res = cell.map(|cell| cell.to_token());
+
+            results.push(res.as_deref());
         }
 
         Ok(results.to_vector())

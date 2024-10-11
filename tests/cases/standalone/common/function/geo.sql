@@ -87,6 +87,7 @@ WITH cell_cte AS (
   SELECT s2_latlng_to_cell(37.76938, -122.3889) AS cell
 )
 SELECT cell,
+       s2_cell_to_token(cell),
        s2_cell_level(cell),
        s2_cell_parent(cell, 3)
 FROM cell_cte;
