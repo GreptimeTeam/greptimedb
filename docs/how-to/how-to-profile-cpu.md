@@ -1,11 +1,5 @@
 # Profiling CPU
 
-## Build GreptimeDB with `pprof` feature
-
-```bash
-cargo build --features=pprof
-```
-
 ## HTTP API
 Sample at 99 Hertz, for 5 seconds, output report in [protobuf format](https://github.com/google/pprof/blob/master/proto/profile.proto).
 ```bash

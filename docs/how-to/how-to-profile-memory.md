@@ -18,12 +18,6 @@ sudo apt install libjemalloc-dev
 curl https://raw.githubusercontent.com/brendangregg/FlameGraph/master/flamegraph.pl > ./flamegraph.pl
 ```
 
-### Build GreptimeDB with `mem-prof` feature.
-
-```bash
-cargo build --features=mem-prof
-```
-
 ## Profiling
 
 Start GreptimeDB instance with environment variables:
