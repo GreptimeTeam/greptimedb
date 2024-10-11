@@ -319,11 +319,11 @@ impl MetaStateHandler {
         self.greptimedb_telemetry_task.should_report(true);
     }
 
-    pub async fn on_follower_start(&self) {
+    pub async fn on_leader_stop(&self) {
         self.state.write().unwrap().next_state(become_follower());
 
         self.leadership_change_notifier
-            .notify_on_follower_start()
+            .notify_on_leader_stop()
             .await;
 
         // Suspends reporting.
@@ -432,7 +432,7 @@ impl Metasrv {
                                 LeaderChangeMessage::StepDown(leader) => {
                                     error!("Leader :{:?} step down", leader);
 
-                                    state_handler.on_follower_start().await;
+                                    state_handler.on_leader_stop().await;
                                 }
                             }
                         }
@@ -446,7 +446,7 @@ impl Metasrv {
                     }
                 }
 
-                state_handler.on_follower_start().await;
+                state_handler.on_leader_stop().await;
             });
 
             // Register candidate and keep lease in background.

@@ -36,7 +36,7 @@ pub trait LeadershipChangeListener: Send + Sync {
     async fn on_leader_start(&self) -> Result<()>;
 
     /// Called when the node transitions to the follower role.
-    async fn on_follower_start(&self) -> Result<()>;
+    async fn on_leader_stop(&self) -> Result<()>;
 }
 
 /// A notifier for leadership change events.
@@ -65,9 +65,9 @@ impl LeadershipChangeNotifier {
     }
 
     /// Notify all listeners that the node has become a follower.
-    pub async fn notify_on_follower_start(&self) {
+    pub async fn notify_on_leader_stop(&self) {
         for listener in &self.listeners {
-            if let Err(err) = listener.on_follower_start().await {
+            if let Err(err) = listener.on_leader_stop().await {
                 error!(
                     err;
                     "Failed to notify 'on_follower_start' event, listener: {}",
@@ -104,7 +104,7 @@ mod tests {
             Ok(())
         }
 
-        async fn on_follower_start(&self) -> Result<()> {
+        async fn on_leader_stop(&self) -> Result<()> {
             if let Some(f) = &self.on_follower_start_fn {
                 return f();
             }
@@ -149,7 +149,7 @@ mod tests {
         assert!(!called_on_follower_start.load(Ordering::Relaxed));
         assert!(called_on_leader_start.load(Ordering::Relaxed));
 
-        notifier.notify_on_follower_start().await;
+        notifier.notify_on_leader_stop().await;
         assert!(called_on_follower_start.load(Ordering::Relaxed));
         assert!(called_on_leader_start.load(Ordering::Relaxed));
     }

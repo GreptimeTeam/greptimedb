@@ -142,7 +142,7 @@ impl LeadershipChangeListener for RegionSupervisorTicker {
         Ok(())
     }
 
-    async fn on_follower_start(&self) -> common_meta::error::Result<()> {
+    async fn on_leader_stop(&self) -> common_meta::error::Result<()> {
         self.stop();
         Ok(())
     }

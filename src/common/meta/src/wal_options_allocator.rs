@@ -106,7 +106,7 @@ impl LeadershipChangeListener for WalOptionsAllocator {
         self.start().await
     }
 
-    async fn on_follower_start(&self) -> Result<()> {
+    async fn on_leader_stop(&self) -> Result<()> {
         Ok(())
     }
 }
