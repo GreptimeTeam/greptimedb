@@ -222,7 +222,6 @@ pub async fn metasrv_builder(
         (None, BackendImpl::PostgresStore) => {
             let pg_client = create_postgres_client(opts).await?;
             let kv_backend = PgStore::with_pg_client(pg_client).await.unwrap();
-            // TODO: implement locking and leader election for pg backend.
             (kv_backend, None)
         }
     };
