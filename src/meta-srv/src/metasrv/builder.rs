@@ -52,8 +52,6 @@ use crate::handler::{
     HeartbeatHandlerGroup, HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers,
 };
 use crate::lease::MetaPeerLookupService;
-use crate::lock::memory::MemLock;
-use crate::lock::DistLockRef;
 use crate::metasrv::{
     ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
@@ -79,7 +77,6 @@ pub struct MetasrvBuilder {
     handler_group: Option<HeartbeatHandlerGroup>,
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClientRef>,
-    lock: Option<DistLockRef>,
     node_manager: Option<NodeManagerRef>,
     plugins: Option<Plugins>,
     table_metadata_allocator: Option<TableMetadataAllocatorRef>,
@@ -95,7 +92,6 @@ impl MetasrvBuilder {
             meta_peer_client: None,
             election: None,
             options: None,
-            lock: None,
             node_manager: None,
             plugins: None,
             table_metadata_allocator: None,
@@ -137,11 +133,6 @@ impl MetasrvBuilder {
         self
     }
 
-    pub fn lock(mut self, lock: Option<DistLockRef>) -> Self {
-        self.lock = lock;
-        self
-    }
-
     pub fn node_manager(mut self, node_manager: NodeManagerRef) -> Self {
         self.node_manager = Some(node_manager);
         self
@@ -171,7 +162,6 @@ impl MetasrvBuilder {
             in_memory,
             selector,
             handler_group,
-            lock,
             node_manager,
             plugins,
             table_metadata_allocator,
@@ -205,7 +195,6 @@ impl MetasrvBuilder {
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
-        let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
         let selector_ctx = SelectorContext {
             server_addr: options.server_addr.clone(),
             datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
@@ -384,7 +373,6 @@ impl MetasrvBuilder {
             flow_selector: Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)),
             handler_group: Arc::new(handler_group),
             election,
-            lock,
             procedure_manager,
             mailbox,
             procedure_executor: ddl_manager,
