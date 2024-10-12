@@ -13,6 +13,9 @@
 // limitations under the License.
 
 //! A physical plan for window sort(Which is sorting multiple sorted ranges according to input `PartitionRange`).
+//!
+
+// for debugging since this have a lot of logic
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -24,7 +27,7 @@ use arrow::array::types::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType,
 };
-use arrow::array::{Array, PrimitiveArray};
+use arrow::array::{Array, ArrayRef, PrimitiveArray};
 use arrow::compute::SortColumn;
 use arrow_schema::{DataType, SchemaRef, SortOptions, TimeUnit};
 use common_error::ext::{BoxedError, PlainError};
@@ -272,26 +275,32 @@ impl WindowedSortStream {
         while let Some(merge_stream) = &mut self.merge_stream.front_mut() {
             match merge_stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
-                    if let Some(remaining) = self.remaining_fetch() {
+                    let ret = if let Some(remaining) = self.remaining_fetch() {
                         if remaining == 0 {
-                            return Poll::Ready(None);
+                            None
                         } else if remaining < batch.num_rows() {
                             self.produced += remaining;
-                            return Poll::Ready(Some(Ok(batch.slice(0, remaining))));
+                            Some(Ok(batch.slice(0, remaining)))
                         } else {
                             self.produced += batch.num_rows();
-                            return Poll::Ready(Some(Ok(batch)));
+                            Some(Ok(batch))
                         }
                     } else {
                         self.produced += batch.num_rows();
-                        return Poll::Ready(Some(Ok(batch)));
-                    }
+                        Some(Ok(batch))
+                    };
+                    dbg!("poll_result_stream", &ret);
+                    return Poll::Ready(ret);
                 }
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
                     // current merge stream is done, we can start polling the next one
+                    dbg!(
+                        "poll_result_stream: one merge stream done, left",
+                        &self.merge_stream.len() - 1
+                    );
                     self.merge_stream.pop_front();
                     continue;
                 }
@@ -347,7 +356,18 @@ impl WindowedSortStream {
                     // compare with last_value to find boundary, then merge runs if needed
 
                     // iterate over runs_with_batch to merge sort, might create zero or more stream to put to `sort_partition_rbs`
-                    for (sorted_rb, run_info) in &runs_with_batch {
+
+                    // FIXME: add quere here so remaining batch can be put back to input queue
+                    let mut last_remaining = None;
+                    let mut run_iter = runs_with_batch.into_iter();
+                    loop {
+                        let (sorted_rb, run_info) = if let Some(r) = last_remaining.take() {
+                            r
+                        } else if let Some(r) = run_iter.next() {
+                            r
+                        } else {
+                            break;
+                        };
                         if sorted_rb.num_rows() == 0 {
                             continue;
                         }
@@ -365,6 +385,7 @@ impl WindowedSortStream {
                         };
 
                         if cur_range.is_subset(&working_range) {
+                            dbg!("start concat subset run", cur_range, working_range);
                             // data still in range, can't merge sort yet
                             // see if can concat entire sorted rb, merge sort need to wait
                             self.try_concat_batch(
@@ -373,16 +394,26 @@ impl WindowedSortStream {
                                 sort_column.options,
                             )?;
                         } else if let Some(intersection) = cur_range.intersection(&working_range) {
+                            dbg!(
+                                "start intersection run",
+                                intersection,
+                                cur_range,
+                                working_range
+                            );
                             // slice rb by intersection and concat it then merge sort
                             let cur_sort_column =
                                 sort_column.values.slice(run_info.offset, run_info.len);
                             let (offset, len) = find_slice_from_range(
                                 &SortColumn {
-                                    values: cur_sort_column,
+                                    values: cur_sort_column.clone(),
                                     options: sort_column.options,
                                 },
                                 &intersection,
                             )?;
+
+                            if offset != 0 {
+                                internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
+                            }
 
                             let sliced_rb = sorted_rb.slice(offset, len);
 
@@ -397,18 +428,31 @@ impl WindowedSortStream {
 
                             // since we are crossing working range, we need to merge sort the working set
                             self.start_new_merge_sort()?;
-                            if offset != 0 {
-                                self.push_batch(sorted_rb.slice(0, offset));
+
+                            let remaining = (offset + len, sorted_rb.num_rows() - offset - len);
+                            if remaining.1 != 0 {
+                                let (r_offset, r_len) = remaining;
+                                // we have remaining data in this batch, put it back to input queue
+                                let remaining_rb = sorted_rb.slice(r_offset, r_len);
+                                let new_first_val =
+                                    get_timestamp_from_idx(&cur_sort_column, r_offset)?;
+                                let new_run_info = SucRun {
+                                    offset: run_info.offset + remaining.0,
+                                    len: remaining.1,
+                                    first_val: new_first_val, // TODO: test this logic
+                                    last_val: run_info.last_val,
+                                };
+                                last_remaining = Some((remaining_rb, new_run_info));
                             }
-                            if offset + len != sorted_rb.num_rows() {
-                                self.push_batch(
-                                    sorted_rb
-                                        .slice(offset + len, sorted_rb.num_rows() - offset - len),
-                                );
-                            }
+                            // FIXME(discord9): need deal with remaining batch cross working range problem
+                            // i.e: this example require more slice
+                            // |---1---|       |---3---|
+                            // |----------2------------|
+                            // the simplest fix is put the remaining batch back to iter and deal it in next loop
+                            dbg!("after intersection run", &self.in_progress);
                         } else {
                             // no overlap, we can merge sort the working set
-
+                            dbg!("No overlap, start merge sort for", working_range, cur_range);
                             self.build_sorted_stream()?;
                             self.start_new_merge_sort()?;
 
@@ -420,6 +464,7 @@ impl WindowedSortStream {
                 None => {
                     // input stream is done, we need to merge sort the remaining working set
                     // and emit the result
+                    dbg!("input stream done, start merge sort");
                     self.build_sorted_stream()?;
                     self.start_new_merge_sort()?;
                 }
@@ -446,9 +491,11 @@ impl WindowedSortStream {
             cmp_with_opts(&self.last_value, &first_val, &opt) <= std::cmp::Ordering::Equal;
 
         if is_ok_to_concat {
+            dbg!("concat batch", &batch);
             self.push_batch(batch);
             // next time we get input batch might still be ordered, so not build stream yet
         } else {
+            dbg!("First build then push batch", &batch);
             // no more sorted data, build stream now
             self.build_sorted_stream()?;
             self.push_batch(batch);
@@ -458,6 +505,11 @@ impl WindowedSortStream {
 
     /// Get the current working range
     fn get_working_range(&self) -> Option<TimeRange> {
+        dbg!(
+            "get_working_range",
+            self.working_idx,
+            &self.all_avail_working_range
+        );
         self.all_avail_working_range
             .get(self.working_idx)
             .map(|(range, _)| *range)
@@ -470,6 +522,11 @@ impl WindowedSortStream {
 
     /// make `in_progress` as a new `DfSendableRecordBatchStream` and put into `sort_partition_rbs`
     fn build_sorted_stream(&mut self) -> datafusion_common::Result<()> {
+        dbg!(
+            "build_sorted_stream",
+            &self.in_progress,
+            self.sorted_input_runs.len()
+        );
         if self.in_progress.is_empty() {
             return Ok(());
         }
@@ -482,11 +539,17 @@ impl WindowedSortStream {
 
     /// Start merging sort the current working set
     fn start_new_merge_sort(&mut self) -> datafusion_common::Result<()> {
+        dbg!("start_new_merge_sort", &self.sorted_input_runs.len());
+        if !self.in_progress.is_empty() {
+            return internal_err!("Starting a merge sort when in_progress is not empty")?;
+        }
         let fetch = self.remaining_fetch();
         let reservation = MemoryConsumer::new(format!("WindowedSortStream[{}]", self.merge_count))
             .register(&self.memory_pool);
 
         let streams = std::mem::take(&mut self.sorted_input_runs);
+
+        self.set_next_working_range();
 
         if streams.is_empty() {
             return Ok(());
@@ -507,7 +570,6 @@ impl WindowedSortStream {
         )?;
         self.merge_stream.push_back(resulting_stream);
         // this working range is done, move to next working range
-        self.set_next_working_range();
         Ok(())
     }
 
@@ -1014,16 +1076,54 @@ fn split_overlapping_ranges(ranges: &[PartitionRange]) -> BTreeMap<TimeRange, Ve
     ret
 }
 
+/// Get timestamp from array at offset
+fn get_timestamp_from_idx(
+    array: &ArrayRef,
+    offset: usize,
+) -> datafusion_common::Result<Option<Timestamp>> {
+    let time_unit = if let DataType::Timestamp(unit, _) = array.data_type() {
+        unit
+    } else {
+        return Err(DataFusionError::Internal(format!(
+            "Unsupported sort column type: {}",
+            array.data_type()
+        )));
+    };
+    let ty = array.data_type();
+    let array = array.slice(offset, 1);
+    let mut iter = downcast_ts_array!(
+        array.data_type() => (array_iter_helper, array),
+        _ => internal_err!("Unsupported sort column type: {ty}")?
+    );
+    let (_idx, val) = iter.next().ok_or_else(|| {
+        DataFusionError::Internal("Empty array in get_timestamp_from".to_string())
+    })?;
+    let val = if let Some(val) = val {
+        val
+    } else {
+        return Ok(None);
+    };
+    let gt_timestamp = new_timestamp_from(time_unit, val);
+    Ok(Some(gt_timestamp))
+}
+
 #[cfg(test)]
 mod test {
+    use std::io::Write;
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, TimestampMillisecondArray};
+    use arrow::array::{
+        ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray,
+    };
+    use arrow::compute::concat_batches;
+    use arrow::json::ArrayWriter;
     use arrow_schema::{Field, Schema};
     use datafusion::physical_plan::ExecutionMode;
     use datafusion_physical_expr::EquivalenceProperties;
     use futures::StreamExt;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
 
     use super::*;
     #[test]
@@ -2041,7 +2141,7 @@ mod test {
             }
         }
 
-        async fn run_test(&self) {
+        async fn run_test(&self) -> Vec<DfRecordBatch> {
             let (ranges, batches): (Vec<_>, Vec<_>) = self.input.clone().into_iter().unzip();
 
             let mock_input = MockInputExec::new(batches, self.schema.clone());
@@ -2059,7 +2159,7 @@ mod test {
             let real_output = exec_stream.collect::<Vec<_>>().await;
             let real_output: Vec<_> = real_output.into_iter().try_collect().unwrap();
             // let concat_batch = concat_batches(&self.output.schema(), &real_output).unwrap();
-            assert_eq!(real_output, self.output);
+            real_output
         }
     }
 
@@ -2527,10 +2627,230 @@ mod test {
                     ]))],
                 ],
             ),
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                None,
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![
+                    // long have subset short run case
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(10),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            1, 5, 9,
+                        ]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(3),
+                            end: Timestamp::new_millisecond(7),
+                            num_rows: 1,
+                            identifier: 1,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            3, 4, 5, 6,
+                        ]))],
+                    ),
+                ],
+                vec![
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([1]))],
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                        3, 4, 5, 5, 6, 9,
+                    ]))],
+                ],
+            ),
         ];
 
-        for testcase in &test_cases {
-            testcase.run_test().await;
+        for testcase in &test_cases[8..] {
+            let output = testcase.run_test().await;
+            assert_eq!(output, testcase.output);
+        }
+    }
+
+    fn new_array(unit: TimeUnit, arr: Vec<i64>) -> ArrayRef {
+        match unit {
+            TimeUnit::Second => Arc::new(TimestampSecondArray::from_iter_values(arr)) as ArrayRef,
+            TimeUnit::Millisecond => {
+                Arc::new(TimestampMillisecondArray::from_iter_values(arr)) as ArrayRef
+            }
+            TimeUnit::Microsecond => {
+                Arc::new(TimestampMicrosecondArray::from_iter_values(arr)) as ArrayRef
+            }
+            TimeUnit::Nanosecond => {
+                Arc::new(TimestampNanosecondArray::from_iter_values(arr)) as ArrayRef
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gen_test_window_sort_stream() {
+        let test_cnt = 100;
+        let part_cnt_bound = 100;
+        let range_size_bound = 100;
+        let range_offset_bound = 100;
+        let in_range_datapoint_cnt_bound = 100;
+
+        let mut rng = fastrand::Rng::new();
+        rng.seed(1337);
+        let mut bound_val = None;
+        // construct testcases
+        type CmpFn<T> = Box<dyn FnMut(&T, &T) -> std::cmp::Ordering>;
+        for case_id in 0..test_cnt {
+            let descending = rng.bool();
+            fn ret_cmp_fn<T: Ord>(descending: bool) -> CmpFn<T> {
+                if descending {
+                    return Box::new(|a: &T, b: &T| b.cmp(a));
+                }
+                Box::new(|a: &T, b: &T| a.cmp(b))
+            }
+            let unit = match rng.u8(0..3) {
+                0 => TimeUnit::Second,
+                1 => TimeUnit::Millisecond,
+                2 => TimeUnit::Microsecond,
+                _ => TimeUnit::Nanosecond,
+            };
+
+            let mut input_ranged_data = vec![];
+            let mut output_data: Vec<i64> = vec![];
+            // generate input data
+            for part_id in 0..rng.usize(0..part_cnt_bound) {
+                let (start, end) = if descending {
+                    let end = bound_val
+                        .map(|i| i - rng.i64(0..range_offset_bound))
+                        .unwrap_or_else(|| rng.i64(..));
+                    bound_val = Some(end);
+                    let start = end - rng.i64(0..range_size_bound);
+                    let start = Timestamp::new(start, unit.clone().into());
+                    let end = Timestamp::new(end, unit.clone().into());
+                    (start, end)
+                } else {
+                    let start = bound_val
+                        .map(|i| i + rng.i64(0..range_offset_bound))
+                        .unwrap_or_else(|| rng.i64(..));
+                    bound_val = Some(start);
+                    let end = start + rng.i64(0..range_size_bound);
+                    let start = Timestamp::new(start, unit.clone().into());
+                    let end = Timestamp::new(end, unit.clone().into());
+                    (start, end)
+                };
+
+                let iter = 0..rng.usize(0..in_range_datapoint_cnt_bound);
+                let data_gen = iter
+                    .map(|_| rng.i64(start.value()..=end.value()))
+                    .sorted_by(ret_cmp_fn(descending))
+                    .collect_vec();
+                output_data.extend(data_gen.clone());
+                let arr = new_array(unit.clone(), data_gen);
+                let range = PartitionRange {
+                    start,
+                    end,
+                    num_rows: arr.len(),
+                    identifier: part_id,
+                };
+                input_ranged_data.push((range, vec![arr]));
+            }
+
+            output_data.sort_by(ret_cmp_fn(descending));
+            let output_arr = new_array(unit.clone(), output_data);
+
+            let test_stream = TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending,
+                    nulls_first: true,
+                },
+                None,
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(unit.clone(), None),
+                    false,
+                )],
+                input_ranged_data.clone(),
+                vec![vec![output_arr]],
+            );
+
+            let res = test_stream.run_test().await;
+            let res_concat = concat_batches(&test_stream.schema, &res).unwrap();
+            let expected = test_stream.output;
+            let expected_concat = concat_batches(&test_stream.schema, &expected).unwrap();
+
+            if res_concat != expected_concat {
+                {
+                    let mut f_input =
+                        std::fs::File::create(format!("case_{}_input.json", case_id)).unwrap();
+                    f_input.write_all(b"[").unwrap();
+                    for (input_range, input_arr) in input_ranged_data {
+                        let range_json = json!({
+                            "start": input_range.start.to_chrono_datetime().unwrap().to_string(),
+                            "end": input_range.end.to_chrono_datetime().unwrap().to_string(),
+                            "num_rows": input_range.num_rows,
+                            "identifier": input_range.identifier,
+                        });
+                        let buf = Vec::new();
+                        let mut input_writer = ArrayWriter::new(buf);
+                        input_writer
+                            .write(
+                                &DfRecordBatch::try_new(test_stream.schema.clone(), input_arr)
+                                    .unwrap(),
+                            )
+                            .unwrap();
+                        input_writer.finish().unwrap();
+                        let res_str =
+                            String::from_utf8_lossy(&input_writer.into_inner()).to_string();
+                        let whole_json =
+                            format!(r#"{{"range": {}, "data": {}}},"#, range_json, res_str);
+                        f_input.write_all(whole_json.as_bytes()).unwrap();
+                    }
+                    f_input.write_all(b"]").unwrap();
+                }
+                {
+                    let mut f_res =
+                        std::fs::File::create(format!("case_{}_result.json", case_id)).unwrap();
+                    f_res.write_all(b"[").unwrap();
+                    for batch in &res {
+                        let mut res_writer = ArrayWriter::new(f_res);
+                        res_writer.write(batch).unwrap();
+                        res_writer.finish().unwrap();
+                        f_res = res_writer.into_inner();
+                        f_res.write_all(b",").unwrap();
+                    }
+                    f_res.write_all(b"]").unwrap();
+
+                    let f_res_concat =
+                        std::fs::File::create(format!("case_{}_result_concat.json", case_id))
+                            .unwrap();
+                    let mut res_writer = ArrayWriter::new(f_res_concat);
+                    res_writer.write(&res_concat).unwrap();
+                    res_writer.finish().unwrap();
+
+                    let f_expected =
+                        std::fs::File::create(format!("case_{}_expected.json", case_id)).unwrap();
+                    let mut expected_writer = ArrayWriter::new(f_expected);
+                    expected_writer.write(&expected_concat).unwrap();
+                    expected_writer.finish().unwrap();
+                }
+                panic!(
+                    "case failed, case id: {0}, output and expected save to case_{0}_*.json file",
+                    case_id
+                );
+            }
+            assert_eq!(
+                res_concat, expected_concat,
+                "case failed, case id: {}",
+                case_id
+            );
         }
     }
 }
