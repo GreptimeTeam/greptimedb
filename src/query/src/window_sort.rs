@@ -55,6 +55,8 @@ use crate::error::{QueryExecutionSnafu, Result};
 /// This sorting plan only accept sort by ts and will not sort by other fields.
 ///
 /// internally, it call [`streaming_merge`] multiple times to merge multiple sorted ranges
+///
+/// the input stream must be in the order of `PartitionRange` in `ranges`, or else the result will be incorrect
 #[derive(Debug, Clone)]
 pub struct WindowedSortExec {
     /// Physical sort expressions(that is, sort by timestamp)
@@ -270,7 +272,20 @@ impl WindowedSortStream {
         while let Some(merge_stream) = &mut self.merge_stream.front_mut() {
             match merge_stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
-                    return Poll::Ready(Some(Ok(batch)));
+                    if let Some(remaining) = self.remaining_fetch() {
+                        if remaining == 0 {
+                            return Poll::Ready(None);
+                        } else if remaining < batch.num_rows() {
+                            self.produced += remaining;
+                            return Poll::Ready(Some(Ok(batch.slice(0, remaining))));
+                        } else {
+                            self.produced += batch.num_rows();
+                            return Poll::Ready(Some(Ok(batch)));
+                        }
+                    } else {
+                        self.produced += batch.num_rows();
+                        return Poll::Ready(Some(Ok(batch)));
+                    }
                 }
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Some(Err(e)));
@@ -496,15 +511,11 @@ impl WindowedSortStream {
         Ok(())
     }
 
-    fn in_progress_row_cnt(&self) -> usize {
-        self.in_progress.iter().map(|rb| rb.num_rows()).sum()
-    }
-
     /// Remaining number of rows to fetch, if no fetch limit, return None
+    /// if fetch limit is reached, return Some(0)
     fn remaining_fetch(&self) -> Option<usize> {
-        let total_now = self.produced + self.in_progress_row_cnt();
-        self.fetch
-            .map(|p| if p >= total_now { p - total_now } else { 0 })
+        let total_now = self.produced;
+        self.fetch.map(|p| p.saturating_sub(total_now))
     }
 }
 
@@ -2343,6 +2354,176 @@ mod test {
                     vec![Arc::new(TimestampMillisecondArray::from_iter_values([3]))],
                     vec![Arc::new(TimestampMillisecondArray::from_iter_values([
                         4, 5,
+                    ]))],
+                ],
+            ),
+            // test fetch
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                Some(6),
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![
+                    // no overlap, empty intersection batch case
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(2),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            1, 2,
+                        ]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(3),
+                            num_rows: 1,
+                            identifier: 1,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            1, 2, 3,
+                        ]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(3),
+                            end: Timestamp::new_millisecond(5),
+                            num_rows: 1,
+                            identifier: 1,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            4, 5,
+                        ]))],
+                    ),
+                ],
+                vec![
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                        1, 1, 2, 2,
+                    ]))],
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([3]))],
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([4]))],
+                ],
+            ),
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                Some(3),
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![
+                    // no overlap, empty intersection batch case
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(2),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            1, 2,
+                        ]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(3),
+                            num_rows: 1,
+                            identifier: 1,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            1, 2, 3,
+                        ]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(3),
+                            end: Timestamp::new_millisecond(5),
+                            num_rows: 1,
+                            identifier: 1,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            4, 5,
+                        ]))],
+                    ),
+                ],
+                vec![vec![Arc::new(TimestampMillisecondArray::from_iter_values(
+                    [1, 1, 2],
+                ))]],
+            ),
+            // rev case
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: true,
+                    nulls_first: true,
+                },
+                None,
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![
+                    // reverse order
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(3),
+                            end: Timestamp::new_millisecond(5),
+                            num_rows: 1,
+                            identifier: 1,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            5, 4,
+                        ]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(3),
+                            num_rows: 1,
+                            identifier: 1,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            3, 2, 1,
+                        ]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(2),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            2, 1,
+                        ]))],
+                    ),
+                ],
+                vec![
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                        5, 4,
+                    ]))],
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                        3, 2, 1,
+                    ]))],
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                        2, 1,
                     ]))],
                 ],
             ),
