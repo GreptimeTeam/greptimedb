@@ -128,7 +128,9 @@ where
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let pipeline_name = parts.headers.get(OTLP_GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME);
+        let pipeline_name = parts
+            .headers
+            .get(OTLP_GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME);
         let pipeline_version = parts
             .headers
             .get(OTLP_GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME);
