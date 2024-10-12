@@ -1601,7 +1601,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     let res = send_req(
         &client,
         vec![(
-            HeaderName::from_static("x-greptime-table-name"),
+            HeaderName::from_static("x-greptime-log-table-name"),
             HeaderValue::from_static("logs"),
         )],
         "/v1/otlp/v1/logs?db=public",
