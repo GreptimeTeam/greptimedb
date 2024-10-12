@@ -45,6 +45,12 @@ pub struct LeadershipChangeNotifier {
     listeners: Vec<Arc<dyn LeadershipChangeListener>>,
 }
 
+impl LeadershipChangeNotifierCustomizer for LeadershipChangeNotifier {
+    fn customize(&self, notifier: &mut LeadershipChangeNotifier) {
+        notifier.listeners.extend(self.listeners.clone());
+    }
+}
+
 impl LeadershipChangeNotifier {
     /// Adds a listener to the notifier.
     pub fn add_listener(&mut self, listener: Arc<dyn LeadershipChangeListener>) {

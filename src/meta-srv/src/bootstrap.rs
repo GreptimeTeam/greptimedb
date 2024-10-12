@@ -148,6 +148,10 @@ impl MetasrvInstance {
     pub fn plugins(&self) -> Plugins {
         self.plugins.clone()
     }
+
+    pub fn mut_inner(&mut self) -> &mut Metasrv {
+        &mut self.metasrv
+    }
 }
 
 pub async fn bootstrap_metasrv_with_router(

@@ -55,7 +55,9 @@ use crate::error::{
     StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
-use crate::handler::HeartbeatHandlerGroupRef;
+use crate::handler::{
+    HeartbeatHandlerGroup, HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef,
+};
 use crate::lease::lookup_datanode_peer;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
@@ -560,6 +562,15 @@ impl Metasrv {
 
     pub fn handler_group(&self) -> &HeartbeatHandlerGroupRef {
         &self.handler_group
+    }
+
+    pub fn modify_handler_group<F>(&mut self, f: F) -> Result<()>
+    where
+        F: FnOnce(HeartbeatHandlerGroupBuilder) -> Result<HeartbeatHandlerGroup>,
+    {
+        let builder = HeartbeatHandlerGroupBuilder::from(self.handler_group.as_ref());
+        self.handler_group = Arc::new(f(builder)?);
+        Ok(())
     }
 
     pub fn election(&self) -> Option<&ElectionRef> {
