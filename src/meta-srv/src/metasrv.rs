@@ -57,7 +57,6 @@ use crate::error::{
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::HeartbeatHandlerGroupRef;
 use crate::lease::lookup_datanode_peer;
-use crate::lock::DistLockRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
@@ -356,7 +355,6 @@ pub struct Metasrv {
     flow_selector: SelectorRef,
     handler_group: HeartbeatHandlerGroupRef,
     election: Option<ElectionRef>,
-    lock: DistLockRef,
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
     procedure_executor: ProcedureExecutorRef,
@@ -566,10 +564,6 @@ impl Metasrv {
 
     pub fn election(&self) -> Option<&ElectionRef> {
         self.election.as_ref()
-    }
-
-    pub fn lock(&self) -> &DistLockRef {
-        &self.lock
     }
 
     pub fn mailbox(&self) -> &MailboxRef {
