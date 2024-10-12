@@ -14,9 +14,6 @@
 
 //! A physical plan for window sort(Which is sorting multiple sorted ranges according to input `PartitionRange`).
 
-// TODO(discord9): remove allow(unused) after implementation is done
-#![allow(unused)]
-
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
@@ -27,20 +24,14 @@ use arrow::array::types::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType,
 };
-use arrow::array::{
-    downcast_temporal_array, Array, ArrayRef, ArrowPrimitiveType, PrimitiveArray,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
-};
+use arrow::array::{Array, PrimitiveArray};
 use arrow::compute::SortColumn;
 use arrow_schema::{DataType, SchemaRef, SortOptions, TimeUnit};
-use async_stream::stream;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_recordbatch::adapter::RecordBatchStreamAdapter;
-use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use common_time::Timestamp;
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
 use datafusion::execution::{RecordBatchStream, TaskContext};
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -49,8 +40,8 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
 };
 use datafusion_common::utils::bisect;
-use datafusion_common::{internal_err, DataFusionError, ScalarValue};
-use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
+use datafusion_common::{internal_err, DataFusionError};
+use datafusion_physical_expr::{Partitioning, PhysicalSortExpr};
 use datatypes::value::Value;
 use futures::Stream;
 use itertools::Itertools;
@@ -72,10 +63,6 @@ pub struct WindowedSortExec {
     fetch: Option<usize>,
     /// The input ranges indicate input stream will be composed of those ranges in given order
     ranges: Vec<PartitionRange>,
-    /// Overlapping Timestamp Ranges'index given the input ranges
-    ///
-    /// note the key ranges here should not overlapping with each other
-    overlap_counts: BTreeMap<TimeRange, Vec<usize>>,
     /// All available working ranges and their corresponding working set
     ///
     /// working ranges promise once input stream get a value out of current range, future values will never be in this range
@@ -111,8 +98,6 @@ impl WindowedSortExec {
             return Err(BoxedError::new(plain_error)).context(QueryExecutionSnafu {});
         }
 
-        let arrow_schema = input.schema();
-
         let properties = PlanProperties::new(
             input.equivalence_properties().clone(),
             Partitioning::UnknownPartitioning(1),
@@ -126,7 +111,6 @@ impl WindowedSortExec {
             expression,
             fetch,
             ranges,
-            overlap_counts,
             all_avail_working_range,
             input,
             metrics: ExecutionPlanMetricsSet::new(),
@@ -217,16 +201,12 @@ pub struct WindowedSortStream {
     /// Memory pool for this stream
     memory_pool: Arc<dyn MemoryPool>,
     /// currently assembling RecordBatches, will be put to `sort_partition_rbs` when it's done
-    ///
-    /// TODO(discord9): remove `SucRun` from the tuple
     in_progress: Vec<DfRecordBatch>,
     /// last `Timestamp` of the last input RecordBatch in `in_progress`, use to found partial sorted run's boundary
     last_value: Option<Timestamp>,
     /// Current working set of `PartitionRange` sorted RecordBatches
     sorted_input_runs: Vec<DfSendableRecordBatchStream>,
-    /// Merge-sorted result stream, should be polled to end before start a new merge sort again
-    ///
-    /// TODO(discord9): make this a queue to buffer multiple merge outputs
+    /// Merge-sorted result streams, should be polled to end before start a new merge sort again
     merge_stream: VecDeque<DfSendableRecordBatchStream>,
     /// The number of times merge sort has been called
     merge_count: usize,
@@ -246,12 +226,6 @@ pub struct WindowedSortStream {
     produced: usize,
     /// Resulting Stream(`merge_stream`)'s batch size
     batch_size: usize,
-    /// The input ranges indicate input stream will be composed of those ranges in given order
-    ranges: Vec<PartitionRange>,
-    /// Overlapping Timestamp Ranges'index given the input ranges
-    ///
-    /// note the key ranges here should not overlapping with each other
-    overlap_counts: BTreeMap<TimeRange, Vec<usize>>,
     /// All available working ranges and their corresponding working set
     ///
     /// working ranges promise once input stream get a value out of current range, future values will never be in this range
@@ -281,8 +255,6 @@ impl WindowedSortStream {
             fetch: exec.fetch,
             produced: 0,
             batch_size: context.session_config().batch_size(),
-            ranges: exec.ranges.clone(),
-            overlap_counts: exec.overlap_counts.clone(),
             all_avail_working_range: exec.all_avail_working_range.clone(),
             metrics: exec.metrics.clone(),
         }
@@ -312,7 +284,6 @@ impl WindowedSortStream {
                     return Poll::Pending;
                 }
             }
-            self.merge_stream.len();
         }
         // if no output stream is available
         Poll::Ready(None)
@@ -527,11 +498,6 @@ impl WindowedSortStream {
 
     fn in_progress_row_cnt(&self) -> usize {
         self.in_progress.iter().map(|rb| rb.num_rows()).sum()
-    }
-
-    fn fetch_reached(&mut self) -> bool {
-        let total_now = self.produced + self.in_progress_row_cnt();
-        self.fetch.map(|fetch| total_now >= fetch).unwrap_or(false)
     }
 
     /// Remaining number of rows to fetch, if no fetch limit, return None
@@ -1037,39 +1003,14 @@ fn split_overlapping_ranges(ranges: &[PartitionRange]) -> BTreeMap<TimeRange, Ve
     ret
 }
 
-/// Find all exist timestamps from given ranges
-pub fn find_all_exist_timestamps(ranges: &[PartitionRange]) -> BTreeSet<Timestamp> {
-    ranges
-        .iter()
-        .flat_map(|p| [p.start, p.end].into_iter())
-        .collect()
-}
-
-/// Check if the input ranges's lower bound is monotonic non-decrease
-pub fn check_lower_bound_monotonicity(ranges: &[PartitionRange]) -> bool {
-    if ranges.is_empty() {
-        return true;
-    }
-    ranges.windows(2).all(|w| w[0].start <= w[1].start)
-}
-
-/// Check if the input ranges's upper bound is monotonic non-increase.
-pub fn check_upper_bound_monotonicity(ranges: &[PartitionRange]) -> bool {
-    if ranges.is_empty() {
-        return true;
-    }
-    ranges.windows(2).all(|w| w[0].end >= w[1].end)
-}
-
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
 
-    use arrow::array::new_empty_array;
-    use arrow::compute::concat_batches;
+    use arrow::array::{ArrayRef, TimestampMillisecondArray};
     use arrow_schema::{Field, Schema};
-    use chrono::format;
     use datafusion::physical_plan::ExecutionMode;
+    use datafusion_physical_expr::EquivalenceProperties;
     use futures::StreamExt;
     use pretty_assertions::assert_eq;
 
@@ -2056,7 +1997,6 @@ mod test {
         output: Vec<DfRecordBatch>,
         schema: SchemaRef,
     }
-    use datafusion::catalog::schema;
     use datafusion::physical_plan::expressions::Column;
     impl TestStream {
         fn new(
@@ -2093,8 +2033,7 @@ mod test {
         async fn run_test(&self) {
             let (ranges, batches): (Vec<_>, Vec<_>) = self.input.clone().into_iter().unzip();
 
-            let mock_input =
-                MockInputExec::new(batches, self.schema.clone(), self.expression.options);
+            let mock_input = MockInputExec::new(batches, self.schema.clone());
 
             let exec = WindowedSortExec::try_new(
                 self.expression.clone(),
@@ -2121,7 +2060,7 @@ mod test {
     }
 
     impl MockInputExec {
-        fn new(input: Vec<DfRecordBatch>, schema: SchemaRef, opt: SortOptions) -> Self {
+        fn new(input: Vec<DfRecordBatch>, schema: SchemaRef) -> Self {
             Self {
                 properties: PlanProperties::new(
                     EquivalenceProperties::new(schema.clone()),
@@ -2135,8 +2074,8 @@ mod test {
     }
 
     impl DisplayAs for MockInputExec {
-        fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            todo!()
+        fn fmt_as(&self, _t: DisplayFormatType, _f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            unimplemented!()
         }
     }
 
@@ -2162,8 +2101,8 @@ mod test {
 
         fn execute(
             &self,
-            partition: usize,
-            context: Arc<TaskContext>,
+            _partition: usize,
+            _context: Arc<TaskContext>,
         ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
             let stream = MockStream {
                 stream: self.input.clone(),
@@ -2184,7 +2123,7 @@ mod test {
         type Item = datafusion_common::Result<DfRecordBatch>;
         fn poll_next(
             mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
+            _cx: &mut Context<'_>,
         ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
             if self.idx < self.stream.len() {
                 let ret = self.stream[self.idx].clone();
@@ -2272,7 +2211,7 @@ mod test {
                     false,
                 )],
                 vec![
-                    // test merge two stream
+                    // test direct emit
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
