@@ -22,7 +22,7 @@ use snafu::ResultExt;
 pub async fn setup_frontend_plugins(
     plugins: &mut Plugins,
     fe_opts: &FrontendOptions,
-    _config_file: Option<&String>,
+    _raw_config_file: Option<&String>,
 ) -> Result<()> {
     if let Some(user_provider) = fe_opts.user_provider.as_ref() {
         let provider =
