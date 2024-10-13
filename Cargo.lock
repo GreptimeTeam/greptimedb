@@ -2215,6 +2215,18 @@ name = "common-plugins"
 version = "0.9.3"
 
 [[package]]
+name = "common-pprof"
+version = "0.9.3"
+dependencies = [
+ "common-error",
+ "common-macro",
+ "pprof",
+ "prost 0.12.6",
+ "snafu 0.8.5",
+ "tokio",
+]
+
+[[package]]
 name = "common-procedure"
 version = "0.9.3"
 dependencies = [
@@ -10705,6 +10717,7 @@ dependencies = [
  "common-mem-prof",
  "common-meta",
  "common-plugins",
+ "common-pprof",
  "common-query",
  "common-recordbatch",
  "common-runtime",
