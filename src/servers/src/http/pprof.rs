@@ -67,8 +67,8 @@ pub mod handler {
         let body = match req.output {
             Output::Proto => profiling.dump_proto().await.context(DumpPprofSnafu)?,
             Output::Text => {
-                let report = profiling.report().await.context(DumpPprofSnafu)?;
-                format!("{:?}", report).into_bytes()
+                let report = profiling.dump_text().await.context(DumpPprofSnafu)?;
+                report.into_bytes()
             }
             Output::Flamegraph => profiling.dump_flamegraph().await.context(DumpPprofSnafu)?,
         };
