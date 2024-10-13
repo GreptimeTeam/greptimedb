@@ -16,7 +16,7 @@ pprof = { version = "0.13", features = [
     "flamegraph",
     "prost-codec",
     "protobuf",
-], optional = true }
+] }
 
 [lints]
 workspace = true
