@@ -21,12 +21,12 @@ use std::collections::HashMap;
 use std::ops::Deref;
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-use common_time::Interval;
+use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
-use datatypes::types::TimestampType;
+use datatypes::types::{IntervalType, TimestampType};
 use datatypes::value::ListValue;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
@@ -325,7 +325,9 @@ fn encode_array(
                 .iter()
                 .map(|v| match v {
                     Value::Null => Ok(None),
-                    Value::Interval(v) => Ok(Some(PgInterval::from(*v))),
+                    Value::IntervalYearMonth(v) => Ok(Some(PgInterval::from(*v))),
+                    Value::IntervalDayTime(v) => Ok(Some(PgInterval::from(*v))),
+                    Value::IntervalMonthDayNano(v) => Ok(Some(PgInterval::from(*v))),
                     _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
                         err_msg: format!("Invalid list item type, find {v:?}, expected interval",),
                     }))),
@@ -443,7 +445,9 @@ pub(super) fn encode_value(
                 })))
             }
         }
-        Value::Interval(v) => builder.encode_field(&PgInterval::from(*v)),
+        Value::IntervalYearMonth(v) => builder.encode_field(&PgInterval::from(*v)),
+        Value::IntervalDayTime(v) => builder.encode_field(&PgInterval::from(*v)),
+        Value::IntervalMonthDayNano(v) => builder.encode_field(&PgInterval::from(*v)),
         Value::Decimal128(v) => builder.encode_field(&v.to_string()),
         Value::List(values) => encode_array(query_ctx, values, builder),
         Value::Duration(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
@@ -875,9 +879,51 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<PgInterval>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Interval(_) => ScalarValue::IntervalMonthDayNano(
-                            data.map(|i| Interval::from(i).to_i128()),
-                        ),
+                        ConcreteDataType::Interval(IntervalType::YearMonth(_)) => {
+                            ScalarValue::IntervalYearMonth(
+                                data.map(|i| {
+                                    if i.days != 0 || i.microseconds != 0 {
+                                        Err(invalid_parameter_error(
+                                            "invalid_parameter_type",
+                                            Some(format!(
+                                                "Expected: {}, found: {}",
+                                                server_type, client_type
+                                            )),
+                                        ))
+                                    } else {
+                                        Ok(IntervalYearMonth::new(i.months).to_i32())
+                                    }
+                                })
+                                .transpose()?,
+                            )
+                        }
+                        ConcreteDataType::Interval(IntervalType::DayTime(_)) => {
+                            ScalarValue::IntervalDayTime(
+                                data.map(|i| {
+                                    if i.months != 0 || i.microseconds % 1000 != 0 {
+                                        Err(invalid_parameter_error(
+                                            "invalid_parameter_type",
+                                            Some(format!(
+                                                "Expected: {}, found: {}",
+                                                server_type, client_type
+                                            )),
+                                        ))
+                                    } else {
+                                        Ok(IntervalDayTime::new(
+                                            i.days,
+                                            (i.microseconds / 1000) as i32,
+                                        )
+                                        .to_i64())
+                                    }
+                                })
+                                .transpose()?,
+                            )
+                        }
+                        ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => {
+                            ScalarValue::IntervalMonthDayNano(
+                                data.map(|i| IntervalMonthDayNano::from(i).to_i128()),
+                            )
+                        }
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
@@ -886,7 +932,9 @@ pub(super) fn parameters_to_scalar_values(
                         }
                     }
                 } else {
-                    ScalarValue::IntervalMonthDayNano(data.map(|i| Interval::from(i).to_i128()))
+                    ScalarValue::IntervalMonthDayNano(
+                        data.map(|i| IntervalMonthDayNano::from(i).to_i128()),
+                    )
                 }
             }
             &Type::BYTEA => {
@@ -1150,7 +1198,21 @@ mod test {
                 FieldFormat::Text,
             ),
             FieldInfo::new(
-                "intervals".into(),
+                "interval_year_month".into(),
+                None,
+                None,
+                Type::INTERVAL,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "interval_day_time".into(),
+                None,
+                None,
+                Type::INTERVAL,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "interval_month_day_nano".into(),
                 None,
                 None,
                 Type::INTERVAL,
@@ -1214,6 +1276,8 @@ mod test {
             ConcreteDataType::datetime_datatype(),
             ConcreteDataType::timestamp_datatype(TimeUnit::Second),
             ConcreteDataType::interval_datatype(IntervalUnit::YearMonth),
+            ConcreteDataType::interval_datatype(IntervalUnit::DayTime),
+            ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
             ConcreteDataType::list_datatype(ConcreteDataType::int64_datatype()),
             ConcreteDataType::list_datatype(ConcreteDataType::float64_datatype()),
             ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
@@ -1246,7 +1310,9 @@ mod test {
             Value::Time(1001i64.into()),
             Value::DateTime(1000001i64.into()),
             Value::Timestamp(1000001i64.into()),
-            Value::Interval(1000001i128.into()),
+            Value::IntervalYearMonth(IntervalYearMonth::new(1)),
+            Value::IntervalDayTime(IntervalDayTime::new(1, 10)),
+            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 10)),
             Value::List(ListValue::new(
                 vec![Value::Int64(1i64)],
                 ConcreteDataType::int64_datatype(),

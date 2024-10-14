@@ -27,7 +27,7 @@ pub mod util;
 pub use date::Date;
 pub use datetime::DateTime;
 pub use duration::Duration;
-pub use interval::Interval;
+pub use interval::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 pub use range::RangeMillis;
 pub use timestamp::Timestamp;
 pub use timestamp_millis::TimestampMillis;
