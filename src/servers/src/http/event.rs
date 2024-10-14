@@ -12,11 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 use std::time::Instant;
 
-use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
+use api::v1::value::ValueData;
+use api::v1::{
+    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
+    Value as GreptimeValue,
+};
 use axum::body::HttpBody;
 use axum::extract::{FromRequest, Multipart, Path, Query, State};
 use axum::headers::ContentType;
@@ -44,7 +49,6 @@ use crate::error::{
 };
 use crate::http::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
-use crate::http::json_result::JsonResponse;
 use crate::http::HttpResponse;
 use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{
@@ -358,23 +362,155 @@ pub async fn pipeline_dryrun(
 
 #[axum_macros::debug_handler]
 pub async fn loki_ingest(
-    State(_log_state): State<LogState>,
-    // Query(query_params): Query<LogIngesterQueryParams>,
-    Extension(mut _query_ctx): Extension<QueryContext>,
+    State(log_state): State<LogState>,
+    Extension(mut ctx): Extension<QueryContext>,
     TypedHeader(content_type): TypedHeader<ContentType>,
     bytes: Bytes,
 ) -> Result<HttpResponse> {
+    // TODO(shuiyisong): should change channel to loki
+    ctx.set_channel(Channel::Http);
+    let ctx = Arc::new(ctx);
+    let exec_timer = std::time::Instant::now();
+
+    // decompress req
     ensure!(
         &content_type.to_string() == "application/x-protobuf",
         UnsupportedContentTypeSnafu { content_type }
     );
-
     let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
     let req = loki_api::logproto::PushRequest::decode(&decompressed[..])
         .context(DecodeOtlpRequestSnafu)?;
-    warn!("loki ingest: {:#?}", req);
 
-    Ok(JsonResponse::from_output(vec![]).await)
+    // init schemas
+    let mut schemas: Vec<ColumnSchema> = vec![
+        ColumnSchema {
+            column_name: "timestamp".to_string(),
+            datatype: ColumnDataType::TimestampNanosecond.into(),
+            semantic_type: SemanticType::Timestamp.into(),
+            datatype_extension: None,
+            options: None,
+        },
+        ColumnSchema {
+            column_name: "line".to_string(),
+            datatype: ColumnDataType::String.into(),
+            semantic_type: SemanticType::Field.into(),
+            datatype_extension: None,
+            options: None,
+        },
+    ];
+
+    let mut global_label_key_index: HashMap<String, i32> = HashMap::new();
+    global_label_key_index.insert("timestamp".to_string(), 0);
+    global_label_key_index.insert("line".to_string(), 1);
+
+    let mut rows = vec![];
+
+    for stream in req.streams {
+        // parse labels for each row
+        let labels: HashMap<String, String> =
+            serde_json::from_str(&stream.labels).context(ParseJsonSnafu)?;
+
+        // process entries
+        for entry in stream.entries {
+            let ts = if let Some(ts) = entry.timestamp {
+                ts
+            } else {
+                continue;
+            };
+            let line = entry.line;
+
+            // create and init row
+            let mut row = Vec::with_capacity(schemas.capacity());
+            for _ in 0..row.capacity() {
+                row.push(GreptimeValue { value_data: None });
+            }
+            // insert ts and line
+            row[0] = GreptimeValue {
+                value_data: Some(ValueData::TimestampNanosecondValue(
+                    ts.seconds * 1000000000 + ts.nanos as i64,
+                )),
+            };
+            row[1] = GreptimeValue {
+                value_data: Some(ValueData::StringValue(line)),
+            };
+            // insert labels
+            for (k, v) in labels.iter() {
+                if let Some(index) = global_label_key_index.get(k) {
+                    // exist in schema
+                    // insert value using index
+                    row[*index as usize] = GreptimeValue {
+                        value_data: Some(ValueData::StringValue(v.clone())),
+                    };
+                } else {
+                    // not exist
+                    // add schema and append to values
+                    schemas.push(ColumnSchema {
+                        column_name: k.clone(),
+                        datatype: ColumnDataType::String.into(),
+                        semantic_type: SemanticType::Tag.into(),
+                        datatype_extension: None,
+                        options: None,
+                    });
+                    global_label_key_index.insert(k.clone(), (schemas.len() - 1) as i32);
+
+                    row.push(GreptimeValue {
+                        value_data: Some(ValueData::StringValue(v.clone())),
+                    });
+                }
+            }
+
+            rows.push(row);
+        }
+    }
+
+    // fill Null for missing values
+    for row in rows.iter_mut() {
+        if row.len() < schemas.len() {
+            for _ in row.len()..schemas.len() {
+                row.push(GreptimeValue { value_data: None });
+            }
+        }
+    }
+
+    let rows = Rows {
+        rows: rows.into_iter().map(|values| Row { values }).collect(),
+        schema: schemas,
+    };
+
+    let ins_req = RowInsertRequest {
+        // TODO(shuiyisong): table name
+        table_name: "test_table_name".to_string(),
+        rows: Some(rows),
+    };
+    let ins_reqs = RowInsertRequests {
+        inserts: vec![ins_req],
+    };
+
+    let handler = log_state.log_handler;
+    let output = handler.insert_logs(ins_reqs, ctx).await;
+
+    // TODO(shuiyisong): add metrics
+    // if let Ok(Output {
+    //     data: OutputData::AffectedRows(rows),
+    //     meta: _,
+    // }) = &output
+    // {
+    //     METRIC_HTTP_LOGS_INGESTION_COUNTER
+    //         .with_label_values(&[db.as_str()])
+    //         .inc_by(*rows as u64);
+    //     METRIC_HTTP_LOGS_INGESTION_ELAPSED
+    //         .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
+    //         .observe(exec_timer.elapsed().as_secs_f64());
+    // } else {
+    //     METRIC_HTTP_LOGS_INGESTION_ELAPSED
+    //         .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+    //         .observe(exec_timer.elapsed().as_secs_f64());
+    // }
+
+    let response = GreptimedbV1Response::from_output(vec![output])
+        .await
+        .with_execution_time(exec_timer.elapsed().as_millis() as u64);
+    Ok(response)
 }
 
 #[axum_macros::debug_handler]
