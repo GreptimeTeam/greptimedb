@@ -368,7 +368,6 @@ impl WindowedSortStream {
 
                     // iterate over runs_with_batch to merge sort, might create zero or more stream to put to `sort_partition_rbs`
 
-                    // FIXME: add quere here so remaining batch can be put back to input queue
                     let mut last_remaining = None;
                     let mut run_iter = runs_with_batch.into_iter();
                     loop {
@@ -446,16 +445,16 @@ impl WindowedSortStream {
                                 let new_run_info = SucRun {
                                     offset: run_info.offset + remaining.0,
                                     len: remaining.1,
-                                    first_val: new_first_val, // TODO: test this logic
+                                    first_val: new_first_val,
                                     last_val: run_info.last_val,
                                 };
                                 last_remaining = Some((remaining_rb, new_run_info));
                             }
-                            // FIXME(discord9): need deal with remaining batch cross working range problem
-                            // i.e: this example require more slice
+                            // deal with remaining batch cross working range problem
+                            // i.e: this example require more slice, and we are currently at point A
                             // |---1---|       |---3---|
-                            // |----------2------------|
-                            // the simplest fix is put the remaining batch back to iter and deal it in next loop
+                            // |-------A--2------------|
+                            //  put the remaining batch back to iter and deal it in next loop
                             mydbg!("after intersection run", &last_remaining);
                         } else {
                             // no overlap, we can merge sort the working set
@@ -678,9 +677,6 @@ macro_rules! downcast_ts_array {
 /// Find the slice(where start <= data < end and sort by `sort_column.options`) from the given range
 ///
 /// Return the offset and length of the slice
-///
-/// FIXME: currently it's inclusive so some problem might occur
-/// make it left inclusive right exclusive might be better
 fn find_slice_from_range(
     sort_column: &SortColumn,
     range: &TimeRange,
@@ -726,8 +722,8 @@ fn find_slice_from_range(
         // i,e, for max_val = 4, array = [5,3,2] should be start=1
         // max_val = 4, array = [5, 4, 3, 2] should be start= 2
         let start = bisect::<false>(&[array.clone()], &[max_val.clone()], &[*opt])?;
-        // min_val = 1, array = [3, 2, 1], end = 2+1
-        // min_val = 1, array = [3, 2, 0], end = 1+1
+        // min_val = 1, array = [3, 2, 1, 0], end = 2
+        // min_val = 1, array = [3, 2, 0], end = 2
         let end = bisect::<false>(&[array.clone()], &[min_val.clone()], &[*opt])?;
         (start, end)
     } else {
@@ -899,6 +895,8 @@ fn get_sorted_runs(sort_column: SortColumn) -> datafusion_common::Result<Vec<Suc
 }
 
 /// Left(`start`) inclusive right(`end`) exclusive,
+///
+/// This is just tuple with extra methods
 #[derive(Debug, Clone, Default, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TimeRange {
     start: Timestamp,
@@ -2147,7 +2145,9 @@ mod test {
                 Ok((1, 3)),
             ),
             (
-                Arc::new(TimestampMillisecondArray::from_iter_values([5, 4, 3, 2, 1])) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values([
+                    5, 4, 3, 2, 1, 0,
+                ])) as ArrayRef,
                 true,
                 TimeRange {
                     end: Timestamp::new_millisecond(4),
@@ -2222,7 +2222,7 @@ mod test {
             ),
             // test off by one case
             (
-                Arc::new(TimestampMillisecondArray::from_iter_values([3, 2, 1])) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values([3, 2, 1, 0])) as ArrayRef,
                 true,
                 TimeRange {
                     end: Timestamp::new_millisecond(4),
