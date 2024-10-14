@@ -372,7 +372,7 @@ impl MetasrvBuilder {
             // TODO(jeremy): We do not allow configuring the flow selector.
             flow_selector: Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)),
             handler_group: None,
-            handler_group_builder,
+            handler_group_builder: Some(handler_group_builder),
             election,
             procedure_manager,
             mailbox,

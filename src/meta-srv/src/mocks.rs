@@ -75,7 +75,6 @@ pub async fn mock(
     };
 
     let mut metasrv = builder.build().await.unwrap();
-    metasrv.build_heartbeat_handler_group().unwrap();
     metasrv.try_start().await.unwrap();
 
     let (client, server) = tokio::io::duplex(1024);
