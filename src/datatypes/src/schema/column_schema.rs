@@ -382,6 +382,28 @@ impl fmt::Display for ChangeFulltextOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "fulltext options: ")?;
 
+        if let Some(enable) = self.enable {
+            write!(f, "enable={}", enable)?;
+        } else {
+            write!(f, "enable=None")?;
+        }
+
+        if let Some(analyzer) = self.analyzer {
+            if analyzer == 0 {
+                write!(f, ", analyzer=English")?;
+            } else {
+                write!(f, ", analyzer=Chinese")?;
+            }
+        } else {
+            write!(f, ", analyzer=None")?;
+        }
+
+        if let Some(case_sensitive) = self.case_sensitive {
+            write!(f, ", case_sensitive={}", case_sensitive)?;
+        } else {
+            write!(f, ", case_sensitive=None")?;
+        }
+
         Ok(())
     }
 }

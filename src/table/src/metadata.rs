@@ -1415,7 +1415,11 @@ mod tests {
 
         let alter_kind = AlterKind::ChangeFulltext {
             column_name: "col1".to_string(),
-            options: HashMap::from([(String::from("analyzer"), String::from("English"))]),
+            options: ChangeFulltextOptions {
+                enable: Some(true),
+                analyzer: Some(0),
+                case_sensitive: None,
+            },
         };
         assert!(meta
             .builder_with_alter_kind("my_table", &alter_kind, false)
@@ -1423,7 +1427,11 @@ mod tests {
 
         let alter_kind = AlterKind::ChangeFulltext {
             column_name: "col1".to_string(),
-            options: HashMap::from([(String::from("case_sensitive"), String::from("no"))]),
+            options: ChangeFulltextOptions {
+                enable: None,
+                analyzer: None,
+                case_sensitive: Some(false),
+            },
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind, false)

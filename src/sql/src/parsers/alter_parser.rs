@@ -466,7 +466,10 @@ mod tests {
                         options,
                     } => {
                         assert_eq!(column_name.value, r#"message"#);
-                        assert_eq!(options.get("analyzer").unwrap(), "Chinese");
+                        assert!(options.analyzer.is_some());
+                        assert_eq!(options.analyzer.unwrap(), 1);
+                        assert!(options.case_sensitive.is_some());
+                        assert_eq!(options.case_sensitive.unwrap(), true);
                     }
                     _ => unreachable!(),
                 }

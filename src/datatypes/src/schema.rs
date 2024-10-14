@@ -487,13 +487,4 @@ mod tests {
             .build()
             .is_err());
     }
-
-    #[test]
-    fn test_validate_fulltext_options() {
-        let options = HashMap::from([(String::from("analyzer"), String::from("English"))]);
-        assert!(parse_fulltext_options(&options).is_some());
-
-        let options = HashMap::from([(String::from("analyzer"), String::from("Chinglish"))]);
-        assert!(parse_fulltext_options(&options).is_some());
-    }
 }
