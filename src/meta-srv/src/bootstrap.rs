@@ -98,7 +98,7 @@ impl MetasrvInstance {
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        self.metasrv.build_heartbeat_handler()?;
+        self.metasrv.build_heartbeat_handler_group()?;
         self.metasrv.try_start().await?;
 
         if let Some(t) = self.export_metrics_task.as_ref() {

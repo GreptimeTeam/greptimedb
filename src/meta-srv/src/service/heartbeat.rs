@@ -50,7 +50,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
             .handler_group()
             .clone()
             .context(error::UnexpectedSnafu {
-                violated: "expected heartbeat handler",
+                violated: "expected heartbeat handlers",
             })?;
 
         let ctx = self.new_ctx();

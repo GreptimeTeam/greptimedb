@@ -371,12 +371,6 @@ pub struct Metasrv {
 }
 
 impl Metasrv {
-    pub fn build_heartbeat_handler(&mut self) -> Result<()> {
-        self.handler_group = Some(Arc::new(self.handler_group_builder.build()?));
-
-        Ok(())
-    }
-
     pub async fn try_start(&self) -> Result<()> {
         if self
             .started
@@ -571,6 +565,12 @@ impl Metasrv {
 
     pub fn handler_group_builder(&mut self) -> &mut HeartbeatHandlerGroupBuilder {
         &mut self.handler_group_builder
+    }
+
+    pub fn build_heartbeat_handler_group(&mut self) -> Result<()> {
+        self.handler_group = Some(Arc::new(self.handler_group_builder.build()?));
+
+        Ok(())
     }
 
     pub fn election(&self) -> Option<&ElectionRef> {
