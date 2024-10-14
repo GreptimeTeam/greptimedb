@@ -58,7 +58,7 @@ const COLUMN_PREFIX: &str = "__column_";
 /// itself.
 pub struct MetadataRegion {
     mito: MitoEngine,
-    /// Logical lock for operations that need to be serialized. Like update & read region columnns.
+    /// Logical lock for operations that need to be serialized. Like update & read region columns.
     ///
     /// Region entry will be registered on creating and opening logical region, and deregistered on
     /// removing logical region.
