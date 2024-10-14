@@ -2984,7 +2984,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn gen_test_window_sort_stream() {
+    async fn fuzzy_ish_test_window_sort_stream() {
         let test_cnt = 100;
         let part_cnt_bound = 100;
         let range_size_bound = 100;
