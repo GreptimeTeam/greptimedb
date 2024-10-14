@@ -372,7 +372,7 @@ pub struct Metasrv {
 
 impl Metasrv {
     pub fn build_heartbeat_handler(&mut self) -> Result<()> {
-        self.handler_group = Some(Arc::new(self.handler_group_builder.clone().build()?));
+        self.handler_group = Some(Arc::new(self.handler_group_builder.build()?));
 
         Ok(())
     }

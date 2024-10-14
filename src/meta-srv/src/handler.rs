@@ -531,19 +531,19 @@ impl HeartbeatHandlerGroupBuilder {
     /// Builds the group of heartbeat handlers.
     ///
     /// Applies the customizer if it exists.
-    pub fn build(mut self) -> Result<HeartbeatHandlerGroup> {
+    pub fn build(&mut self) -> Result<HeartbeatHandlerGroup> {
         if let Some(customizer) = self
             .plugins
             .as_ref()
             .and_then(|plugins| plugins.get::<HeartbeatHandlerGroupBuilderCustomizerRef>())
         {
             debug!("Customizing the heartbeat handler group builder");
-            customizer.customize(&mut self)?;
+            customizer.customize(self)?;
         }
 
         Ok(HeartbeatHandlerGroup {
-            handlers: self.handlers.into_iter().collect(),
-            pushers: self.pushers,
+            handlers: self.handlers.clone(),
+            pushers: self.pushers.clone(),
         })
     }
 
