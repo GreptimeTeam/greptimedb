@@ -424,9 +424,7 @@ pub enum Error {
 
     #[cfg(feature = "pprof")]
     #[snafu(display("Failed to dump pprof data"))]
-    DumpPprof {
-        source: crate::http::pprof::nix::Error,
-    },
+    DumpPprof { source: common_pprof::error::Error },
 
     #[cfg(not(windows))]
     #[snafu(display("Failed to update jemalloc metrics"))]
