@@ -28,7 +28,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{parse_fulltext_options, ColumnSchema, FulltextOptions, Schema, SchemaRef};
+use datatypes::schema::{ChangeFulltextOptions, ColumnSchema, FulltextOptions, Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -631,7 +631,7 @@ impl RegionMetadataBuilder {
     fn change_column_fulltext(
         &mut self,
         column_name: String,
-        options: HashMap<String, String>,
+        options: ChangeFulltextOptions,
     ) -> Result<()> {
         for column_meta in self.column_metadatas.iter_mut() {
             if column_name.eq(&column_meta.column_schema.name) {
@@ -642,8 +642,14 @@ impl RegionMetadataBuilder {
                     FulltextOptions::default()
                 };
 
-                if let Some(f) = parse_fulltext_options(&options) {
-                    fulltext = f;
+                if let Some(enable) = options.enable {
+                    fulltext.enable = enable;
+                }
+                if let Some(analyzer) = options.analyzer {
+                    fulltext.analyzer = analyzer.try_into().context(InvalidFulltextOptionsSnafu)?;
+                }
+                if let Some(case_sensitive) = options.case_sensitive {
+                    fulltext.case_sensitive = case_sensitive;
                 }
 
                 column_meta
@@ -772,18 +778,11 @@ pub enum MetadataError {
         location: Location,
     },
 
-    #[snafu(display(
-        "Invalid fulltext options, column: {}, key: {}, value: {}",
-        column_name,
-        key,
-        value
-    ))]
+    #[snafu(display("Invalid fulltext options"))]
     InvalidFulltextOptions {
+        source: datatypes::error::Error,
         #[snafu(implicit)]
         location: Location,
-        column_name: String,
-        key: String,
-        value: String,
     },
 }
 

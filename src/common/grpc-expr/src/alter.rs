@@ -20,7 +20,7 @@ use api::v1::{
     CreateTableExpr, DropColumns, RenameTable, SemanticType,
 };
 use common_query::AddColumnLocation;
-use datatypes::schema::{ColumnSchema, RawSchema};
+use datatypes::schema::{ChangeFulltextOptions, ColumnSchema, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ChangeColumnTypeRequest};
@@ -94,10 +94,16 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
         }
         Kind::ChangeFulltext(ChangeFulltext {
             column_name,
-            options,
+            enable,
+            analyzer,
+            case_sensitive,
         }) => AlterKind::ChangeFulltext {
             column_name,
-            options,
+            options: ChangeFulltextOptions {
+                enable,
+                analyzer,
+                case_sensitive,
+            },
         },
     };
 

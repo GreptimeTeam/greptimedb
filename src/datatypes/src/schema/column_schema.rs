@@ -18,7 +18,9 @@ use std::fmt;
 use arrow::datatypes::Field;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
+use sqlparser_derive::{Visit, VisitMut};
 
+use super::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error, Result};
 use crate::schema::constraint::ColumnDefaultConstraint;
@@ -351,6 +353,99 @@ pub enum FulltextAnalyzer {
     #[default]
     English,
     Chinese,
+}
+
+impl TryFrom<i32> for FulltextAnalyzer {
+    type Error = Error;
+
+    fn try_from(value: i32) -> Result<Self> {
+        match value {
+            0 => Ok(FulltextAnalyzer::English),
+            1 => Ok(FulltextAnalyzer::Chinese),
+            _ => Err(error::InvalidFulltextOptionsSnafu {
+                key: "analyzer".to_string(),
+                value: value.to_string(),
+            }
+            .build()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut, Default)]
+pub struct ChangeFulltextOptions {
+    pub enable: Option<bool>,
+    pub analyzer: Option<i32>,
+    pub case_sensitive: Option<bool>,
+}
+
+impl fmt::Display for ChangeFulltextOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fulltext options: ")?;
+
+        Ok(())
+    }
+}
+
+/// Parses the provided options to configure full-text search behavior.
+///
+/// This function checks for specific keys in the provided `HashMap`:
+/// - `COLUMN_FULLTEXT_OPT_KEY_ANALYZER`: Defines the analyzer to use (e.g., "english", "chinese").
+/// - `COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE`: Defines whether the full-text search should be case-sensitive ("true" or "false").
+///
+/// If the provided options contain valid values for the full-text keys, a configured `ChangeFulltextOptions`
+/// object is returned. If the options are invalid or missing, the function returns error.
+impl TryFrom<HashMap<String, String>> for ChangeFulltextOptions {
+    type Error = Error;
+
+    fn try_from(options: HashMap<String, String>) -> Result<Self> {
+        let mut fulltext = ChangeFulltextOptions::default();
+
+        // Check and parse the "analyzer" option
+        if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
+            match analyzer.to_ascii_lowercase().as_str() {
+                "english" => {
+                    fulltext.enable = Some(true);
+                    fulltext.analyzer = Some(0);
+                }
+                "chinese" => {
+                    fulltext.enable = Some(true);
+                    fulltext.analyzer = Some(1);
+                }
+                _ => {
+                    // If the analyzer is invalid, return None to indicate failure
+                    return error::InvalidFulltextOptionsSnafu {
+                        key: COLUMN_FULLTEXT_OPT_KEY_ANALYZER.to_string(),
+                        value: analyzer.to_string(),
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        // Check and parse the "case_sensitive" option
+        if let Some(case_sensitive) = options.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
+            match case_sensitive.to_ascii_lowercase().as_str() {
+                "true" => {
+                    fulltext.enable = Some(true);
+                    fulltext.case_sensitive = Some(true);
+                }
+                "false" => {
+                    fulltext.enable = Some(true);
+                    fulltext.case_sensitive = Some(false);
+                }
+                _ => {
+                    // If case sensitivity is invalid, return None
+                    return error::InvalidFulltextOptionsSnafu {
+                        key: COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE.to_string(),
+                        value: case_sensitive.to_string(),
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        Ok(fulltext)
+    }
 }
 
 impl fmt::Display for FulltextAnalyzer {

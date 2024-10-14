@@ -121,6 +121,11 @@ pub enum Error {
     InvalidFulltextColumnType {
         column_name: String,
         column_type: ColumnDataType,
+    },
+
+    #[snafu(display("Invalid fulltext options"))]
+    InvalidFulltextOptions {
+        source: datatypes::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -145,9 +150,9 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
 
-            Error::UnknownColumnDataType { .. } | Error::InvalidFulltextColumnType { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::UnknownColumnDataType { .. }
+            | Error::InvalidFulltextOptions { .. }
+            | Error::InvalidFulltextColumnType { .. } => StatusCode::InvalidArguments,
         }
     }
 

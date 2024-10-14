@@ -111,7 +111,7 @@ SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'English', case_sensitive = 'yes');
 
-Error: 1004(InvalidArguments), Invalid fulltext options, column: message, key: case_sensitive, value: yes
+Error: 2000(InvalidSyntax), sql parser error: failed to parse fulltext options
 
 SHOW CREATE TABLE test;
 
@@ -132,7 +132,7 @@ SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinglish', case_sensitive = 'false');
 
-Error: 1004(InvalidArguments), Invalid fulltext options, column: message, key: analyzer, value: Chinglish
+Error: 2000(InvalidSyntax), sql parser error: failed to parse fulltext options
 
 SHOW CREATE TABLE test;
 
@@ -174,7 +174,7 @@ SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN time SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'no');
 
-Error: 1004(InvalidArguments), Invalid data type TimestampMillisecond for fulltext
+Error: 2000(InvalidSyntax), sql parser error: failed to parse fulltext options
 
 SHOW CREATE TABLE test;
 

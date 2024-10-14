@@ -25,19 +25,17 @@ use api::v1::region::{
 use api::v1::{self, Rows, SemanticType};
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::ChangeFulltextOptions;
 use snafu::{ensure, OptionExt};
 use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, InvalidFulltextOptionsSnafu, InvalidRawRegionRequestSnafu,
-    InvalidRegionRequestSnafu, MetadataError, RegionMetadata, Result,
+    ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
+    RegionMetadata, Result,
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
-
-const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
-const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
 
 #[derive(Debug, IntoStaticStr)]
 pub enum RegionRequest {
@@ -397,7 +395,7 @@ pub enum AlterKind {
         /// Name of column to change.
         column_name: String,
         /// Fulltext options.
-        options: HashMap<String, String>,
+        options: ChangeFulltextOptions,
     },
 }
 
@@ -422,10 +420,9 @@ impl AlterKind {
                     col_to_change.validate(metadata)?;
                 }
             }
-            AlterKind::ChangeColumnFulltext {
-                column_name,
-                options,
-            } => Self::validate_column_fulltext_to_alter(metadata, column_name, options)?,
+            AlterKind::ChangeColumnFulltext { column_name, .. } => {
+                Self::validate_column_fulltext_to_alter(metadata, column_name)?
+            }
         }
         Ok(())
     }
@@ -464,24 +461,10 @@ impl AlterKind {
         Ok(())
     }
 
-    /// Validates full-text options for altering a specific column in the region metadata.
-    ///
-    /// This function checks if the provided column exists in the region metadata and validates
-    /// the full-text options (`analyzer` and `case_sensitive`) for correctness. If any option is
-    /// invalid, it returns an error.
-    ///
-    /// # Parameters:
-    /// - `metadata`: The region metadata that contains column information.
-    /// - `column_name`: The name of the column to validate.
-    /// - `options`: A `HashMap<String, String>` containing the full-text options to be validated.
-    ///
-    /// # Returns:
-    /// - `Ok(())` if the column exists and the options are valid.
-    /// - `Err` if the column is not found or if any of the options are invalid.
+    /// Returns an error if the column to change fulltext is invalid.
     pub fn validate_column_fulltext_to_alter(
         metadata: &RegionMetadata,
         column_name: &str,
-        options: &HashMap<String, String>,
     ) -> Result<()> {
         // Ensure the column exists in the region metadata, otherwise return an error
         metadata
@@ -490,48 +473,6 @@ impl AlterKind {
                 region_id: metadata.region_id,
                 err: format!("column {} not found", column_name),
             })?;
-
-        // Validate the full-text options in a simplified manner
-        for (key, value) in options {
-            let value_lower = value.to_ascii_lowercase();
-            match key.to_ascii_lowercase().as_str() {
-                // Validate the "analyzer" option
-                COLUMN_FULLTEXT_OPT_KEY_ANALYZER => {
-                    if !matches!(value_lower.as_str(), "english")
-                        && !matches!(value_lower.as_str(), "chinese")
-                    {
-                        return InvalidFulltextOptionsSnafu {
-                            column_name,
-                            key,
-                            value,
-                        }
-                        .fail();
-                    }
-                }
-                // Validate the "case_sensitive" option
-                COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE => {
-                    if !matches!(value_lower.as_str(), "true")
-                        && !matches!(value_lower.as_str(), "false")
-                    {
-                        return InvalidFulltextOptionsSnafu {
-                            column_name,
-                            key,
-                            value,
-                        }
-                        .fail();
-                    }
-                }
-                // Return an error for any unknown options
-                _ => {
-                    return InvalidFulltextOptionsSnafu {
-                        column_name,
-                        key,
-                        value,
-                    }
-                    .fail()
-                }
-            }
-        }
 
         Ok(())
     }
@@ -564,7 +505,11 @@ impl TryFrom<alter_request::Kind> for AlterKind {
             }
             alter_request::Kind::ChangeFulltext(x) => AlterKind::ChangeColumnFulltext {
                 column_name: x.column_name,
-                options: x.options,
+                options: ChangeFulltextOptions {
+                    enable: x.enable,
+                    analyzer: x.analyzer,
+                    case_sensitive: x.case_sensitive,
+                },
             },
         };
 

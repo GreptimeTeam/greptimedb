@@ -145,6 +145,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid fulltext options"))]
+    InvalidFulltextOptions {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -156,12 +163,13 @@ impl ErrorExt for Error {
             }
             Error::RemoveColumnInIndex { .. }
             | Error::BuildColumnDescriptor { .. }
-            | Error::InvalidAlterRequest { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidAlterRequest { .. }
+            | Error::InvalidFulltextColumnType { .. } => StatusCode::InvalidArguments,
             Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
             Error::SchemaBuild { source, .. } => source.status_code(),
             Error::TableOperation { source } => source.status_code(),
-            Error::InvalidFulltextColumnType { source, .. } => source.status_code(),
+            Error::InvalidFulltextOptions { source, .. } => source.status_code(),
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::Unsupported { .. } => StatusCode::Unsupported,
             Error::ParseTableOption { .. } => StatusCode::InvalidArguments,

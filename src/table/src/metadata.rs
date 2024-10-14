@@ -19,7 +19,7 @@ use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{
-    parse_fulltext_options, ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder,
+    ChangeFulltextOptions, ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder,
     SchemaRef,
 };
 use derive_builder::Builder;
@@ -597,7 +597,7 @@ impl TableMeta {
         &self,
         table_name: &str,
         column_name: &String,
-        options: HashMap<String, String>,
+        options: ChangeFulltextOptions,
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
@@ -615,8 +615,16 @@ impl TableMeta {
             FulltextOptions::default()
         };
 
-        if let Some(f) = parse_fulltext_options(&options) {
-            fulltext = f;
+        if let Some(enable) = options.enable {
+            fulltext.enable = enable;
+        }
+        if let Some(analyzer) = options.analyzer {
+            fulltext.analyzer = analyzer
+                .try_into()
+                .context(error::InvalidFulltextOptionsSnafu)?;
+        }
+        if let Some(case_sensitive) = options.case_sensitive {
+            fulltext.case_sensitive = case_sensitive;
         }
 
         let columns: Result<Vec<_>> = table_schema
@@ -659,9 +667,7 @@ impl TableMeta {
 
                 Ok(meta_builder)
             }
-            Err(e) => {
-                return Err(e);
-            }
+            Err(e) => Err(e),
         }
     }
 

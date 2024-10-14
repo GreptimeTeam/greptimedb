@@ -26,8 +26,8 @@ use snafu::{ensure, ResultExt};
 
 use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
 pub use crate::schema::column_schema::{
-    ColumnSchema, FulltextAnalyzer, FulltextOptions, Metadata, COMMENT_KEY, FULLTEXT_KEY,
-    TIME_INDEX_KEY,
+    ChangeFulltextOptions, ColumnSchema, FulltextAnalyzer, FulltextOptions, Metadata, COMMENT_KEY,
+    FULLTEXT_KEY, TIME_INDEX_KEY,
 };
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
@@ -301,69 +301,6 @@ fn validate_timestamp_index(column_schemas: &[ColumnSchema], timestamp_index: us
     );
 
     Ok(())
-}
-
-/// Parses the provided options to configure full-text search behavior.
-///
-/// This function checks for specific keys in the provided `HashMap`:
-/// - `COLUMN_FULLTEXT_OPT_KEY_ANALYZER`: Defines the analyzer to use (e.g., "english", "chinese").
-/// - `COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE`: Defines whether the full-text search should be case-sensitive ("true" or "false").
-///
-/// If the provided options contain valid values for the full-text keys, a configured `FulltextOptions`
-/// object is returned. If the options are invalid or missing, the function returns `None`.
-///
-/// # Parameters:
-/// - `options`: A reference to a `HashMap<String, String>` containing the full-text options.
-///
-/// # Returns:
-/// - `Some(FulltextOptions)` if valid options are provided.
-/// - `None` if the options are invalid or do not contain full-text related keys.
-pub fn parse_fulltext_options(options: &HashMap<String, String>) -> Option<FulltextOptions> {
-    let mut fulltext = FulltextOptions::default();
-
-    // Check and parse the "analyzer" option
-    if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
-        match analyzer.to_ascii_lowercase().as_str() {
-            "english" => {
-                fulltext.enable = true;
-                fulltext.analyzer = FulltextAnalyzer::English;
-            }
-            "chinese" => {
-                fulltext.enable = true;
-                fulltext.analyzer = FulltextAnalyzer::Chinese;
-            }
-            _ => {
-                // If the analyzer is invalid, return None to indicate failure
-                return None;
-            }
-        }
-    }
-
-    // Check and parse the "case_sensitive" option
-    if let Some(case_sensitive) = options.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
-        match case_sensitive.to_ascii_lowercase().as_str() {
-            "true" => {
-                fulltext.enable = true;
-                fulltext.case_sensitive = true;
-            }
-            "false" => {
-                fulltext.enable = true;
-                fulltext.case_sensitive = false;
-            }
-            _ => {
-                // If case sensitivity is invalid, return None
-                return None;
-            }
-        }
-    }
-
-    // If any fulltext-related key exists, return the constructed FulltextOptions
-    if fulltext.enable {
-        Some(fulltext)
-    } else {
-        // Return None if no valid fulltext keys are found
-        None
-    }
 }
 
 pub type SchemaRef = Arc<Schema>;

@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 
 use common_query::AddColumnLocation;
+use datatypes::schema::ChangeFulltextOptions;
 use snafu::ResultExt;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
@@ -94,9 +95,18 @@ impl<'a> ParserContext<'a> {
                     .collect::<Result<HashMap<String, String>>>()
                     .unwrap();
 
+                let fulltext_options: ChangeFulltextOptions = match options.try_into() {
+                    Ok(options) => options,
+                    Err(_) => {
+                        return Err(ParserError::ParserError(
+                            "failed to parse fulltext options".to_string(),
+                        ))
+                    }
+                };
+
                 AlterTableOperation::AlterColumnFulltext {
                     column_name,
-                    options: options.into(),
+                    options: fulltext_options,
                 }
             } else {
                 let target_type = self.parser.parse_data_type()?;

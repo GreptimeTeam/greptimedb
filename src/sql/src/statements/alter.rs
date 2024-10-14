@@ -15,10 +15,9 @@
 use std::fmt::{Debug, Display};
 
 use common_query::AddColumnLocation;
+use datatypes::schema::ChangeFulltextOptions;
 use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
-
-use crate::statements::OptionMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct AlterTable {
@@ -73,10 +72,10 @@ pub enum AlterTableOperation {
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
     RenameTable { new_table_name: String },
-    /// `SET COLUMN <column_name> FULLTEXT WITH`
+    /// `SET COLUMN <column_name> FULLTEXT WITH <options>`
     AlterColumnFulltext {
         column_name: Ident,
-        options: OptionMap,
+        options: ChangeFulltextOptions,
     },
 }
 
@@ -108,11 +107,7 @@ impl Display for AlterTableOperation {
                 column_name,
                 options,
             } => {
-                write!(
-                    f,
-                    r#"SET COLUMN {column_name} FULLTEXT WITH {:?}"#,
-                    options.to_str_map()
-                )
+                write!(f, r#"SET COLUMN {column_name} FULLTEXT WITH {:?}"#, options)
             }
         }
     }
