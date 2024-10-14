@@ -338,7 +338,7 @@ mod test {
             .await
             .unwrap();
 
-        // close nonexistent region
+        // close nonexistent region won't report error
         let nonexistent_region_id = RegionId::new(12313, 12);
         engine
             .handle_request(
@@ -346,7 +346,7 @@ mod test {
                 RegionRequest::Close(RegionCloseRequest {}),
             )
             .await
-            .unwrap_err();
+            .unwrap();
 
         // open nonexistent region won't report error
         let invalid_open_request = RegionOpenRequest {
