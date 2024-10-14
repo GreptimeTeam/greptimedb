@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_telemetry::error;
+use common_telemetry::{error, info};
 
 use crate::error::Result;
 
@@ -47,6 +47,7 @@ pub struct LeadershipChangeNotifier {
 
 impl LeadershipChangeNotifierCustomizer for LeadershipChangeNotifier {
     fn customize(&self, notifier: &mut LeadershipChangeNotifier) {
+        info!("Customizing leadership change notifier");
         notifier.listeners.extend(self.listeners.clone());
     }
 }

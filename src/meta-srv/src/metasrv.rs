@@ -55,9 +55,7 @@ use crate::error::{
     StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
-use crate::handler::{
-    HeartbeatHandlerGroup, HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef,
-};
+use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::lease::lookup_datanode_peer;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
@@ -355,7 +353,8 @@ pub struct Metasrv {
     selector: SelectorRef,
     // The flow selector is used to select a target flownode.
     flow_selector: SelectorRef,
-    handler_group: HeartbeatHandlerGroupRef,
+    handler_group: Option<HeartbeatHandlerGroupRef>,
+    handler_group_builder: HeartbeatHandlerGroupBuilder,
     election: Option<ElectionRef>,
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
@@ -372,6 +371,12 @@ pub struct Metasrv {
 }
 
 impl Metasrv {
+    pub fn build_heartbeat_handler(&mut self) -> Result<()> {
+        self.handler_group = Some(Arc::new(self.handler_group_builder.clone().build()?));
+
+        Ok(())
+    }
+
     pub async fn try_start(&self) -> Result<()> {
         if self
             .started
@@ -560,17 +565,12 @@ impl Metasrv {
         &self.flow_selector
     }
 
-    pub fn handler_group(&self) -> &HeartbeatHandlerGroupRef {
+    pub fn handler_group(&self) -> &Option<HeartbeatHandlerGroupRef> {
         &self.handler_group
     }
 
-    pub fn modify_handler_group<F>(&mut self, f: F) -> Result<()>
-    where
-        F: FnOnce(HeartbeatHandlerGroupBuilder) -> Result<HeartbeatHandlerGroup>,
-    {
-        let builder = HeartbeatHandlerGroupBuilder::from(self.handler_group.as_ref());
-        self.handler_group = Arc::new(f(builder)?);
-        Ok(())
+    pub fn handler_group_builder(&mut self) -> &mut HeartbeatHandlerGroupBuilder {
+        &mut self.handler_group_builder
     }
 
     pub fn election(&self) -> Option<&ElectionRef> {

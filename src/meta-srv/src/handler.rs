@@ -443,6 +443,7 @@ impl Mailbox for HeartbeatMailbox {
 }
 
 /// The builder to build the group of heartbeat handlers.
+#[derive(Clone)]
 pub struct HeartbeatHandlerGroupBuilder {
     /// The handler to handle region failure.
     region_failure_handler: Option<RegionFailureHandler>,
@@ -458,18 +459,6 @@ pub struct HeartbeatHandlerGroupBuilder {
 
     /// The group of heartbeat handlers.
     handlers: Vec<NameCachedHandler>,
-}
-
-impl From<&HeartbeatHandlerGroup> for HeartbeatHandlerGroupBuilder {
-    fn from(value: &HeartbeatHandlerGroup) -> Self {
-        HeartbeatHandlerGroupBuilder {
-            region_failure_handler: None,
-            region_lease_handler: None,
-            plugins: None,
-            pushers: value.pushers.clone(),
-            handlers: value.handlers.clone(),
-        }
-    }
 }
 
 impl HeartbeatHandlerGroupBuilder {
