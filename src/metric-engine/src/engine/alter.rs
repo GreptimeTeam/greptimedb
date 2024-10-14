@@ -84,6 +84,12 @@ impl MetricEngineInner {
             return Ok(physical_region_id);
         };
 
+        // lock metadata region for this logical region id
+        let _write_guard = self
+            .metadata_region
+            .write_lock_logical_region(logical_region_id)
+            .await;
+
         let metadata_region_id = to_metadata_region_id(physical_region_id);
         let mut columns_to_add = vec![];
         for col in &columns {
