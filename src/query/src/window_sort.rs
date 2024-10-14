@@ -51,19 +51,6 @@ use store_api::region_engine::PartitionRange;
 
 use crate::error::{QueryExecutionSnafu, Result};
 
-const IS_DEBUG: bool = false;
-
-macro_rules! mydbg{
-    ($($arg:expr),*) => {
-        #[allow(clippy::dbg_macro)]
-        if IS_DEBUG {
-            dbg!($($arg),*)
-        }else{
-            ($($arg),*)
-        }
-    }
-}
-
 /// A complex stream sort execution plan which accepts a list of `PartitionRange` and
 /// merge sort them whenever possible, and emit the sorted result as soon as possible.
 /// This sorting plan only accept sort by ts and will not sort by other fields.
@@ -300,7 +287,6 @@ impl WindowedSortStream {
                         self.produced += batch.num_rows();
                         Some(Ok(batch))
                     };
-                    mydbg!("poll_result_stream", &ret);
                     return Poll::Ready(ret);
                 }
                 Poll::Ready(Some(Err(e))) => {
@@ -308,10 +294,7 @@ impl WindowedSortStream {
                 }
                 Poll::Ready(None) => {
                     // current merge stream is done, we can start polling the next one
-                    mydbg!(
-                        "poll_result_stream: one merge stream done, left",
-                        &self.merge_stream.len() - 1
-                    );
+
                     self.merge_stream.pop_front();
                     continue;
                 }
@@ -395,7 +378,6 @@ impl WindowedSortStream {
                         };
 
                         if cur_range.is_subset(&working_range) {
-                            mydbg!("start concat subset run", cur_range, working_range);
                             // data still in range, can't merge sort yet
                             // see if can concat entire sorted rb, merge sort need to wait
                             self.try_concat_batch(
@@ -404,12 +386,6 @@ impl WindowedSortStream {
                                 sort_column.options,
                             )?;
                         } else if let Some(intersection) = cur_range.intersection(&working_range) {
-                            mydbg!(
-                                "start intersection run",
-                                intersection,
-                                cur_range,
-                                working_range
-                            );
                             // slice rb by intersection and concat it then merge sort
                             let cur_sort_column =
                                 sort_column.values.slice(run_info.offset, run_info.len);
@@ -426,7 +402,7 @@ impl WindowedSortStream {
                             }
 
                             let sliced_rb = sorted_rb.slice(offset, len);
-                            mydbg!("sliced_rb", &sliced_rb, offset, len);
+
                             // try to concat the sliced input batch to the current `in_progress` run
                             self.try_concat_batch(sliced_rb, &run_info, sort_column.options)?;
                             // since no more sorted data in this range will come in now, build stream now
@@ -455,15 +431,9 @@ impl WindowedSortStream {
                             // |---1---|       |---3---|
                             // |-------A--2------------|
                             //  put the remaining batch back to iter and deal it in next loop
-                            mydbg!("after intersection run", &last_remaining);
                         } else {
                             // no overlap, we can merge sort the working set
-                            mydbg!(
-                                "No overlap, start merge sort for",
-                                working_range,
-                                cur_range,
-                                &run_info
-                            );
+
                             self.build_sorted_stream()?;
                             self.start_new_merge_sort()?;
 
@@ -475,7 +445,6 @@ impl WindowedSortStream {
                 None => {
                     // input stream is done, we need to merge sort the remaining working set
                     // and emit the result
-                    mydbg!("input stream done, start merge sort");
                     self.build_sorted_stream()?;
                     self.start_new_merge_sort()?;
                 }
@@ -502,11 +471,9 @@ impl WindowedSortStream {
             cmp_with_opts(&self.last_value, &run_info.first_val, &opt) <= std::cmp::Ordering::Equal;
 
         if is_ok_to_concat {
-            mydbg!("concat batch", &batch);
             self.push_batch(batch);
             // next time we get input batch might still be ordered, so not build stream yet
         } else {
-            mydbg!("First build then push batch", &batch);
             // no more sorted data, build stream now
             self.build_sorted_stream()?;
             self.push_batch(batch);
@@ -517,11 +484,6 @@ impl WindowedSortStream {
 
     /// Get the current working range
     fn get_working_range(&self) -> Option<TimeRange> {
-        mydbg!(
-            "get_working_range",
-            self.working_idx,
-            &self.all_avail_working_range
-        );
         self.all_avail_working_range
             .get(self.working_idx)
             .map(|(range, _)| *range)
@@ -534,11 +496,6 @@ impl WindowedSortStream {
 
     /// make `in_progress` as a new `DfSendableRecordBatchStream` and put into `sort_partition_rbs`
     fn build_sorted_stream(&mut self) -> datafusion_common::Result<()> {
-        mydbg!(
-            "build_sorted_stream",
-            &self.in_progress,
-            self.sorted_input_runs.len()
-        );
         if self.in_progress.is_empty() {
             return Ok(());
         }
@@ -551,7 +508,6 @@ impl WindowedSortStream {
 
     /// Start merging sort the current working set
     fn start_new_merge_sort(&mut self) -> datafusion_common::Result<()> {
-        mydbg!("start_new_merge_sort", &self.sorted_input_runs.len());
         if !self.in_progress.is_empty() {
             return internal_err!("Starting a merge sort when in_progress is not empty")?;
         }
