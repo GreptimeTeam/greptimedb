@@ -32,3 +32,13 @@ TQL EVAL ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '
 TQL EVAL (now() - now(), now() -  (now() - '10 seconds'::interval), '1s')  test{k="a"};
 
 DROP TABLE test;
+
+CREATE TABLE test (`Field_I` DOUBLE, `Ts_J` TIMESTAMP TIME INDEX, `Tag_K` STRING PRIMARY KEY);
+
+INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
+
+TQL EVAL (0, 10, '5s') test{__field__="Field_I"};
+
+TQL EVAL (0, 10, '5s') test{__field__="field_i"};
+
+drop table test;

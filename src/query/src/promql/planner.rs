@@ -805,10 +805,11 @@ impl PromPlanner {
 
             let exprs = result_set
                 .into_iter()
-                .map(|col| DfExpr::Column(col.into()))
+                .map(|col| DfExpr::Column(Column::new_unqualified(col)))
                 .chain(self.create_tag_column_exprs()?)
                 .chain(Some(self.create_time_index_column_expr()?))
                 .collect::<Vec<_>>();
+
             // reuse this variable for simplicity
             table_scan = LogicalPlanBuilder::from(table_scan)
                 .project(exprs)
