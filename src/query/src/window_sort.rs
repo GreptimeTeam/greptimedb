@@ -15,8 +15,6 @@
 //! A physical plan for window sort(Which is sorting multiple sorted ranges according to input `PartitionRange`).
 //!
 
-// for debugging since this have a lot of logic
-
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
@@ -52,6 +50,19 @@ use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
 
 use crate::error::{QueryExecutionSnafu, Result};
+
+const IS_DEBUG: bool = false;
+
+macro_rules! mydbg{
+    ($($arg:expr),*) => {
+        #[allow(clippy::dbg_macro)]
+        if IS_DEBUG {
+            dbg!($($arg),*)
+        }else{
+            ($($arg),*)
+        }
+    }
+}
 
 /// A complex stream sort execution plan which accepts a list of `PartitionRange` and
 /// merge sort them whenever possible, and emit the sorted result as soon as possible.
@@ -289,7 +300,7 @@ impl WindowedSortStream {
                         self.produced += batch.num_rows();
                         Some(Ok(batch))
                     };
-                    dbg!("poll_result_stream", &ret);
+                    mydbg!("poll_result_stream", &ret);
                     return Poll::Ready(ret);
                 }
                 Poll::Ready(Some(Err(e))) => {
@@ -297,7 +308,7 @@ impl WindowedSortStream {
                 }
                 Poll::Ready(None) => {
                     // current merge stream is done, we can start polling the next one
-                    dbg!(
+                    mydbg!(
                         "poll_result_stream: one merge stream done, left",
                         &self.merge_stream.len() - 1
                     );
@@ -373,8 +384,8 @@ impl WindowedSortStream {
                         }
                         // determine if this batch is in current working range
                         let cur_range = {
-                            match (run_info.first_val, run_info.last_val) {
-                                (Some(f), Some(l)) => TimeRange::new(f, l),
+                            match run_info.get_time_range() {
+                                Some(r) => r,
                                 _ => internal_err!("Found NULL in time index column")?,
                             }
                         };
@@ -385,16 +396,16 @@ impl WindowedSortStream {
                         };
 
                         if cur_range.is_subset(&working_range) {
-                            dbg!("start concat subset run", cur_range, working_range);
+                            mydbg!("start concat subset run", cur_range, working_range);
                             // data still in range, can't merge sort yet
                             // see if can concat entire sorted rb, merge sort need to wait
                             self.try_concat_batch(
                                 sorted_rb.clone(),
-                                run_info.first_val,
+                                &run_info,
                                 sort_column.options,
                             )?;
                         } else if let Some(intersection) = cur_range.intersection(&working_range) {
-                            dbg!(
+                            mydbg!(
                                 "start intersection run",
                                 intersection,
                                 cur_range,
@@ -416,13 +427,9 @@ impl WindowedSortStream {
                             }
 
                             let sliced_rb = sorted_rb.slice(offset, len);
-
+                            mydbg!("sliced_rb", &sliced_rb, offset, len);
                             // try to concat the sliced input batch to the current `in_progress` run
-                            self.try_concat_batch(
-                                sliced_rb,
-                                run_info.first_val,
-                                sort_column.options,
-                            )?;
+                            self.try_concat_batch(sliced_rb, &run_info, sort_column.options)?;
                             // since no more sorted data in this range will come in now, build stream now
                             self.build_sorted_stream()?;
 
@@ -449,22 +456,27 @@ impl WindowedSortStream {
                             // |---1---|       |---3---|
                             // |----------2------------|
                             // the simplest fix is put the remaining batch back to iter and deal it in next loop
-                            dbg!("after intersection run", &self.in_progress);
+                            mydbg!("after intersection run", &last_remaining);
                         } else {
                             // no overlap, we can merge sort the working set
-                            dbg!("No overlap, start merge sort for", working_range, cur_range);
+                            mydbg!(
+                                "No overlap, start merge sort for",
+                                working_range,
+                                cur_range,
+                                &run_info
+                            );
                             self.build_sorted_stream()?;
                             self.start_new_merge_sort()?;
 
-                            self.push_batch(sorted_rb.clone());
+                            // always put it back to input queue until some batch is in working range
+                            last_remaining = Some((sorted_rb, run_info));
                         }
-                        self.last_value = run_info.last_val;
                     }
                 }
                 None => {
                     // input stream is done, we need to merge sort the remaining working set
                     // and emit the result
-                    dbg!("input stream done, start merge sort");
+                    mydbg!("input stream done, start merge sort");
                     self.build_sorted_stream()?;
                     self.start_new_merge_sort()?;
                 }
@@ -484,28 +496,29 @@ impl WindowedSortStream {
     fn try_concat_batch(
         &mut self,
         batch: DfRecordBatch,
-        first_val: Option<Timestamp>,
+        run_info: &SucRun<Timestamp>,
         opt: Option<SortOptions>,
     ) -> datafusion_common::Result<()> {
         let is_ok_to_concat =
-            cmp_with_opts(&self.last_value, &first_val, &opt) <= std::cmp::Ordering::Equal;
+            cmp_with_opts(&self.last_value, &run_info.first_val, &opt) <= std::cmp::Ordering::Equal;
 
         if is_ok_to_concat {
-            dbg!("concat batch", &batch);
+            mydbg!("concat batch", &batch);
             self.push_batch(batch);
             // next time we get input batch might still be ordered, so not build stream yet
         } else {
-            dbg!("First build then push batch", &batch);
+            mydbg!("First build then push batch", &batch);
             // no more sorted data, build stream now
             self.build_sorted_stream()?;
             self.push_batch(batch);
         }
+        self.last_value = run_info.last_val;
         Ok(())
     }
 
     /// Get the current working range
     fn get_working_range(&self) -> Option<TimeRange> {
-        dbg!(
+        mydbg!(
             "get_working_range",
             self.working_idx,
             &self.all_avail_working_range
@@ -522,7 +535,7 @@ impl WindowedSortStream {
 
     /// make `in_progress` as a new `DfSendableRecordBatchStream` and put into `sort_partition_rbs`
     fn build_sorted_stream(&mut self) -> datafusion_common::Result<()> {
-        dbg!(
+        mydbg!(
             "build_sorted_stream",
             &self.in_progress,
             self.sorted_input_runs.len()
@@ -539,7 +552,7 @@ impl WindowedSortStream {
 
     /// Start merging sort the current working set
     fn start_new_merge_sort(&mut self) -> datafusion_common::Result<()> {
-        dbg!("start_new_merge_sort", &self.sorted_input_runs.len());
+        mydbg!("start_new_merge_sort", &self.sorted_input_runs.len());
         if !self.in_progress.is_empty() {
             return internal_err!("Starting a merge sort when in_progress is not empty")?;
         }
@@ -620,6 +633,14 @@ fn split_batch_to_sorted_run(
         // those slice should be zero copy, so supposedly no new reservation needed
         let mut ret = Vec::new();
         for run in sorted_runs_offset {
+            if run.offset + run.len > batch.num_rows() {
+                internal_err!(
+                    "Invalid run offset and length: offset = {:?}, len = {:?}, num_rows = {:?}",
+                    run.offset,
+                    run.len,
+                    batch.num_rows()
+                )?;
+            }
             let new_rb = batch.slice(run.offset, run.len);
             ret.push((new_rb, run));
         }
@@ -654,9 +675,12 @@ macro_rules! downcast_ts_array {
     };
 }
 
-/// Find the slice from the given range
+/// Find the slice(where start <= data < end and sort by `sort_column.options`) from the given range
 ///
 /// Return the offset and length of the slice
+///
+/// FIXME: currently it's inclusive so some problem might occur
+/// make it left inclusive right exclusive might be better
 fn find_slice_from_range(
     sort_column: &SortColumn,
     range: &TimeRange,
@@ -672,13 +696,9 @@ fn find_slice_from_range(
     };
     let array = &sort_column.values;
     let opt = &sort_column.options.unwrap_or_default();
+    let descending = opt.descending;
 
-    let sorted_range = if opt.descending {
-        [range.end, range.start]
-    } else {
-        [range.start, range.end]
-    };
-    let typed_sorted_range = sorted_range
+    let typed_sorted_range = [range.start, range.end]
         .iter()
         .map(|t| {
             t.convert_to(time_unit.into())
@@ -698,10 +718,27 @@ fn find_slice_from_range(
         })
         .try_collect::<_, Vec<_>, _>()?;
 
-    let (start_val, end_val) = (typed_sorted_range[0].clone(), typed_sorted_range[1].clone());
+    let (min_val, max_val) = (typed_sorted_range[0].clone(), typed_sorted_range[1].clone());
 
-    let start = bisect::<true>(&[array.clone()], &[start_val.clone()], &[*opt])?;
-    let end = bisect::<false>(&[array.clone()], &[end_val.clone()], &[*opt])?;
+    // get slice that in which all data that `min_val<=data<max_val`
+    let (start, end) = if descending {
+        // note that `data < max_val`
+        // i,e, for max_val = 4, array = [5,3,2] should be start=1
+        // max_val = 4, array = [5, 4, 3, 2] should be start= 2
+        let start = bisect::<false>(&[array.clone()], &[max_val.clone()], &[*opt])?;
+        // min_val = 1, array = [3, 2, 1], end = 2+1
+        // min_val = 1, array = [3, 2, 0], end = 1+1
+        let end = bisect::<false>(&[array.clone()], &[min_val.clone()], &[*opt])?;
+        (start, end)
+    } else {
+        // min_val = 1, array = [1, 2, 3], start = 0
+        // min_val = 1, array = [0, 2, 3], start = 1
+        let start = bisect::<true>(&[array.clone()], &[min_val.clone()], &[*opt])?;
+        // max_val = 3, array = [1, 3, 4], end = 1
+        // max_val = 3, array = [1, 2, 4], end = 2
+        let end = bisect::<true>(&[array.clone()], &[max_val.clone()], &[*opt])?;
+        (start, end)
+    };
 
     Ok((start, end - start))
 }
@@ -770,6 +807,18 @@ struct SucRun<N: Ord> {
     last_val: Option<N>,
 }
 
+impl SucRun<Timestamp> {
+    /// Get the time range of the run, which is [min_val, max_val + 1)
+    fn get_time_range(&self) -> Option<TimeRange> {
+        let start = self.first_val.min(self.last_val);
+        let end = self
+            .first_val
+            .max(self.last_val)
+            .map(|i| Timestamp::new(i.value() + 1, i.unit()));
+        start.zip(end).map(|(s, e)| TimeRange::new(s, e))
+    }
+}
+
 /// find all successive runs in the input iterator
 fn find_successive_runs<T: Iterator<Item = (usize, Option<N>)>, N: Ord + Copy>(
     iter: T,
@@ -777,7 +826,7 @@ fn find_successive_runs<T: Iterator<Item = (usize, Option<N>)>, N: Ord + Copy>(
 ) -> Vec<SucRun<N>> {
     let mut runs = Vec::new();
     let mut last_value = None;
-    let mut iter_len = 0;
+    let mut iter_len = None;
 
     let mut last_offset = 0;
     let mut first_val: Option<N> = None;
@@ -806,11 +855,11 @@ fn find_successive_runs<T: Iterator<Item = (usize, Option<N>)>, N: Ord + Copy>(
             first_val = first_val.or(Some(t));
             last_val = Some(t).or(last_val);
         }
-        iter_len = idx;
+        iter_len = Some(idx);
     }
     let run = SucRun {
         offset: last_offset,
-        len: iter_len - last_offset + 1,
+        len: iter_len.map(|l| l - last_offset + 1).unwrap_or(0),
         first_val,
         last_val,
     };
@@ -849,6 +898,7 @@ fn get_sorted_runs(sort_column: SortColumn) -> datafusion_common::Result<Vec<Suc
     }
 }
 
+/// Left(`start`) inclusive right(`end`) exclusive,
 #[derive(Debug, Clone, Default, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TimeRange {
     start: Timestamp,
@@ -1965,11 +2015,23 @@ mod test {
                 }),
                 vec![(0, 2, Some(2), Some(1)), (2, 2, Some(3), Some(3))],
             ),
+            (
+                vec![],
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                }),
+                vec![(0, 0, None, None)],
+            ),
         ];
         for (input, sort_opts, expected) in testcases {
-            let ret = find_successive_runs(input.into_iter().enumerate(), &sort_opts);
+            let ret = find_successive_runs(input.clone().into_iter().enumerate(), &sort_opts);
             let expected = expected.into_iter().map(SucRun::<i32>::from).collect_vec();
-            assert_eq!(ret, expected);
+            assert_eq!(
+                ret, expected,
+                "input: {:?}, opt: {:?},expected: {:?}",
+                input, sort_opts, expected
+            );
         }
     }
 
@@ -2036,7 +2098,7 @@ mod test {
                     start: Timestamp::new_millisecond(2),
                     end: Timestamp::new_millisecond(4),
                 },
-                Ok((1, 3)),
+                Ok((1, 2)),
             ),
             (
                 Arc::new(TimestampMillisecondArray::from_iter_values([1, 3, 4, 6])) as ArrayRef,
@@ -2063,7 +2125,7 @@ mod test {
                     start: Timestamp::new_millisecond(2),
                     end: Timestamp::new_millisecond(5),
                 },
-                Ok((1, 3)),
+                Ok((1, 2)),
             ),
             (
                 Arc::new(TimestampMillisecondArray::from_iter_values([1, 2, 3, 4, 5])) as ArrayRef,
@@ -2073,6 +2135,118 @@ mod test {
                     end: Timestamp::new_millisecond(7),
                 },
                 Ok((5, 0)),
+            ),
+            // descending off by one cases
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([5, 3, 2, 1])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(4),
+                    start: Timestamp::new_millisecond(1),
+                },
+                Ok((1, 3)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([5, 4, 3, 2, 1])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(4),
+                    start: Timestamp::new_millisecond(1),
+                },
+                Ok((2, 3)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([5, 3, 2, 0])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(4),
+                    start: Timestamp::new_millisecond(1),
+                },
+                Ok((1, 2)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([5, 4, 3, 2, 0])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(4),
+                    start: Timestamp::new_millisecond(1),
+                },
+                Ok((2, 2)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([5, 4, 3, 2, 1])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(5),
+                    start: Timestamp::new_millisecond(2),
+                },
+                Ok((1, 3)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([5, 4, 3, 1])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(5),
+                    start: Timestamp::new_millisecond(2),
+                },
+                Ok((1, 2)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([6, 4, 3, 2, 1])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(5),
+                    start: Timestamp::new_millisecond(2),
+                },
+                Ok((1, 3)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([6, 4, 3, 1])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(5),
+                    start: Timestamp::new_millisecond(2),
+                },
+                Ok((1, 2)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([
+                    10, 9, 8, 7, 6,
+                ])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(5),
+                    start: Timestamp::new_millisecond(2),
+                },
+                Ok((5, 0)),
+            ),
+            // test off by one case
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([3, 2, 1])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(4),
+                    start: Timestamp::new_millisecond(3),
+                },
+                Ok((0, 1)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([5, 3, 2])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(4),
+                    start: Timestamp::new_millisecond(3),
+                },
+                Ok((1, 1)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([5, 4, 3, 2])) as ArrayRef,
+                true,
+                TimeRange {
+                    end: Timestamp::new_millisecond(4),
+                    start: Timestamp::new_millisecond(3),
+                },
+                Ok((2, 1)),
             ),
         ];
 
@@ -2086,7 +2260,13 @@ mod test {
             };
             let ret = find_slice_from_range(&sort_column, &range);
             match (ret, expected) {
-                (Ok(ret), Ok(expected)) => assert_eq!(ret, expected),
+                (Ok(ret), Ok(expected)) => {
+                    assert_eq!(
+                        ret, expected,
+                        "sort_vals: {:?}, range: {:?}",
+                        sort_column, range
+                    )
+                }
                 (Err(err), Err(expected)) => {
                     let expected: &str = expected;
                     assert!(
@@ -2101,6 +2281,7 @@ mod test {
         }
     }
 
+    #[derive(Debug)]
     struct TestStream {
         expression: PhysicalSortExpr,
         fetch: Option<usize>,
@@ -2253,6 +2434,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[allow(clippy::print_stdout)]
     async fn test_window_sort_stream() {
         let test_cases = [
             TestStream::new(
@@ -2326,7 +2508,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(2),
+                            end: Timestamp::new_millisecond(3),
                             num_rows: 1,
                             identifier: 0,
                         },
@@ -2337,7 +2519,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(3),
+                            end: Timestamp::new_millisecond(4),
                             num_rows: 1,
                             identifier: 0,
                         },
@@ -2350,9 +2532,9 @@ mod test {
                     vec![Arc::new(TimestampMillisecondArray::from_iter_values([
                         1, 2,
                     ]))],
-                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
-                        2, 3,
-                    ]))],
+                    // didn't trigger a merge sort/concat here so this is it
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([2]))],
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([3]))],
                 ],
             ),
             TestStream::new(
@@ -2372,7 +2554,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(2),
+                            end: Timestamp::new_millisecond(3),
                             num_rows: 1,
                             identifier: 0,
                         },
@@ -2383,7 +2565,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(3),
+                            end: Timestamp::new_millisecond(4),
                             num_rows: 1,
                             identifier: 1,
                         },
@@ -2416,7 +2598,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(2),
+                            end: Timestamp::new_millisecond(3),
                             num_rows: 1,
                             identifier: 0,
                         },
@@ -2427,7 +2609,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(3),
+                            end: Timestamp::new_millisecond(4),
                             num_rows: 1,
                             identifier: 1,
                         },
@@ -2437,8 +2619,8 @@ mod test {
                     ),
                     (
                         PartitionRange {
-                            start: Timestamp::new_millisecond(3),
-                            end: Timestamp::new_millisecond(5),
+                            start: Timestamp::new_millisecond(4),
+                            end: Timestamp::new_millisecond(6),
                             num_rows: 1,
                             identifier: 1,
                         },
@@ -2475,7 +2657,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(2),
+                            end: Timestamp::new_millisecond(3),
                             num_rows: 1,
                             identifier: 0,
                         },
@@ -2486,7 +2668,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(3),
+                            end: Timestamp::new_millisecond(4),
                             num_rows: 1,
                             identifier: 1,
                         },
@@ -2497,7 +2679,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(3),
-                            end: Timestamp::new_millisecond(5),
+                            end: Timestamp::new_millisecond(6),
                             num_rows: 1,
                             identifier: 1,
                         },
@@ -2531,7 +2713,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(2),
+                            end: Timestamp::new_millisecond(3),
                             num_rows: 1,
                             identifier: 0,
                         },
@@ -2542,7 +2724,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(3),
+                            end: Timestamp::new_millisecond(4),
                             num_rows: 1,
                             identifier: 1,
                         },
@@ -2553,7 +2735,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(3),
-                            end: Timestamp::new_millisecond(5),
+                            end: Timestamp::new_millisecond(6),
                             num_rows: 1,
                             identifier: 1,
                         },
@@ -2584,7 +2766,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(3),
-                            end: Timestamp::new_millisecond(5),
+                            end: Timestamp::new_millisecond(6),
                             num_rows: 1,
                             identifier: 1,
                         },
@@ -2595,7 +2777,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(3),
+                            end: Timestamp::new_millisecond(4),
                             num_rows: 1,
                             identifier: 1,
                         },
@@ -2606,7 +2788,7 @@ mod test {
                     (
                         PartitionRange {
                             start: Timestamp::new_millisecond(1),
-                            end: Timestamp::new_millisecond(2),
+                            end: Timestamp::new_millisecond(3),
                             num_rows: 1,
                             identifier: 0,
                         },
@@ -2619,11 +2801,9 @@ mod test {
                     vec![Arc::new(TimestampMillisecondArray::from_iter_values([
                         5, 4,
                     ]))],
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([3]))],
                     vec![Arc::new(TimestampMillisecondArray::from_iter_values([
-                        3, 2, 1,
-                    ]))],
-                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
-                        2, 1,
+                        2, 2, 1, 1,
                     ]))],
                 ],
             ),
@@ -2671,11 +2851,120 @@ mod test {
                     ]))],
                 ],
             ),
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                None,
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![
+                    // complex overlap
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(3),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            1, 2,
+                        ]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(10),
+                            num_rows: 1,
+                            identifier: 1,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            1, 3, 4, 5, 6, 8,
+                        ]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(7),
+                            end: Timestamp::new_millisecond(10),
+                            num_rows: 1,
+                            identifier: 1,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            7, 8, 9,
+                        ]))],
+                    ),
+                ],
+                vec![
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                        1, 1, 2,
+                    ]))],
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                        3, 4, 5, 6,
+                    ]))],
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                        7, 8, 8, 9,
+                    ]))],
+                ],
+            ),
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                None,
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![
+                    // complex subset with having same datapoint
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(11),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                        ]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(5),
+                            end: Timestamp::new_millisecond(7),
+                            num_rows: 1,
+                            identifier: 1,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                            5, 6,
+                        ]))],
+                    ),
+                ],
+                vec![
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                        1, 2, 3, 4,
+                    ]))],
+                    vec![Arc::new(TimestampMillisecondArray::from_iter_values([
+                        5, 5, 6, 6, 7, 8, 9, 10,
+                    ]))],
+                ],
+            ),
         ];
 
-        for testcase in &test_cases[8..] {
+        let indexed_test_cases = test_cases.iter().enumerate().collect_vec();
+
+        for (idx, testcase) in &indexed_test_cases {
+            println!("running test case: {}", idx);
             let output = testcase.run_test().await;
-            assert_eq!(output, testcase.output);
+            assert_eq!(output, testcase.output, "case {idx} failed.");
         }
     }
 
@@ -2707,7 +2996,8 @@ mod test {
         let mut bound_val = None;
         // construct testcases
         type CmpFn<T> = Box<dyn FnMut(&T, &T) -> std::cmp::Ordering>;
-        for case_id in 0..test_cnt {
+        let mut full_testcase_list = Vec::new();
+        for _case_id in 0..test_cnt {
             let descending = rng.bool();
             fn ret_cmp_fn<T: Ord>(descending: bool) -> CmpFn<T> {
                 if descending {
@@ -2731,7 +3021,7 @@ mod test {
                         .map(|i| i - rng.i64(0..range_offset_bound))
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(end);
-                    let start = end - rng.i64(0..range_size_bound);
+                    let start = end - rng.i64(1..range_size_bound);
                     let start = Timestamp::new(start, unit.clone().into());
                     let end = Timestamp::new(end, unit.clone().into());
                     (start, end)
@@ -2740,7 +3030,7 @@ mod test {
                         .map(|i| i + rng.i64(0..range_offset_bound))
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(start);
-                    let end = start + rng.i64(0..range_size_bound);
+                    let end = start + rng.i64(1..range_size_bound);
                     let start = Timestamp::new(start, unit.clone().into());
                     let end = Timestamp::new(end, unit.clone().into());
                     (start, end)
@@ -2748,7 +3038,7 @@ mod test {
 
                 let iter = 0..rng.usize(0..in_range_datapoint_cnt_bound);
                 let data_gen = iter
-                    .map(|_| rng.i64(start.value()..=end.value()))
+                    .map(|_| rng.i64(start.value()..end.value()))
                     .sorted_by(ret_cmp_fn(descending))
                     .collect_vec();
                 output_data.extend(data_gen.clone());
@@ -2780,7 +3070,10 @@ mod test {
                 input_ranged_data.clone(),
                 vec![vec![output_arr]],
             );
+            full_testcase_list.push(test_stream);
+        }
 
+        for (case_id, test_stream) in full_testcase_list.into_iter().enumerate() {
             let res = test_stream.run_test().await;
             let res_concat = concat_batches(&test_stream.schema, &res).unwrap();
             let expected = test_stream.output;
@@ -2791,7 +3084,7 @@ mod test {
                     let mut f_input =
                         std::fs::File::create(format!("case_{}_input.json", case_id)).unwrap();
                     f_input.write_all(b"[").unwrap();
-                    for (input_range, input_arr) in input_ranged_data {
+                    for (input_range, input_arr) in test_stream.input {
                         let range_json = json!({
                             "start": input_range.start.to_chrono_datetime().unwrap().to_string(),
                             "end": input_range.end.to_chrono_datetime().unwrap().to_string(),
@@ -2800,12 +3093,7 @@ mod test {
                         });
                         let buf = Vec::new();
                         let mut input_writer = ArrayWriter::new(buf);
-                        input_writer
-                            .write(
-                                &DfRecordBatch::try_new(test_stream.schema.clone(), input_arr)
-                                    .unwrap(),
-                            )
-                            .unwrap();
+                        input_writer.write(&input_arr).unwrap();
                         input_writer.finish().unwrap();
                         let res_str =
                             String::from_utf8_lossy(&input_writer.into_inner()).to_string();
