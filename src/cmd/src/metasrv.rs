@@ -170,7 +170,9 @@ struct StartCommand {
 
 /// The context for the command.
 pub struct CmdContext {
+    // The config file path.
     pub config_file: Option<String>,
+    // The environment variable prefix.
     pub env_prefix: String,
 }
 
