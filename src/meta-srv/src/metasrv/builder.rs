@@ -48,9 +48,7 @@ use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
-use crate::handler::{
-    HeartbeatHandlerGroup, HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers,
-};
+use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
     ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectorContext, SelectorRef, TABLE_ID_SEQ,
@@ -74,7 +72,7 @@ pub struct MetasrvBuilder {
     kv_backend: Option<KvBackendRef>,
     in_memory: Option<ResettableKvBackendRef>,
     selector: Option<SelectorRef>,
-    handler_group: Option<HeartbeatHandlerGroup>,
+    handler_group_builder: Option<HeartbeatHandlerGroupBuilder>,
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClientRef>,
     node_manager: Option<NodeManagerRef>,
@@ -88,7 +86,7 @@ impl MetasrvBuilder {
             kv_backend: None,
             in_memory: None,
             selector: None,
-            handler_group: None,
+            handler_group_builder: None,
             meta_peer_client: None,
             election: None,
             options: None,
@@ -118,8 +116,11 @@ impl MetasrvBuilder {
         self
     }
 
-    pub fn heartbeat_handler(mut self, handler_group: HeartbeatHandlerGroup) -> Self {
-        self.handler_group = Some(handler_group);
+    pub fn heartbeat_handler(
+        mut self,
+        handler_group_builder: HeartbeatHandlerGroupBuilder,
+    ) -> Self {
+        self.handler_group_builder = Some(handler_group_builder);
         self
     }
 
@@ -161,7 +162,7 @@ impl MetasrvBuilder {
             kv_backend,
             in_memory,
             selector,
-            handler_group,
+            handler_group_builder,
             node_manager,
             plugins,
             table_metadata_allocator,
@@ -338,8 +339,8 @@ impl MetasrvBuilder {
             .context(error::InitDdlManagerSnafu)?,
         );
 
-        let handler_group = match handler_group {
-            Some(handler_group) => handler_group,
+        let handler_group_builder = match handler_group_builder {
+            Some(handler_group_builder) => handler_group_builder,
             None => {
                 let region_lease_handler = RegionLeaseHandler::new(
                     distributed_time_constants::REGION_LEASE_SECS,
@@ -352,7 +353,6 @@ impl MetasrvBuilder {
                     .with_region_failure_handler(region_failover_handler)
                     .with_region_lease_handler(Some(region_lease_handler))
                     .add_default_handlers()
-                    .build()?
             }
         };
 
@@ -371,7 +371,8 @@ impl MetasrvBuilder {
             selector,
             // TODO(jeremy): We do not allow configuring the flow selector.
             flow_selector: Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)),
-            handler_group: Arc::new(handler_group),
+            handler_group: None,
+            handler_group_builder: Some(handler_group_builder),
             election,
             procedure_manager,
             mailbox,

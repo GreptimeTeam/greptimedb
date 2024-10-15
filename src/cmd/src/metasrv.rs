@@ -48,6 +48,10 @@ impl Instance {
             _guard: guard,
         }
     }
+
+    pub fn mut_inner(&mut self) -> &mut MetasrvInstance {
+        &mut self.instance
+    }
 }
 
 #[async_trait]

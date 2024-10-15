@@ -26,6 +26,7 @@ use crate::metasrv::Context;
 use crate::region::lease_keeper::{RegionLeaseKeeperRef, RenewRegionLeasesResponse};
 use crate::region::RegionLeaseKeeper;
 
+#[derive(Clone)]
 pub struct RegionLeaseHandler {
     region_lease_seconds: u64,
     region_lease_keeper: RegionLeaseKeeperRef,

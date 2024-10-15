@@ -209,15 +209,16 @@ impl Pushers {
     }
 }
 
+#[derive(Clone)]
 struct NameCachedHandler {
     name: &'static str,
-    handler: Box<dyn HeartbeatHandler>,
+    handler: Arc<dyn HeartbeatHandler>,
 }
 
 impl NameCachedHandler {
     fn new(handler: impl HeartbeatHandler + 'static) -> Self {
         let name = handler.name();
-        let handler = Box::new(handler);
+        let handler = Arc::new(handler);
         Self { name, handler }
     }
 }
@@ -225,7 +226,7 @@ impl NameCachedHandler {
 pub type HeartbeatHandlerGroupRef = Arc<HeartbeatHandlerGroup>;
 
 /// The group of heartbeat handlers.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct HeartbeatHandlerGroup {
     handlers: Vec<NameCachedHandler>,
     pushers: Pushers,
@@ -442,6 +443,7 @@ impl Mailbox for HeartbeatMailbox {
 }
 
 /// The builder to build the group of heartbeat handlers.
+#[derive(Clone)]
 pub struct HeartbeatHandlerGroupBuilder {
     /// The handler to handle region failure.
     region_failure_handler: Option<RegionFailureHandler>,
@@ -540,7 +542,7 @@ impl HeartbeatHandlerGroupBuilder {
         }
 
         Ok(HeartbeatHandlerGroup {
-            handlers: self.handlers.into_iter().collect(),
+            handlers: self.handlers,
             pushers: self.pushers,
         })
     }

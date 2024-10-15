@@ -258,6 +258,7 @@ impl RegionFailureDetectorController for RegionFailureDetectorControl {
 }
 
 /// [`HeartbeatAcceptor`] forwards heartbeats to [`RegionSupervisor`].
+#[derive(Clone)]
 pub(crate) struct HeartbeatAcceptor {
     sender: Sender<Event>,
 }

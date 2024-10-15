@@ -44,18 +44,18 @@ use common_wal::config::MetasrvWalConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
-    InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
-    StopProcedureManagerSnafu,
+    self, InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu,
+    StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
-use crate::handler::HeartbeatHandlerGroupRef;
+use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::lease::lookup_datanode_peer;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
@@ -353,7 +353,8 @@ pub struct Metasrv {
     selector: SelectorRef,
     // The flow selector is used to select a target flownode.
     flow_selector: SelectorRef,
-    handler_group: HeartbeatHandlerGroupRef,
+    handler_group: Option<HeartbeatHandlerGroupRef>,
+    handler_group_builder: Option<HeartbeatHandlerGroupBuilder>,
     election: Option<ElectionRef>,
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
@@ -370,7 +371,15 @@ pub struct Metasrv {
 }
 
 impl Metasrv {
-    pub async fn try_start(&self) -> Result<()> {
+    pub async fn try_start(&mut self) -> Result<()> {
+        let builder = self
+            .handler_group_builder
+            .take()
+            .context(error::UnexpectedSnafu {
+                violated: "expected heartbeat handler group builder",
+            })?;
+        self.handler_group = Some(Arc::new(builder.build()?));
+
         if self
             .started
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
@@ -558,8 +567,12 @@ impl Metasrv {
         &self.flow_selector
     }
 
-    pub fn handler_group(&self) -> &HeartbeatHandlerGroupRef {
+    pub fn handler_group(&self) -> &Option<HeartbeatHandlerGroupRef> {
         &self.handler_group
+    }
+
+    pub fn handler_group_builder(&mut self) -> &mut Option<HeartbeatHandlerGroupBuilder> {
+        &mut self.handler_group_builder
     }
 
     pub fn election(&self) -> Option<&ElectionRef> {

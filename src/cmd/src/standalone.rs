@@ -653,7 +653,7 @@ impl StartCommand {
     }
 }
 
-struct StandaloneInformationExtension {
+pub struct StandaloneInformationExtension {
     region_server: RegionServer,
     procedure_manager: ProcedureManagerRef,
     start_time_ms: u64,
