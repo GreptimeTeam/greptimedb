@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use common_telemetry::{error, info};
@@ -24,6 +24,8 @@ pub type LeadershipChangeNotifierCustomizerRef = Arc<dyn LeadershipChangeNotifie
 /// A trait for customizing the leadership change notifier.
 pub trait LeadershipChangeNotifierCustomizer: Send + Sync {
     fn customize(&self, notifier: &mut LeadershipChangeNotifier);
+
+    fn add_listener(&self, listener: Arc<dyn LeadershipChangeListener>);
 }
 
 /// A trait for handling leadership change events in a distributed system.
@@ -45,10 +47,28 @@ pub struct LeadershipChangeNotifier {
     listeners: Vec<Arc<dyn LeadershipChangeListener>>,
 }
 
-impl LeadershipChangeNotifierCustomizer for LeadershipChangeNotifier {
+#[derive(Default)]
+pub struct DefaultLeadershipChangeNotifierCustomizer {
+    listeners: Mutex<Vec<Arc<dyn LeadershipChangeListener>>>,
+}
+
+impl DefaultLeadershipChangeNotifierCustomizer {
+    pub fn new() -> Self {
+        Self {
+            listeners: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl LeadershipChangeNotifierCustomizer for DefaultLeadershipChangeNotifierCustomizer {
     fn customize(&self, notifier: &mut LeadershipChangeNotifier) {
         info!("Customizing leadership change notifier");
-        notifier.listeners.extend(self.listeners.clone());
+        let listeners = self.listeners.lock().unwrap().clone();
+        notifier.listeners.extend(listeners);
+    }
+
+    fn add_listener(&self, listener: Arc<dyn LeadershipChangeListener>) {
+        self.listeners.lock().unwrap().push(listener);
     }
 }
 

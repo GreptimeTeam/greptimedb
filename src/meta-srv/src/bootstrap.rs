@@ -149,8 +149,8 @@ impl MetasrvInstance {
         self.plugins.clone()
     }
 
-    pub fn mut_inner(&mut self) -> &mut Metasrv {
-        &mut self.metasrv
+    pub fn get_inner(&self) -> &Metasrv {
+        &self.metasrv
     }
 }
 
