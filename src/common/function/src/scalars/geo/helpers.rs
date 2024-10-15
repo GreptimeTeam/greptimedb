@@ -14,15 +14,15 @@
 
 macro_rules! ensure_columns_len {
     ($columns:ident) => {
-        ensure!(
+        snafu::ensure!(
             $columns.windows(2).all(|c| c[0].len() == c[1].len()),
-            InvalidFuncArgsSnafu {
+            common_query::error::InvalidFuncArgsSnafu {
                 err_msg: "The length of input columns are in different size"
             }
         )
     };
     ($column_a:ident, $column_b:ident, $($column_n:ident),*) => {
-        ensure!(
+        snafu::ensure!(
             {
                 let mut result = $column_a.len() == $column_b.len();
                 $(
@@ -30,7 +30,7 @@ macro_rules! ensure_columns_len {
                 )*
                 result
             }
-            InvalidFuncArgsSnafu {
+            common_query::error::InvalidFuncArgsSnafu {
                 err_msg: "The length of input columns are in different size"
             }
         )
@@ -41,9 +41,9 @@ pub(super) use ensure_columns_len;
 
 macro_rules! ensure_columns_n {
     ($columns:ident, $n:literal) => {
-        ensure!(
+        snafu::ensure!(
             $columns.len() == $n,
-            InvalidFuncArgsSnafu {
+            common_query::error::InvalidFuncArgsSnafu {
                 err_msg: format!(
                     "The length of arguments is not correct, expect {}, provided : {}",
                     stringify!($n),
@@ -59,3 +59,17 @@ macro_rules! ensure_columns_n {
 }
 
 pub(super) use ensure_columns_n;
+
+macro_rules! ensure_and_coerce {
+    ($compare:expr, $coerce:expr) => {{
+        snafu::ensure!(
+            $compare,
+            common_query::error::InvalidFuncArgsSnafu {
+                err_msg: "Argument was outside of acceptable range "
+            }
+        );
+        Ok($coerce)
+    }};
+}
+
+pub(super) use ensure_and_coerce;

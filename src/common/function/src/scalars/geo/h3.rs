@@ -16,7 +16,7 @@ use std::str::FromStr;
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_query::error::{self, InvalidFuncArgsSnafu, Result};
+use common_query::error::{self, Result};
 use common_query::prelude::{Signature, TypeSignature};
 use datafusion::logical_expr::Volatility;
 use datatypes::prelude::ConcreteDataType;
@@ -29,9 +29,9 @@ use datatypes::vectors::{
 use derive_more::Display;
 use h3o::{CellIndex, LatLng, Resolution};
 use once_cell::sync::Lazy;
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 
-use super::helpers::{ensure_columns_len, ensure_columns_n};
+use super::helpers::{ensure_and_coerce, ensure_columns_len, ensure_columns_n};
 use crate::function::{Function, FunctionContext};
 
 static CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
@@ -382,15 +382,7 @@ impl Function for H3CellResolution {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 1, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+        ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
         let size = cell_vec.len();
@@ -980,18 +972,6 @@ fn value_to_resolution(v: Value) -> Result<Resolution> {
             ))
         })
         .context(error::ExecuteSnafu)
-}
-
-macro_rules! ensure_and_coerce {
-    ($compare:expr, $coerce:expr) => {{
-        ensure!(
-            $compare,
-            InvalidFuncArgsSnafu {
-                err_msg: "Argument was outside of acceptable range "
-            }
-        );
-        Ok($coerce)
-    }};
 }
 
 fn value_to_position(v: Value) -> Result<u64> {
