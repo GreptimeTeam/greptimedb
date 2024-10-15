@@ -206,9 +206,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid data type {} for fulltext", data_type))]
+    #[snafu(display(
+        "Invalid data type {} for fulltext in column {}",
+        data_type,
+        column_name
+    ))]
     InvalidFulltextDataType {
         data_type: String,
+        column_name: String,
         #[snafu(implicit)]
         location: Location,
     },

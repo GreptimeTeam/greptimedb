@@ -16,18 +16,18 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_expr::Kind;
 use api::v1::{
-    column_def, AddColumnLocation as Location, AlterExpr, ChangeColumnTypes, ChangeFulltext,
-    CreateTableExpr, DropColumns, RenameTable, SemanticType,
+    column_def, AddColumnLocation as Location, AlterExpr, ChangeColumnTypes, CreateTableExpr,
+    DropColumns, RenameTable, SemanticType,
 };
 use common_query::AddColumnLocation;
-use datatypes::schema::{ChangeFulltextOptions, ColumnSchema, RawSchema};
+use datatypes::schema::{ColumnSchema, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ChangeColumnTypeRequest};
 
 use crate::error::{
-    InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu, Result,
-    UnknownLocationTypeSnafu,
+    DecodeProtoSnafu, InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu,
+    Result, UnknownLocationTypeSnafu,
 };
 
 const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
@@ -92,18 +92,10 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
         Kind::RenameTable(RenameTable { new_table_name }) => {
             AlterKind::RenameTable { new_table_name }
         }
-        Kind::ChangeFulltext(ChangeFulltext {
-            column_name,
-            enable,
-            analyzer,
-            case_sensitive,
-        }) => AlterKind::ChangeFulltext {
-            column_name,
-            options: ChangeFulltextOptions {
-                enable,
-                analyzer,
-                case_sensitive,
-            },
+        Kind::ChangeFulltext(change) => AlterKind::ChangeFulltext {
+            column_name: change.column_name.clone(),
+            options: column_def::try_as_change_fulltext_options(&change)
+                .context(DecodeProtoSnafu)?,
         },
     };
 

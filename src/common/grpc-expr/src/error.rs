@@ -129,6 +129,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to decode proto"))]
+    DecodeProto {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: api::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -152,7 +160,8 @@ impl ErrorExt for Error {
 
             Error::UnknownColumnDataType { .. }
             | Error::InvalidFulltextOptions { .. }
-            | Error::InvalidFulltextColumnType { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidFulltextColumnType { .. }
+            | Error::DecodeProto { .. } => StatusCode::InvalidArguments,
         }
     }
 

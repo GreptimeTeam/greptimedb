@@ -266,6 +266,7 @@ impl ColumnSchema {
         if self.data_type != ConcreteDataType::string_datatype() {
             return error::InvalidFulltextDataTypeSnafu {
                 data_type: self.data_type.to_string(),
+                column_name: self.name.clone(),
             }
             .fail();
         }

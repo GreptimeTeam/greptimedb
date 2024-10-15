@@ -15,8 +15,10 @@
 use std::collections::HashMap;
 
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, COMMENT_KEY, FULLTEXT_KEY,
+    ChangeFulltextOptions, ColumnDefaultConstraint, ColumnSchema, FulltextOptions, COMMENT_KEY,
+    FULLTEXT_KEY,
 };
+use greptime_proto::v1::{Analyzer, ChangeFulltext};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -91,6 +93,26 @@ pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<Column
     options.options.insert(FULLTEXT_GRPC_KEY.to_string(), v);
 
     Ok((!options.options.is_empty()).then_some(options))
+}
+
+/// Tries to construct a `ChangeFulltextOptions` from the given `ChangeFulltext`.
+pub fn try_as_change_fulltext_options(
+    ChangeFulltext {
+        enable,
+        analyzer,
+        case_sensitive,
+        ..
+    }: &ChangeFulltext,
+) -> Result<ChangeFulltextOptions> {
+    let _ = analyzer
+        .map(|a| Analyzer::try_from(a))
+        .transpose()
+        .context(error::DecodeProtoSnafu)?;
+    Ok(ChangeFulltextOptions {
+        enable: *enable,
+        analyzer: *analyzer,
+        case_sensitive: *case_sensitive,
+    })
 }
 
 #[cfg(test)]

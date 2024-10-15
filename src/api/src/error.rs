@@ -66,15 +66,23 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to decode proto"))]
+    DecodeProto {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: prost::DecodeError,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::UnknownColumnDataType { .. } => StatusCode::InvalidArguments,
-            Error::IntoColumnDataType { .. } | Error::SerializeJson { .. } => {
-                StatusCode::Unexpected
-            }
+            Error::IntoColumnDataType { .. }
+            | Error::SerializeJson { .. }
+            | Error::DecodeProto { .. } => StatusCode::Unexpected,
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::InvalidColumnDefaultConstraint { source, .. } => source.status_code(),
         }
