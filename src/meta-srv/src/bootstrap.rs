@@ -56,7 +56,6 @@ use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::{error, Result};
 
-#[derive(Clone)]
 pub struct MetasrvInstance {
     metasrv: Arc<Metasrv>,
 
