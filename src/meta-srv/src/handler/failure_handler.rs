@@ -21,7 +21,6 @@ use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 use crate::region::supervisor::{DatanodeHeartbeat, HeartbeatAcceptor, RegionSupervisor};
 
-#[derive(Clone)]
 pub struct RegionFailureHandler {
     heartbeat_acceptor: HeartbeatAcceptor,
 }

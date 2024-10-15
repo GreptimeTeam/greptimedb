@@ -443,7 +443,6 @@ impl Mailbox for HeartbeatMailbox {
 }
 
 /// The builder to build the group of heartbeat handlers.
-#[derive(Clone)]
 pub struct HeartbeatHandlerGroupBuilder {
     /// The handler to handle region failure.
     region_failure_handler: Option<RegionFailureHandler>,
