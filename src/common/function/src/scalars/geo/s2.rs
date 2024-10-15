@@ -252,7 +252,7 @@ fn signature_of_cell_and_level() -> Signature {
     Signature::one_of(signatures, Volatility::Stable)
 }
 
-fn cell_from_value(v: Value) -> Result<Option<CellID>> {
+fn cell_from_value(v: Value) -> Option<CellID> {
     let cell = match v {
         Value::Int64(v) => Some(CellID(v as u64)),
         Value::UInt64(v) => Some(CellID(v)),
