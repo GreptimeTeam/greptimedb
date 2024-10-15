@@ -2393,7 +2393,6 @@ mod test {
     }
 
     #[tokio::test]
-    #[allow(clippy::print_stdout)]
     async fn test_window_sort_stream() {
         let test_cases = [
             TestStream::new(
@@ -2921,7 +2920,6 @@ mod test {
         let indexed_test_cases = test_cases.iter().enumerate().collect_vec();
 
         for (idx, testcase) in &indexed_test_cases {
-            println!("running test case: {}", idx);
             let output = testcase.run_test().await;
             assert_eq!(output, testcase.output, "case {idx} failed.");
         }
