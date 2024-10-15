@@ -25,8 +25,8 @@ use s2::cellid::{CellID, MAX_LEVEL};
 use s2::latlng::LatLng;
 use snafu::ensure;
 
-use super::helpers::{ensure_and_coerce, ensure_columns_len, ensure_columns_n};
 use crate::function::{Function, FunctionContext};
+use crate::scalars::geo::helpers::{ensure_and_coerce, ensure_columns_len, ensure_columns_n};
 
 static CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     vec![
@@ -182,7 +182,7 @@ impl Function for S2CellToToken {
         let mut results = StringVectorBuilder::with_capacity(size);
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
+            let cell = cell_from_value(cell_vec.get(i));
             let res = cell.map(|cell| cell.to_token());
 
             results.push(res.as_deref());
@@ -219,7 +219,7 @@ impl Function for S2CellParent {
         let mut results = UInt64VectorBuilder::with_capacity(size);
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
+            let cell = cell_from_value(cell_vec.get(i));
             let level = value_to_level(level_vec.get(i))?;
             let result = cell.map(|cell| cell.parent(level).0);
 
@@ -253,12 +253,11 @@ fn signature_of_cell_and_level() -> Signature {
 }
 
 fn cell_from_value(v: Value) -> Option<CellID> {
-    let cell = match v {
+    match v {
         Value::Int64(v) => Some(CellID(v as u64)),
         Value::UInt64(v) => Some(CellID(v)),
         _ => None,
-    };
-    Ok(cell)
+    }
 }
 
 fn value_to_level(v: Value) -> Result<u64> {
