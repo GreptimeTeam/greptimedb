@@ -146,7 +146,7 @@ impl Function for S2CellLevel {
         let mut results = UInt64VectorBuilder::with_capacity(size);
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
+            let cell = cell_from_value(cell_vec.get(i));
             let res = cell.map(|cell| cell.level());
 
             results.push(res);
