@@ -380,6 +380,14 @@ impl WindowedSortStream {
                             internal_err!("No working range found")?
                         };
 
+                        if sort_column.options.unwrap_or_default().descending {
+                            if cur_range.end > working_range.end {
+                                internal_err!("Current batch have data on the right side of working range, something is very wrong")?;
+                            }
+                        } else if cur_range.start < working_range.start {
+                            internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
+                        }
+
                         if cur_range.is_subset(&working_range) {
                             // data still in range, can't merge sort yet
                             // see if can concat entire sorted rb, merge sort need to wait
@@ -707,15 +715,6 @@ macro_rules! array_iter_helper {
     }};
 }
 
-fn new_timestamp_from(time_unit: &TimeUnit, value: i64) -> Timestamp {
-    match time_unit {
-        TimeUnit::Second => Timestamp::new_second(value),
-        TimeUnit::Millisecond => Timestamp::new_millisecond(value),
-        TimeUnit::Microsecond => Timestamp::new_microsecond(value),
-        TimeUnit::Nanosecond => Timestamp::new_nanosecond(value),
-    }
-}
-
 /// Compare with options, note None is considered as NULL here
 fn cmp_with_opts<T: Ord>(
     a: &Option<T>,
@@ -842,8 +841,8 @@ fn get_sorted_runs(sort_column: SortColumn) -> datafusion_common::Result<Vec<Suc
             .map(|run| SucRun {
                 offset: run.offset,
                 len: run.len,
-                first_val: run.first_val.map(|v| new_timestamp_from(unit, v)),
-                last_val: run.last_val.map(|v| new_timestamp_from(unit, v)),
+                first_val: run.first_val.map(|v| Timestamp::new(v, unit.into())),
+                last_val: run.last_val.map(|v| Timestamp::new(v, unit.into())),
             })
             .collect_vec();
         Ok(ts_runs)
@@ -1111,7 +1110,7 @@ fn get_timestamp_from_idx(
     } else {
         return Ok(None);
     };
-    let gt_timestamp = new_timestamp_from(time_unit, val);
+    let gt_timestamp = Timestamp::new(val, time_unit.into());
     Ok(Some(gt_timestamp))
 }
 
