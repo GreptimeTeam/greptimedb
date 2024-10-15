@@ -613,7 +613,7 @@ impl HeartbeatHandlerGroupBuilder {
 pub type HeartbeatHandlerGroupBuilderCustomizerRef =
     Arc<dyn HeartbeatHandlerGroupBuilderCustomizer>;
 
-pub enum CustomizeHeartbeatGroup {
+pub enum CustomizeHeartbeatGroupAction {
     AddHandlerAfter {
         target: String,
         handler: NameCachedHandler,
@@ -631,7 +631,7 @@ pub enum CustomizeHeartbeatGroup {
     },
 }
 
-impl CustomizeHeartbeatGroup {
+impl CustomizeHeartbeatGroupAction {
     pub fn new_add_handler_after(
         target: &'static str,
         handler: impl HeartbeatHandler + 'static,
@@ -673,30 +673,30 @@ impl CustomizeHeartbeatGroup {
 pub trait HeartbeatHandlerGroupBuilderCustomizer: Send + Sync {
     fn customize(&self, builder: &mut HeartbeatHandlerGroupBuilder) -> Result<()>;
 
-    fn add_action(&self, action: CustomizeHeartbeatGroup);
+    fn add_action(&self, action: CustomizeHeartbeatGroupAction);
 }
 
 #[derive(Default)]
 pub struct DefaultHeartbeatHandlerGroupBuilderCustomizer {
-    action: Mutex<Vec<CustomizeHeartbeatGroup>>,
+    actions: Mutex<Vec<CustomizeHeartbeatGroupAction>>,
 }
 
 impl HeartbeatHandlerGroupBuilderCustomizer for DefaultHeartbeatHandlerGroupBuilderCustomizer {
     fn customize(&self, builder: &mut HeartbeatHandlerGroupBuilder) -> Result<()> {
         info!("Customizing the heartbeat handler group builder");
-        let mut actions = self.action.lock().unwrap();
+        let mut actions = self.actions.lock().unwrap();
         for action in actions.drain(..) {
             match action {
-                CustomizeHeartbeatGroup::AddHandlerAfter { target, handler } => {
+                CustomizeHeartbeatGroupAction::AddHandlerAfter { target, handler } => {
                     builder.add_handler_after_inner(&target, handler)?;
                 }
-                CustomizeHeartbeatGroup::AddHandlerBefore { target, handler } => {
+                CustomizeHeartbeatGroupAction::AddHandlerBefore { target, handler } => {
                     builder.add_handler_before_inner(&target, handler)?;
                 }
-                CustomizeHeartbeatGroup::ReplaceHandler { target, handler } => {
+                CustomizeHeartbeatGroupAction::ReplaceHandler { target, handler } => {
                     builder.replace_handler_inner(&target, handler)?;
                 }
-                CustomizeHeartbeatGroup::AddHandlerLast { handler } => {
+                CustomizeHeartbeatGroupAction::AddHandlerLast { handler } => {
                     builder.add_handler_last_inner(handler);
                 }
             }
@@ -704,8 +704,8 @@ impl HeartbeatHandlerGroupBuilderCustomizer for DefaultHeartbeatHandlerGroupBuil
         Ok(())
     }
 
-    fn add_action(&self, action: CustomizeHeartbeatGroup) {
-        self.action.lock().unwrap().push(action);
+    fn add_action(&self, action: CustomizeHeartbeatGroupAction) {
+        self.actions.lock().unwrap().push(action);
     }
 }
 
