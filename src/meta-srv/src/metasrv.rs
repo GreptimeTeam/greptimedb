@@ -16,7 +16,7 @@ pub mod builder;
 
 use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use clap::ValueEnum;
@@ -337,7 +337,6 @@ impl MetaStateHandler {
     }
 }
 
-#[derive(Clone)]
 pub struct Metasrv {
     state: StateRef,
     started: Arc<AtomicBool>,
@@ -353,8 +352,8 @@ pub struct Metasrv {
     selector: SelectorRef,
     // The flow selector is used to select a target flownode.
     flow_selector: SelectorRef,
-    handler_group: Option<HeartbeatHandlerGroupRef>,
-    handler_group_builder: Option<HeartbeatHandlerGroupBuilder>,
+    handler_group: RwLock<Option<HeartbeatHandlerGroupRef>>,
+    handler_group_builder: Mutex<Option<HeartbeatHandlerGroupBuilder>>,
     election: Option<ElectionRef>,
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
@@ -371,15 +370,7 @@ pub struct Metasrv {
 }
 
 impl Metasrv {
-    pub async fn try_start(&mut self) -> Result<()> {
-        let builder = self
-            .handler_group_builder
-            .take()
-            .context(error::UnexpectedSnafu {
-                violated: "expected heartbeat handler group builder",
-            })?;
-        self.handler_group = Some(Arc::new(builder.build()?));
-
+    pub async fn try_start(&self) -> Result<()> {
         if self
             .started
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
@@ -388,6 +379,16 @@ impl Metasrv {
             warn!("Metasrv already started");
             return Ok(());
         }
+
+        let handler_group_builder =
+            self.handler_group_builder
+                .lock()
+                .unwrap()
+                .take()
+                .context(error::UnexpectedSnafu {
+                    violated: "expected heartbeat handler group builder",
+                })?;
+        *self.handler_group.write().unwrap() = Some(Arc::new(handler_group_builder.build()?));
 
         // Creates default schema if not exists
         self.table_metadata_manager
@@ -567,12 +568,8 @@ impl Metasrv {
         &self.flow_selector
     }
 
-    pub fn handler_group(&self) -> &Option<HeartbeatHandlerGroupRef> {
-        &self.handler_group
-    }
-
-    pub fn handler_group_builder(&mut self) -> &mut Option<HeartbeatHandlerGroupBuilder> {
-        &mut self.handler_group_builder
+    pub fn handler_group(&self) -> Option<HeartbeatHandlerGroupRef> {
+        self.handler_group.read().unwrap().clone()
     }
 
     pub fn election(&self) -> Option<&ElectionRef> {

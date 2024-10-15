@@ -58,7 +58,7 @@ use crate::{error, Result};
 
 #[derive(Clone)]
 pub struct MetasrvInstance {
-    metasrv: Metasrv,
+    metasrv: Arc<Metasrv>,
 
     httpsrv: Arc<HttpServer>,
 
@@ -83,8 +83,9 @@ impl MetasrvInstance {
                 .with_greptime_config_options(opts.to_toml().context(TomlFormatSnafu)?)
                 .build(),
         );
+        let metasrv = Arc::new(metasrv);
         // put metasrv into plugins for later use
-        plugins.insert::<Arc<Metasrv>>(Arc::new(metasrv.clone()));
+        plugins.insert::<Arc<Metasrv>>(metasrv.clone());
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(InitExportMetricsTaskSnafu)?;
         Ok(MetasrvInstance {
@@ -178,13 +179,13 @@ pub async fn bootstrap_metasrv_with_router(
     Ok(())
 }
 
-pub fn router(metasrv: Metasrv) -> Router {
+pub fn router(metasrv: Arc<Metasrv>) -> Router {
     tonic::transport::Server::builder()
         .accept_http1(true) // for admin services
-        .add_service(HeartbeatServer::new(metasrv.clone()))
-        .add_service(StoreServer::new(metasrv.clone()))
-        .add_service(ClusterServer::new(metasrv.clone()))
-        .add_service(ProcedureServiceServer::new(metasrv.clone()))
+        .add_service(HeartbeatServer::from_arc(metasrv.clone()))
+        .add_service(StoreServer::from_arc(metasrv.clone()))
+        .add_service(ClusterServer::from_arc(metasrv.clone()))
+        .add_service(ProcedureServiceServer::from_arc(metasrv.clone()))
         .add_service(admin::make_admin_service(metasrv))
 }
 
