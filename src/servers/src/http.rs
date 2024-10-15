@@ -36,7 +36,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
 use datatypes::schema::SchemaRef;
-use datatypes::value::ColumnPair;
+use datatypes::value::transform_value_ref_to_json_value;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use schemars::JsonSchema;
@@ -252,11 +252,8 @@ impl HttpRecordsOutput {
                     // safety here: schemas length is equal to the number of columns in the recordbatch
                     let schema = &schemas[col_idx];
                     for row_idx in 0..recordbatch.num_rows() {
-                        let column_pair = ColumnPair {
-                            value: col.get_ref(row_idx),
-                            schema,
-                        };
-                        let value = Value::try_from(column_pair).context(ToJsonSnafu)?;
+                        let value = transform_value_ref_to_json_value(col.get_ref(row_idx), schema)
+                            .context(ToJsonSnafu)?;
                         rows[row_idx + finished_row_cursor].push(value);
                     }
                 }

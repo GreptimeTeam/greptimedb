@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap as StdHashMap};
+use std::collections::BTreeMap;
 
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnDataTypeExtension, ColumnOptions, ColumnSchema, JsonTypeExtension, Row,
+    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
     RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value as GreptimeValue,
 };
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
@@ -30,16 +30,6 @@ use snafu::ResultExt;
 use super::trace::attributes::OtlpAnyValue;
 use crate::error::{OpenTelemetryLogSnafu, Result};
 use crate::otlp::trace::span::bytes_to_hex_string;
-
-/// Normalize otlp instrumentation, metric and attribute names
-///
-/// <https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md#instrument-name-syntax>
-/// - since the name are case-insensitive, we transform them to lowercase for
-/// - better sql usability
-/// - replace `.` and `-` with `_`
-fn normalize_otlp_name(name: &str) -> String {
-    name.to_lowercase().replace(|c| c == '.' || c == '-', "_")
-}
 
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
 ///
@@ -190,7 +180,7 @@ fn log_to_pipeline_value(
     PipelineValue::Map(Map { values: map })
 }
 
-fn build_identity_schema() -> Vec<ColumnSchema> {
+fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
     [
         (
             "scope_name",
@@ -287,12 +277,7 @@ fn build_identity_schema() -> Vec<ColumnSchema> {
             ColumnDataType::String,
             SemanticType::Field,
             None,
-            Some(ColumnOptions {
-                options: StdHashMap::from([(
-                    "fulltext".to_string(),
-                    r#"{"enable":true}"#.to_string(),
-                )]),
-            }),
+            None,
         ),
     ]
     .into_iter()
@@ -391,7 +376,7 @@ fn parse_export_logs_service_request_to_rows(request: ExportLogsServiceRequest) 
         }
     }
     Rows {
-        schema: build_identity_schema(),
+        schema: build_otlp_logs_identity_schema(),
         rows: result,
     }
 }
@@ -468,7 +453,7 @@ fn key_value_to_map(key_values: Vec<KeyValue>) -> BTreeMap<String, PipelineValue
             },
             None => PipelineValue::Null,
         };
-        map.insert(normalize_otlp_name(&kv.key), value);
+        map.insert(kv.key.clone(), value);
     }
     map
 }
@@ -505,7 +490,7 @@ fn key_value_to_jsonb(key_values: Vec<KeyValue>) -> JsonbValue<'static> {
             },
             None => JsonbValue::Null,
         };
-        map.insert(normalize_otlp_name(&kv.key), value);
+        map.insert(kv.key.clone(), value);
     }
     JsonbValue::Object(map)
 }

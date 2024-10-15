@@ -114,6 +114,7 @@ impl Value {
             },
 
             // We only consider object and array to be json types. and use Map to represent json
+            // TODO(qtang): Needs to be defined with better semantics
             "json" => Ok(Value::Map(Map::default())),
 
             _ => ValueParseTypeSnafu { t }.fail(),

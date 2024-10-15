@@ -115,7 +115,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         interceptor_ref.pre_execute(ctx.clone())?;
         let (requests, rows) = otlp::logs::to_grpc_insert_requests(request, pipeline, table_name)?;
 
-        self.handle_row_inserts(requests, ctx)
+        self.handle_log_inserts(requests, ctx)
             .await
             .inspect(|_| OTLP_LOGS_ROWS.inc_by(rows as u64))
             .map_err(BoxedError::new)

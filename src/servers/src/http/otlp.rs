@@ -41,11 +41,11 @@ use snafu::prelude::*;
 
 use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::error::{self, Result};
+use crate::http::header::constants::{
+    GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME, GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
+    GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
+};
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
-
-const OTLP_GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME: &str = "x-greptime-log-pipeline-name";
-const OTLP_GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME: &str = "x-greptime-log-pipeline-version";
-const OTLP_GREPTIME_LOG_TABLE_NAME_HEADER_NAME: &str = "x-greptime-log-table-name";
 
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "metrics"))]
@@ -128,21 +128,17 @@ where
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let pipeline_name = parts
-            .headers
-            .get(OTLP_GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME);
-        let pipeline_version = parts
-            .headers
-            .get(OTLP_GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME);
+        let pipeline_name = parts.headers.get(GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME);
+        let pipeline_version = parts.headers.get(GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME);
         match (pipeline_name, pipeline_version) {
             (Some(name), Some(version)) => Ok(PipelineInfo {
                 pipeline_name: Some(pipeline_header_error(
                     name,
-                    OTLP_GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
+                    GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
                 )?),
                 pipeline_version: Some(pipeline_header_error(
                     version,
-                    OTLP_GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
+                    GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
                 )?),
             }),
             (None, _) => Ok(PipelineInfo {
@@ -152,7 +148,7 @@ where
             (Some(name), None) => Ok(PipelineInfo {
                 pipeline_name: Some(pipeline_header_error(
                     name,
-                    OTLP_GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
+                    GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
                 )?),
                 pipeline_version: None,
             }),
@@ -172,11 +168,11 @@ where
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let table_name = parts.headers.get(OTLP_GREPTIME_LOG_TABLE_NAME_HEADER_NAME);
+        let table_name = parts.headers.get(GREPTIME_LOG_TABLE_NAME_HEADER_NAME);
 
         match table_name {
             Some(name) => Ok(TableInfo {
-                table_name: pipeline_header_error(name, OTLP_GREPTIME_LOG_TABLE_NAME_HEADER_NAME)?,
+                table_name: pipeline_header_error(name, GREPTIME_LOG_TABLE_NAME_HEADER_NAME)?,
             }),
             None => Ok(TableInfo {
                 table_name: "opentelemetry_logs".to_string(),
@@ -207,7 +203,7 @@ pub async fn logs(
         let pipeline_version =
             to_pipeline_version(pipeline_info.pipeline_version).map_err(|_| {
                 error::InvalidParameterSnafu {
-                    reason: OTLP_GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
+                    reason: GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
                 }
                 .build()
             })?;
