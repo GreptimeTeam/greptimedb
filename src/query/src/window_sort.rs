@@ -55,9 +55,9 @@ use crate::error::{QueryExecutionSnafu, Result};
 /// merge sort them whenever possible, and emit the sorted result as soon as possible.
 /// This sorting plan only accept sort by ts and will not sort by other fields.
 ///
-/// internally, it call [`streaming_merge`] multiple times to merge multiple sorted ranges
+/// internally, it call [`streaming_merge`] multiple times to merge multiple sorted "working ranges"
 ///
-/// the input stream must be in the order of `PartitionRange` in `ranges`, or else the result will be incorrect
+/// the input stream must be concated in the order of `PartitionRange` in `ranges`(and each `PartitionRange` is sorted within itself), or else the result will be incorrect
 #[derive(Debug, Clone)]
 pub struct WindowedSortExec {
     /// Physical sort expressions(that is, sort by timestamp)
@@ -166,8 +166,6 @@ impl ExecutionPlan for WindowedSortExec {
         vec![&self.input]
     }
 
-    // DataFusion will swap children unconditionally.
-    // But since this node is leaf node, it's safe to just return self.
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
@@ -200,6 +198,11 @@ impl ExecutionPlan for WindowedSortExec {
 }
 
 /// The core logic of merging sort multiple sorted ranges
+///
+/// the flow of data is:
+/// ```md
+/// input --check if sorted--> in_progress --find sorted run--> sorted_input_runs --call merge sort--> merge_stream --> output
+/// ```
 pub struct WindowedSortStream {
     /// Memory pool for this stream
     memory_pool: Arc<dyn MemoryPool>,
@@ -217,9 +220,9 @@ pub struct WindowedSortStream {
     working_idx: usize,
     /// input stream assumed reading in order of `PartitionRange`
     input: DfSendableRecordBatchStream,
-    /// Whether the input stream is terminated
+    /// Whether the input stream is terminated, if it did, we should poll input again
     is_input_terminated: bool,
-    /// sOutput Schema, which is the same as input schema, since this is a sort plan
+    /// Output Schema, which is the same as input schema, since this is a sort plan
     schema: SchemaRef,
     /// Physical sort expressions(that is, sort by timestamp)
     expression: PhysicalSortExpr,
@@ -227,7 +230,7 @@ pub struct WindowedSortStream {
     fetch: Option<usize>,
     /// number of rows produced
     produced: usize,
-    /// Resulting Stream(`merge_stream`)'s batch size
+    /// Resulting Stream(`merge_stream`)'s batch size, merely a suggestion
     batch_size: usize,
     /// All available working ranges and their corresponding working set
     ///
@@ -411,16 +414,16 @@ impl WindowedSortStream {
                             // since we are crossing working range, we need to merge sort the working set
                             self.start_new_merge_sort()?;
 
-                            let remaining = (offset + len, sorted_rb.num_rows() - offset - len);
-                            if remaining.1 != 0 {
-                                let (r_offset, r_len) = remaining;
+                            let (r_offset, r_len) =
+                                (offset + len, sorted_rb.num_rows() - offset - len);
+                            if r_len != 0 {
                                 // we have remaining data in this batch, put it back to input queue
                                 let remaining_rb = sorted_rb.slice(r_offset, r_len);
                                 let new_first_val =
                                     get_timestamp_from_idx(&cur_sort_column, r_offset)?;
                                 let new_run_info = SucRun {
-                                    offset: run_info.offset + remaining.0,
-                                    len: remaining.1,
+                                    offset: run_info.offset + r_offset,
+                                    len: r_len,
                                     first_val: new_first_val,
                                     last_val: run_info.last_val,
                                 };
@@ -494,7 +497,7 @@ impl WindowedSortStream {
         self.working_idx += 1;
     }
 
-    /// make `in_progress` as a new `DfSendableRecordBatchStream` and put into `sort_partition_rbs`
+    /// make `in_progress` as a new `DfSendableRecordBatchStream` and put into `sorted_input_runs`
     fn build_sorted_stream(&mut self) -> datafusion_common::Result<()> {
         if self.in_progress.is_empty() {
             return Ok(());
@@ -511,14 +514,10 @@ impl WindowedSortStream {
         if !self.in_progress.is_empty() {
             return internal_err!("Starting a merge sort when in_progress is not empty")?;
         }
-        let fetch = self.remaining_fetch();
-        let reservation = MemoryConsumer::new(format!("WindowedSortStream[{}]", self.merge_count))
-            .register(&self.memory_pool);
-
-        let streams = std::mem::take(&mut self.sorted_input_runs);
 
         self.set_next_working_range();
 
+        let streams = std::mem::take(&mut self.sorted_input_runs);
         if streams.is_empty() {
             return Ok(());
         } else if streams.len() == 1 {
@@ -526,6 +525,11 @@ impl WindowedSortStream {
                 .push_back(streams.into_iter().next().unwrap());
             return Ok(());
         }
+
+        let fetch = self.remaining_fetch();
+        let reservation = MemoryConsumer::new(format!("WindowedSortStream[{}]", self.merge_count))
+            .register(&self.memory_pool);
+        self.merge_count += 1;
 
         let resulting_stream = streaming_merge(
             streams,
