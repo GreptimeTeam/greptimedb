@@ -27,7 +27,7 @@ use arrow::array::types::{
 };
 use arrow::array::{Array, ArrayRef, PrimitiveArray};
 use arrow::compute::SortColumn;
-use arrow_schema::{DataType, SchemaRef, SortOptions, TimeUnit};
+use arrow_schema::{DataType, SchemaRef, SortOptions};
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
@@ -1125,7 +1125,7 @@ mod test {
     };
     use arrow::compute::concat_batches;
     use arrow::json::ArrayWriter;
-    use arrow_schema::{Field, Schema};
+    use arrow_schema::{Field, Schema, TimeUnit};
     use datafusion::physical_plan::ExecutionMode;
     use datafusion_physical_expr::EquivalenceProperties;
     use futures::StreamExt;
