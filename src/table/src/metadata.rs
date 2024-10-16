@@ -619,9 +619,7 @@ impl TableMeta {
             fulltext.enable = enable;
         }
         if let Some(analyzer) = options.analyzer {
-            fulltext.analyzer = analyzer
-                .try_into()
-                .context(error::InvalidFulltextOptionsSnafu)?;
+            fulltext.analyzer = analyzer;
         }
         if let Some(case_sensitive) = options.case_sensitive {
             fulltext.case_sensitive = case_sensitive;
@@ -943,7 +941,7 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer, Schema, SchemaBuilder};
 
     use super::*;
 
@@ -1417,7 +1415,7 @@ mod tests {
             column_name: "col1".to_string(),
             options: ChangeFulltextOptions {
                 enable: Some(true),
-                analyzer: Some(0),
+                analyzer: Some(FulltextAnalyzer::English),
                 case_sensitive: None,
             },
         };

@@ -18,15 +18,15 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, ChangeFulltext,
-    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropColumn, DropColumns, ExpireAfter, RenameTable, SemanticType, TableName,
+    AddColumn, AddColumns, AlterExpr, Analyzer, ChangeColumnType, ChangeColumnTypes,
+    ChangeFulltext, ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr,
+    CreateViewExpr, DropColumn, DropColumns, ExpireAfter, RenameTable, SemanticType, TableName,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
-use datatypes::schema::{ColumnSchema, COMMENT_KEY};
+use datatypes::schema::{ColumnSchema, FulltextAnalyzer, COMMENT_KEY};
 use file_engine::FileOptions;
 use query::sql::{
     check_file_to_table_schema_compatibility, file_column_schemas_to_table,
@@ -489,7 +489,11 @@ pub(crate) fn to_alter_expr(
         } => Kind::ChangeFulltext(ChangeFulltext {
             column_name: column_name.value.to_string(),
             enable: options.enable,
-            analyzer: options.analyzer,
+            analyzer: match options.analyzer {
+                Some(FulltextAnalyzer::Chinese) => Some(Analyzer::Chinese as i32),
+                Some(FulltextAnalyzer::English) => Some(Analyzer::English as i32),
+                None => None,
+            },
             case_sensitive: options.case_sensitive,
         }),
     };

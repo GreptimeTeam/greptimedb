@@ -22,17 +22,17 @@ use api::v1::region::{
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, Rows, SemanticType};
+use api::v1::{self, column_def, Rows, SemanticType};
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ChangeFulltextOptions;
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
-    RegionMetadata, Result,
+    ColumnMetadata, InvalidFulltextOptionsProtoSnafu, InvalidRawRegionRequestSnafu,
+    InvalidRegionRequestSnafu, MetadataError, RegionMetadata, Result,
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -507,7 +507,8 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 column_name: x.column_name,
                 options: ChangeFulltextOptions {
                     enable: x.enable,
-                    analyzer: x.analyzer,
+                    analyzer: column_def::try_as_fulltext_option(x.analyzer)
+                        .context(InvalidFulltextOptionsProtoSnafu)?,
                     case_sensitive: x.case_sensitive,
                 },
             },

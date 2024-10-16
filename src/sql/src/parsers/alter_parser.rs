@@ -143,6 +143,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use common_error::ext::ErrorExt;
+    use datatypes::schema::FulltextAnalyzer;
     use sqlparser::ast::{ColumnOption, DataType};
 
     use super::*;
@@ -467,7 +468,10 @@ mod tests {
                     } => {
                         assert_eq!(column_name.value, r#"message"#);
                         assert!(options.analyzer.is_some());
-                        assert_eq!(options.analyzer.unwrap(), 1);
+                        assert_eq!(
+                            options.analyzer.as_ref().unwrap().clone(),
+                            FulltextAnalyzer::Chinese
+                        );
                         assert!(options.case_sensitive.is_some());
                         assert_eq!(options.case_sensitive.unwrap(), true);
                     }

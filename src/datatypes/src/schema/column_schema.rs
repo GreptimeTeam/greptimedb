@@ -349,62 +349,45 @@ pub struct FulltextOptions {
 }
 
 /// Fulltext analyzer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
 pub enum FulltextAnalyzer {
     #[default]
     English,
     Chinese,
 }
 
-impl TryFrom<i32> for FulltextAnalyzer {
-    type Error = Error;
-
-    fn try_from(value: i32) -> Result<Self> {
-        match value {
-            0 => Ok(FulltextAnalyzer::English),
-            1 => Ok(FulltextAnalyzer::Chinese),
-            _ => Err(error::InvalidFulltextOptionsSnafu {
-                key: "analyzer".to_string(),
-                value: value.to_string(),
-            }
-            .build()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut, Default)]
 pub struct ChangeFulltextOptions {
     pub enable: Option<bool>,
-    pub analyzer: Option<i32>,
+    pub analyzer: Option<FulltextAnalyzer>,
     pub case_sensitive: Option<bool>,
 }
 
 impl fmt::Display for ChangeFulltextOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "fulltext options: ")?;
-
         if let Some(enable) = self.enable {
             write!(f, "enable={}", enable)?;
         } else {
             write!(f, "enable=None")?;
         }
-
-        if let Some(analyzer) = self.analyzer {
-            if analyzer == 0 {
-                write!(f, ", analyzer=English")?;
-            } else {
-                write!(f, ", analyzer=Chinese")?;
+        if let Some(analyzer) = &self.analyzer {
+            match analyzer {
+                FulltextAnalyzer::English => {
+                    write!(f, ", analyzer=English")?;
+                }
+                FulltextAnalyzer::Chinese => {
+                    write!(f, ", analyzer=Chinese")?;
+                }
             }
         } else {
             write!(f, ", analyzer=None")?;
         }
-
         if let Some(case_sensitive) = self.case_sensitive {
             write!(f, ", case_sensitive={}", case_sensitive)?;
         } else {
             write!(f, ", case_sensitive=None")?;
         }
-
         Ok(())
     }
 }
@@ -428,11 +411,11 @@ impl TryFrom<HashMap<String, String>> for ChangeFulltextOptions {
             match analyzer.to_ascii_lowercase().as_str() {
                 "english" => {
                     fulltext.enable = Some(true);
-                    fulltext.analyzer = Some(0);
+                    fulltext.analyzer = Some(FulltextAnalyzer::English);
                 }
                 "chinese" => {
                     fulltext.enable = Some(true);
-                    fulltext.analyzer = Some(1);
+                    fulltext.analyzer = Some(FulltextAnalyzer::Chinese);
                 }
                 _ => {
                     // If the analyzer is invalid, return None to indicate failure

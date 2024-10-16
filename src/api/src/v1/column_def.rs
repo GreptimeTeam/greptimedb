@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use datatypes::schema::{
-    ChangeFulltextOptions, ColumnDefaultConstraint, ColumnSchema, FulltextOptions, COMMENT_KEY,
-    FULLTEXT_KEY,
+    ChangeFulltextOptions, ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer,
+    FulltextOptions, COMMENT_KEY, FULLTEXT_KEY,
 };
 use greptime_proto::v1::{Analyzer, ChangeFulltext};
 use snafu::ResultExt;
@@ -95,6 +95,17 @@ pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<Column
     Ok((!options.options.is_empty()).then_some(options))
 }
 
+/// Tries to construct a `FulltextAnalyzer` from the given `Analyzer`.
+pub fn try_as_fulltext_option(analyzer: Option<i32>) -> Result<Option<FulltextAnalyzer>> {
+    let analyzer = analyzer
+        .map(Analyzer::try_from)
+        .transpose()
+        .context(error::DecodeProtoSnafu)?;
+    Ok(analyzer.map(|a| match a {
+        Analyzer::English => FulltextAnalyzer::English,
+        Analyzer::Chinese => FulltextAnalyzer::Chinese,
+    }))
+}
 /// Tries to construct a `ChangeFulltextOptions` from the given `ChangeFulltext`.
 pub fn try_as_change_fulltext_options(
     ChangeFulltext {
@@ -104,13 +115,10 @@ pub fn try_as_change_fulltext_options(
         ..
     }: &ChangeFulltext,
 ) -> Result<ChangeFulltextOptions> {
-    let _ = analyzer
-        .map(|a| Analyzer::try_from(a))
-        .transpose()
-        .context(error::DecodeProtoSnafu)?;
+    let analyzer = try_as_fulltext_option(*analyzer)?;
     Ok(ChangeFulltextOptions {
         enable: *enable,
-        analyzer: *analyzer,
+        analyzer,
         case_sensitive: *case_sensitive,
     })
 }

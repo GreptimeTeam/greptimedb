@@ -645,8 +645,8 @@ impl RegionMetadataBuilder {
                 if let Some(enable) = options.enable {
                     fulltext.enable = enable;
                 }
-                if let Some(analyzer) = options.analyzer {
-                    fulltext.analyzer = analyzer.try_into().context(InvalidFulltextOptionsSnafu)?;
+                if let Some(ref analyzer) = options.analyzer {
+                    fulltext.analyzer = analyzer.clone();
                 }
                 if let Some(case_sensitive) = options.case_sensitive {
                     fulltext.case_sensitive = case_sensitive;
@@ -781,6 +781,13 @@ pub enum MetadataError {
     #[snafu(display("Invalid fulltext options"))]
     InvalidFulltextOptions {
         source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid fulltext options in proto"))]
+    InvalidFulltextOptionsProto {
+        source: api::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
