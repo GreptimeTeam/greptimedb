@@ -17,10 +17,11 @@ use std::io::Write;
 
 use api::prom_store::remote::WriteRequest;
 use auth::user_provider_from_option;
-use axum::http::{HeaderName, StatusCode};
+use axum::http::{HeaderName, HeaderValue, StatusCode};
 use common_error::status_code::StatusCode as ErrorCode;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::metrics::v1::ResourceMetrics;
@@ -90,6 +91,7 @@ macro_rules! http_tests {
 
                 test_otlp_metrics,
                 test_otlp_traces,
+                test_otlp_logs,
             );
         )*
     };
@@ -1520,7 +1522,7 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     let client = TestClient::new(app);
 
     // write metrics data
-    let res = send_req(&client, "/v1/otlp/v1/metrics", body.clone(), false).await;
+    let res = send_req(&client, vec![], "/v1/otlp/v1/metrics", body.clone(), false).await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select metrics data
@@ -1532,7 +1534,7 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     // write metrics data with gzip
-    let res = send_req(&client, "/v1/otlp/v1/metrics", body.clone(), true).await;
+    let res = send_req(&client, vec![], "/v1/otlp/v1/metrics", body.clone(), true).await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select metrics data again
@@ -1557,7 +1559,7 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     let client = TestClient::new(app);
 
     // write traces data
-    let res = send_req(&client, "/v1/otlp/v1/traces", body.clone(), false).await;
+    let res = send_req(&client, vec![], "/v1/otlp/v1/traces", body.clone(), false).await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select traces data
@@ -1572,11 +1574,45 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     // write metrics data with gzip
-    let res = send_req(&client, "/v1/otlp/v1/traces", body.clone(), true).await;
+    let res = send_req(&client, vec![], "/v1/otlp/v1/traces", body.clone(), true).await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select metrics data again
     validate_data(&client, "select * from traces_preview_v01;", expected).await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_otlp_logs(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_traces").await;
+
+    let content = r#"
+{"resourceLogs":[{"resource":{"attributes":[{"key":"resource-attr","value":{"stringValue":"resource-attr-val-1"}}]},"schemaUrl":"https://opentelemetry.io/schemas/1.0.0/resourceLogs","scopeLogs":[{"scope":{},"schemaUrl":"https://opentelemetry.io/schemas/1.0.0/scopeLogs","logRecords":[{"flags":1,"timeUnixNano":1581452773000009875,"observedTimeUnixNano":1581452773000009875,"severityNumber":9,"severityText":"Info","body":{"value":{"stringValue":"This is a log message"}},"attributes":[{"key":"app","value":{"stringValue":"server"}},{"key":"instance_num","value":{"intValue":1}}],"droppedAttributesCount":1,"traceId":[48,56,48,52,48,50,48,49,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48],"spanId":[48,49,48,50,48,52,48,56,48,48,48,48,48,48,48,48]},{"flags":1,"timeUnixNano":1581452773000000789,"observedTimeUnixNano":1581452773000000789,"severityNumber":9,"severityText":"Info","body":{"value":{"stringValue":"something happened"}},"attributes":[{"key":"customer","value":{"stringValue":"acme"}},{"key":"env","value":{"stringValue":"dev"}}],"droppedAttributesCount":1,"traceId":[48],"spanId":[48]}]}]}]}
+"#;
+
+    let req: ExportLogsServiceRequest = serde_json::from_str(content).unwrap();
+    let body = req.encode_to_vec();
+
+    // handshake
+    let client = TestClient::new(app);
+
+    // write traces data
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("x-greptime-log-table-name"),
+            HeaderValue::from_static("logs"),
+        )],
+        "/v1/otlp/v1/logs?db=public",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["","",{},{"resource-attr":"resource-attr-val-1"},{"customer":"acme","env":"dev"},1581452773000000789,1581452773000000789,"30","30",1,"Info",9,"something happened"],["","",{},{"resource-attr":"resource-attr-val-1"},{"app":"server","instance_num":1},1581452773000009875,1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030",1,"Info",9,"This is a log message"]]"#;
+    validate_data(&client, "select * from logs;", expected).await;
 
     guard.remove_all().await;
 }
@@ -1593,10 +1629,20 @@ async fn validate_data(client: &TestClient, sql: &str, expected: &str) {
     assert_eq!(v, expected);
 }
 
-async fn send_req(client: &TestClient, path: &str, body: Vec<u8>, with_gzip: bool) -> TestResponse {
+async fn send_req(
+    client: &TestClient,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    path: &str,
+    body: Vec<u8>,
+    with_gzip: bool,
+) -> TestResponse {
     let mut req = client
         .post(path)
         .header("content-type", "application/x-protobuf");
+
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
 
     let mut len = body.len();
 

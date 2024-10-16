@@ -38,6 +38,7 @@ use snafu::{ensure, ResultExt};
 
 use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Error, Result, TryFromValueSnafu};
 use crate::prelude::*;
+use crate::schema::ColumnSchema;
 use crate::type_id::LogicalTypeId;
 use crate::types::{IntervalType, ListType};
 use crate::vectors::ListVector;
@@ -1286,39 +1287,52 @@ impl<'a> From<Option<ListValueRef<'a>>> for ValueRef<'a> {
     }
 }
 
-impl<'a> TryFrom<ValueRef<'a>> for serde_json::Value {
-    type Error = serde_json::Error;
+/// transform a [ValueRef] to a [serde_json::Value].
+/// The json type will be handled specially
+pub fn transform_value_ref_to_json_value<'a>(
+    value: ValueRef<'a>,
+    schema: &'a ColumnSchema,
+) -> serde_json::Result<serde_json::Value> {
+    let json_value = match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Boolean(v) => serde_json::Value::Bool(v),
+        ValueRef::UInt8(v) => serde_json::Value::from(v),
+        ValueRef::UInt16(v) => serde_json::Value::from(v),
+        ValueRef::UInt32(v) => serde_json::Value::from(v),
+        ValueRef::UInt64(v) => serde_json::Value::from(v),
+        ValueRef::Int8(v) => serde_json::Value::from(v),
+        ValueRef::Int16(v) => serde_json::Value::from(v),
+        ValueRef::Int32(v) => serde_json::Value::from(v),
+        ValueRef::Int64(v) => serde_json::Value::from(v),
+        ValueRef::Float32(v) => serde_json::Value::from(v.0),
+        ValueRef::Float64(v) => serde_json::Value::from(v.0),
+        ValueRef::String(bytes) => serde_json::Value::String(bytes.to_string()),
+        ValueRef::Binary(bytes) => {
+            if let ConcreteDataType::Json(_) = schema.data_type {
+                match jsonb::from_slice(bytes) {
+                    Ok(json) => json.into(),
+                    Err(e) => {
+                        error!(e; "Failed to parse jsonb");
+                        serde_json::Value::Null
+                    }
+                }
+            } else {
+                serde_json::to_value(bytes)?
+            }
+        }
+        ValueRef::Date(v) => serde_json::Value::Number(v.val().into()),
+        ValueRef::DateTime(v) => serde_json::Value::Number(v.val().into()),
+        ValueRef::List(v) => serde_json::to_value(v)?,
+        ValueRef::Timestamp(v) => serde_json::to_value(v.value())?,
+        ValueRef::Time(v) => serde_json::to_value(v.value())?,
+        ValueRef::IntervalYearMonth(v) => serde_json::Value::from(v),
+        ValueRef::IntervalDayTime(v) => serde_json::Value::from(v),
+        ValueRef::IntervalMonthDayNano(v) => serde_json::Value::from(v),
+        ValueRef::Duration(v) => serde_json::to_value(v.value())?,
+        ValueRef::Decimal128(v) => serde_json::to_value(v.to_string())?,
+    };
 
-    fn try_from(value: ValueRef<'a>) -> serde_json::Result<serde_json::Value> {
-        let json_value = match value {
-            ValueRef::Null => serde_json::Value::Null,
-            ValueRef::Boolean(v) => serde_json::Value::Bool(v),
-            ValueRef::UInt8(v) => serde_json::Value::from(v),
-            ValueRef::UInt16(v) => serde_json::Value::from(v),
-            ValueRef::UInt32(v) => serde_json::Value::from(v),
-            ValueRef::UInt64(v) => serde_json::Value::from(v),
-            ValueRef::Int8(v) => serde_json::Value::from(v),
-            ValueRef::Int16(v) => serde_json::Value::from(v),
-            ValueRef::Int32(v) => serde_json::Value::from(v),
-            ValueRef::Int64(v) => serde_json::Value::from(v),
-            ValueRef::Float32(v) => serde_json::Value::from(v.0),
-            ValueRef::Float64(v) => serde_json::Value::from(v.0),
-            ValueRef::String(bytes) => serde_json::Value::String(bytes.to_string()),
-            ValueRef::Binary(bytes) => serde_json::to_value(bytes)?,
-            ValueRef::Date(v) => serde_json::Value::Number(v.val().into()),
-            ValueRef::DateTime(v) => serde_json::Value::Number(v.val().into()),
-            ValueRef::List(v) => serde_json::to_value(v)?,
-            ValueRef::Timestamp(v) => serde_json::to_value(v.value())?,
-            ValueRef::Time(v) => serde_json::to_value(v.value())?,
-            ValueRef::IntervalYearMonth(v) => serde_json::Value::from(v),
-            ValueRef::IntervalDayTime(v) => serde_json::Value::from(v),
-            ValueRef::IntervalMonthDayNano(v) => serde_json::Value::from(v),
-            ValueRef::Duration(v) => serde_json::to_value(v.value())?,
-            ValueRef::Decimal128(v) => serde_json::to_value(v.to_string())?,
-        };
-
-        Ok(json_value)
-    }
+    Ok(json_value)
 }
 
 /// Reference to a [ListValue].

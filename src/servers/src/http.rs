@@ -36,6 +36,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
 use datatypes::schema::SchemaRef;
+use datatypes::value::transform_value_ref_to_json_value;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use schemars::JsonSchema;
@@ -241,14 +242,18 @@ impl HttpRecordsOutput {
         } else {
             let num_rows = recordbatches.iter().map(|r| r.num_rows()).sum::<usize>();
             let mut rows = Vec::with_capacity(num_rows);
+            let schemas = schema.column_schemas();
             let num_cols = schema.column_schemas().len();
             rows.resize_with(num_rows, || Vec::with_capacity(num_cols));
 
             let mut finished_row_cursor = 0;
             for recordbatch in recordbatches {
-                for col in recordbatch.columns() {
+                for (col_idx, col) in recordbatch.columns().iter().enumerate() {
+                    // safety here: schemas length is equal to the number of columns in the recordbatch
+                    let schema = &schemas[col_idx];
                     for row_idx in 0..recordbatch.num_rows() {
-                        let value = Value::try_from(col.get_ref(row_idx)).context(ToJsonSnafu)?;
+                        let value = transform_value_ref_to_json_value(col.get_ref(row_idx), schema)
+                            .context(ToJsonSnafu)?;
                         rows[row_idx + finished_row_cursor].push(value);
                     }
                 }
@@ -882,6 +887,7 @@ impl HttpServer {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
+            .route("/v1/logs", routing::post(otlp::logs))
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
