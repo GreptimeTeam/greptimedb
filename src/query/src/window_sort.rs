@@ -1941,6 +1941,30 @@ mod test {
         }
         let testcases = vec![
             (
+                vec![Some(1), Some(1), Some(2), Some(1), Some(3)],
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                }),
+                vec![(0, 3, Some(1), Some(2)), (3, 2, Some(1), Some(3))],
+            ),
+            (
+                vec![Some(1), Some(2), Some(2), Some(1), Some(3)],
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                }),
+                vec![(0, 3, Some(1), Some(2)), (3, 2, Some(1), Some(3))],
+            ),
+            (
+                vec![Some(1), Some(2), None, None, Some(1), Some(3)],
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                }),
+                vec![(0, 4, Some(1), Some(2)), (4, 2, Some(1), Some(3))],
+            ),
+            (
                 vec![Some(1), Some(2), Some(1), Some(3)],
                 Some(SortOptions {
                     descending: false,
@@ -1969,6 +1993,14 @@ mod test {
                 vec![(0, 2, Some(1), Some(2)), (2, 2, Some(3), Some(3))],
             ),
             (
+                vec![Some(1), Some(2), None, Some(3)],
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                }),
+                vec![(0, 3, Some(1), Some(2)), (3, 1, Some(3), Some(3))],
+            ),
+            (
                 vec![Some(2), Some(1), None, Some(3)],
                 Some(SortOptions {
                     descending: true,
@@ -1983,6 +2015,26 @@ mod test {
                     nulls_first: true,
                 }),
                 vec![(0, 0, None, None)],
+            ),
+            (
+                vec![None, None, Some(2), Some(2), Some(1), Some(5), Some(4)],
+                Some(SortOptions {
+                    descending: true,
+                    nulls_first: true,
+                }),
+                vec![(0, 5, Some(2), Some(1)), (5, 2, Some(5), Some(4))],
+            ),
+            (
+                vec![None, None, Some(2), Some(2), Some(1), Some(5), Some(4)],
+                Some(SortOptions {
+                    descending: true,
+                    nulls_first: false,
+                }),
+                vec![
+                    (0, 2, None, None),
+                    (2, 3, Some(2), Some(1)),
+                    (5, 2, Some(5), Some(4)),
+                ],
             ),
         ];
         for (input, sort_opts, expected) in testcases {
@@ -2035,6 +2087,60 @@ mod test {
                 }),
                 std::cmp::Ordering::Greater,
             ),
+            (
+                Some(1),
+                None,
+                Some(SortOptions {
+                    descending: true,
+                    nulls_first: false,
+                }),
+                std::cmp::Ordering::Less,
+            ),
+            (
+                Some(1),
+                None,
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                }),
+                std::cmp::Ordering::Less,
+            ),
+            (
+                None,
+                None,
+                Some(SortOptions {
+                    descending: true,
+                    nulls_first: true,
+                }),
+                std::cmp::Ordering::Equal,
+            ),
+            (
+                None,
+                None,
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                }),
+                std::cmp::Ordering::Equal,
+            ),
+            (
+                None,
+                None,
+                Some(SortOptions {
+                    descending: true,
+                    nulls_first: false,
+                }),
+                std::cmp::Ordering::Equal,
+            ),
+            (
+                None,
+                None,
+                Some(SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                }),
+                std::cmp::Ordering::Equal,
+            ),
         ];
         for (a, b, opts, expected) in testcases {
             assert_eq!(
@@ -2060,6 +2166,17 @@ mod test {
                     end: Timestamp::new_millisecond(4),
                 },
                 Ok((1, 2)),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from_iter_values([
+                    -2, -1, 0, 1, 2, 3, 4, 5,
+                ])) as ArrayRef,
+                false,
+                TimeRange {
+                    start: Timestamp::new_millisecond(-1),
+                    end: Timestamp::new_millisecond(4),
+                },
+                Ok((1, 5)),
             ),
             (
                 Arc::new(TimestampMillisecondArray::from_iter_values([1, 3, 4, 6])) as ArrayRef,
@@ -2302,7 +2419,6 @@ mod test {
 
             let real_output = exec_stream.collect::<Vec<_>>().await;
             let real_output: Vec<_> = real_output.into_iter().try_collect().unwrap();
-            // let concat_batch = concat_batches(&self.output.schema(), &real_output).unwrap();
             real_output
         }
     }
