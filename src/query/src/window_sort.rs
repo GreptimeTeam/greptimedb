@@ -690,7 +690,7 @@ fn find_slice_from_range(
         // i,e, for max_val = 4, array = [5,3,2] should be start=1
         // max_val = 4, array = [5, 4, 3, 2] should be start= 2
         let start = bisect::<false>(&[array.clone()], &[max_val.clone()], &[*opt])?;
-        // min_val = 1, array = [3, 2, 1, 0], end = 2
+        // min_val = 1, array = [3, 2, 1, 0], end = 3
         // min_val = 1, array = [3, 2, 0], end = 2
         let end = bisect::<false>(&[array.clone()], &[min_val.clone()], &[*opt])?;
         (start, end)
