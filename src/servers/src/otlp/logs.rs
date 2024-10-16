@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
+    ColumnDataType, ColumnDataTypeExtension, ColumnOptions, ColumnSchema, JsonTypeExtension, Row,
     RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value as GreptimeValue,
 };
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
@@ -277,7 +277,12 @@ fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
             ColumnDataType::String,
             SemanticType::Field,
             None,
-            None,
+            Some(ColumnOptions {
+                options: HashMap::from([(
+                    "fulltext".to_string(),
+                    r#"{"enable":true}"#.to_string(),
+                )]),
+            }),
         ),
     ]
     .into_iter()
