@@ -36,6 +36,7 @@ mod range_select;
 pub mod region_query;
 pub mod sql;
 pub mod stats;
+mod window_sort;
 
 #[cfg(test)]
 mod tests;
