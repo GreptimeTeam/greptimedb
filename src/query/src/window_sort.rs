@@ -42,7 +42,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::utils::bisect;
 use datafusion_common::{internal_err, DataFusionError};
-use datafusion_physical_expr::{Partitioning, PhysicalSortExpr};
+use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::value::Value;
 use futures::Stream;
 use itertools::Itertools;
@@ -103,7 +103,7 @@ impl WindowedSortExec {
 
         let properties = PlanProperties::new(
             input.equivalence_properties().clone(),
-            Partitioning::UnknownPartitioning(1),
+            input.output_partitioning().clone(),
             input.execution_mode(),
         );
 
@@ -128,12 +128,6 @@ impl WindowedSortExec {
         context: Arc<TaskContext>,
         partition: usize,
     ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
-        if 0 != partition {
-            return Err(DataFusionError::Internal(format!(
-                "WindowedSortExec invalid partition {partition}"
-            )));
-        }
-
         let input_stream: DfSendableRecordBatchStream =
             self.input.execute(partition, context.clone())?;
 
@@ -587,10 +581,16 @@ fn split_batch_to_sorted_run(
     let sort_column = expression.evaluate_to_sort_column(&batch)?;
     let sorted_runs_offset = get_sorted_runs(sort_column.clone())?;
     if let Some(run) = sorted_runs_offset.first()
-        && run.offset == 0
-        && run.len == batch.num_rows()
         && sorted_runs_offset.len() == 1
     {
+        if !(run.offset == 0 && run.len == batch.num_rows()) {
+            internal_err!(
+                "Invalid run offset and length: offset = {:?}, len = {:?}, num_rows = {:?}",
+                run.offset,
+                run.len,
+                batch.num_rows()
+            )?;
+        }
         // input rb is already sorted, we can emit it directly
         Ok(SortedRunSet {
             runs_with_batch: vec![(batch, run.clone())],
@@ -598,7 +598,7 @@ fn split_batch_to_sorted_run(
         })
     } else {
         // those slice should be zero copy, so supposedly no new reservation needed
-        let mut ret = Vec::new();
+        let mut ret = Vec::with_capacity(sorted_runs_offset.len());
         for run in sorted_runs_offset {
             if run.offset + run.len > batch.num_rows() {
                 internal_err!(
@@ -716,28 +716,32 @@ macro_rules! array_iter_helper {
 }
 
 /// Compare with options, note None is considered as NULL here
+///
+/// default to null first
 fn cmp_with_opts<T: Ord>(
     a: &Option<T>,
     b: &Option<T>,
     opt: &Option<SortOptions>,
 ) -> std::cmp::Ordering {
-    if let Some(opt) = opt {
-        if let (Some(a), Some(b)) = (a, b) {
-            if opt.descending {
-                b.cmp(a)
-            } else {
-                a.cmp(b)
-            }
+    let opt = opt.unwrap_or_default();
+
+    if let (Some(a), Some(b)) = (a, b) {
+        if opt.descending {
+            b.cmp(a)
         } else {
-            match (opt.nulls_first, a.is_none()) {
-                (true, true) => std::cmp::Ordering::Less,
-                (true, false) => std::cmp::Ordering::Greater,
-                (false, true) => std::cmp::Ordering::Greater,
-                (false, false) => std::cmp::Ordering::Less,
-            }
+            a.cmp(b)
         }
-    } else {
+    } else if opt.nulls_first {
+        // now we know at leatst one of them is None
+        // in rust None < Some(_)
         a.cmp(b)
+    } else {
+        match (a, b) {
+            (Some(a), Some(b)) => a.cmp(b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
     }
 }
 
@@ -1127,7 +1131,7 @@ mod test {
     use arrow::json::ArrayWriter;
     use arrow_schema::{Field, Schema, TimeUnit};
     use datafusion::physical_plan::ExecutionMode;
-    use datafusion_physical_expr::EquivalenceProperties;
+    use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
     use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use serde_json::json;
