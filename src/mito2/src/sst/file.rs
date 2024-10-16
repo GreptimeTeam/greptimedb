@@ -90,7 +90,8 @@ impl FromStr for FileId {
     }
 }
 
-/// Time range of a SST file.
+/// Time range (min and max timestamps) of a SST file.
+/// Both min and max are inclusive.
 pub type FileTimeRange = (Timestamp, Timestamp);
 
 /// Checks if two inclusive timestamp ranges overlap with each other.

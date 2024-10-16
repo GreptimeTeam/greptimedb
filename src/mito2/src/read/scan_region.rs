@@ -834,12 +834,7 @@ impl StreamContext {
         self.ranges
             .iter()
             .enumerate()
-            .map(|(idx, range_meta)| PartitionRange {
-                start: range_meta.time_range.0,
-                end: range_meta.time_range.1,
-                num_rows: range_meta.num_rows,
-                identifier: idx,
-            })
+            .map(|(idx, range_meta)| range_meta.new_partition_range(idx))
             .collect()
     }
 

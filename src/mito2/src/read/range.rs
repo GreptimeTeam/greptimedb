@@ -14,7 +14,9 @@
 
 //! Structs for partition ranges.
 
+use common_time::Timestamp;
 use smallvec::{smallvec, SmallVec};
+use store_api::region_engine::PartitionRange;
 
 use crate::memtable::MemtableRef;
 use crate::read::scan_region::ScanInput;
@@ -48,6 +50,26 @@ pub(crate) struct RangeMeta {
 }
 
 impl RangeMeta {
+    /// Creates a [PartitionRange] with specific identifier.
+    /// It converts the inclusive max timestamp to exclusive end timestamp.
+    pub(crate) fn new_partition_range(&self, identifier: usize) -> PartitionRange {
+        PartitionRange {
+            start: self.time_range.0,
+            end: Timestamp::new(
+                // The i64::MAX timestamp may be invisible but we don't guarantee to support this
+                // value now.
+                self.time_range
+                    .1
+                    .value()
+                    .checked_add(1)
+                    .unwrap_or(self.time_range.1.value()),
+                self.time_range.1.unit(),
+            ),
+            num_rows: self.num_rows,
+            identifier,
+        }
+    }
+
     /// Creates a list of ranges from the `input` for seq scan.
     pub(crate) fn seq_scan_ranges(input: &ScanInput) -> Vec<RangeMeta> {
         let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
