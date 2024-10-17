@@ -39,7 +39,7 @@ use crate::error::Result;
 
 /// Sort input within given PartitionRange
 ///
-/// Input is assumed to be segemented by empty RecordBatch, which indicates a new `PartitionRange` is starting
+/// Input is assumed to be segmented by empty RecordBatch, which indicates a new `PartitionRange` is starting
 ///
 /// and this operator will sort each partition independently within the partition.
 #[derive(Debug, Clone)]
