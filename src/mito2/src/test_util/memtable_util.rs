@@ -35,7 +35,7 @@ use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
 use crate::memtable::{
     BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder, MemtableId,
-    MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
+    MemtableRange, MemtableRef, MemtableStats,
 };
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
@@ -360,12 +360,4 @@ pub(crate) fn collect_iter_timestamps(iter: BoxedBatchIterator) -> Vec<i64> {
     })
     .map(|v| v.unwrap().0.value())
     .collect()
-}
-
-/// Builds a memtable range for test.
-pub(crate) fn mem_range_for_test(id: MemtableId) -> MemtableRange {
-    let builder = Box::new(EmptyIterBuilder::default());
-
-    let context = Arc::new(MemtableRangeContext::new(id, builder));
-    MemtableRange::new(context)
 }

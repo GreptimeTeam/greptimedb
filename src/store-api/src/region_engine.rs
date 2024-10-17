@@ -180,7 +180,7 @@ impl ScannerPartitioning {
 pub struct PartitionRange {
     /// Start time of time index column. Inclusive.
     pub start: Timestamp,
-    /// End time of time index column. Inclusive.
+    /// End time of time index column. Exclusive.
     pub end: Timestamp,
     /// Number of rows in this range. Is used to balance ranges between partitions.
     pub num_rows: usize,
