@@ -128,6 +128,12 @@ impl WindowedSortExec {
             all_avail_working_range.push(working_ranges);
         }
 
+        common_telemetry::info!("[DEBUG] ranges: {:?}", ranges);
+        common_telemetry::info!(
+            "[DEBUG] all_avail_working_range: {:?}",
+            all_avail_working_range
+        );
+
         Ok(Self {
             expression,
             fetch,
@@ -363,120 +369,110 @@ impl WindowedSortStream {
                 Poll::Pending => return Poll::Pending,
             };
 
+            let Some(SortedRunSet {
+                runs_with_batch,
+                sort_column,
+            }) = new_input_rbs
+            else {
+                // input stream is done, we need to merge sort the remaining working set
+                self.build_sorted_stream()?;
+                self.start_new_merge_sort()?;
+                continue;
+            };
             // The core logic to eargerly merge sort the working set
-            match new_input_rbs {
-                Some(SortedRunSet {
-                    runs_with_batch,
-                    sort_column,
-                }) => {
-                    // compare with last_value to find boundary, then merge runs if needed
 
-                    // iterate over runs_with_batch to merge sort, might create zero or more stream to put to `sort_partition_rbs`
+            // compare with last_value to find boundary, then merge runs if needed
 
-                    let mut last_remaining = None;
-                    let mut run_iter = runs_with_batch.into_iter();
-                    loop {
-                        let (sorted_rb, run_info) = if let Some(r) = last_remaining.take() {
-                            r
-                        } else if let Some(r) = run_iter.next() {
-                            r
-                        } else {
-                            break;
-                        };
-                        if sorted_rb.num_rows() == 0 {
-                            continue;
-                        }
-                        // determine if this batch is in current working range
-                        let cur_range = {
-                            match run_info.get_time_range() {
-                                Some(r) => r,
-                                _ => internal_err!("Found NULL in time index column")?,
-                            }
-                        };
-                        let working_range = if let Some(r) = self.get_working_range() {
-                            r
-                        } else {
-                            internal_err!("No working range found")?
-                        };
-
-                        if sort_column.options.unwrap_or_default().descending {
-                            if cur_range.end > working_range.end {
-                                internal_err!("Current batch have data on the right side of working range, something is very wrong")?;
-                            }
-                        } else if cur_range.start < working_range.start {
-                            internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
-                        }
-
-                        if cur_range.is_subset(&working_range) {
-                            // data still in range, can't merge sort yet
-                            // see if can concat entire sorted rb, merge sort need to wait
-                            self.try_concat_batch(
-                                sorted_rb.clone(),
-                                &run_info,
-                                sort_column.options,
-                            )?;
-                        } else if let Some(intersection) = cur_range.intersection(&working_range) {
-                            // slice rb by intersection and concat it then merge sort
-                            let cur_sort_column =
-                                sort_column.values.slice(run_info.offset, run_info.len);
-                            let (offset, len) = find_slice_from_range(
-                                &SortColumn {
-                                    values: cur_sort_column.clone(),
-                                    options: sort_column.options,
-                                },
-                                &intersection,
-                            )?;
-
-                            if offset != 0 {
-                                internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
-                            }
-
-                            let sliced_rb = sorted_rb.slice(offset, len);
-
-                            // try to concat the sliced input batch to the current `in_progress` run
-                            self.try_concat_batch(sliced_rb, &run_info, sort_column.options)?;
-                            // since no more sorted data in this range will come in now, build stream now
-                            self.build_sorted_stream()?;
-
-                            // since we are crossing working range, we need to merge sort the working set
-                            self.start_new_merge_sort()?;
-
-                            let (r_offset, r_len) =
-                                (offset + len, sorted_rb.num_rows() - offset - len);
-                            if r_len != 0 {
-                                // we have remaining data in this batch, put it back to input queue
-                                let remaining_rb = sorted_rb.slice(r_offset, r_len);
-                                let new_first_val =
-                                    get_timestamp_from_idx(&cur_sort_column, r_offset)?;
-                                let new_run_info = SucRun {
-                                    offset: run_info.offset + r_offset,
-                                    len: r_len,
-                                    first_val: new_first_val,
-                                    last_val: run_info.last_val,
-                                };
-                                last_remaining = Some((remaining_rb, new_run_info));
-                            }
-                            // deal with remaining batch cross working range problem
-                            // i.e: this example require more slice, and we are currently at point A
-                            // |---1---|       |---3---|
-                            // |-------A--2------------|
-                            //  put the remaining batch back to iter and deal it in next loop
-                        } else {
-                            // no overlap, we can merge sort the working set
-
-                            self.build_sorted_stream()?;
-                            self.start_new_merge_sort()?;
-
-                            // always put it back to input queue until some batch is in working range
-                            last_remaining = Some((sorted_rb, run_info));
-                        }
-                    }
+            // iterate over runs_with_batch to merge sort, might create zero or more stream to put to `sort_partition_rbs`
+            let mut last_remaining = None;
+            let mut run_iter = runs_with_batch.into_iter();
+            loop {
+                let (sorted_rb, run_info) = if let Some(r) = last_remaining.take() {
+                    r
+                } else if let Some(r) = run_iter.next() {
+                    r
+                } else {
+                    break;
+                };
+                if sorted_rb.num_rows() == 0 {
+                    continue;
                 }
-                None => {
-                    // input stream is done, we need to merge sort the remaining working set
-                    // and emit the result
+                // determine if this batch is in current working range
+                let cur_range = {
+                    match run_info.get_time_range() {
+                        Some(r) => r,
+                        _ => internal_err!("Found NULL in time index column")?,
+                    }
+                };
+                let working_range = if let Some(r) = self.get_working_range() {
+                    r
+                } else {
+                    internal_err!("No working range found")?
+                };
+
+                if sort_column.options.unwrap_or_default().descending {
+                    if cur_range.end > working_range.end {
+                        internal_err!("Current batch have data on the right side of working range `{:?}`, something is very wrong", working_range)?;
+                    }
+                } else if cur_range.start < working_range.start {
+                    internal_err!("Current batch have data on the left side of working range `{:?}`, something is very wrong", working_range)?;
+                }
+
+                if cur_range.is_subset(&working_range) {
+                    // data still in range, can't merge sort yet
+                    // see if can concat entire sorted rb, merge sort need to wait
+                    self.try_concat_batch(sorted_rb.clone(), &run_info, sort_column.options)?;
+                } else if let Some(intersection) = cur_range.intersection(&working_range) {
+                    // slice rb by intersection and concat it then merge sort
+                    let cur_sort_column = sort_column.values.slice(run_info.offset, run_info.len);
+                    let (offset, len) = find_slice_from_range(
+                        &SortColumn {
+                            values: cur_sort_column.clone(),
+                            options: sort_column.options,
+                        },
+                        &intersection,
+                    )?;
+
+                    if offset != 0 {
+                        internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
+                    }
+
+                    let sliced_rb = sorted_rb.slice(offset, len);
+
+                    // try to concat the sliced input batch to the current `in_progress` run
+                    self.try_concat_batch(sliced_rb, &run_info, sort_column.options)?;
+                    // since no more sorted data in this range will come in now, build stream now
+                    self.build_sorted_stream()?;
+
+                    // since we are crossing working range, we need to merge sort the working set
+                    self.start_new_merge_sort()?;
+
+                    let (r_offset, r_len) = (offset + len, sorted_rb.num_rows() - offset - len);
+                    if r_len != 0 {
+                        // we have remaining data in this batch, put it back to input queue
+                        let remaining_rb = sorted_rb.slice(r_offset, r_len);
+                        let new_first_val = get_timestamp_from_idx(&cur_sort_column, r_offset)?;
+                        let new_run_info = SucRun {
+                            offset: run_info.offset + r_offset,
+                            len: r_len,
+                            first_val: new_first_val,
+                            last_val: run_info.last_val,
+                        };
+                        last_remaining = Some((remaining_rb, new_run_info));
+                    }
+                    // deal with remaining batch cross working range problem
+                    // i.e: this example require more slice, and we are currently at point A
+                    // |---1---|       |---3---|
+                    // |-------A--2------------|
+                    //  put the remaining batch back to iter and deal it in next loop
+                } else {
+                    // no overlap, we can merge sort the working set
+
                     self.build_sorted_stream()?;
                     self.start_new_merge_sort()?;
+
+                    // always put it back to input queue until some batch is in working range
+                    last_remaining = Some((sorted_rb, run_info));
                 }
             }
         }
