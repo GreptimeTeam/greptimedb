@@ -129,6 +129,7 @@ impl UnorderedScan {
         );
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
+        let distinguish_range = self.properties.distinguish_partition_range();
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
@@ -138,6 +139,8 @@ impl UnorderedScan {
             for part_range in part_ranges {
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
+                #[cfg(debug_assertions)]
+                let mut checker = crate::read::BatchChecker::default();
 
                 let stream = Self::scan_partition_range(
                     stream_ctx.clone(),
@@ -150,6 +153,20 @@ impl UnorderedScan {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
 
+                    debug_assert!(!batch.is_empty());
+                    if batch.is_empty() {
+                        continue;
+                    }
+
+                    #[cfg(debug_assertions)]
+                    checker.ensure_part_range_batch(
+                        "UnorderedScan",
+                        stream_ctx.input.mapper.metadata().region_id,
+                        partition,
+                        part_range,
+                        &batch,
+                    );
+
                     let convert_start = Instant::now();
                     let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
                     metrics.convert_cost += convert_start.elapsed();
@@ -158,6 +175,14 @@ impl UnorderedScan {
                     metrics.yield_cost += yield_start.elapsed();
 
                     fetch_start = Instant::now();
+                }
+
+                // Yields an empty part to indicate this range is terminated.
+                // The query engine can use this to optimize some queries.
+                if distinguish_range {
+                    let yield_start = Instant::now();
+                    yield stream_ctx.input.mapper.empty_record_batch();
+                    metrics.yield_cost += yield_start.elapsed();
                 }
 
                 metrics.scan_cost += fetch_start.elapsed();
