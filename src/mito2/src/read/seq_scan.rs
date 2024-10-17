@@ -230,6 +230,8 @@ impl SeqScan {
                 let cache = stream_ctx.input.cache_manager.as_deref();
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
+                #[cfg(debug_assertions)]
+                let mut checker = crate::read::BatchChecker::default();
                 while let Some(batch) = reader
                     .next_batch()
                     .await
@@ -240,9 +242,19 @@ impl SeqScan {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
 
+                    debug_assert!(!batch.is_empty());
                     if batch.is_empty() {
                         continue;
                     }
+
+                    #[cfg(debug_assertions)]
+                    checker.ensure_part_range_batch(
+                        "SeqScan",
+                        stream_ctx.input.mapper.metadata().region_id,
+                        partition,
+                        part_range,
+                        &batch,
+                    );
 
                     let convert_start = Instant::now();
                     let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
