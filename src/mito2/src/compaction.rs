@@ -63,10 +63,13 @@ use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
 };
-use crate::schedule::scheduler::SchedulerRef;
+use crate::schedule::scheduler::{Job, Priority, SchedulerRef};
 use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
+
+/// Compaction tasks deadline
+const COMPACTION_TASK_DEADLINE: Duration = Duration::from_secs(5 * 60);
 
 /// Region compaction request.
 pub struct CompactionRequest {
@@ -141,6 +144,7 @@ impl CompactionScheduler {
         access_layer: &AccessLayerRef,
         waiter: OptionOutputTx,
         manifest_ctx: &ManifestContextRef,
+        manual: bool,
     ) -> Result<()> {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             // Region is compacting. Add the waiter to pending list.
@@ -161,7 +165,7 @@ impl CompactionScheduler {
         );
         self.region_status.insert(region_id, status);
         let result = self
-            .schedule_compaction_request(request, compact_options)
+            .schedule_compaction_request(request, compact_options, manual)
             .await;
 
         self.listener.on_compaction_scheduled(region_id);
@@ -192,6 +196,7 @@ impl CompactionScheduler {
             .schedule_compaction_request(
                 request,
                 compact_request::Options::Regular(Default::default()),
+                false,
             )
             .await
         {
@@ -239,6 +244,7 @@ impl CompactionScheduler {
         &mut self,
         request: CompactionRequest,
         options: compact_request::Options,
+        manual: bool,
     ) -> Result<()> {
         let picker = new_picker(
             &options,
@@ -257,9 +263,15 @@ impl CompactionScheduler {
             manifest_ctx,
             listener,
         } = request;
+
+        let priority = if manual {
+            Priority::High
+        } else {
+            Priority::Low(Some(COMPACTION_TASK_DEADLINE))
+        };
         debug!(
-            "Pick compaction strategy {:?} for region: {}",
-            picker, region_id
+            "Pick compaction strategy {:?} for region: {}, priority: {:?}",
+            picker, region_id, priority
         );
 
         let compaction_region = CompactionRegion {
@@ -362,9 +374,13 @@ impl CompactionScheduler {
 
         // Submit the compaction task.
         self.scheduler
-            .schedule(Box::pin(async move {
-                local_compaction_task.run().await;
-            }))
+            .schedule(Job::new(
+                "compaction",
+                priority,
+                Box::pin(async move {
+                    local_compaction_task.run().await;
+                }),
+            ))
             .map_err(|e| {
                 error!(e; "Failed to submit compaction request for region {}", region_id);
                 // If failed to submit the job, we need to remove the region from the scheduler.
@@ -667,6 +683,7 @@ mod tests {
                 &env.access_layer,
                 waiter,
                 &manifest_ctx,
+                false,
             )
             .await
             .unwrap();
@@ -686,6 +703,7 @@ mod tests {
                 &env.access_layer,
                 waiter,
                 &manifest_ctx,
+                false,
             )
             .await
             .unwrap();
@@ -726,6 +744,7 @@ mod tests {
                 &env.access_layer,
                 OptionOutputTx::none(),
                 &manifest_ctx,
+                false,
             )
             .await
             .unwrap();
@@ -755,6 +774,7 @@ mod tests {
                 &env.access_layer,
                 OptionOutputTx::none(),
                 &manifest_ctx,
+                false,
             )
             .await
             .unwrap();
@@ -789,6 +809,7 @@ mod tests {
                 &env.access_layer,
                 OptionOutputTx::none(),
                 &manifest_ctx,
+                false,
             )
             .await
             .unwrap();

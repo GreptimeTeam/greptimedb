@@ -24,7 +24,7 @@ use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutp
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
-    /// Handles compaction request submitted to region worker.
+    /// Handles manual compaction request submitted to region worker.
     pub(crate) async fn handle_compaction_request(
         &mut self,
         region_id: RegionId,
@@ -44,6 +44,7 @@ impl<S> RegionWorkerLoop<S> {
                 &region.access_layer,
                 sender,
                 &region.manifest_ctx,
+                true,
             )
             .await
         {
@@ -93,7 +94,7 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// Schedule compaction for the region if necessary.
-    pub(crate) async fn schedule_compaction(&mut self, region: &MitoRegionRef) {
+    pub(crate) async fn schedule_compaction(&mut self, region: &MitoRegionRef, manual: bool) {
         let now = self.time_provider.current_time_millis();
         if now - region.last_compaction_millis()
             >= self.config.min_compaction_interval.as_millis() as i64
@@ -107,6 +108,7 @@ impl<S> RegionWorkerLoop<S> {
                     &region.access_layer,
                     OptionOutputTx::none(),
                     &region.manifest_ctx,
+                    manual,
                 )
                 .await
             {
