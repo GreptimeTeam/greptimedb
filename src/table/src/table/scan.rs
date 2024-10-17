@@ -101,6 +101,12 @@ impl RegionScanExec {
         ranges
     }
 
+    /// Similiar to [`Self::get_partition_ranges`] but don't collapse the ranges.
+    pub fn get_uncollapsed_partition_ranges(&self) -> Vec<Vec<PartitionRange>> {
+        let scanner = self.scanner.lock().unwrap();
+        scanner.properties().partitions.clone()
+    }
+
     /// Update the partition ranges of underlying scanner.
     pub fn with_new_partitions(
         &self,
@@ -124,6 +130,15 @@ impl RegionScanExec {
             append_mode: self.append_mode,
             total_rows: self.total_rows,
         })
+    }
+
+    pub fn time_index(&self) -> Option<String> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .schema()
+            .timestamp_column()
+            .map(|x| x.name.clone())
     }
 }
 

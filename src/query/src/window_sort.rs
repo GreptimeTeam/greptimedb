@@ -57,30 +57,51 @@ use crate::error::{QueryExecutionSnafu, Result};
 ///
 /// internally, it call [`streaming_merge`] multiple times to merge multiple sorted "working ranges"
 ///
-/// the input stream must be concated in the order of `PartitionRange` in `ranges`(and each `PartitionRange` is sorted within itself), or else the result will be incorrect
+/// the input stream must be concated in the order of `PartitionRange` in `ranges`(and each `PartitionRange`
+/// is sorted within itself), or else the result will be incorrect.
 #[derive(Debug, Clone)]
 pub struct WindowedSortExec {
     /// Physical sort expressions(that is, sort by timestamp)
     expression: PhysicalSortExpr,
     /// Optional number of rows to fetch. Stops producing rows after this fetch
     fetch: Option<usize>,
-    /// The input ranges indicate input stream will be composed of those ranges in given order
-    ranges: Vec<PartitionRange>,
+    /// The input ranges indicate input stream will be composed of those ranges in given order.
+    ///
+    /// Each partition has one vector of `PartitionRange`.
+    ranges: Vec<Vec<PartitionRange>>,
     /// All available working ranges and their corresponding working set
     ///
-    /// working ranges promise once input stream get a value out of current range, future values will never be in this range
-    all_avail_working_range: Vec<(TimeRange, BTreeSet<usize>)>,
+    /// working ranges promise once input stream get a value out of current range, future values will never
+    /// be in this range. Each partition has one vector of ranges.
+    all_avail_working_range: Vec<Vec<(TimeRange, BTreeSet<usize>)>>,
     input: Arc<dyn ExecutionPlan>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
     properties: PlanProperties,
 }
 
-fn check_partition_range_monotonicity(ranges: &[PartitionRange], descending: bool) -> bool {
-    if descending {
-        ranges.windows(2).all(|w| w[0].end >= w[1].end)
+fn check_partition_range_monotonicity(
+    ranges: &[Vec<PartitionRange>],
+    descending: bool,
+) -> Result<()> {
+    let is_valid = ranges.iter().all(|r| {
+        if descending {
+            r.windows(2).all(|w| w[0].end >= w[1].end)
+        } else {
+            r.windows(2).all(|w| w[0].start <= w[1].start)
+        }
+    });
+
+    if !is_valid {
+        let msg = if descending {
+            "Input `PartitionRange`s's upper bound is not monotonic non-increase"
+        } else {
+            "Input `PartitionRange`s's lower bound is not monotonic non-decrease"
+        };
+        let plain_error = PlainError::new(msg.to_string(), StatusCode::Unexpected);
+        Err(BoxedError::new(plain_error)).context(QueryExecutionSnafu {})
     } else {
-        ranges.windows(2).all(|w| w[0].start <= w[1].start)
+        Ok(())
     }
 }
 
@@ -88,18 +109,10 @@ impl WindowedSortExec {
     pub fn try_new(
         expression: PhysicalSortExpr,
         fetch: Option<usize>,
-        ranges: Vec<PartitionRange>,
+        ranges: Vec<Vec<PartitionRange>>,
         input: Arc<dyn ExecutionPlan>,
     ) -> Result<Self> {
-        if !check_partition_range_monotonicity(&ranges, expression.options.descending) {
-            let msg = if expression.options.descending {
-                "Input `PartitionRange`s's upper bound is not monotonic non-increase"
-            } else {
-                "Input `PartitionRange`s's lower bound is not monotonic non-decrease"
-            };
-            let plain_error = PlainError::new(msg.to_string(), StatusCode::Unexpected);
-            return Err(BoxedError::new(plain_error)).context(QueryExecutionSnafu {});
-        }
+        check_partition_range_monotonicity(&ranges, expression.options.descending)?;
 
         let properties = PlanProperties::new(
             input.equivalence_properties().clone(),
@@ -107,9 +120,14 @@ impl WindowedSortExec {
             input.execution_mode(),
         );
 
-        let overlap_counts = split_overlapping_ranges(&ranges);
-        let all_avail_working_range =
-            compute_all_working_ranges(&overlap_counts, expression.options.descending);
+        let mut all_avail_working_range = Vec::with_capacity(ranges.len());
+        for r in &ranges {
+            let overlap_counts = split_overlapping_ranges(r);
+            let working_ranges =
+                compute_all_working_ranges(&overlap_counts, expression.options.descending);
+            all_avail_working_range.push(working_ranges);
+        }
+
         Ok(Self {
             expression,
             fetch,
@@ -122,7 +140,8 @@ impl WindowedSortExec {
     }
 
     /// During receiving partial-sorted RecordBatch, we need to update the working set which is the
-    /// `PartitionRange` we think those RecordBatch belongs to. And when we receive something outside of working set, we can merge results before whenever possible.
+    /// `PartitionRange` we think those RecordBatch belongs to. And when we receive something outside
+    /// of working set, we can merge results before whenever possible.
     pub fn to_stream(
         &self,
         context: Arc<TaskContext>,
@@ -131,7 +150,12 @@ impl WindowedSortExec {
         let input_stream: DfSendableRecordBatchStream =
             self.input.execute(partition, context.clone())?;
 
-        let df_stream = Box::pin(WindowedSortStream::new(context, self, input_stream)) as _;
+        let df_stream = Box::pin(WindowedSortStream::new(
+            context,
+            self,
+            input_stream,
+            partition,
+        )) as _;
 
         Ok(df_stream)
     }
@@ -239,6 +263,7 @@ impl WindowedSortStream {
         context: Arc<TaskContext>,
         exec: &WindowedSortExec,
         input: DfSendableRecordBatchStream,
+        partition: usize,
     ) -> Self {
         Self {
             memory_pool: context.runtime_env().memory_pool.clone(),
@@ -255,7 +280,7 @@ impl WindowedSortStream {
             fetch: exec.fetch,
             produced: 0,
             batch_size: context.session_config().batch_size(),
-            all_avail_working_range: exec.all_avail_working_range.clone(),
+            all_avail_working_range: exec.all_avail_working_range[partition].clone(),
             metrics: exec.metrics.clone(),
         }
     }
@@ -990,7 +1015,8 @@ fn compute_all_working_ranges(
         match &mut cur_range_set {
             None => cur_range_set = Some((*range, BTreeSet::from_iter(set.iter().cloned()))),
             Some((working_range, working_set)) => {
-                // if next overlap range have Partition that's is not last one in `working_set`(hence need to be read before merge sorting), and `working_set` have >1 count
+                // if next overlap range have Partition that's is not last one in `working_set`(hence need
+                // to be read before merge sorting), and `working_set` have >1 count
                 // we have to expand current working range to cover it(and add it's `set` to `working_set`)
                 // so that merge sort is possible
                 let need_expand = {
@@ -2410,7 +2436,7 @@ mod test {
             let exec = WindowedSortExec::try_new(
                 self.expression.clone(),
                 self.fetch,
-                ranges,
+                vec![ranges],
                 Arc::new(mock_input),
             )
             .unwrap();

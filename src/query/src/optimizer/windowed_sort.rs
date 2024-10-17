@@ -12,20 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::SemanticType;
 use arrow_schema::SortOptions;
 use common_recordbatch::OrderOption;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{Column, Result as DataFusionResult};
 use datafusion_expr::expr::Sort;
 use datafusion_expr::{utils, Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
+use datafusion_physical_expr::expressions::Column as PhysicalColumn;
 use store_api::region_engine::PartitionRange;
 use store_api::storage::TimeSeriesRowSelector;
+use table::table::scan::RegionScanExec;
 
 use crate::dummy_catalog::DummyTableProvider;
+use crate::plan::windowed_sort::WindowedSort;
+use crate::window_sort::WindowedSortExec;
 
 /// Optimize rule for windowed sort.
 ///
@@ -212,14 +223,14 @@ pub struct WindowedSortPhysicalRule;
 impl PhysicalOptimizerRule for WindowedSortPhysicalRule {
     fn optimize(
         &self,
-        plan: std::sync::Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        plan: Arc<dyn ExecutionPlan>,
         config: &datafusion::config::ConfigOptions,
-    ) -> DataFusionResult<std::sync::Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
-        todo!()
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        Self::do_optimize(plan, config)
     }
 
     fn name(&self) -> &str {
-        "WindowedSortPhysicalRule"
+        "WindowedSortRule"
     }
 
     fn schema_check(&self) -> bool {
@@ -229,9 +240,85 @@ impl PhysicalOptimizerRule for WindowedSortPhysicalRule {
 
 impl WindowedSortPhysicalRule {
     fn do_optimize(
-        plan: std::sync::Arc<dyn datafusion::physical_plan::ExecutionPlan>,
-        config: &datafusion::config::ConfigOptions,
-    ) -> DataFusionResult<std::sync::Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
-        todo!()
+        plan: Arc<dyn ExecutionPlan>,
+        _config: &datafusion::config::ConfigOptions,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let result = plan
+            .transform_down(|plan| {
+                if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
+                    // TODO: support multiple expr in windowed sort
+                    if !sort_exec.preserve_partitioning() || sort_exec.expr().len() != 1 {
+                        return Ok(Transformed::no(plan));
+                    }
+
+                    let Some(scanner_info) = fetch_partition_range(sort_exec.input().clone())?
+                    else {
+                        return Ok(Transformed::no(plan));
+                    };
+
+                    if let Some(first_sort_expr) = sort_exec.expr().first()
+                        && let Some(column_expr) = first_sort_expr
+                            .expr
+                            .as_any()
+                            .downcast_ref::<PhysicalColumn>()
+                        && column_expr.name() == &scanner_info.time_index
+                    {
+                    } else {
+                        return Ok(Transformed::no(plan));
+                    }
+
+                    // TODO: append another pre-sort plan
+                    let windowed_sort_exec = WindowedSortExec::try_new(
+                        sort_exec.expr().first().unwrap().clone(),
+                        sort_exec.fetch(),
+                        scanner_info.partition_ranges,
+                        sort_exec.input().clone(),
+                    )?;
+
+                    return Ok(Transformed::yes(Arc::new(windowed_sort_exec)));
+                }
+
+                Ok(Transformed::no(plan))
+            })?
+            .data;
+
+        Ok(result)
     }
+}
+
+struct ScannerInfo {
+    partition_ranges: Vec<Vec<PartitionRange>>,
+    time_index: String,
+}
+
+fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Option<ScannerInfo>> {
+    let mut partition_ranges = None;
+    let mut time_index = None;
+
+    input.transform_up(|plan| {
+        // Unappliable case, reset the result.
+        if plan.as_any().is::<RepartitionExec>()
+            || plan.as_any().is::<CoalesceBatchesExec>()
+            || plan.as_any().is::<CoalescePartitionsExec>()
+            || plan.as_any().is::<SortExec>()
+        {
+            partition_ranges = None;
+        }
+
+        if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
+            partition_ranges = Some(region_scan_exec.get_uncollapsed_partition_ranges());
+            time_index = region_scan_exec.time_index();
+        }
+
+        Ok(Transformed::no(plan))
+    })?;
+
+    let result = try {
+        ScannerInfo {
+            partition_ranges: partition_ranges?,
+            time_index: time_index?,
+        }
+    };
+
+    Ok(result)
 }
