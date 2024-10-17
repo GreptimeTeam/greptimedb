@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["MultiDimPartitionRule","RuleChecker","SplitPoint"],"type":["Axis"]};

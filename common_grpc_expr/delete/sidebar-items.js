@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["to_table_delete_request"]};

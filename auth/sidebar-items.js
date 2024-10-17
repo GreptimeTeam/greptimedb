@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Identity","Password","PermissionReq","PermissionResp"],"fn":["auth_mysql","user_provider_from_option","userinfo_by_name"],"mod":["common","error","permission","user_info","user_provider"],"trait":["PermissionChecker","UserInfo","UserProvider"],"type":["HashedPassword","PermissionCheckerRef","UserInfoRef","UserProviderRef"]};
