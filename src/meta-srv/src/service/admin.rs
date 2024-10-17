@@ -30,7 +30,7 @@ use tonic::server::NamedService;
 
 use crate::metasrv::Metasrv;
 
-pub fn make_admin_service(metasrv: Metasrv) -> Admin {
+pub fn make_admin_service(metasrv: Arc<Metasrv>) -> Admin {
     let router = Router::new().route("/health", health::HealthHandler);
 
     let router = router.route(

@@ -210,6 +210,37 @@ where
         self.transformer.transform_mut(val)
     }
 
+    pub fn prepare_pipeline_value(&self, val: Value, result: &mut [Value]) -> Result<()> {
+        match val {
+            Value::Map(map) => {
+                let mut search_from = 0;
+                // because of the key in the json map is ordered
+                for (payload_key, payload_value) in map.values.into_iter() {
+                    if search_from >= self.required_keys.len() {
+                        break;
+                    }
+
+                    // because of map key is ordered, required_keys is ordered too
+                    if let Some(pos) = self.required_keys[search_from..]
+                        .iter()
+                        .position(|k| k == &payload_key)
+                    {
+                        result[search_from + pos] = payload_value;
+                        // next search from is always after the current key
+                        search_from += pos;
+                    }
+                }
+            }
+            Value::String(_) => {
+                result[0] = val;
+            }
+            _ => {
+                return PrepareValueMustBeObjectSnafu.fail();
+            }
+        }
+        Ok(())
+    }
+
     pub fn prepare(&self, val: serde_json::Value, result: &mut [Value]) -> Result<()> {
         match val {
             serde_json::Value::Object(map) => {
@@ -284,6 +315,11 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
         .iter()
         .position(|k| k == key)
         .context(IntermediateKeyIndexSnafu { kind, key })
+}
+
+pub enum PipelineWay {
+    Identity,
+    Custom(std::sync::Arc<Pipeline<crate::GreptimeTransformer>>),
 }
 
 #[cfg(test)]

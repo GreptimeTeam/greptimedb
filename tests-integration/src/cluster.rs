@@ -72,7 +72,7 @@ pub struct GreptimeDbCluster {
 
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
     pub kv_backend: KvBackendRef,
-    pub metasrv: Metasrv,
+    pub metasrv: Arc<Metasrv>,
     pub frontend: Arc<FeInstance>,
 }
 

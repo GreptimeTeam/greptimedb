@@ -70,8 +70,7 @@ impl SlowQueryTimer {
                 slow!(
                     cost = elapsed.as_millis() as u64,
                     threshold = threshold.as_millis() as u64,
-                    // TODO(zyy17): It's better to implement Display for EvalStmt for pretty print.
-                    promql = format!("{:?}", stmt)
+                    promql = stmt.to_string()
                 );
             }
         }

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use client::client_manager::NodeClients;
@@ -371,8 +371,8 @@ impl MetasrvBuilder {
             selector,
             // TODO(jeremy): We do not allow configuring the flow selector.
             flow_selector: Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)),
-            handler_group: None,
-            handler_group_builder: Some(handler_group_builder),
+            handler_group: RwLock::new(None),
+            handler_group_builder: Mutex::new(Some(handler_group_builder)),
             election,
             procedure_manager,
             mailbox,

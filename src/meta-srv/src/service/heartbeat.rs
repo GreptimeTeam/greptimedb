@@ -46,12 +46,9 @@ impl heartbeat_server::Heartbeat for Metasrv {
     ) -> GrpcResult<Self::HeartbeatStream> {
         let mut in_stream = req.into_inner();
         let (tx, rx) = mpsc::channel(128);
-        let handler_group = self
-            .handler_group()
-            .clone()
-            .context(error::UnexpectedSnafu {
-                violated: "expected heartbeat handlers",
-            })?;
+        let handler_group = self.handler_group().context(error::UnexpectedSnafu {
+            violated: "expected heartbeat handlers",
+        })?;
 
         let ctx = self.new_ctx();
         let _handle = common_runtime::spawn_global(async move {

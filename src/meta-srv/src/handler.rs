@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use api::v1::meta::mailbox_message::Payload;
@@ -210,7 +210,7 @@ impl Pushers {
 }
 
 #[derive(Clone)]
-struct NameCachedHandler {
+pub struct NameCachedHandler {
     name: &'static str,
     handler: Arc<dyn HeartbeatHandler>,
 }
@@ -443,7 +443,6 @@ impl Mailbox for HeartbeatMailbox {
 }
 
 /// The builder to build the group of heartbeat handlers.
-#[derive(Clone)]
 pub struct HeartbeatHandlerGroupBuilder {
     /// The handler to handle region failure.
     region_failure_handler: Option<RegionFailureHandler>,
@@ -547,15 +546,27 @@ impl HeartbeatHandlerGroupBuilder {
         })
     }
 
+    fn add_handler_after_inner(&mut self, target: &str, handler: NameCachedHandler) -> Result<()> {
+        if let Some(pos) = self.handlers.iter().position(|x| x.name == target) {
+            self.handlers.insert(pos + 1, handler);
+            return Ok(());
+        }
+
+        error::HandlerNotFoundSnafu { name: target }.fail()
+    }
+
     /// Adds the handler after the specified handler.
     pub fn add_handler_after(
         &mut self,
         target: &'static str,
         handler: impl HeartbeatHandler + 'static,
     ) -> Result<()> {
+        self.add_handler_after_inner(target, NameCachedHandler::new(handler))
+    }
+
+    fn add_handler_before_inner(&mut self, target: &str, handler: NameCachedHandler) -> Result<()> {
         if let Some(pos) = self.handlers.iter().position(|x| x.name == target) {
-            self.handlers
-                .insert(pos + 1, NameCachedHandler::new(handler));
+            self.handlers.insert(pos, handler);
             return Ok(());
         }
 
@@ -568,8 +579,12 @@ impl HeartbeatHandlerGroupBuilder {
         target: &'static str,
         handler: impl HeartbeatHandler + 'static,
     ) -> Result<()> {
+        self.add_handler_before_inner(target, NameCachedHandler::new(handler))
+    }
+
+    fn replace_handler_inner(&mut self, target: &str, handler: NameCachedHandler) -> Result<()> {
         if let Some(pos) = self.handlers.iter().position(|x| x.name == target) {
-            self.handlers.insert(pos, NameCachedHandler::new(handler));
+            self.handlers[pos] = handler;
             return Ok(());
         }
 
@@ -582,25 +597,115 @@ impl HeartbeatHandlerGroupBuilder {
         target: &'static str,
         handler: impl HeartbeatHandler + 'static,
     ) -> Result<()> {
-        if let Some(pos) = self.handlers.iter().position(|x| x.name == target) {
-            self.handlers[pos] = NameCachedHandler::new(handler);
-            return Ok(());
-        }
+        self.replace_handler_inner(target, NameCachedHandler::new(handler))
+    }
 
-        error::HandlerNotFoundSnafu { name: target }.fail()
+    fn add_handler_last_inner(&mut self, handler: NameCachedHandler) {
+        self.handlers.push(handler);
     }
 
     fn add_handler_last(&mut self, handler: impl HeartbeatHandler + 'static) {
-        self.handlers.push(NameCachedHandler::new(handler));
+        self.add_handler_last_inner(NameCachedHandler::new(handler));
     }
 }
 
 pub type HeartbeatHandlerGroupBuilderCustomizerRef =
     Arc<dyn HeartbeatHandlerGroupBuilderCustomizer>;
 
+pub enum CustomizeHeartbeatGroupAction {
+    AddHandlerAfter {
+        target: String,
+        handler: NameCachedHandler,
+    },
+    AddHandlerBefore {
+        target: String,
+        handler: NameCachedHandler,
+    },
+    ReplaceHandler {
+        target: String,
+        handler: NameCachedHandler,
+    },
+    AddHandlerLast {
+        handler: NameCachedHandler,
+    },
+}
+
+impl CustomizeHeartbeatGroupAction {
+    pub fn new_add_handler_after(
+        target: &'static str,
+        handler: impl HeartbeatHandler + 'static,
+    ) -> Self {
+        Self::AddHandlerAfter {
+            target: target.to_string(),
+            handler: NameCachedHandler::new(handler),
+        }
+    }
+
+    pub fn new_add_handler_before(
+        target: &'static str,
+        handler: impl HeartbeatHandler + 'static,
+    ) -> Self {
+        Self::AddHandlerBefore {
+            target: target.to_string(),
+            handler: NameCachedHandler::new(handler),
+        }
+    }
+
+    pub fn new_replace_handler(
+        target: &'static str,
+        handler: impl HeartbeatHandler + 'static,
+    ) -> Self {
+        Self::ReplaceHandler {
+            target: target.to_string(),
+            handler: NameCachedHandler::new(handler),
+        }
+    }
+
+    pub fn new_add_handler_last(handler: impl HeartbeatHandler + 'static) -> Self {
+        Self::AddHandlerLast {
+            handler: NameCachedHandler::new(handler),
+        }
+    }
+}
+
 /// The customizer of the [`HeartbeatHandlerGroupBuilder`].
 pub trait HeartbeatHandlerGroupBuilderCustomizer: Send + Sync {
     fn customize(&self, builder: &mut HeartbeatHandlerGroupBuilder) -> Result<()>;
+
+    fn add_action(&self, action: CustomizeHeartbeatGroupAction);
+}
+
+#[derive(Default)]
+pub struct DefaultHeartbeatHandlerGroupBuilderCustomizer {
+    actions: Mutex<Vec<CustomizeHeartbeatGroupAction>>,
+}
+
+impl HeartbeatHandlerGroupBuilderCustomizer for DefaultHeartbeatHandlerGroupBuilderCustomizer {
+    fn customize(&self, builder: &mut HeartbeatHandlerGroupBuilder) -> Result<()> {
+        info!("Customizing the heartbeat handler group builder");
+        let mut actions = self.actions.lock().unwrap();
+        for action in actions.drain(..) {
+            match action {
+                CustomizeHeartbeatGroupAction::AddHandlerAfter { target, handler } => {
+                    builder.add_handler_after_inner(&target, handler)?;
+                }
+                CustomizeHeartbeatGroupAction::AddHandlerBefore { target, handler } => {
+                    builder.add_handler_before_inner(&target, handler)?;
+                }
+                CustomizeHeartbeatGroupAction::ReplaceHandler { target, handler } => {
+                    builder.replace_handler_inner(&target, handler)?;
+                }
+                CustomizeHeartbeatGroupAction::AddHandlerLast { handler } => {
+                    builder.add_handler_last_inner(handler);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn add_action(&self, action: CustomizeHeartbeatGroupAction) {
+        self.actions.lock().unwrap().push(action);
+    }
 }
 
 #[cfg(test)]

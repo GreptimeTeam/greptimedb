@@ -65,7 +65,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.9.3"
+version = "0.9.4"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -138,12 +138,13 @@ opentelemetry-proto = { version = "0.5", features = [
     "metrics",
     "trace",
     "with-serde",
+    "logs",
 ] }
 parquet = { version = "51.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.4" }
+promql-parser = { version = "0.4.1" }
 prost = "0.12"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
