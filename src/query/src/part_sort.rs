@@ -13,43 +13,29 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use arrow::array::types::{
-    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-    TimestampSecondType,
-};
-use arrow::array::{Array, ArrayRef, PrimitiveArray};
-use arrow::compute::{concat, take_record_batch, SortColumn};
-use arrow_schema::{DataType, SchemaRef, SortOptions};
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
+use arrow::array::Array;
+use arrow::compute::{concat, take_record_batch};
+use arrow_schema::SchemaRef;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
-use common_time::Timestamp;
 use datafusion::common::arrow::compute::sort_to_indices;
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::execution::{RecordBatchStream, TaskContext};
 use datafusion::physical_plan::coalesce_batches::concat_batches;
-use datafusion::physical_plan::memory::MemoryStream;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::sorts::sort::SortExec;
-use datafusion::physical_plan::sorts::streaming_merge::streaming_merge;
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
 };
-use datafusion_common::utils::bisect;
 use datafusion_common::{internal_err, DataFusionError};
 use datafusion_physical_expr::PhysicalSortExpr;
-use datatypes::value::Value;
 use futures::Stream;
 use itertools::Itertools;
-use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
 
-use crate::error::{QueryExecutionSnafu, Result};
+use crate::error::Result;
 
 /// Sort input within given PartitionRange
 ///
@@ -171,8 +157,6 @@ struct PartSortStream {
     input: DfSendableRecordBatchStream,
     input_complete: bool,
     schema: SchemaRef,
-    /// The input ranges indicate input stream will be composed of those ranges in given order
-    ranges: Vec<PartitionRange>,
     /// The current PartitionRange's index
     range_idx: usize,
 }
@@ -193,7 +177,6 @@ impl PartSortStream {
             input,
             input_complete: false,
             schema: sort.input.schema(),
-            ranges: sort.ranges.clone(),
             range_idx: 0,
         }
     }
@@ -328,9 +311,9 @@ mod test {
     use std::io::Write;
     use std::sync::Arc;
 
-    use arrow::array::TimestampSecondArray;
     use arrow::json::ArrayWriter;
-    use arrow_schema::{Field, Schema, TimeUnit};
+    use arrow_schema::{DataType, Field, Schema, SortOptions, TimeUnit};
+    use common_time::Timestamp;
     use datafusion_physical_expr::expressions::Column;
     use futures::StreamExt;
 
