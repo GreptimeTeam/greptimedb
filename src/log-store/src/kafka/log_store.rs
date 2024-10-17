@@ -205,7 +205,7 @@ impl LogStore for KafkaLogStore {
     async fn read(
         &self,
         provider: &Provider,
-        entry_id: EntryId,
+        mut entry_id: EntryId,
         index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
         let provider = provider
@@ -224,6 +224,22 @@ impl LogStore for KafkaLogStore {
             .await?
             .client()
             .clone();
+
+        let start_offset = client
+            .get_offset(OffsetAt::Earliest)
+            .await
+            .context(GetOffsetSnafu {
+                topic: &provider.topic,
+            })?;
+
+        if entry_id as i64 <= start_offset {
+            warn!(
+                "The entry_id: {} is less than start_offset: {}, topic: {}. Overwriting entry_id with start_offset",
+                entry_id, start_offset, &provider.topic
+            );
+
+            entry_id = start_offset as u64;
+        }
 
         // Gets the offset of the latest record in the topic. Actually, it's the latest record of the single partition in the topic.
         // The read operation terminates when this record is consumed.
