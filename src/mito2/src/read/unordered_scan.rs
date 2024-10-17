@@ -150,6 +150,10 @@ impl UnorderedScan {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
 
+                    if batch.is_empty() {
+                        continue;
+                    }
+
                     let convert_start = Instant::now();
                     let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
                     metrics.convert_cost += convert_start.elapsed();
@@ -159,6 +163,12 @@ impl UnorderedScan {
 
                     fetch_start = Instant::now();
                 }
+
+                // Yields an empty part to indicate this range is terminated.
+                // The query engine can use this to optimize some queries.
+                let yield_start = Instant::now();
+                yield stream_ctx.input.mapper.empty_record_batch();
+                metrics.yield_cost += yield_start.elapsed();
 
                 metrics.scan_cost += fetch_start.elapsed();
                 part_metrics.merge_metrics(&metrics);
