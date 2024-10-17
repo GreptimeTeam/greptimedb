@@ -129,6 +129,7 @@ impl UnorderedScan {
         );
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
+        let distinguish_range = self.properties.distinguish_partition_range();
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
@@ -178,9 +179,11 @@ impl UnorderedScan {
 
                 // Yields an empty part to indicate this range is terminated.
                 // The query engine can use this to optimize some queries.
-                let yield_start = Instant::now();
-                yield stream_ctx.input.mapper.empty_record_batch();
-                metrics.yield_cost += yield_start.elapsed();
+                if distinguish_range {
+                    let yield_start = Instant::now();
+                    yield stream_ctx.input.mapper.empty_record_batch();
+                    metrics.yield_cost += yield_start.elapsed();
+                }
 
                 metrics.scan_cost += fetch_start.elapsed();
                 part_metrics.merge_metrics(&metrics);

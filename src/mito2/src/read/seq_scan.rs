@@ -203,6 +203,7 @@ impl SeqScan {
         let semaphore = self.semaphore.clone();
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
+        let distinguish_range = self.properties.distinguish_partition_range();
         let part_metrics = PartitionMetrics::new(
             self.stream_ctx.input.mapper.metadata().region_id,
             partition,
@@ -268,7 +269,7 @@ impl SeqScan {
 
                 // Yields an empty part to indicate this range is terminated.
                 // The query engine can use this to optimize some queries.
-                if !compaction {
+                if distinguish_range {
                     let yield_start = Instant::now();
                     yield stream_ctx.input.mapper.empty_record_batch();
                     metrics.yield_cost += yield_start.elapsed();
