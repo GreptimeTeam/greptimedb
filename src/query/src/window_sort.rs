@@ -31,6 +31,7 @@ use arrow_schema::{DataType, SchemaRef, SortOptions};
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
+use common_telemetry::error;
 use common_time::Timestamp;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
 use datafusion::execution::{RecordBatchStream, TaskContext};
@@ -376,9 +377,11 @@ impl WindowedSortStream {
 
                         if sort_column.options.unwrap_or_default().descending {
                             if cur_range.end > working_range.end {
+                                error!("Invalid range: {:?} > {:?}", cur_range, working_range);
                                 internal_err!("Current batch have data on the right side of working range, something is very wrong")?;
                             }
                         } else if cur_range.start < working_range.start {
+                            error!("Invalid range: {:?} < {:?}", cur_range, working_range);
                             internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
                         }
 
@@ -1119,7 +1122,7 @@ fn get_timestamp_from_idx(
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use std::io::Write;
     use std::sync::Arc;
 
@@ -2424,14 +2427,14 @@ mod test {
     }
 
     #[derive(Debug)]
-    struct MockInputExec {
+    pub struct MockInputExec {
         input: Vec<DfRecordBatch>,
         schema: SchemaRef,
         properties: PlanProperties,
     }
 
     impl MockInputExec {
-        fn new(input: Vec<DfRecordBatch>, schema: SchemaRef) -> Self {
+        pub fn new(input: Vec<DfRecordBatch>, schema: SchemaRef) -> Self {
             Self {
                 properties: PlanProperties::new(
                     EquivalenceProperties::new(schema.clone()),
@@ -3045,7 +3048,7 @@ mod test {
         }
     }
 
-    fn new_array(unit: TimeUnit, arr: Vec<i64>) -> ArrayRef {
+    pub fn new_array(unit: TimeUnit, arr: Vec<i64>) -> ArrayRef {
         match unit {
             TimeUnit::Second => Arc::new(TimestampSecondArray::from_iter_values(arr)) as ArrayRef,
             TimeUnit::Millisecond => {
@@ -3067,6 +3070,7 @@ mod test {
         let range_size_bound = 100;
         let range_offset_bound = 100;
         let in_range_datapoint_cnt_bound = 100;
+        let fetch_bound = 100;
 
         let mut rng = fastrand::Rng::new();
         rng.seed(1337);
@@ -3087,6 +3091,11 @@ mod test {
                 1 => TimeUnit::Millisecond,
                 2 => TimeUnit::Microsecond,
                 _ => TimeUnit::Nanosecond,
+            };
+            let fetch = if rng.bool() {
+                Some(rng.usize(0..fetch_bound))
+            } else {
+                None
             };
 
             let mut input_ranged_data = vec![];
@@ -3130,6 +3139,9 @@ mod test {
             }
 
             output_data.sort_by(ret_cmp_fn(descending));
+            if let Some(fetch) = fetch {
+                output_data.truncate(fetch);
+            }
             let output_arr = new_array(unit.clone(), output_data);
 
             let test_stream = TestStream::new(
@@ -3138,7 +3150,7 @@ mod test {
                     descending,
                     nulls_first: true,
                 },
-                None,
+                fetch,
                 vec![Field::new(
                     "ts",
                     DataType::Timestamp(unit.clone(), None),
