@@ -20,9 +20,14 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
-use ahash::HashSet;
+use std::collections::BTreeMap;
+
+use ahash::{HashSet, HashSetExt};
 use common_telemetry::debug;
-use error::{IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, YamlLoadSnafu};
+use error::{
+    IntermediateKeyIndexSnafu, OpenTelemetrySelectInfoDuplicateSnafu,
+    PrepareValueMustBeObjectSnafu, YamlLoadSnafu,
+};
 use itertools::Itertools;
 use processor::{Processor, ProcessorBuilder, Processors};
 use snafu::{OptionExt, ResultExt};
@@ -317,8 +322,62 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
         .context(IntermediateKeyIndexSnafu { kind, key })
 }
 
+#[derive(Default)]
+pub struct SelectInfo {
+    pub scope_attributes: BTreeMap<String, String>,
+    pub log_attributes: BTreeMap<String, String>,
+    pub resource_attributes: BTreeMap<String, String>,
+    pub keys: HashSet<String>,
+}
+
+//attr1:attr1,attr2:attr2
+fn parse_select(
+    select: &str,
+    map: &mut BTreeMap<String, String>,
+    keys: &mut HashSet<String>,
+) -> Result<()> {
+    for attr in select.split(',') {
+        let parts: Vec<&str> = attr.split(':').collect();
+        if parts.len() == 2 {
+            map.insert(parts[0].to_string(), parts[1].to_string());
+            if keys.contains(parts[0]) {
+                return OpenTelemetrySelectInfoDuplicateSnafu { key: parts[0] }.fail();
+            } else {
+                keys.insert(parts[0].to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+impl TryFrom<String> for SelectInfo {
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        let mut scope_attributes = BTreeMap::new();
+        let mut log_attributes = BTreeMap::new();
+        let mut resource_attributes = BTreeMap::new();
+        let mut keys: HashSet<String> = HashSet::new();
+        for (idx, select) in value.split(';').enumerate() {
+            match idx {
+                0 => parse_select(select, &mut resource_attributes, &mut keys)?,
+                1 => parse_select(select, &mut scope_attributes, &mut keys)?,
+                2 => parse_select(select, &mut log_attributes, &mut keys)?,
+                _ => {}
+            }
+        }
+
+        Ok(SelectInfo {
+            scope_attributes,
+            log_attributes,
+            resource_attributes,
+            keys,
+        })
+    }
+
+    type Error = error::Error;
+}
+
 pub enum PipelineWay {
-    Identity,
+    BuildInOtlpLog(Box<SelectInfo>),
     Custom(std::sync::Arc<Pipeline<crate::GreptimeTransformer>>),
 }
 

@@ -1600,10 +1600,16 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     // write traces data
     let res = send_req(
         &client,
-        vec![(
-            HeaderName::from_static("x-greptime-log-table-name"),
-            HeaderValue::from_static("logs"),
-        )],
+        vec![
+            (
+                HeaderName::from_static("x-greptime-log-table-name"),
+                HeaderValue::from_static("logs"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-log-select-info"),
+                HeaderValue::from_static("resource_attr:$.['resource-attr'];;instance_num:$.['instance_num'],app:$.['app']"),
+            ),
+        ],
         "/v1/otlp/v1/logs?db=public",
         body.clone(),
         false,
@@ -1611,7 +1617,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = r#"[["","",{},{"resource-attr":"resource-attr-val-1"},{"customer":"acme","env":"dev"},1581452773000000789,1581452773000000789,"30","30",1,"Info",9,"something happened"],["","",{},{"resource-attr":"resource-attr-val-1"},{"app":"server","instance_num":1},1581452773000009875,1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030",1,"Info",9,"This is a log message"]]"#;
+    let expected = r#"[["","",{},{"resource-attr":"resource-attr-val-1"},{"customer":"acme","env":"dev"},1581452773000000789,1581452773000000789,"30","30",1,"Info",9,"something happened","resource-attr-val-1",null,null],["","",{},{"resource-attr":"resource-attr-val-1"},{"app":"server","instance_num":1},1581452773000009875,1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030",1,"Info",9,"This is a log message","resource-attr-val-1","server",1]]"#;
     validate_data(&client, "select * from logs;", expected).await;
 
     guard.remove_all().await;

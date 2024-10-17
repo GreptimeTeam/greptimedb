@@ -5539,6 +5539,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonpath-rust"
+version = "0.7.2"
+dependencies = [
+ "pest",
+ "pest_derive",
+ "regex",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "jsonptr"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5648,7 +5659,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-timeout 0.5.1",
  "hyper-util",
- "jsonpath-rust",
+ "jsonpath-rust 0.5.1",
  "k8s-openapi",
  "kube-core",
  "pem 3.0.4",
@@ -10794,6 +10805,7 @@ dependencies = [
  "influxdb_line_protocol",
  "itertools 0.10.5",
  "jsonb",
+ "jsonpath-rust 0.7.2",
  "lazy_static",
  "mime_guess",
  "mysql_async",
@@ -10815,6 +10827,7 @@ dependencies = [
  "prost 0.12.6",
  "query",
  "rand",
+ "ref-cast",
  "regex",
  "reqwest",
  "rust-embed",
