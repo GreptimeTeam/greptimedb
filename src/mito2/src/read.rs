@@ -516,9 +516,8 @@ impl Batch {
 
     /// Returns true if the given batch is behind the current batch.
     #[cfg(debug_assertions)]
-    pub(crate) fn is_behind(&self, other: &Batch) -> bool {
+    pub(crate) fn check_next_batch(&self, other: &Batch) -> bool {
         // Checks the primary key and then the timestamp.
-
         use std::cmp::Ordering;
         self.primary_key()
             .cmp(other.primary_key())
@@ -549,7 +548,7 @@ impl BatchChecker {
         let is_behind = self
             .last_batch
             .as_ref()
-            .map(|last| batch.is_behind(last))
+            .map(|last| last.check_next_batch(batch))
             .unwrap_or(true);
         self.last_batch = Some(batch.clone());
         is_behind
@@ -563,22 +562,22 @@ impl BatchChecker {
         if let Some(last) = &self.last_batch {
             write!(
                 message,
-                "last_pk: {:?}, last_ts: {:?}, last_seq: {:?}",
+                "last_pk: {:?}, last_ts: {:?}, last_seq: {:?}, ",
                 last.primary_key(),
                 last.last_timestamp(),
                 last.last_sequence()
             )
             .unwrap();
-        } else {
-            write!(
-                message,
-                "batch_pk: {:?}, batch_ts: {:?}, batch_seq: {:?}",
-                batch.primary_key(),
-                batch.timestamps(),
-                batch.sequences()
-            )
-            .unwrap();
         }
+        write!(
+            message,
+            "batch_pk: {:?}, batch_ts: {:?}, batch_seq: {:?}",
+            batch.primary_key(),
+            batch.timestamps(),
+            batch.sequences()
+        )
+        .unwrap();
+
         message
     }
 
