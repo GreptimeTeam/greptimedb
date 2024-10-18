@@ -6,23 +6,23 @@ INSERT INTO test VALUES (1, 1, 1, false), (2, 2, 2, true);
 
 Affected Rows: 2
 
-ALTER TABLE test MODIFY "I" STRING;
+ALTER TABLE test MODIFY COLUMN "I" STRING;
 
 Error: 4002(TableColumnNotFound), Column I not exists in table test
 
-ALTER TABLE test MODIFY k DATE;
+ALTER TABLE test MODIFY COLUMN k DATE;
 
 Error: 1004(InvalidArguments), Invalid alter table(test) request: column 'k' cannot be cast automatically to type 'Date'
 
-ALTER TABLE test MODIFY id STRING;
+ALTER TABLE test MODIFY COLUMN id STRING;
 
 Error: 1004(InvalidArguments), Invalid alter table(test) request: Not allowed to change primary key index column 'id'
 
-ALTER TABLE test MODIFY j STRING;
+ALTER TABLE test MODIFY COLUMN j STRING;
 
 Error: 1004(InvalidArguments), Invalid alter table(test) request: Not allowed to change timestamp index column 'j' datatype
 
-ALTER TABLE test MODIFY I STRING;
+ALTER TABLE test MODIFY COLUMN I STRING;
 
 Affected Rows: 0
 
@@ -61,7 +61,7 @@ DESCRIBE test;
 | k      | Boolean              |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
-ALTER TABLE test MODIFY I INTEGER;
+ALTER TABLE test MODIFY COLUMN I INTEGER;
 
 Affected Rows: 0
 

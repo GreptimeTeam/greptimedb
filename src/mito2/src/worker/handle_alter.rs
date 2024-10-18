@@ -15,11 +15,12 @@
 //! Handling alter related requests.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_telemetry::{debug, info};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
-use store_api::region_request::RegionAlterRequest;
+use store_api::region_request::{AlterKind, ChangeTableOption, RegionAlterRequest};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -27,6 +28,8 @@ use crate::error::{
 };
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
+use crate::region::version::VersionRef;
+use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 
@@ -112,6 +115,22 @@ impl<S> RegionWorkerLoop<S> {
             region.metadata().schema_version
         );
 
+        match request.kind {
+            AlterKind::ChangeTableOptions { options } => {
+                self.handle_alter_region_options(region, version, options, sender)
+            }
+            _ => self.handle_alter_region_metadata(region, version, request, sender),
+        }
+    }
+
+    /// Handles region metadata changes.
+    fn handle_alter_region_metadata(
+        &mut self,
+        region: MitoRegionRef,
+        version: VersionRef,
+        request: RegionAlterRequest,
+        sender: OptionOutputTx,
+    ) {
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -121,9 +140,47 @@ impl<S> RegionWorkerLoop<S> {
         };
         // Persist the metadata to region's manifest.
         let change = RegionChange {
-            metadata: new_meta.clone(),
+            metadata: new_meta,
+            ttl: None,
         };
         self.handle_manifest_region_change(region, change, sender)
+    }
+
+    /// Handles requests that changes region options, like TTL.
+    fn handle_alter_region_options(
+        &mut self,
+        region: MitoRegionRef,
+        version: VersionRef,
+        options: Vec<ChangeTableOption>,
+        sender: OptionOutputTx,
+    ) {
+        let mut builder = RegionMetadataBuilder::from_existing((*version.metadata).clone());
+        builder.bump_version();
+        let metadata = match builder.build().context(InvalidRegionRequestSnafu) {
+            Ok(new_meta) => Arc::new(new_meta),
+            Err(e) => {
+                sender.send(Err(e));
+                return;
+            }
+        };
+        let mut change = RegionChange {
+            metadata,
+            ttl: None,
+        };
+        for option in options {
+            match option {
+                ChangeTableOption::TTL(ttl) => {
+                    if let Some(ttl) = ttl {
+                        change.ttl = Some(ttl);
+                    } else {
+                        // Subtle difference: if ttl is absent in ChangeTableOption,
+                        // it actually means unset ttl.
+                        change.ttl = Some(Duration::from_secs(0));
+                    }
+                }
+            }
+        }
+        self.handle_manifest_region_change(region, change, sender);
     }
 }
 
