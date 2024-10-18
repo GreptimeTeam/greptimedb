@@ -154,7 +154,7 @@ impl<S> RegionWorkerLoop<S> {
         options: Vec<ChangeTableOption>,
         sender: OptionOutputTx,
     ) {
-        let mut builder = RegionMetadataBuilder::from_existing((&*version.metadata).clone());
+        let mut builder = RegionMetadataBuilder::from_existing((*version.metadata).clone());
         builder.bump_version();
         let metadata = match builder.build().context(InvalidRegionRequestSnafu) {
             Ok(new_meta) => Arc::new(new_meta),
