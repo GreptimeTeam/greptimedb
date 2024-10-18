@@ -18,6 +18,7 @@ pub mod table_name;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use auth::UserInfoRef;
 use common_catalog::build_db_string;
@@ -45,6 +46,7 @@ pub(crate) struct MutableInner {
     schema: String,
     user_info: UserInfoRef,
     timezone: Timezone,
+    query_timeout: Option<Duration>,
 }
 
 impl Default for MutableInner {
@@ -53,6 +55,7 @@ impl Default for MutableInner {
             schema: DEFAULT_SCHEMA_NAME.into(),
             user_info: auth::userinfo_by_name(None),
             timezone: get_timezone(None).clone(),
+            query_timeout: None,
         }
     }
 }
