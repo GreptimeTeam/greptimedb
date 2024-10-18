@@ -29,6 +29,7 @@ use tokio::sync::Notify;
 use crate::config::MitoConfig;
 use crate::engine::listener::CompactionListener;
 use crate::engine::MitoEngine;
+use crate::schedule::scheduler::Job;
 use crate::test_util::{
     build_rows_for_key, column_metadata_to_column_schema, put_rows, CreateRequestBuilder, TestEnv,
 };
@@ -315,9 +316,9 @@ async fn test_readonly_during_compaction() {
     let job_notify = notify.clone();
     engine
         .purge_scheduler()
-        .schedule(Box::pin(async move {
+        .schedule(Job::new_test(Box::pin(async move {
             job_notify.notify_one();
-        }))
+        })))
         .unwrap();
     notify.notified().await;
 

@@ -16,16 +16,59 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use common_telemetry::warn;
+use futures::StreamExt;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::{InvalidSchedulerStateSnafu, InvalidSenderSnafu, Result, StopSchedulerSnafu};
+use crate::error::{InvalidSchedulerStateSnafu, Result, StopSchedulerSnafu};
+use crate::metrics::{SCHEDULER_PENDING_JOBS, SCHEDULER_TASK_ELAPSED};
+use crate::schedule::priority;
 
-pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
+/// Priority of the job.
+#[derive(Clone, Copy, Debug)]
+pub enum Priority {
+    /// High priority job.
+    High,
+    /// Low priority job with an optional deadline.
+    Low(Option<Duration>),
+}
+
+pub struct Job {
+    /// Job type.
+    job_type: &'static str,
+    /// Job priority.
+    priority: Priority,
+    /// Async task to schedule.
+    task: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl Job {
+    pub fn new(
+        job_type: &'static str,
+        priority: Priority,
+        task: Pin<Box<dyn Future<Output = ()> + Send>>,
+    ) -> Self {
+        Self {
+            job_type,
+            priority,
+            task,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_test(task: Pin<Box<dyn Future<Output = ()> + Send>>) -> Self {
+        Self {
+            job_type: "test",
+            priority: Priority::High,
+            task,
+        }
+    }
+}
 
 ///The state of scheduler
 const STATE_RUNNING: u8 = 0;
@@ -47,7 +90,7 @@ pub type SchedulerRef = Arc<dyn Scheduler>;
 /// Request scheduler based on local state.
 pub struct LocalScheduler {
     /// Sends jobs to flume bounded channel
-    sender: RwLock<Option<async_channel::Sender<Job>>>,
+    sender: RwLock<Option<priority::Sender<Job>>>,
     /// Task handles
     handles: Mutex<Vec<JoinHandle<()>>>,
     /// Token used to halt the scheduler
@@ -61,7 +104,7 @@ impl LocalScheduler {
     ///
     /// concurrency: the number of bounded receiver
     pub fn new(concurrency: usize) -> Self {
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, rx) = priority::unbounded::<Job>();
         let token = CancellationToken::new();
         let state = Arc::new(AtomicU8::new(STATE_RUNNING));
 
@@ -69,7 +112,7 @@ impl LocalScheduler {
 
         for _ in 0..concurrency {
             let child = token.child_token();
-            let receiver = rx.clone();
+            let mut receiver_stream = Box::pin(rx.clone().into_stream());
             let state_clone = state.clone();
             let handle = common_runtime::spawn_global(async move {
                 while state_clone.load(Ordering::Relaxed) == STATE_RUNNING {
@@ -77,18 +120,24 @@ impl LocalScheduler {
                         _ = child.cancelled() => {
                             break;
                         }
-                        req_opt = receiver.recv() =>{
-                            if let Ok(job) = req_opt {
-                                job.await;
-                            }
+                        Some(job) = receiver_stream.next() =>{
+                            SCHEDULER_PENDING_JOBS.with_label_values(&[job.job_type]).sub(1);
+                            let _timer = SCHEDULER_TASK_ELAPSED.with_label_values(&[job.job_type]).start_timer();
+                            job.task.await;
                         }
                     }
                 }
                 // When task scheduler is cancelled, we will wait all task finished
                 if state_clone.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
                     // recv_async waits until all sender's been dropped.
-                    while let Ok(job) = receiver.recv().await {
-                        job.await;
+                    while let Some(job) = receiver_stream.next().await {
+                        SCHEDULER_PENDING_JOBS
+                            .with_label_values(&[job.job_type])
+                            .sub(1);
+                        let _timer = SCHEDULER_TASK_ELAPSED
+                            .with_label_values(&[job.job_type])
+                            .start_timer();
+                        job.task.await;
                     }
                     state_clone.store(STATE_STOP, Ordering::Relaxed);
                 }
@@ -115,13 +164,14 @@ impl Scheduler for LocalScheduler {
     fn schedule(&self, job: Job) -> Result<()> {
         ensure!(self.is_running(), InvalidSchedulerStateSnafu);
 
-        self.sender
-            .read()
-            .unwrap()
-            .as_ref()
-            .context(InvalidSchedulerStateSnafu)?
-            .try_send(job)
-            .map_err(|_| InvalidSenderSnafu {}.build())
+        let binding = self.sender.read().unwrap();
+        let sender = binding.as_ref().context(InvalidSchedulerStateSnafu)?;
+        let job_type = job.job_type;
+        let priority = job.priority;
+        sender.try_send(job, priority).map(|r| {
+            SCHEDULER_PENDING_JOBS.with_label_values(&[job_type]).add(1);
+            r
+        })
     }
 
     /// if await_termination is true, scheduler will wait all tasks finished before stopping
@@ -177,9 +227,9 @@ mod tests {
         for _ in 0..task_size {
             let sum_clone = sum.clone();
             local
-                .schedule(Box::pin(async move {
+                .schedule(Job::new_test(Box::pin(async move {
                     sum_clone.fetch_add(1, Ordering::Relaxed);
-                }))
+                })))
                 .unwrap();
         }
         local.stop(true).await.unwrap();
@@ -195,9 +245,9 @@ mod tests {
         for _ in 0..task_size {
             let sum_clone = sum.clone();
             let ok = local
-                .schedule(Box::pin(async move {
+                .schedule(Job::new_test(Box::pin(async move {
                     sum_clone.fetch_add(1, Ordering::Relaxed);
-                }))
+                })))
                 .is_ok();
             if ok {
                 target += 1;
@@ -217,9 +267,9 @@ mod tests {
         for _ in 0..task_size {
             let barrier_clone = barrier.clone();
             local
-                .schedule(Box::pin(async move {
+                .schedule(Job::new_test(Box::pin(async move {
                     barrier_clone.wait().await;
-                }))
+                })))
                 .unwrap();
         }
         barrier.wait().await;
@@ -248,9 +298,9 @@ mod tests {
             loop {
                 let sum_c = sum_clone.clone();
                 let ok = local_task
-                    .schedule(Box::pin(async move {
+                    .schedule(Job::new_test(Box::pin(async move {
                         sum_c.fetch_add(1, Ordering::Relaxed);
-                    }))
+                    })))
                     .is_ok();
                 if ok {
                     target_clone.fetch_add(1, Ordering::Relaxed);
