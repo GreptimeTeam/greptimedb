@@ -61,20 +61,20 @@ DESCRIBE test;
 | k      | Boolean              |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
-ALTER TABLE test MODIFY I INTEGER;
+ALTER TABLE test MODIFY COLUMN I INTEGER;
 
-Error: 2000(InvalidSyntax), sql parser error: Expected =, found: INTEGER at Line: 1, Column 27
+Affected Rows: 0
 
 -- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
-+----+----------+-------------------------+-------+
-| id | i        | j                       | k     |
-+----+----------+-------------------------+-------+
-| 1  | 1        | 1970-01-01T00:00:00.001 | false |
-| 2  | 2        | 1970-01-01T00:00:00.002 | true  |
-| 3  | greptime | 1970-01-01T00:00:00.003 | true  |
-+----+----------+-------------------------+-------+
++----+---+-------------------------+-------+
+| id | i | j                       | k     |
++----+---+-------------------------+-------+
+| 1  | 1 | 1970-01-01T00:00:00.001 | false |
+| 2  | 2 | 1970-01-01T00:00:00.002 | true  |
+| 3  |   | 1970-01-01T00:00:00.003 | true  |
++----+---+-------------------------+-------+
 
 DESCRIBE test;
 
@@ -82,7 +82,7 @@ DESCRIBE test;
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
 | id     | Int32                | PRI | YES  |         | TAG           |
-| i      | String               |     | YES  |         | FIELD         |
+| i      | Int32                |     | YES  |         | FIELD         |
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | k      | Boolean              |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
