@@ -538,6 +538,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("OpenTelemetry select key {} is complicated structure.", key))]
+    OpenTelemetryNestValueIsComplicated {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -603,7 +609,8 @@ impl ErrorExt for Error {
             | ParseJson { .. }
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }
-            | OpenTelemetryLog { .. } => StatusCode::InvalidArguments,
+            | OpenTelemetryLog { .. }
+            | OpenTelemetryNestValueIsComplicated { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),

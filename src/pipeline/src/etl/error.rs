@@ -570,12 +570,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("OpenTelemetry select info has duplicate key: {key}"))]
-    OpenTelemetrySelectInfoDuplicate {
-        key: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
