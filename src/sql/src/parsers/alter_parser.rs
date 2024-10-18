@@ -84,7 +84,7 @@ impl ParserContext<'_> {
                     column_name,
                     target_type,
                 }
-            } else {
+            } else if self.consume_token("OPTIONS") {
                 // Modify table attributes.
                 let mut options = vec![];
                 loop {
@@ -107,6 +107,11 @@ impl ParserContext<'_> {
                     }
                 }
                 AlterTableOperation::ChangeTableOptions { options }
+            } else {
+                return Err(ParserError::ParserError(format!(
+                    "Expect `COLUMN` or `OPTIONS` after `MODIFY`, got: `{}`",
+                    self.parser.next_token()
+                )));
             }
         } else if self.parser.parse_keyword(Keyword::RENAME) {
             let new_table_name_obj_raw = self.parse_object_name()?;
@@ -454,16 +459,28 @@ mod tests {
 
     #[test]
     fn test_parse_alter_column() {
-        check_parse_alter_table("ALTER TABLE test_table MODIFY 'a'='A';", &[("a", "A")]);
         check_parse_alter_table(
-            "ALTER TABLE test_table MODIFY 'a'='A','b'='B'",
+            "ALTER TABLE test_table MODIFY OPTIONS 'a'='A';",
+            &[("a", "A")],
+        );
+        check_parse_alter_table(
+            "ALTER TABLE test_table MODIFY OPTIONS 'a'='A','b'='B'",
             &[("a", "A"), ("b", "B")],
         );
         check_parse_alter_table(
-            "ALTER TABLE test_table MODIFY 'a'='A','b'='B','c'='C';",
+            "ALTER TABLE test_table MODIFY OPTIONS 'a'='A','b'='B','c'='C';",
             &[("a", "A"), ("b", "B"), ("c", "C")],
         );
+        check_parse_alter_table(
+            "ALTER TABLE test_table MODIFY OPTIONS 'a'=NULL;",
+            &[("a", "")],
+        );
 
-        check_parse_alter_table("ALTER TABLE test_table MODIFY 'a'=NULL;", &[("a", "")]);
+        ParserContext::create_with_dialect(
+            "ALTER TABLE test_table MODIFY a INTEGER",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap_err();
     }
 }
