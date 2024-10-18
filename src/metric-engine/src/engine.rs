@@ -17,6 +17,7 @@ mod catchup;
 mod close;
 mod create;
 mod drop;
+mod flush;
 mod open;
 mod options;
 mod put;
@@ -145,7 +146,7 @@ impl RegionEngine for MetricEngine {
                     .alter_region(region_id, alter, &mut extension_return_value)
                     .await
             }
-            RegionRequest::Flush(_) | RegionRequest::Compact(_) => {
+            RegionRequest::Compact(_) => {
                 if self.inner.is_physical_region(region_id) {
                     self.inner
                         .mito
@@ -157,10 +158,11 @@ impl RegionEngine for MetricEngine {
                     UnsupportedRegionRequestSnafu { request }.fail()
                 }
             }
+            RegionRequest::Flush(req) => self.inner.flush_region(region_id, req).await,
             RegionRequest::Delete(_) | RegionRequest::Truncate(_) => {
                 UnsupportedRegionRequestSnafu { request }.fail()
             }
-            RegionRequest::Catchup(ref req) => self.inner.catchup_region(region_id, *req).await,
+            RegionRequest::Catchup(req) => self.inner.catchup_region(region_id, req).await,
         };
 
         result.map_err(BoxedError::new).map(|rows| RegionResponse {
