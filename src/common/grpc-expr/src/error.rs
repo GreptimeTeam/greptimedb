@@ -118,6 +118,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid change table option request"))]
+    InvalidChangeTableOptionRequest {
+        #[snafu(source)]
+        error: table::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -141,6 +147,7 @@ impl ErrorExt for Error {
             Error::UnknownColumnDataType { .. } | Error::InvalidFulltextColumnType { .. } => {
                 StatusCode::InvalidArguments
             }
+            Error::InvalidChangeTableOptionRequest { .. } => StatusCode::InvalidArguments,
         }
     }
 

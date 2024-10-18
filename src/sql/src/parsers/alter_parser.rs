@@ -20,7 +20,7 @@ use sqlparser::tokenizer::Token;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
-use crate::statements::alter::{AlterTable, AlterTableOperation};
+use crate::statements::alter::{AlterTable, AlterTableOperation, ChangeTableOption};
 use crate::statements::statement::Statement;
 
 impl ParserContext<'_> {
@@ -74,13 +74,39 @@ impl ParserContext<'_> {
                 )));
             }
         } else if self.consume_token("MODIFY") {
-            let _ = self.parser.parse_keyword(Keyword::COLUMN);
-            let column_name = Self::canonicalize_identifier(self.parser.parse_identifier(false)?);
-            let target_type = self.parser.parse_data_type()?;
+            // Modify column type
+            if self.parser.parse_keyword(Keyword::COLUMN) {
+                let column_name =
+                    Self::canonicalize_identifier(self.parser.parse_identifier(false)?);
+                let target_type = self.parser.parse_data_type()?;
 
-            AlterTableOperation::ChangeColumnType {
-                column_name,
-                target_type,
+                AlterTableOperation::ChangeColumnType {
+                    column_name,
+                    target_type,
+                }
+            } else {
+                // Modify table attributes.
+                let mut options = vec![];
+                loop {
+                    let key = self.parser.parse_literal_string()?;
+                    self.parser.expect_token(&Token::Eq)?;
+                    let value = if self.parser.parse_keyword(Keyword::NULL) {
+                        "".to_string()
+                    } else if let Ok(present) = self.parser.parse_literal_string() {
+                        present
+                    } else {
+                        return Err(ParserError::ParserError(format!(
+                            "Unexpected option value for alter table statements, expect string literal or NULL, got: `{}`",
+                            self.parser.next_token()
+                        )));
+                    };
+
+                    options.push(ChangeTableOption { key, value });
+                    if !self.parser.consume_token(&Token::Comma) {
+                        break;
+                    }
+                }
+                AlterTableOperation::ChangeTableOptions { options }
             }
         } else if self.parser.parse_keyword(Keyword::RENAME) {
             let new_table_name_obj_raw = self.parse_object_name()?;
@@ -272,7 +298,7 @@ mod tests {
         )
         .unwrap();
 
-        let sql_2 = "ALTER TABLE my_metric_1 MODIFY a STRING";
+        let sql_2 = "ALTER TABLE my_metric_1 MODIFY COLUMN a STRING";
         let mut result_2 = ParserContext::create_with_dialect(
             sql_2,
             &GreptimeDbDialect {},
@@ -405,5 +431,52 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    fn check_parse_alter_table(sql: &str, expected: &[(&str, &str)]) {
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let Statement::Alter(alter) = &result[0] else {
+            unreachable!()
+        };
+        assert_eq!("test_table", alter.table_name.0[0].value);
+        let AlterTableOperation::ChangeTableOptions { options } = &alter.alter_operation else {
+            unreachable!()
+        };
+        let res = options
+            .iter()
+            .map(|o| (o.key.as_str(), o.value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(expected, &res);
+    }
+
+    #[test]
+    fn test_parse_alter_column() {
+        check_parse_alter_table("ALTER TABLE test_table MODIFY 'a'='A';", &[("a", "A")]);
+        check_parse_alter_table(
+            "ALTER TABLE test_table MODIFY 'a'='A','b'='B'",
+            &[("a", "A"), ("b", "B")],
+        );
+        check_parse_alter_table(
+            "ALTER TABLE test_table MODIFY 'a'='A','b'='B','c'='C';",
+            &[("a", "A"), ("b", "B"), ("c", "C")],
+        );
+
+        check_parse_alter_table("ALTER TABLE test_table MODIFY 'a'=NULL;", &[("a", "")]);
+        assert!(ParserContext::create_with_dialect(
+            "ALTER TABLE test_table MODIFY 'a'=a;",
+            &GreptimeDbDialect {},
+            ParseOptions::default()
+        )
+        .is_err());
+
+        assert!(ParserContext::create_with_dialect(
+            "ALTER TABLE test_table MODIFY a='a';",
+            &GreptimeDbDialect {},
+            ParseOptions::default()
+        )
+        .is_err());
     }
 }

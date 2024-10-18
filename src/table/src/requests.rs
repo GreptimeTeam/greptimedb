@@ -27,6 +27,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::ColumnSchema;
 use greptime_proto::v1::region::compact_request;
+use greptime_proto::v1::ChangeTableOption;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::is_mito_engine_option_key;
@@ -34,6 +35,7 @@ use store_api::mito_engine_options::is_mito_engine_option_key;
 use crate::error::{ParseTableOptionSnafu, Result};
 use crate::metadata::{TableId, TableVersion};
 use crate::table_reference::TableReference;
+use crate::Error;
 
 pub const FILE_TABLE_META_KEY: &str = "__private.file_table_meta";
 pub const FILE_TABLE_LOCATION_KEY: &str = "location";
@@ -212,6 +214,34 @@ pub enum AlterKind {
     RenameTable {
         new_table_name: String,
     },
+    ChangeTableOptions {
+        options: Vec<ChangeTableOptionRequest>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ChangeTableOptionRequest {
+    TTL(Option<Duration>),
+    WriteBufferSize(Option<ReadableSize>),
+    Extra(HashMap<String, String>),
+}
+
+impl TryFrom<&ChangeTableOption> for ChangeTableOptionRequest {
+    type Error = Error;
+
+    fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
+        let ChangeTableOption { key, value } = value;
+        if key == TTL_KEY {
+            let ttl = if value.is_empty() {
+                None
+            } else {
+                Some(humantime::parse_duration(value).unwrap())
+            };
+            Ok(Self::TTL(ttl))
+        } else {
+            todo!()
+        }
+    }
 }
 
 #[derive(Debug)]

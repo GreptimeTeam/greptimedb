@@ -789,6 +789,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
                 DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
                 DdlRequest::Alter(req) => {
+                    info!("===1");
                     self.handle_alter_request(ddl.region_id, req, ddl.sender)
                         .await;
                     continue;

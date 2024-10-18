@@ -51,7 +51,9 @@ impl AlterTableProcedure {
             AlterKind::RenameTable { new_table_name } => {
                 new_info.name = new_table_name.to_string();
             }
-            AlterKind::DropColumns { .. } | AlterKind::ChangeColumnTypes { .. } => {}
+            AlterKind::DropColumns { .. }
+            | AlterKind::ChangeColumnTypes { .. }
+            | AlterKind::ChangeTableOptions { .. } => {}
         }
 
         Ok(new_info)

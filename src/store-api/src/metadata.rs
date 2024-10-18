@@ -523,6 +523,9 @@ impl RegionMetadataBuilder {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ChangeColumnTypes { columns } => self.change_column_types(columns),
+            AlterKind::ChangeTableOptions { options: _ } => {
+                // nothing to be done with RegionMetadata
+            }
         }
         Ok(self)
     }
