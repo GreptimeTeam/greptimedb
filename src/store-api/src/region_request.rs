@@ -639,7 +639,7 @@ impl From<v1::ChangeColumnType> for ChangeColumnType {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RegionFlushRequest {
     pub row_group_size: Option<usize>,
 }
