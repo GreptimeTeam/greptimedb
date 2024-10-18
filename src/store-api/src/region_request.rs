@@ -25,7 +25,6 @@ use api::v1::region::{
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{self, Rows, SemanticType};
-use common_base::readable_size::ReadableSize;
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
 use snafu::{ensure, OptionExt};
@@ -33,8 +32,8 @@ use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
-    RegionMetadata, Result,
+    ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionOptionChangeRequestSnafu,
+    InvalidRegionRequestSnafu, MetadataError, RegionMetadata, Result,
 };
 use crate::mito_engine_options::TTL_KEY;
 use crate::path_utils::region_dir;
@@ -506,13 +505,22 @@ impl TryFrom<&v1::ChangeTableOption> for ChangeTableOption {
             let ttl_value = if option.value.is_empty() {
                 None
             } else {
-                // todo: remove this unwrap
-                let d = humantime::parse_duration(&option.value).unwrap();
+                let d = humantime::parse_duration(&option.value).map_err(|_| {
+                    InvalidRegionOptionChangeRequestSnafu {
+                        key: &option.key,
+                        value: &option.value,
+                    }
+                    .build()
+                })?;
                 Some(d)
             };
             Ok(ChangeTableOption::TTL(ttl_value))
         } else {
-            todo!("raise error on other types")
+            InvalidRegionOptionChangeRequestSnafu {
+                key: &option.key,
+                value: &option.value,
+            }
+            .fail()
         }
     }
 }
@@ -679,9 +687,7 @@ impl From<v1::ChangeColumnType> for ChangeColumnType {
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum ChangeTableOption {
-    WriteBufferSize(Option<ReadableSize>),
     TTL(Option<Duration>),
-    Extra((String, String)),
 }
 
 #[derive(Debug, Default)]

@@ -32,10 +32,10 @@ use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::is_mito_engine_option_key;
 
-use crate::error::{ParseTableOptionSnafu, Result};
+use crate::error::{ParseTableOptionSnafu, Result, UnsupportedTableOptionChangeSnafu};
 use crate::metadata::{TableId, TableVersion};
 use crate::table_reference::TableReference;
-use crate::Error;
+use crate::{error, Error};
 
 pub const FILE_TABLE_META_KEY: &str = "__private.file_table_meta";
 pub const FILE_TABLE_LOCATION_KEY: &str = "location";
@@ -82,7 +82,7 @@ pub struct TableOptions {
 }
 
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
-pub const TTL_KEY: &str = "ttl";
+pub const TTL_KEY: &str = store_api::mito_engine_options::TTL_KEY;
 pub const STORAGE_KEY: &str = "storage";
 pub const COMMENT_KEY: &str = "comment";
 pub const AUTO_CREATE_TABLE_KEY: &str = "auto_create_table";
@@ -222,8 +222,6 @@ pub enum AlterKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChangeTableOptionRequest {
     TTL(Option<Duration>),
-    WriteBufferSize(Option<ReadableSize>),
-    Extra(HashMap<String, String>),
 }
 
 impl TryFrom<&ChangeTableOption> for ChangeTableOptionRequest {
@@ -235,11 +233,14 @@ impl TryFrom<&ChangeTableOption> for ChangeTableOptionRequest {
             let ttl = if value.is_empty() {
                 None
             } else {
-                Some(humantime::parse_duration(value).unwrap())
+                Some(
+                    humantime::parse_duration(value)
+                        .map_err(|_| error::InvalidTableOptionValueSnafu { key, value }.build())?,
+                )
             };
             Ok(Self::TTL(ttl))
         } else {
-            todo!()
+            UnsupportedTableOptionChangeSnafu { key }.fail()
         }
     }
 }
