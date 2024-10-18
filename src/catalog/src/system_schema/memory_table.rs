@@ -74,7 +74,7 @@ impl MemoryTableBuilder {
     /// Construct the `information_schema.{table_name}` virtual table
     pub async fn memory_records(&mut self) -> Result<RecordBatch> {
         if self.columns.is_empty() {
-            RecordBatch::new_empty(self.schema.clone()).context(CreateRecordBatchSnafu)
+            Ok(RecordBatch::new_empty(self.schema.clone()))
         } else {
             RecordBatch::new(self.schema.clone(), std::mem::take(&mut self.columns))
                 .context(CreateRecordBatchSnafu)

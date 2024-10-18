@@ -203,6 +203,9 @@ pub struct ScannerProperties {
     /// Total rows that **may** return by scanner. This field is only read iff
     /// [ScannerProperties::append_mode] is true.
     total_rows: usize,
+
+    /// Whether to yield an empty batch to distinguish partition ranges.
+    distinguish_partition_range: bool,
 }
 
 impl ScannerProperties {
@@ -224,12 +227,19 @@ impl ScannerProperties {
         self
     }
 
+    /// Sets distinguish partition range for scanner.
+    pub fn with_distinguish_partition_range(mut self, distinguish_partition_range: bool) -> Self {
+        self.distinguish_partition_range = distinguish_partition_range;
+        self
+    }
+
     /// Creates a new [`ScannerProperties`] with the given partitioning.
     pub fn new(partitions: Vec<Vec<PartitionRange>>, append_mode: bool, total_rows: usize) -> Self {
         Self {
             partitions,
             append_mode,
             total_rows,
+            distinguish_partition_range: false,
         }
     }
 
@@ -243,6 +253,10 @@ impl ScannerProperties {
 
     pub fn total_rows(&self) -> usize {
         self.total_rows
+    }
+
+    pub fn distinguish_partition_range(&self) -> bool {
+        self.distinguish_partition_range
     }
 }
 

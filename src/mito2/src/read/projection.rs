@@ -160,6 +160,11 @@ impl ProjectionMapper {
         self.output_schema.clone()
     }
 
+    /// Returns an empty [RecordBatch].
+    pub(crate) fn empty_record_batch(&self) -> RecordBatch {
+        RecordBatch::new_empty(self.output_schema.clone())
+    }
+
     /// Converts a [Batch] to a [RecordBatch].
     ///
     /// The batch must match the `projection` using to build the mapper.

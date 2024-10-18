@@ -491,6 +491,116 @@ impl Batch {
         // Safety: sequences is not null so it actually returns Some.
         self.sequences.get_data(index).unwrap()
     }
+
+    /// Checks the batch is monotonic by timestamps.
+    #[cfg(debug_assertions)]
+    pub(crate) fn check_monotonic(&self) -> bool {
+        if self.timestamps_native().is_none() {
+            return true;
+        }
+
+        let timestamps = self.timestamps_native().unwrap();
+        let sequences = self.sequences.as_arrow().values();
+        timestamps.windows(2).enumerate().all(|(i, window)| {
+            let current = window[0];
+            let next = window[1];
+            let current_sequence = sequences[i];
+            let next_sequence = sequences[i + 1];
+            if current == next {
+                current_sequence >= next_sequence
+            } else {
+                current < next
+            }
+        })
+    }
+
+    /// Returns true if the given batch is behind the current batch.
+    #[cfg(debug_assertions)]
+    pub(crate) fn check_next_batch(&self, other: &Batch) -> bool {
+        // Checks the primary key and then the timestamp.
+        use std::cmp::Ordering;
+        self.primary_key()
+            .cmp(other.primary_key())
+            .then_with(|| self.last_timestamp().cmp(&other.first_timestamp()))
+            .then_with(|| other.first_sequence().cmp(&self.last_sequence()))
+            <= Ordering::Equal
+    }
+}
+
+/// A struct to check the batch is monotonic.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+pub(crate) struct BatchChecker {
+    last_batch: Option<Batch>,
+}
+
+#[cfg(debug_assertions)]
+impl BatchChecker {
+    /// Returns true if the given batch is monotonic and behind
+    /// the last batch.
+    pub(crate) fn check_monotonic(&mut self, batch: &Batch) -> bool {
+        if !batch.check_monotonic() {
+            return false;
+        }
+
+        // Checks the batch is behind the last batch.
+        // Then Updates the last batch.
+        let is_behind = self
+            .last_batch
+            .as_ref()
+            .map(|last| last.check_next_batch(batch))
+            .unwrap_or(true);
+        self.last_batch = Some(batch.clone());
+        is_behind
+    }
+
+    /// Formats current batch and last batch for debug.
+    pub(crate) fn format_batch(&self, batch: &Batch) -> String {
+        use std::fmt::Write;
+
+        let mut message = String::new();
+        if let Some(last) = &self.last_batch {
+            write!(
+                message,
+                "last_pk: {:?}, last_ts: {:?}, last_seq: {:?}, ",
+                last.primary_key(),
+                last.last_timestamp(),
+                last.last_sequence()
+            )
+            .unwrap();
+        }
+        write!(
+            message,
+            "batch_pk: {:?}, batch_ts: {:?}, batch_seq: {:?}",
+            batch.primary_key(),
+            batch.timestamps(),
+            batch.sequences()
+        )
+        .unwrap();
+
+        message
+    }
+
+    /// Checks batches from the part range are monotonic. Otherwise, panics.
+    pub(crate) fn ensure_part_range_batch(
+        &mut self,
+        scanner: &str,
+        region_id: store_api::storage::RegionId,
+        partition: usize,
+        part_range: store_api::region_engine::PartitionRange,
+        batch: &Batch,
+    ) {
+        if !self.check_monotonic(batch) {
+            panic!(
+                "{}: batch is not sorted, region_id: {}, partition: {}, part_range: {:?}, {}",
+                scanner,
+                region_id,
+                partition,
+                part_range,
+                self.format_batch(batch),
+            );
+        }
+    }
 }
 
 /// Len of timestamp in arrow row format.

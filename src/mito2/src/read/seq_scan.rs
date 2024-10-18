@@ -203,6 +203,7 @@ impl SeqScan {
         let semaphore = self.semaphore.clone();
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
+        let distinguish_range = self.properties.distinguish_partition_range();
         let part_metrics = PartitionMetrics::new(
             self.stream_ctx.input.mapper.metadata().region_id,
             partition,
@@ -230,6 +231,8 @@ impl SeqScan {
                 let cache = stream_ctx.input.cache_manager.as_deref();
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
+                #[cfg(debug_assertions)]
+                let mut checker = crate::read::BatchChecker::default();
                 while let Some(batch) = reader
                     .next_batch()
                     .await
@@ -240,6 +243,20 @@ impl SeqScan {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
 
+                    debug_assert!(!batch.is_empty());
+                    if batch.is_empty() {
+                        continue;
+                    }
+
+                    #[cfg(debug_assertions)]
+                    checker.ensure_part_range_batch(
+                        "SeqScan",
+                        stream_ctx.input.mapper.metadata().region_id,
+                        partition,
+                        part_range,
+                        &batch,
+                    );
+
                     let convert_start = Instant::now();
                     let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
                     metrics.convert_cost += convert_start.elapsed();
@@ -249,6 +266,15 @@ impl SeqScan {
 
                     fetch_start = Instant::now();
                 }
+
+                // Yields an empty part to indicate this range is terminated.
+                // The query engine can use this to optimize some queries.
+                if distinguish_range {
+                    let yield_start = Instant::now();
+                    yield stream_ctx.input.mapper.empty_record_batch();
+                    metrics.yield_cost += yield_start.elapsed();
+                }
+
                 metrics.scan_cost += fetch_start.elapsed();
                 part_metrics.merge_metrics(&metrics);
             }
