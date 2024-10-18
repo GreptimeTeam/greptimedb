@@ -98,7 +98,7 @@ impl VersionControl {
         Ok(())
     }
 
-    /// Applies region option changes and generates a new verison.
+    /// Applies region option changes and generates a new version.
     pub(crate) fn alter_options(&self, options: RegionOptions) {
         let version = self.current().version;
         let new_version = Arc::new(
