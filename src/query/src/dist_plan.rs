@@ -15,8 +15,9 @@
 mod analyzer;
 mod commutativity;
 mod merge_scan;
+mod merge_sort;
 mod planner;
 
 pub use analyzer::DistPlannerAnalyzer;
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
-pub use planner::DistExtensionPlanner;
+pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};

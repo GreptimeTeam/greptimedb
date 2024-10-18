@@ -38,6 +38,18 @@ impl Plugins {
         self.read().get::<T>().cloned()
     }
 
+    pub fn get_or_insert<T, F>(&self, f: F) -> T
+    where
+        T: 'static + Send + Sync + Clone,
+        F: FnOnce() -> T,
+    {
+        let mut binding = self.write();
+        if !binding.contains::<T>() {
+            binding.insert(f());
+        }
+        binding.get::<T>().cloned().unwrap()
+    }
+
     pub fn map_mut<T: 'static + Send + Sync, F, R>(&self, mapper: F) -> R
     where
         F: FnOnce(Option<&mut T>) -> R,

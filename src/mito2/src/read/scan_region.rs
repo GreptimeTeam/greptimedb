@@ -17,14 +17,12 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
-use common_time::Timestamp;
-use datafusion::physical_plan::DisplayFormatType;
 use datafusion_expr::utils::expr_to_columns;
 use parquet::arrow::arrow_reader::RowSelection;
 use smallvec::SmallVec;
@@ -48,7 +46,7 @@ use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
-use crate::sst::file::{overlaps, FileHandle, FileMeta};
+use crate::sst::file::FileHandle;
 use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
@@ -700,73 +698,6 @@ impl ScanInput {
         })
     }
 
-    /// Prunes file ranges to scan and adds them to the `collector`.
-    pub(crate) async fn prune_file_ranges(
-        &self,
-        collector: &mut impl FileRangeCollector,
-    ) -> Result<ReaderMetrics> {
-        let mut file_prune_cost = Duration::ZERO;
-        let mut reader_metrics = ReaderMetrics::default();
-        for file in &self.files {
-            let prune_start = Instant::now();
-            let res = self
-                .access_layer
-                .read_sst(file.clone())
-                .predicate(self.predicate.clone())
-                .time_range(self.time_range)
-                .projection(Some(self.mapper.column_ids().to_vec()))
-                .cache(self.cache_manager.clone())
-                .inverted_index_applier(self.inverted_index_applier.clone())
-                .fulltext_index_applier(self.fulltext_index_applier.clone())
-                .expected_metadata(Some(self.mapper.metadata().clone()))
-                .build_reader_input(&mut reader_metrics)
-                .await;
-            file_prune_cost += prune_start.elapsed();
-            let (mut file_range_ctx, row_groups) = match res {
-                Ok(x) => x,
-                Err(e) => {
-                    if e.is_object_not_found() && self.ignore_file_not_found {
-                        error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
-                        continue;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            };
-            if !compat::has_same_columns(
-                self.mapper.metadata(),
-                file_range_ctx.read_format().metadata(),
-            ) {
-                // They have different schema. We need to adapt the batch first so the
-                // mapper can convert it.
-                let compat = CompatBatch::new(
-                    &self.mapper,
-                    file_range_ctx.read_format().metadata().clone(),
-                )?;
-                file_range_ctx.set_compat_batch(Some(compat));
-            }
-            // Build ranges from row groups.
-            let file_range_ctx = Arc::new(file_range_ctx);
-            let file_ranges = row_groups
-                .into_iter()
-                .map(|(row_group_idx, row_selection)| {
-                    FileRange::new(file_range_ctx.clone(), row_group_idx, row_selection)
-                });
-            collector.append_file_ranges(file.meta_ref(), file_ranges);
-        }
-
-        READ_SST_COUNT.observe(self.files.len() as f64);
-
-        common_telemetry::debug!(
-            "Region {} prune {} files, cost is {:?}",
-            self.mapper.metadata().region_id,
-            self.files.len(),
-            file_prune_cost
-        );
-
-        Ok(reader_metrics)
-    }
-
     /// Scans the input source in another task and sends batches to the sender.
     pub(crate) fn spawn_scan_task(
         &self,
@@ -806,10 +737,7 @@ impl ScanInput {
     pub(crate) fn predicate(&self) -> Option<Predicate> {
         self.predicate.clone()
     }
-}
 
-#[cfg(test)]
-impl ScanInput {
     /// Returns number of memtables to scan.
     pub(crate) fn num_memtables(&self) -> usize {
         self.memtables.len()
@@ -819,166 +747,21 @@ impl ScanInput {
     pub(crate) fn num_files(&self) -> usize {
         self.files.len()
     }
+}
 
+#[cfg(test)]
+impl ScanInput {
     /// Returns SST file ids to scan.
     pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
         self.files.iter().map(|file| file.file_id()).collect()
     }
 }
 
-/// Groups of file ranges. Each group in the list contains multiple file
-/// ranges to scan. File ranges in the same group may come from different files.
-pub(crate) type FileRangesGroup = SmallVec<[Vec<FileRange>; 4]>;
-
-/// A partition of a scanner to read.
-/// It contains memtables and file ranges to scan.
-#[derive(Clone, Default)]
-pub(crate) struct ScanPart {
-    /// Memtable ranges to scan.
-    pub(crate) memtable_ranges: Vec<MemtableRange>,
-    /// File ranges to scan.
-    pub(crate) file_ranges: FileRangesGroup,
-    /// Optional time range of the part (inclusive).
-    pub(crate) time_range: Option<(Timestamp, Timestamp)>,
-}
-
-impl fmt::Debug for ScanPart {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ScanPart({} memtable ranges, {} file ranges",
-            self.memtable_ranges.len(),
-            self.file_ranges
-                .iter()
-                .map(|ranges| ranges.len())
-                .sum::<usize>(),
-        )?;
-        if let Some(time_range) = &self.time_range {
-            write!(f, ", time range: {:?})", time_range)
-        } else {
-            write!(f, ")")
-        }
-    }
-}
-
-impl ScanPart {
-    /// Returns true if the time range given `part` overlaps with this part.
-    pub(crate) fn overlaps(&self, part: &ScanPart) -> bool {
-        let (Some(current_range), Some(part_range)) = (self.time_range, part.time_range) else {
-            return true;
-        };
-
-        overlaps(&current_range, &part_range)
-    }
-
-    /// Merges given `part` to this part.
-    pub(crate) fn merge(&mut self, mut part: ScanPart) {
-        self.memtable_ranges.append(&mut part.memtable_ranges);
-        self.file_ranges.append(&mut part.file_ranges);
-        let Some(part_range) = part.time_range else {
-            return;
-        };
-        let Some(current_range) = self.time_range else {
-            self.time_range = part.time_range;
-            return;
-        };
-        let start = current_range.0.min(part_range.0);
-        let end = current_range.1.max(part_range.1);
-        self.time_range = Some((start, end));
-    }
-
-    /// Returns true if the we can split the part into multiple parts
-    /// and preserving order.
-    pub(crate) fn can_split_preserve_order(&self) -> bool {
-        self.memtable_ranges.is_empty()
-            && self.file_ranges.len() == 1
-            && self.file_ranges[0].len() > 1
-    }
-}
-
-/// A trait to collect file ranges to scan.
-pub(crate) trait FileRangeCollector {
-    /// Appends file ranges from the **same file** to the collector.
-    fn append_file_ranges(
-        &mut self,
-        file_meta: &FileMeta,
-        file_ranges: impl Iterator<Item = FileRange>,
-    );
-}
-
-/// Optional list of [ScanPart]s.
-#[derive(Default)]
-pub(crate) struct ScanPartList(pub(crate) Option<Vec<ScanPart>>);
-
-impl fmt::Debug for ScanPartList {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.0 {
-            Some(parts) => write!(f, "{:?}", parts),
-            None => write!(f, "[]"),
-        }
-    }
-}
-
-impl ScanPartList {
-    /// Returns true if the list is None.
-    pub(crate) fn is_none(&self) -> bool {
-        self.0.is_none()
-    }
-
-    /// Sets parts to the list.
-    pub(crate) fn set_parts(&mut self, parts: Vec<ScanPart>) {
-        self.0 = Some(parts);
-    }
-
-    /// Gets the part by index, returns None if the index is out of bound.
-    /// # Panics
-    /// Panics if parts are not initialized.
-    pub(crate) fn get_part(&mut self, index: usize) -> Option<&ScanPart> {
-        let parts = self.0.as_ref().unwrap();
-        parts.get(index)
-    }
-
-    /// Returns the number of parts.
-    pub(crate) fn len(&self) -> usize {
-        self.0.as_ref().map_or(0, |parts| parts.len())
-    }
-
-    /// Returns the number of memtable ranges.
-    pub(crate) fn num_mem_ranges(&self) -> usize {
-        self.0.as_ref().map_or(0, |parts| {
-            parts.iter().map(|part| part.memtable_ranges.len()).sum()
-        })
-    }
-
-    /// Returns the number of files.
-    pub(crate) fn num_files(&self) -> usize {
-        self.0.as_ref().map_or(0, |parts| {
-            parts.iter().map(|part| part.file_ranges.len()).sum()
-        })
-    }
-
-    /// Returns the number of file ranges.
-    pub(crate) fn num_file_ranges(&self) -> usize {
-        self.0.as_ref().map_or(0, |parts| {
-            parts
-                .iter()
-                .flat_map(|part| part.file_ranges.iter())
-                .map(|ranges| ranges.len())
-                .sum()
-        })
-    }
-}
-
 /// Context shared by different streams from a scanner.
-/// It contains the input and distributes input to multiple parts
-/// to scan.
+/// It contains the input and ranges to scan.
 pub(crate) struct StreamContext {
     /// Input memtables and files.
     pub(crate) input: ScanInput,
-    /// Parts to scan and the cost to build parts.
-    /// The scanner builds parts to scan from the input lazily.
-    /// The mutex is used to ensure the parts are only built once.
-    pub(crate) parts: Mutex<(ScanPartList, Duration)>,
     /// Metadata for partition ranges.
     pub(crate) ranges: Vec<RangeMeta>,
     /// Lists of range builders.
@@ -994,12 +777,11 @@ impl StreamContext {
     pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
-        READ_SST_COUNT.observe(input.files.len() as f64);
-        let range_builders = RangeBuilderList::new(input.memtables.len(), input.files.len());
+        READ_SST_COUNT.observe(input.num_files() as f64);
+        let range_builders = RangeBuilderList::new(input.num_memtables(), input.num_files());
 
         Self {
             input,
-            parts: Mutex::new((ScanPartList::default(), Duration::default())),
             ranges,
             range_builders,
             query_start,
@@ -1010,12 +792,11 @@ impl StreamContext {
     pub(crate) fn unordered_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::unordered_scan_ranges(&input);
-        READ_SST_COUNT.observe(input.files.len() as f64);
-        let range_builders = RangeBuilderList::new(input.memtables.len(), input.files.len());
+        READ_SST_COUNT.observe(input.num_files() as f64);
+        let range_builders = RangeBuilderList::new(input.num_memtables(), input.num_files());
 
         Self {
             input,
-            parts: Mutex::new((ScanPartList::default(), Duration::default())),
             ranges,
             range_builders,
             query_start,
@@ -1024,27 +805,28 @@ impl StreamContext {
 
     /// Returns true if the index refers to a memtable.
     pub(crate) fn is_mem_range_index(&self, index: RowGroupIndex) -> bool {
-        self.input.memtables.len() > index.index
+        self.input.num_memtables() > index.index
     }
 
     /// Creates file ranges to scan.
     pub(crate) async fn build_file_ranges(
         &self,
         index: RowGroupIndex,
-        ranges: &mut Vec<FileRange>,
         reader_metrics: &mut ReaderMetrics,
-    ) -> Result<()> {
-        ranges.clear();
+    ) -> Result<SmallVec<[FileRange; 2]>> {
+        let mut ranges = SmallVec::new();
         self.range_builders
-            .build_file_ranges(&self.input, index, ranges, reader_metrics)
-            .await
+            .build_file_ranges(&self.input, index, &mut ranges, reader_metrics)
+            .await?;
+        Ok(ranges)
     }
 
     /// Creates memtable ranges to scan.
-    pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex, ranges: &mut Vec<MemtableRange>) {
-        ranges.clear();
+    pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex) -> SmallVec<[MemtableRange; 2]> {
+        let mut ranges = SmallVec::new();
         self.range_builders
-            .build_mem_ranges(&self.input, index, ranges)
+            .build_mem_ranges(&self.input, index, &mut ranges);
+        ranges
     }
 
     /// Retrieves the partition ranges.
@@ -1052,35 +834,30 @@ impl StreamContext {
         self.ranges
             .iter()
             .enumerate()
-            .map(|(idx, range_meta)| PartitionRange {
-                start: range_meta.time_range.0,
-                end: range_meta.time_range.1,
-                num_rows: range_meta.num_rows,
-                identifier: idx,
-            })
+            .map(|(idx, range_meta)| range_meta.new_partition_range(idx))
             .collect()
     }
 
     /// Format the context for explain.
-    pub(crate) fn format_for_explain(
-        &self,
-        t: DisplayFormatType,
-        f: &mut fmt::Formatter,
-    ) -> fmt::Result {
-        match self.parts.try_lock() {
-            Ok(inner) => match t {
-                DisplayFormatType::Default => write!(
-                    f,
-                    "partition_count={} ({} memtable ranges, {} file {} ranges)",
-                    inner.0.len(),
-                    inner.0.num_mem_ranges(),
-                    inner.0.num_files(),
-                    inner.0.num_file_ranges()
-                )?,
-                DisplayFormatType::Verbose => write!(f, "{:?}", inner.0)?,
-            },
-            Err(_) => write!(f, "<locked>")?,
+    pub(crate) fn format_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let (mut num_mem_ranges, mut num_file_ranges) = (0, 0);
+        for range_meta in &self.ranges {
+            for idx in &range_meta.row_group_indices {
+                if self.is_mem_range_index(*idx) {
+                    num_mem_ranges += 1;
+                } else {
+                    num_file_ranges += 1;
+                }
+            }
         }
+        write!(
+            f,
+            "partition_count={} ({} memtable ranges, {} file {} ranges)",
+            self.ranges.len(),
+            num_mem_ranges,
+            self.input.num_files(),
+            num_file_ranges,
+        )?;
         if let Some(selector) = &self.input.series_row_selector {
             write!(f, ", selector={}", selector)?;
         }
@@ -1110,7 +887,7 @@ impl RangeBuilderList {
         &self,
         input: &ScanInput,
         index: RowGroupIndex,
-        ranges: &mut Vec<FileRange>,
+        ranges: &mut SmallVec<[FileRange; 2]>,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<()> {
         let file_index = index.index - self.mem_builders.len();
@@ -1131,7 +908,7 @@ impl RangeBuilderList {
         &self,
         input: &ScanInput,
         index: RowGroupIndex,
-        ranges: &mut Vec<MemtableRange>,
+        ranges: &mut SmallVec<[MemtableRange; 2]>,
     ) {
         let mut builder_opt = self.mem_builders[index.index].lock().unwrap();
         match &mut *builder_opt {
@@ -1159,7 +936,7 @@ struct FileRangeBuilder {
 impl FileRangeBuilder {
     /// Builds file ranges to read.
     /// Negative `row_group_index` indicates all row groups.
-    fn build_ranges(&self, row_group_index: i64, ranges: &mut Vec<FileRange>) {
+    fn build_ranges(&self, row_group_index: i64, ranges: &mut SmallVec<[FileRange; 2]>) {
         let Some(context) = self.context.clone() else {
             return;
         };
@@ -1196,7 +973,7 @@ struct MemRangeBuilder {
 impl MemRangeBuilder {
     /// Builds mem ranges to read in the memtable.
     /// Negative `row_group_index` indicates all row groups.
-    fn build_ranges(&self, row_group_index: i64, ranges: &mut Vec<MemtableRange>) {
+    fn build_ranges(&self, row_group_index: i64, ranges: &mut SmallVec<[MemtableRange; 2]>) {
         if row_group_index >= 0 {
             let row_group_index = row_group_index as usize;
             // Scans one row group.

@@ -12,16 +12,10 @@ brew install jemalloc
 sudo apt install libjemalloc-dev
 ```
 
-### [flamegraph](https://github.com/brendangregg/FlameGraph) 
+### [flamegraph](https://github.com/brendangregg/FlameGraph)
 
 ```bash
-curl https://raw.githubusercontent.com/brendangregg/FlameGraph/master/flamegraph.pl > ./flamegraph.pl 
-```
-
-### Build GreptimeDB with `mem-prof` feature.
-
-```bash
-cargo build --features=mem-prof
+curl https://raw.githubusercontent.com/brendangregg/FlameGraph/master/flamegraph.pl > ./flamegraph.pl
 ```
 
 ## Profiling
@@ -35,7 +29,7 @@ MALLOC_CONF=prof:true,lg_prof_interval:28 ./target/debug/greptime standalone sta
 Dump memory profiling data through HTTP API:
 
 ```bash
-curl localhost:4000/v1/prof/mem > greptime.hprof
+curl localhost:4000/debug/prof/mem > greptime.hprof
 ```
 
 You can periodically dump profiling data and compare them to find the delta memory usage.
@@ -45,6 +39,9 @@ You can periodically dump profiling data and compare them to find the delta memo
 To create flamegraph according to dumped profiling data:
 
 ```bash
-jeprof --svg <path_to_greptimedb_binary> --base=<baseline_prof> <profile_data> > output.svg
-```
+sudo apt install -y libjemalloc-dev
 
+jeprof <path_to_greptime_binary> <profile_data> --collapse | ./flamegraph.pl > mem-prof.svg
+
+jeprof <path_to_greptime_binary> --base <baseline_prof> <profile_data> --collapse | ./flamegraph.pl > output.svg
+```

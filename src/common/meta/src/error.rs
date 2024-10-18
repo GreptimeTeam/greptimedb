@@ -147,6 +147,20 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("Failed to start procedure manager"))]
+    StartProcedureManager {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Failed to stop procedure manager"))]
+    StopProcedureManager {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_procedure::Error,
+    },
+
     #[snafu(display(
         "Failed to get procedure output, procedure id: {procedure_id}, error: {err_msg}"
     ))]
@@ -715,7 +729,9 @@ impl ErrorExt for Error {
 
             SubmitProcedure { source, .. }
             | QueryProcedure { source, .. }
-            | WaitProcedure { source, .. } => source.status_code(),
+            | WaitProcedure { source, .. }
+            | StartProcedureManager { source, .. }
+            | StopProcedureManager { source, .. } => source.status_code(),
             RegisterProcedureLoader { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
             OperateDatanode { source, .. } => source.status_code(),

@@ -33,7 +33,7 @@ use crate::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 pub struct MockInfo {
     pub server_addr: String,
     pub channel_manager: ChannelManager,
-    pub metasrv: Metasrv,
+    pub metasrv: Arc<Metasrv>,
 }
 
 pub async fn mock_with_memstore() -> MockInfo {
@@ -78,12 +78,13 @@ pub async fn mock(
     metasrv.try_start().await.unwrap();
 
     let (client, server) = tokio::io::duplex(1024);
+    let metasrv = Arc::new(metasrv);
     let service = metasrv.clone();
     let _handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(HeartbeatServer::new(service.clone()))
-            .add_service(StoreServer::new(service.clone()))
-            .add_service(ProcedureServiceServer::new(service.clone()))
+            .add_service(HeartbeatServer::from_arc(service.clone()))
+            .add_service(StoreServer::from_arc(service.clone()))
+            .add_service(ProcedureServiceServer::from_arc(service.clone()))
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });

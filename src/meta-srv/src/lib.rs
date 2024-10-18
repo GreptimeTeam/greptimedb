@@ -27,7 +27,6 @@ pub mod flow_meta_alloc;
 pub mod handler;
 pub mod key;
 pub mod lease;
-pub mod lock;
 pub mod metasrv;
 mod metrics;
 #[cfg(feature = "mock")]
@@ -39,7 +38,6 @@ pub mod selector;
 pub mod service;
 pub mod state;
 pub mod table_meta_alloc;
-
 pub use crate::error::Result;
 
 mod greptimedb_telemetry;

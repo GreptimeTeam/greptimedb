@@ -448,30 +448,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to lock based on etcd"))]
-    Lock {
-        #[snafu(source)]
-        error: etcd_client::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to unlock based on etcd"))]
-    Unlock {
-        #[snafu(source)]
-        error: etcd_client::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to grant lease"))]
-    LeaseGrant {
-        #[snafu(source)]
-        error: etcd_client::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid utf-8 value"))]
     InvalidUtf8Value {
         #[snafu(source)]
@@ -770,9 +746,6 @@ impl ErrorExt for Error {
             | Error::ResponseHeaderNotFound { .. }
             | Error::IsNotLeader { .. }
             | Error::InvalidHttpBody { .. }
-            | Error::Lock { .. }
-            | Error::Unlock { .. }
-            | Error::LeaseGrant { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
             | Error::PusherNotFound { .. }

@@ -49,6 +49,8 @@ pub struct KafkaLogStore {
     max_batch_bytes: usize,
     /// The consumer wait timeout.
     consumer_wait_timeout: Duration,
+    /// Ignore missing entries during read WAL.
+    overwrite_entry_start_id: bool,
 }
 
 impl KafkaLogStore {
@@ -64,6 +66,7 @@ impl KafkaLogStore {
             client_manager,
             max_batch_bytes: config.max_batch_bytes.as_bytes() as usize,
             consumer_wait_timeout: config.consumer_wait_timeout,
+            overwrite_entry_start_id: config.overwrite_entry_start_id,
         })
     }
 }
@@ -205,7 +208,7 @@ impl LogStore for KafkaLogStore {
     async fn read(
         &self,
         provider: &Provider,
-        entry_id: EntryId,
+        mut entry_id: EntryId,
         index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
         let provider = provider
@@ -224,6 +227,25 @@ impl LogStore for KafkaLogStore {
             .await?
             .client()
             .clone();
+
+        if self.overwrite_entry_start_id {
+            let start_offset =
+                client
+                    .get_offset(OffsetAt::Earliest)
+                    .await
+                    .context(GetOffsetSnafu {
+                        topic: &provider.topic,
+                    })?;
+
+            if entry_id as i64 <= start_offset {
+                warn!(
+                "The entry_id: {} is less than start_offset: {}, topic: {}. Overwriting entry_id with start_offset",
+                entry_id, start_offset, &provider.topic
+            );
+
+                entry_id = start_offset as u64;
+            }
+        }
 
         // Gets the offset of the latest record in the topic. Actually, it's the latest record of the single partition in the topic.
         // The read operation terminates when this record is consumed.

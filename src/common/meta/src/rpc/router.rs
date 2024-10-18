@@ -289,6 +289,7 @@ pub enum LeaderState {
     ///
     /// - The [`Region`] may be unavailable (e.g., Crashed, Network disconnected).
     /// - The [`Region`] was planned to migrate to another [`Peer`].
+    #[serde(alias = "Downgraded")]
     Downgrading,
 }
 
@@ -513,6 +514,73 @@ mod tests {
 
         let decoded: RegionRoute = serde_json::from_str(input).unwrap();
 
+        assert_eq!(decoded, region_route);
+    }
+
+    #[test]
+    fn test_region_route_compatibility() {
+        let region_route = RegionRoute {
+            region: Region {
+                id: 2.into(),
+                name: "r2".to_string(),
+                partition: None,
+                attrs: BTreeMap::new(),
+            },
+            leader_peer: Some(Peer::new(1, "a1")),
+            follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
+            leader_state: Some(LeaderState::Downgrading),
+            leader_down_since: None,
+        };
+        let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_state":"Downgraded","leader_down_since":null}"#;
+        let decoded: RegionRoute = serde_json::from_str(input).unwrap();
+        assert_eq!(decoded, region_route);
+
+        let region_route = RegionRoute {
+            region: Region {
+                id: 2.into(),
+                name: "r2".to_string(),
+                partition: None,
+                attrs: BTreeMap::new(),
+            },
+            leader_peer: Some(Peer::new(1, "a1")),
+            follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
+            leader_state: Some(LeaderState::Downgrading),
+            leader_down_since: None,
+        };
+        let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_status":"Downgraded","leader_down_since":null}"#;
+        let decoded: RegionRoute = serde_json::from_str(input).unwrap();
+        assert_eq!(decoded, region_route);
+
+        let region_route = RegionRoute {
+            region: Region {
+                id: 2.into(),
+                name: "r2".to_string(),
+                partition: None,
+                attrs: BTreeMap::new(),
+            },
+            leader_peer: Some(Peer::new(1, "a1")),
+            follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
+            leader_state: Some(LeaderState::Downgrading),
+            leader_down_since: None,
+        };
+        let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_state":"Downgrading","leader_down_since":null}"#;
+        let decoded: RegionRoute = serde_json::from_str(input).unwrap();
+        assert_eq!(decoded, region_route);
+
+        let region_route = RegionRoute {
+            region: Region {
+                id: 2.into(),
+                name: "r2".to_string(),
+                partition: None,
+                attrs: BTreeMap::new(),
+            },
+            leader_peer: Some(Peer::new(1, "a1")),
+            follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
+            leader_state: Some(LeaderState::Downgrading),
+            leader_down_since: None,
+        };
+        let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_status":"Downgrading","leader_down_since":null}"#;
+        let decoded: RegionRoute = serde_json::from_str(input).unwrap();
         assert_eq!(decoded, region_route);
     }
 

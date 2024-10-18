@@ -48,6 +48,10 @@ impl Instance {
             _guard: guard,
         }
     }
+
+    pub fn get_inner(&self) -> &MetasrvInstance {
+        &self.instance
+    }
 }
 
 #[async_trait]
@@ -86,6 +90,14 @@ impl Command {
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
         self.subcmd.load_options(global_options)
     }
+
+    pub fn config_file(&self) -> &Option<String> {
+        self.subcmd.config_file()
+    }
+
+    pub fn env_prefix(&self) -> &String {
+        self.subcmd.env_prefix()
+    }
 }
 
 #[derive(Parser)]
@@ -103,6 +115,18 @@ impl SubCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
+        }
+    }
+
+    fn config_file(&self) -> &Option<String> {
+        match self {
+            SubCommand::Start(cmd) => &cmd.config_file,
+        }
+    }
+
+    fn env_prefix(&self) -> &String {
+        match self {
+            SubCommand::Start(cmd) => &cmd.env_prefix,
         }
     }
 }

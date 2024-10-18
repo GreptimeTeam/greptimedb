@@ -21,23 +21,19 @@ use syn::{parse_macro_input, DeriveInput, ItemStruct};
 pub(crate) fn impl_aggr_func_type_store(ast: &DeriveInput) -> TokenStream {
     let name = &ast.ident;
     let gen = quote! {
-        use common_query::logical_plan::accumulator::AggrFuncTypeStore;
-        use common_query::error::{InvalidInputStateSnafu, Error as QueryError};
-        use datatypes::prelude::ConcreteDataType;
-
-        impl AggrFuncTypeStore for #name {
-            fn input_types(&self) -> std::result::Result<Vec<ConcreteDataType>, QueryError> {
+        impl common_query::logical_plan::accumulator::AggrFuncTypeStore for #name {
+            fn input_types(&self) -> std::result::Result<Vec<datatypes::prelude::ConcreteDataType>, common_query::error::Error> {
                 let input_types = self.input_types.load();
-                snafu::ensure!(input_types.is_some(), InvalidInputStateSnafu);
+                snafu::ensure!(input_types.is_some(), common_query::error::InvalidInputStateSnafu);
                 Ok(input_types.as_ref().unwrap().as_ref().clone())
             }
 
-            fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> std::result::Result<(), QueryError> {
+            fn set_input_types(&self, input_types: Vec<datatypes::prelude::ConcreteDataType>) -> std::result::Result<(), common_query::error::Error> {
                 let old = self.input_types.swap(Some(std::sync::Arc::new(input_types.clone())));
                 if let Some(old) = old {
-                    snafu::ensure!(old.len() == input_types.len(), InvalidInputStateSnafu);
+                    snafu::ensure!(old.len() == input_types.len(), common_query::error::InvalidInputStateSnafu);
                     for (x, y) in old.iter().zip(input_types.iter()) {
-                        snafu::ensure!(x == y, InvalidInputStateSnafu);
+                        snafu::ensure!(x == y, common_query::error::InvalidInputStateSnafu);
                     }
                 }
                 Ok(())
@@ -51,7 +47,7 @@ pub(crate) fn impl_as_aggr_func_creator(_args: TokenStream, input: TokenStream) 
     let mut item_struct = parse_macro_input!(input as ItemStruct);
     if let syn::Fields::Named(ref mut fields) = item_struct.fields {
         let result = syn::Field::parse_named.parse2(quote! {
-            input_types: arc_swap::ArcSwapOption<Vec<ConcreteDataType>>
+            input_types: arc_swap::ArcSwapOption<Vec<datatypes::prelude::ConcreteDataType>>
         });
         match result {
             Ok(field) => fields.named.push(field),

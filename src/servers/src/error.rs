@@ -424,9 +424,7 @@ pub enum Error {
 
     #[cfg(feature = "pprof")]
     #[snafu(display("Failed to dump pprof data"))]
-    DumpPprof {
-        source: crate::http::pprof::nix::Error,
-    },
+    DumpPprof { source: common_pprof::error::Error },
 
     #[cfg(not(windows))]
     #[snafu(display("Failed to update jemalloc metrics"))]
@@ -533,6 +531,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("OpenTelemetry log error"))]
+    OpenTelemetryLog {
+        source: pipeline::etl_error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -597,7 +602,8 @@ impl ErrorExt for Error {
             | MysqlValueConversion { .. }
             | ParseJson { .. }
             | UnsupportedContentType { .. }
-            | TimestampOverflow { .. } => StatusCode::InvalidArguments,
+            | TimestampOverflow { .. }
+            | OpenTelemetryLog { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),

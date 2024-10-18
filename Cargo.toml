@@ -20,6 +20,7 @@ members = [
     "src/common/mem-prof",
     "src/common/meta",
     "src/common/plugins",
+    "src/common/pprof",
     "src/common/procedure",
     "src/common/procedure-test",
     "src/common/query",
@@ -64,7 +65,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.9.3"
+version = "0.9.5"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -120,7 +121,7 @@ etcd-client = { version = "0.13" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "0b4f7c8ab06399f6b90e1626e8d5b9697cb33bb9" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "b4d301184eb0d01fd4d1042fcc7c5dfb54f3c1e3" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
@@ -137,12 +138,13 @@ opentelemetry-proto = { version = "0.5", features = [
     "metrics",
     "trace",
     "with-serde",
+    "logs",
 ] }
 parquet = { version = "51.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.4" }
+promql-parser = { version = "0.4.1" }
 prost = "0.12"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
@@ -208,6 +210,7 @@ common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
 common-meta = { path = "src/common/meta" }
 common-plugins = { path = "src/common/plugins" }
+common-pprof = { path = "src/common/pprof" }
 common-procedure = { path = "src/common/procedure" }
 common-procedure-test = { path = "src/common/procedure-test" }
 common-query = { path = "src/common/query" }

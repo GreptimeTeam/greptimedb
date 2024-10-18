@@ -345,9 +345,10 @@ impl TypedPlan {
 #[cfg(test)]
 mod test {
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     use bytes::BytesMut;
-    use common_time::{DateTime, Interval};
+    use common_time::{IntervalMonthDayNano, Timestamp};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
     use pretty_assertions::assert_eq;
@@ -398,7 +399,10 @@ mod test {
                             .with_types(
                                 RelationType::new(vec![
                                     ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                    ColumnType::new(
+                                        ConcreteDataType::timestamp_millisecond_datatype(),
+                                        false,
+                                    ),
                                 ])
                                 .into_named(vec![
                                     Some("number".to_string()),
@@ -413,22 +417,18 @@ mod test {
                                 .map(vec![
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowFloor {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                1_000_000_000,
-                                            ),
-                                            start_time: Some(DateTime::new(1625097600000)),
+                                            window_size: Duration::from_nanos(1_000_000_000),
+                                            start_time: Some(Timestamp::new_millisecond(
+                                                1625097600000,
+                                            )),
                                         },
                                     ),
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowCeiling {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                1_000_000_000,
-                                            ),
-                                            start_time: Some(DateTime::new(1625097600000)),
+                                            window_size: Duration::from_nanos(1_000_000_000),
+                                            start_time: Some(Timestamp::new_millisecond(
+                                                1625097600000,
+                                            )),
                                         },
                                     ),
                                 ])
@@ -539,7 +539,10 @@ mod test {
                             .with_types(
                                 RelationType::new(vec![
                                     ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                    ColumnType::new(
+                                        ConcreteDataType::timestamp_millisecond_datatype(),
+                                        false,
+                                    ),
                                 ])
                                 .into_named(vec![
                                     Some("number".to_string()),
@@ -554,22 +557,18 @@ mod test {
                                 .map(vec![
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowFloor {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                1_000_000_000,
-                                            ),
-                                            start_time: Some(DateTime::new(1625097600000)),
+                                            window_size: Duration::from_nanos(1_000_000_000),
+                                            start_time: Some(Timestamp::new_millisecond(
+                                                1625097600000,
+                                            )),
                                         },
                                     ),
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowCeiling {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                1_000_000_000,
-                                            ),
-                                            start_time: Some(DateTime::new(1625097600000)),
+                                            window_size: Duration::from_nanos(1_000_000_000),
+                                            start_time: Some(Timestamp::new_millisecond(
+                                                1625097600000,
+                                            )),
                                         },
                                     ),
                                 ])
@@ -686,7 +685,10 @@ mod test {
                             .with_types(
                                 RelationType::new(vec![
                                     ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                    ColumnType::new(
+                                        ConcreteDataType::timestamp_millisecond_datatype(),
+                                        false,
+                                    ),
                                 ])
                                 .into_named(vec![
                                     Some("number".to_string()),
@@ -701,21 +703,13 @@ mod test {
                                 .map(vec![
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowFloor {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                3_600_000_000_000,
-                                            ),
+                                            window_size: Duration::from_nanos(3_600_000_000_000),
                                             start_time: None,
                                         },
                                     ),
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowCeiling {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                3_600_000_000_000,
-                                            ),
+                                            window_size: Duration::from_nanos(3_600_000_000_000),
                                             start_time: None,
                                         },
                                     ),
@@ -833,7 +827,10 @@ mod test {
                             .with_types(
                                 RelationType::new(vec![
                                     ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                    ColumnType::new(
+                                        ConcreteDataType::timestamp_millisecond_datatype(),
+                                        false,
+                                    ),
                                 ])
                                 .into_named(vec![
                                     Some("number".to_string()),
@@ -848,21 +845,13 @@ mod test {
                                 .map(vec![
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowFloor {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                3_600_000_000_000,
-                                            ),
+                                            window_size: Duration::from_nanos(3_600_000_000_000),
                                             start_time: None,
                                         },
                                     ),
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowCeiling {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                3_600_000_000_000,
-                                            ),
+                                            window_size: Duration::from_nanos(3_600_000_000_000),
                                             start_time: None,
                                         },
                                     ),
@@ -948,7 +937,10 @@ mod test {
                             .with_types(
                                 RelationType::new(vec![
                                     ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                    ColumnType::new(
+                                        ConcreteDataType::timestamp_millisecond_datatype(),
+                                        false,
+                                    ),
                                 ])
                                 .into_named(vec![
                                     Some("number".to_string()),
@@ -963,22 +955,18 @@ mod test {
                                 .map(vec![
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowFloor {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                3_600_000_000_000,
-                                            ),
-                                            start_time: Some(DateTime::new(1625097600000)),
+                                            window_size: Duration::from_nanos(3_600_000_000_000),
+                                            start_time: Some(Timestamp::new_millisecond(
+                                                1625097600000,
+                                            )),
                                         },
                                     ),
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowCeiling {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                3_600_000_000_000,
-                                            ),
-                                            start_time: Some(DateTime::new(1625097600000)),
+                                            window_size: Duration::from_nanos(3_600_000_000_000),
+                                            start_time: Some(Timestamp::new_millisecond(
+                                                1625097600000,
+                                            )),
                                         },
                                     ),
                                 ])
@@ -1512,7 +1500,7 @@ mod test {
                             .with_types(
                                 RelationType::new(vec![
                                     ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::timestamp_millisecond_datatype(), false),
                                 ])
                                 .into_named(vec![
                                     Some("number".to_string()),
@@ -1536,7 +1524,7 @@ mod test {
                                                 true,
                                             ),ColumnType::new(
                                                 ConcreteDataType::timestamp_millisecond_datatype(),
-                                                true,
+                                                false,
                                             )])
                                             .into_unnamed(),
                                             extensions: FunctionExtensions {
@@ -1554,10 +1542,10 @@ mod test {
                                     .unwrap(),
                                     exprs: vec![
                                         ScalarExpr::Literal(
-                                            Value::Interval(Interval::from_month_day_nano(0, 0, 30000000000)),
+                                            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(0, 0, 30000000000)),
                                             CDT::interval_month_day_nano_datatype()
                                         ),
-                                        ScalarExpr::Column(1).cast(CDT::timestamp_millisecond_datatype())
+                                        ScalarExpr::Column(1)
                                         ],
                                 }])
                                 .unwrap()

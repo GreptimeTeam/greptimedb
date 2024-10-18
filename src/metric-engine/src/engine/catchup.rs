@@ -47,9 +47,10 @@ impl MetricEngineInner {
             .await
             .context(MitoCatchupOperationSnafu)?;
 
+        let data_region_id = utils::to_data_region_id(region_id);
         self.mito
             .handle_request(
-                region_id,
+                data_region_id,
                 RegionRequest::Catchup(RegionCatchupRequest {
                     set_writable: req.set_writable,
                     entry_id: req.entry_id,

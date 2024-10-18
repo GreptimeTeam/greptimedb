@@ -64,21 +64,31 @@ impl MetricEngineInner {
     /// Return the physical region id behind this logical region
     async fn alter_logical_region(
         &self,
-        region_id: RegionId,
+        logical_region_id: RegionId,
         request: RegionAlterRequest,
     ) -> Result<RegionId> {
         let physical_region_id = {
             let state = &self.state.read().unwrap();
-            state.get_physical_region_id(region_id).with_context(|| {
-                error!("Trying to alter an nonexistent region {region_id}");
-                LogicalRegionNotFoundSnafu { region_id }
-            })?
+            state
+                .get_physical_region_id(logical_region_id)
+                .with_context(|| {
+                    error!("Trying to alter an nonexistent region {logical_region_id}");
+                    LogicalRegionNotFoundSnafu {
+                        region_id: logical_region_id,
+                    }
+                })?
         };
 
         // only handle adding column
         let AlterKind::AddColumns { columns } = request.kind else {
             return Ok(physical_region_id);
         };
+
+        // lock metadata region for this logical region id
+        let _write_guard = self
+            .metadata_region
+            .write_lock_logical_region(logical_region_id)
+            .await;
 
         let metadata_region_id = to_metadata_region_id(physical_region_id);
         let mut columns_to_add = vec![];
@@ -87,7 +97,7 @@ impl MetricEngineInner {
                 .metadata_region
                 .column_semantic_type(
                     metadata_region_id,
-                    region_id,
+                    logical_region_id,
                     &col.column_metadata.column_schema.name,
                 )
                 .await?
@@ -102,7 +112,7 @@ impl MetricEngineInner {
         self.add_columns_to_physical_data_region(
             data_region_id,
             metadata_region_id,
-            region_id,
+            logical_region_id,
             columns_to_add,
         )
         .await?;
@@ -110,9 +120,15 @@ impl MetricEngineInner {
         // register columns to logical region
         for col in columns {
             self.metadata_region
-                .add_column(metadata_region_id, region_id, &col.column_metadata)
+                .add_column(metadata_region_id, logical_region_id, &col.column_metadata)
                 .await?;
         }
+
+        // invalid logical column cache
+        self.state
+            .write()
+            .unwrap()
+            .invalid_logical_column_cache(logical_region_id);
 
         Ok(physical_region_id)
     }

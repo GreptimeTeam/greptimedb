@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use client::client_manager::NodeClients;
@@ -48,12 +48,8 @@ use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
-use crate::handler::{
-    HeartbeatHandlerGroup, HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers,
-};
+use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
-use crate::lock::memory::MemLock;
-use crate::lock::DistLockRef;
 use crate::metasrv::{
     ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
@@ -76,10 +72,9 @@ pub struct MetasrvBuilder {
     kv_backend: Option<KvBackendRef>,
     in_memory: Option<ResettableKvBackendRef>,
     selector: Option<SelectorRef>,
-    handler_group: Option<HeartbeatHandlerGroup>,
+    handler_group_builder: Option<HeartbeatHandlerGroupBuilder>,
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClientRef>,
-    lock: Option<DistLockRef>,
     node_manager: Option<NodeManagerRef>,
     plugins: Option<Plugins>,
     table_metadata_allocator: Option<TableMetadataAllocatorRef>,
@@ -91,11 +86,10 @@ impl MetasrvBuilder {
             kv_backend: None,
             in_memory: None,
             selector: None,
-            handler_group: None,
+            handler_group_builder: None,
             meta_peer_client: None,
             election: None,
             options: None,
-            lock: None,
             node_manager: None,
             plugins: None,
             table_metadata_allocator: None,
@@ -122,8 +116,11 @@ impl MetasrvBuilder {
         self
     }
 
-    pub fn heartbeat_handler(mut self, handler_group: HeartbeatHandlerGroup) -> Self {
-        self.handler_group = Some(handler_group);
+    pub fn heartbeat_handler(
+        mut self,
+        handler_group_builder: HeartbeatHandlerGroupBuilder,
+    ) -> Self {
+        self.handler_group_builder = Some(handler_group_builder);
         self
     }
 
@@ -134,11 +131,6 @@ impl MetasrvBuilder {
 
     pub fn election(mut self, election: Option<ElectionRef>) -> Self {
         self.election = election;
-        self
-    }
-
-    pub fn lock(mut self, lock: Option<DistLockRef>) -> Self {
-        self.lock = lock;
         self
     }
 
@@ -170,8 +162,7 @@ impl MetasrvBuilder {
             kv_backend,
             in_memory,
             selector,
-            handler_group,
-            lock,
+            handler_group_builder,
             node_manager,
             plugins,
             table_metadata_allocator,
@@ -205,7 +196,6 @@ impl MetasrvBuilder {
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
-        let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
         let selector_ctx = SelectorContext {
             server_addr: options.server_addr.clone(),
             datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
@@ -349,8 +339,8 @@ impl MetasrvBuilder {
             .context(error::InitDdlManagerSnafu)?,
         );
 
-        let handler_group = match handler_group {
-            Some(handler_group) => handler_group,
+        let handler_group_builder = match handler_group_builder {
+            Some(handler_group_builder) => handler_group_builder,
             None => {
                 let region_lease_handler = RegionLeaseHandler::new(
                     distributed_time_constants::REGION_LEASE_SECS,
@@ -363,7 +353,6 @@ impl MetasrvBuilder {
                     .with_region_failure_handler(region_failover_handler)
                     .with_region_lease_handler(Some(region_lease_handler))
                     .add_default_handlers()
-                    .build()?
             }
         };
 
@@ -382,9 +371,9 @@ impl MetasrvBuilder {
             selector,
             // TODO(jeremy): We do not allow configuring the flow selector.
             flow_selector: Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)),
-            handler_group: Arc::new(handler_group),
+            handler_group: RwLock::new(None),
+            handler_group_builder: Mutex::new(Some(handler_group_builder)),
             election,
-            lock,
             procedure_manager,
             mailbox,
             procedure_executor: ddl_manager,

@@ -91,5 +91,12 @@ impl AggregateFunctions {
         register_aggr_func!("argmin", 1, ArgminAccumulatorCreator);
         register_aggr_func!("scipystatsnormcdf", 2, ScipyStatsNormCdfAccumulatorCreator);
         register_aggr_func!("scipystatsnormpdf", 2, ScipyStatsNormPdfAccumulatorCreator);
+
+        #[cfg(feature = "geo")]
+        register_aggr_func!(
+            "json_encode_path",
+            3,
+            super::geo::encoding::JsonPathEncodeFunctionCreator
+        );
     }
 }

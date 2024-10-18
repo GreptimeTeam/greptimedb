@@ -48,4 +48,4 @@ Please refer to [SQL query](./query.sql) for GreptimeDB and Clickhouse, and [que
 
 ## Addition
 - You can tune GreptimeDB's configuration to get better performance.
-- You can setup GreptimeDB to use S3 as storage, see [here](https://docs.greptime.com/user-guide/operations/configuration/#storage-options).
+- You can setup GreptimeDB to use S3 as storage, see [here](https://docs.greptime.com/user-guide/deployments/configuration#storage-options).

@@ -43,8 +43,10 @@ use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status, StringKey};
-pub use manager::RegionMigrationProcedureTask;
-use manager::{RegionMigrationProcedureGuard, RegionMigrationProcedureTracker};
+use manager::RegionMigrationProcedureGuard;
+pub use manager::{
+    RegionMigrationManagerRef, RegionMigrationProcedureTask, RegionMigrationProcedureTracker,
+};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -52,6 +54,7 @@ use tokio::time::Instant;
 
 use self::migration_start::RegionMigrationStart;
 use crate::error::{self, Result};
+use crate::metrics::{METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE};
 use crate::service::mailbox::MailboxRef;
 
 /// It's shared in each step and available even after recovering.
@@ -388,6 +391,12 @@ impl Context {
 #[async_trait::async_trait]
 #[typetag::serde(tag = "region_migration_state")]
 pub(crate) trait State: Sync + Send + Debug {
+    fn name(&self) -> &'static str {
+        let type_name = std::any::type_name::<Self>();
+        // short name
+        type_name.split("::").last().unwrap_or(type_name)
+    }
+
     /// Yields the next [State] and [Status].
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)>;
 
@@ -476,10 +485,20 @@ impl Procedure for RegionMigrationProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 
+        let name = state.name();
+        let _timer = METRIC_META_REGION_MIGRATION_EXECUTE
+            .with_label_values(&[name])
+            .start_timer();
         let (next, status) = state.next(&mut self.context).await.map_err(|e| {
             if e.is_retryable() {
+                METRIC_META_REGION_MIGRATION_ERROR
+                    .with_label_values(&[name, "retryable"])
+                    .inc();
                 ProcedureError::retry_later(e)
             } else {
+                METRIC_META_REGION_MIGRATION_ERROR
+                    .with_label_values(&[name, "external"])
+                    .inc();
                 ProcedureError::external(e)
             }
         })?;

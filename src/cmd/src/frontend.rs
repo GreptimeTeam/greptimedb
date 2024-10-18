@@ -38,7 +38,6 @@ use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
 use query::stats::StatementStatistics;
 use servers::tls::{TlsMode, TlsOption};
-use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -47,7 +46,7 @@ use crate::error::{
     Result, StartFrontendSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App};
+use crate::{log_versions, App, DistributedInformationExtension};
 
 type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
 
@@ -316,9 +315,10 @@ impl StartCommand {
             .build(),
         );
 
+        let information_extension =
+            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
         let catalog_manager = KvBackendCatalogManager::new(
-            Mode::Distributed,
-            Some(meta_client.clone()),
+            information_extension,
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             None,

@@ -213,6 +213,17 @@ create_index = true
 ## **It's only used when the provider is `kafka`**.
 dump_index_interval = "60s"
 
+## Ignore missing entries during read WAL.
+## **It's only used when the provider is `kafka`**.
+## 
+## This option ensures that when Kafka messages are deleted, the system 
+## can still successfully replay memtable data without throwing an 
+## out-of-range error. 
+## However, enabling this option might lead to unexpected data loss, 
+## as the system will skip over missing entries instead of treating 
+## them as critical errors.
+overwrite_entry_start_id = false
+
 # The Kafka SASL configuration.
 # **It's only used when the provider is `kafka`**.
 # Available SASL mechanisms:

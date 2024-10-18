@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
@@ -21,7 +22,7 @@ use base64::Engine;
 use common_recordbatch::util::collect;
 use datafusion::prelude::{col, lit};
 use mito2::engine::MitoEngine;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
     METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME,
@@ -31,11 +32,12 @@ use store_api::metric_engine_consts::{
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionDeleteRequest, RegionPutRequest};
 use store_api::storage::{RegionId, ScanRequest};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::error::{
     CollectRecordBatchStreamSnafu, DecodeColumnValueSnafu, DeserializeColumnMetadataSnafu,
-    MitoReadOperationSnafu, MitoWriteOperationSnafu, ParseRegionIdSnafu, RegionAlreadyExistsSnafu,
-    Result,
+    LogicalRegionNotFoundSnafu, MitoReadOperationSnafu, MitoWriteOperationSnafu,
+    ParseRegionIdSnafu, RegionAlreadyExistsSnafu, Result,
 };
 use crate::utils;
 
@@ -56,11 +58,19 @@ const COLUMN_PREFIX: &str = "__column_";
 /// itself.
 pub struct MetadataRegion {
     mito: MitoEngine,
+    /// Logical lock for operations that need to be serialized. Like update & read region columns.
+    ///
+    /// Region entry will be registered on creating and opening logical region, and deregistered on
+    /// removing logical region.
+    logical_region_lock: RwLock<HashMap<RegionId, Arc<RwLock<()>>>>,
 }
 
 impl MetadataRegion {
     pub fn new(mito: MitoEngine) -> Self {
-        Self { mito }
+        Self {
+            mito,
+            logical_region_lock: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Add a new table key to metadata.
@@ -85,8 +95,19 @@ impl MetadataRegion {
             }
             .fail()
         } else {
+            self.logical_region_lock
+                .write()
+                .await
+                .insert(logical_region_id, Arc::new(RwLock::new(())));
             Ok(())
         }
+    }
+
+    pub async fn open_logical_region(&self, logical_region_id: RegionId) {
+        self.logical_region_lock
+            .write()
+            .await
+            .insert(logical_region_id, Arc::new(RwLock::new(())));
     }
 
     /// Add a new column key to metadata.
@@ -109,6 +130,40 @@ impl MetadataRegion {
             Self::serialize_column_metadata(column_metadata),
         )
         .await
+    }
+
+    /// Retrieve a read lock guard of given logical region id.
+    pub async fn read_lock_logical_region(
+        &self,
+        logical_region_id: RegionId,
+    ) -> Result<OwnedRwLockReadGuard<()>> {
+        let lock = self
+            .logical_region_lock
+            .read()
+            .await
+            .get(&logical_region_id)
+            .context(LogicalRegionNotFoundSnafu {
+                region_id: logical_region_id,
+            })?
+            .clone();
+        Ok(RwLock::read_owned(lock).await)
+    }
+
+    /// Retrieve a write lock guard of given logical region id.
+    pub async fn write_lock_logical_region(
+        &self,
+        logical_region_id: RegionId,
+    ) -> Result<OwnedRwLockWriteGuard<()>> {
+        let lock = self
+            .logical_region_lock
+            .read()
+            .await
+            .get(&logical_region_id)
+            .context(LogicalRegionNotFoundSnafu {
+                region_id: logical_region_id,
+            })?
+            .clone();
+        Ok(RwLock::write_owned(lock).await)
     }
 
     /// Remove a registered logical region from metadata.
@@ -135,6 +190,11 @@ impl MetadataRegion {
         // remove region key and column keys
         column_keys.push(region_key);
         self.delete(region_id, &column_keys).await?;
+
+        self.logical_region_lock
+            .write()
+            .await
+            .remove(&logical_region_id);
 
         Ok(())
     }

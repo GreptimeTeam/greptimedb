@@ -294,7 +294,7 @@ explain analyze select tag from t where num > 6 order by ts desc limit 2;
 +-+-+-+
 | 0_| 0_|_GlobalLimitExec: skip=0, fetch=2 REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 DESC] REDACTED
-|_|_|_SortExec: TopK(fetch=2), expr=[ts@1 DESC], preserve_partitioning=[true] REDACTED
+|_|_|_SortExec: expr=[ts@1 DESC], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_GlobalLimitExec: skip=0, fetch=2 REDACTED

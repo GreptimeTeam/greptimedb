@@ -42,7 +42,7 @@ use promql::extension_plan::PromExtensionPlanner;
 use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
-use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
+use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer, MergeSortExtensionPlanner};
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
@@ -295,6 +295,7 @@ impl DfQueryPlanner {
                 catalog_manager,
                 region_query_handler,
             )));
+            planners.push(Arc::new(MergeSortExtensionPlanner {}));
         }
         Self {
             physical_planner: DefaultPhysicalPlanner::with_extension_planners(planners),

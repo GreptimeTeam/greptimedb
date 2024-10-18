@@ -134,17 +134,26 @@ impl MetricEngineInner {
             .await?;
         let logical_region_num = logical_regions.len();
 
-        let mut state = self.state.write().unwrap();
-        // recover physical column names
-        let physical_column_names = physical_columns
-            .into_iter()
-            .map(|col| col.column_schema.name)
-            .collect();
-        state.add_physical_region(physical_region_id, physical_column_names);
-        // recover logical regions
-        for logical_region_id in logical_regions {
-            state.add_logical_region(physical_region_id, logical_region_id);
+        {
+            let mut state = self.state.write().unwrap();
+            // recover physical column names
+            let physical_column_names = physical_columns
+                .into_iter()
+                .map(|col| col.column_schema.name)
+                .collect();
+            state.add_physical_region(physical_region_id, physical_column_names);
+            // recover logical regions
+            for logical_region_id in &logical_regions {
+                state.add_logical_region(physical_region_id, *logical_region_id);
+            }
         }
+
+        for logical_region_id in logical_regions {
+            self.metadata_region
+                .open_logical_region(logical_region_id)
+                .await;
+        }
+
         LOGICAL_REGION_COUNT.add(logical_region_num as i64);
 
         Ok(())

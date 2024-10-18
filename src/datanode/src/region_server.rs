@@ -32,7 +32,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use datafusion::datasource::{provider_as_source, TableProvider};
 use datafusion::error::Result as DfResult;
@@ -893,7 +893,7 @@ impl RegionServerInner {
         for region in logical_regions {
             self.region_map
                 .insert(region, RegionEngineWithStatus::Ready(engine.clone()));
-            info!("Logical region {} is registered!", region);
+            debug!("Logical region {} is registered!", region);
         }
         Ok(())
     }
@@ -935,17 +935,19 @@ impl RegionServerInner {
             .iter()
             .map(|x| (*x.key(), x.value().clone()))
             .collect::<Vec<_>>();
+        let num_regions = regions.len();
 
         for (region_id, engine) in regions {
             let closed = engine
                 .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
                 .await;
             match closed {
-                Ok(_) => info!("Region {region_id} is closed"),
+                Ok(_) => debug!("Region {region_id} is closed"),
                 Err(e) => warn!("Failed to close region {region_id}, err: {e}"),
             }
         }
         self.region_map.clear();
+        info!("closed {num_regions} regions");
 
         let engines = self.engines.write().unwrap().drain().collect::<Vec<_>>();
         for (engine_name, engine) in engines {

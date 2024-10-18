@@ -16,10 +16,12 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::MAINTENANCE_KEY;
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::leadership_notifier::LeadershipChangeListener;
 use common_meta::peer::PeerLookupServiceRef;
 use common_meta::{ClusterId, DatanodeId};
 use common_runtime::JoinHandle;
@@ -129,6 +131,23 @@ pub struct RegionSupervisorTicker {
     sender: Sender<Event>,
 }
 
+#[async_trait]
+impl LeadershipChangeListener for RegionSupervisorTicker {
+    fn name(&self) -> &'static str {
+        "RegionSupervisorTicker"
+    }
+
+    async fn on_leader_start(&self) -> common_meta::error::Result<()> {
+        self.start();
+        Ok(())
+    }
+
+    async fn on_leader_stop(&self) -> common_meta::error::Result<()> {
+        self.stop();
+        Ok(())
+    }
+}
+
 impl RegionSupervisorTicker {
     pub(crate) fn new(tick_interval: Duration, sender: Sender<Event>) -> Self {
         Self {
@@ -223,7 +242,7 @@ impl RegionFailureDetectorController for RegionFailureDetectorControl {
             .send(Event::RegisterFailureDetectors(detecting_regions))
             .await
         {
-            error!(err; "RegionSupervisor is stop receiving heartbeat");
+            error!(err; "RegionSupervisor has stop receiving heartbeat.");
         }
     }
 
@@ -233,12 +252,13 @@ impl RegionFailureDetectorController for RegionFailureDetectorControl {
             .send(Event::DeregisterFailureDetectors(detecting_regions))
             .await
         {
-            error!(err; "RegionSupervisor is stop receiving heartbeat");
+            error!(err; "RegionSupervisor has stop receiving heartbeat.");
         }
     }
 }
 
 /// [`HeartbeatAcceptor`] forwards heartbeats to [`RegionSupervisor`].
+#[derive(Clone)]
 pub(crate) struct HeartbeatAcceptor {
     sender: Sender<Event>,
 }
@@ -251,13 +271,13 @@ impl HeartbeatAcceptor {
     /// Accepts heartbeats from datanodes.
     pub(crate) async fn accept(&self, heartbeat: DatanodeHeartbeat) {
         if let Err(err) = self.sender.send(Event::HeartbeatArrived(heartbeat)).await {
-            error!(err; "RegionSupervisor is stop receiving heartbeat");
+            error!(err; "RegionSupervisor has stop receiving heartbeat.");
         }
     }
 }
 
 impl RegionSupervisor {
-    /// Returns a a mpsc channel with a buffer capacity of 1024 for sending and receiving `Event` messages.
+    /// Returns a mpsc channel with a buffer capacity of 1024 for sending and receiving `Event` messages.
     pub(crate) fn channel() -> (Sender<Event>, Receiver<Event>) {
         tokio::sync::mpsc::channel(1024)
     }

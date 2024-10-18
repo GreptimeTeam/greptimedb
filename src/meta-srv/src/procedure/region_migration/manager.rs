@@ -30,6 +30,7 @@ use store_api::storage::RegionId;
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
+use crate::metrics::{METRIC_META_REGION_MIGRATION_DATANODES, METRIC_META_REGION_MIGRATION_FAIL};
 use crate::procedure::region_migration::{
     DefaultContextFactory, PersistentContext, RegionMigrationProcedure,
 };
@@ -44,7 +45,7 @@ pub struct RegionMigrationManager {
 }
 
 #[derive(Default, Clone)]
-pub(crate) struct RegionMigrationProcedureTracker {
+pub struct RegionMigrationProcedureTracker {
     running_procedures: Arc<RwLock<HashMap<RegionId, RegionMigrationProcedureTask>>>,
 }
 
@@ -149,7 +150,7 @@ impl RegionMigrationManager {
     }
 
     /// Returns the [`RegionMigrationProcedureTracker`].
-    pub(crate) fn tracker(&self) -> &RegionMigrationProcedureTracker {
+    pub fn tracker(&self) -> &RegionMigrationProcedureTracker {
         &self.tracker
     }
 
@@ -323,6 +324,12 @@ impl RegionMigrationManager {
             schema_name,
             ..
         } = table_info.table_name();
+        METRIC_META_REGION_MIGRATION_DATANODES
+            .with_label_values(&["src", &task.from_peer.id.to_string()])
+            .inc();
+        METRIC_META_REGION_MIGRATION_DATANODES
+            .with_label_values(&["desc", &task.to_peer.id.to_string()])
+            .inc();
         let RegionMigrationProcedureTask {
             cluster_id,
             region_id,
@@ -358,6 +365,7 @@ impl RegionMigrationManager {
 
             if let Err(e) = watcher::wait(watcher).await {
                 error!(e; "Failed to wait region migration procedure {procedure_id} for {task}");
+                METRIC_META_REGION_MIGRATION_FAIL.inc();
                 return;
             }
 
