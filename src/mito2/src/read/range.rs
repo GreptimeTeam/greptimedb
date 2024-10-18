@@ -177,9 +177,9 @@ impl RangeMeta {
         // For append mode, we can parallelize reading row groups.
         for (i, file) in files.iter().enumerate() {
             let file_index = num_memtables + i;
+            // Get parquet meta from the cache.
             let parquet_meta =
                 cache.and_then(|c| c.get_parquet_meta_data_mem(file.region_id(), file.file_id()));
-            // Get parquet meta from the cache.
             if let Some(parquet_meta) = parquet_meta {
                 // Scans each row group.
                 for row_group_index in 0..file.meta_ref().num_row_groups {
@@ -247,7 +247,6 @@ impl RangeMeta {
         }
     }
 
-    // TODO(yingwen): Support multiple row groups in a range so we can split them later.
     fn push_seq_file_ranges(
         num_memtables: usize,
         files: &[FileHandle],
@@ -256,15 +255,31 @@ impl RangeMeta {
         // For non append-only mode, each range only contains one file.
         for (i, file) in files.iter().enumerate() {
             let file_index = num_memtables + i;
-            ranges.push(RangeMeta {
-                time_range: file.time_range(),
-                indices: smallvec![file_index],
-                row_group_indices: smallvec![RowGroupIndex {
-                    index: file_index,
-                    row_group_index: ALL_ROW_GROUPS,
-                }],
-                num_rows: file.meta_ref().num_rows as usize,
-            });
+            if file.meta_ref().num_row_groups > 0 {
+                // All row groups share the same time range.
+                let row_group_indices = (0..file.meta_ref().num_row_groups)
+                    .map(|row_group_index| RowGroupIndex {
+                        index: file_index,
+                        row_group_index: row_group_index as i64,
+                    })
+                    .collect();
+                ranges.push(RangeMeta {
+                    time_range: file.time_range(),
+                    indices: smallvec![file_index],
+                    row_group_indices,
+                    num_rows: file.meta_ref().num_rows as usize,
+                });
+            } else {
+                ranges.push(RangeMeta {
+                    time_range: file.time_range(),
+                    indices: smallvec![file_index],
+                    row_group_indices: smallvec![RowGroupIndex {
+                        index: file_index,
+                        row_group_index: ALL_ROW_GROUPS,
+                    }],
+                    num_rows: file.meta_ref().num_rows as usize,
+                });
+            }
         }
     }
 }
@@ -396,4 +411,6 @@ mod tests {
             &[(vec![3], 0, 1000), (vec![1, 2], 3000, 6000)],
         );
     }
+
+    // TODO(yingwen): Test split.
 }
