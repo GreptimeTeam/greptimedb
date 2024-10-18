@@ -237,8 +237,8 @@ impl<S> RegionWorkerLoop<S> {
         let request_sender = self.sender.clone();
         // Now the region is in altering state.
         common_runtime::spawn_global(async move {
-            let new_meta = change.metadata.clone();
-            let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
+            let action_list =
+                RegionMetaActionList::with_action(RegionMetaAction::Change(change.clone()));
 
             let result = region
                 .manifest_ctx
@@ -251,7 +251,7 @@ impl<S> RegionWorkerLoop<S> {
                     region_id: region.region_id,
                     sender,
                     result,
-                    new_meta,
+                    change,
                 }),
             };
 
@@ -280,11 +280,21 @@ impl<S> RegionWorkerLoop<S> {
         };
 
         if change_result.result.is_ok() {
+            let RegionChange { metadata, ttl } = change_result.change;
             // Apply the metadata to region's version.
             region
                 .version_control
-                .alter_schema(change_result.new_meta, &region.memtable_builder);
+                .alter_schema(metadata, &region.memtable_builder);
 
+            if let Some(ttl) = ttl {
+                let mut options = region.version_control.current().version.options.clone();
+                if ttl.is_zero() {
+                    options.ttl = None;
+                } else {
+                    options.ttl = Some(ttl);
+                }
+                region.version_control.alter_options(options);
+            }
             info!(
                 "Region {} is altered, schema version is {}",
                 region.region_id,

@@ -44,7 +44,7 @@ use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
     FlushRegionSnafu, InvalidRequestSnafu, Result,
 };
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{RegionChange, RegionEdit};
 use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
 use crate::wal::entry_distributor::WalEntryReceiver;
@@ -757,8 +757,8 @@ pub(crate) struct TruncateResult {
 pub(crate) struct RegionChangeResult {
     /// Region id.
     pub(crate) region_id: RegionId,
-    /// The new region metadata to apply.
-    pub(crate) new_meta: RegionMetadataRef,
+    /// Change to region
+    pub(crate) change: RegionChange,
     /// Result sender.
     pub(crate) sender: OptionOutputTx,
     /// Result from the manifest manager.
