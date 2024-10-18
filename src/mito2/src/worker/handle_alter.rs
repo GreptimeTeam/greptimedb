@@ -15,6 +15,7 @@
 //! Handling alter related requests.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_telemetry::{debug, info};
 use snafu::ResultExt;
@@ -138,7 +139,10 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
         // Persist the metadata to region's manifest.
-        let change = RegionChange { metadata: new_meta };
+        let change = RegionChange {
+            metadata: new_meta,
+            ttl: None,
+        };
         self.handle_manifest_region_change(region, change, sender)
     }
 
@@ -150,16 +154,33 @@ impl<S> RegionWorkerLoop<S> {
         options: Vec<ChangeTableOption>,
         sender: OptionOutputTx,
     ) {
-        let mut new_region_options = version.options.clone();
+        let mut builder = RegionMetadataBuilder::from_existing((&*version.metadata).clone());
+        builder.bump_version();
+        let metadata = match builder.build().context(InvalidRegionRequestSnafu) {
+            Ok(new_meta) => Arc::new(new_meta),
+            Err(e) => {
+                sender.send(Err(e));
+                return;
+            }
+        };
+        let mut change = RegionChange {
+            metadata,
+            ttl: None,
+        };
         for option in options {
             match option {
                 ChangeTableOption::TTL(ttl) => {
-                    new_region_options.ttl = ttl;
+                    if let Some(ttl) = ttl {
+                        change.ttl = Some(ttl);
+                    } else {
+                        // Subtle difference: if ttl is absent in ChangeTableOption,
+                        // it actually means unset ttl.
+                        change.ttl = Some(Duration::from_secs(0));
+                    }
                 }
             }
         }
-        region.version_control.apply_options(new_region_options);
-        sender.send(Ok(0));
+        self.handle_manifest_region_change(region, change, sender);
     }
 }
 

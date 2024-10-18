@@ -99,7 +99,7 @@ impl VersionControl {
     }
 
     /// Applies region option changes and generates a new verison.
-    pub(crate) fn apply_options(&self, options: RegionOptions) {
+    pub(crate) fn alter_options(&self, options: RegionOptions) {
         let version = self.current().version;
         let new_version = Arc::new(
             VersionBuilder::from_version(version)
