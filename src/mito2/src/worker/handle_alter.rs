@@ -156,9 +156,6 @@ impl<S> RegionWorkerLoop<S> {
                 ChangeTableOption::TTL(ttl) => {
                     new_region_options.ttl = ttl;
                 }
-                _ => {
-                    unimplemented!("Change region option {:?} is not supported", option);
-                }
             }
         }
         region.version_control.apply_options(new_region_options);

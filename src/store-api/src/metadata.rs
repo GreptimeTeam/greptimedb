@@ -741,6 +741,14 @@ pub enum MetadataError {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid region option change request, key: {}, value: {}", key, value))]
+    InvalidRegionOptionChangeRequest {
+        key: String,
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for MetadataError {

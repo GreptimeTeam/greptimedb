@@ -226,12 +226,6 @@ impl TableMeta {
                 ChangeTableOptionRequest::TTL(new_ttl) => {
                     new_options.ttl = *new_ttl;
                 }
-                ChangeTableOptionRequest::WriteBufferSize(_) => {
-                    unimplemented!()
-                }
-                ChangeTableOptionRequest::Extra(_) => {
-                    unimplemented!()
-                }
             }
         }
         let mut builder = TableMetaBuilder::default();
