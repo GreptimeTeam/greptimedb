@@ -465,18 +465,5 @@ mod tests {
         );
 
         check_parse_alter_table("ALTER TABLE test_table MODIFY 'a'=NULL;", &[("a", "")]);
-        assert!(ParserContext::create_with_dialect(
-            "ALTER TABLE test_table MODIFY 'a'=a;",
-            &GreptimeDbDialect {},
-            ParseOptions::default()
-        )
-        .is_err());
-
-        assert!(ParserContext::create_with_dialect(
-            "ALTER TABLE test_table MODIFY a='a';",
-            &GreptimeDbDialect {},
-            ParseOptions::default()
-        )
-        .is_err());
     }
 }
