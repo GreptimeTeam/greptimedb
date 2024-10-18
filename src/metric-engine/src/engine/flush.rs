@@ -10,7 +10,7 @@
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
-// limitations under the License.'
+// limitations under the License.
 
 use snafu::ResultExt;
 use store_api::region_engine::RegionEngine;
@@ -42,8 +42,9 @@ impl MetricEngineInner {
             .context(MitoFlushOperationSnafu)
             .map(|response| response.affected_rows)?;
 
+        let data_region_id = utils::to_data_region_id(region_id);
         self.mito
-            .handle_request(region_id, RegionRequest::Flush(req.clone()))
+            .handle_request(data_region_id, RegionRequest::Flush(req.clone()))
             .await
             .context(MitoFlushOperationSnafu)
             .map(|response| response.affected_rows)
