@@ -87,11 +87,7 @@ impl CacheManager {
         file_id: FileId,
     ) -> Option<Arc<ParquetMetaData>> {
         // Try to get metadata from sst meta cache
-        let metadata = self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
-            let value = sst_meta_cache.get(&SstMetaKey(region_id, file_id));
-            update_hit_miss(value, SST_META_TYPE)
-        });
-
+        let metadata = self.get_parquet_meta_data_mem(region_id, file_id);
         if metadata.is_some() {
             return metadata;
         }
@@ -108,6 +104,19 @@ impl CacheManager {
         };
 
         None
+    }
+
+    /// Gets cached [ParquetMetaData] from memory cache.
+    pub fn get_parquet_meta_data_mem(
+        &self,
+        region_id: RegionId,
+        file_id: FileId,
+    ) -> Option<Arc<ParquetMetaData>> {
+        // Try to get metadata from sst meta cache
+        self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
+            let value = sst_meta_cache.get(&SstMetaKey(region_id, file_id));
+            update_hit_miss(value, SST_META_TYPE)
+        })
     }
 
     /// Puts [ParquetMetaData] into the cache.

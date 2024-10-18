@@ -18,9 +18,11 @@ use common_time::Timestamp;
 use smallvec::{smallvec, SmallVec};
 use store_api::region_engine::PartitionRange;
 
+use crate::cache::CacheManager;
 use crate::memtable::MemtableRef;
 use crate::read::scan_region::ScanInput;
 use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
+use crate::sst::parquet::format::parquet_row_group_time_range;
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 const ALL_ROW_GROUPS: i64 = -1;
@@ -84,7 +86,12 @@ impl RangeMeta {
     pub(crate) fn unordered_scan_ranges(input: &ScanInput) -> Vec<RangeMeta> {
         let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
         Self::push_unordered_mem_ranges(&input.memtables, &mut ranges);
-        Self::push_unordered_file_ranges(input.memtables.len(), &input.files, &mut ranges);
+        Self::push_unordered_file_ranges(
+            input.memtables.len(),
+            &input.files,
+            input.cache_manager.as_deref(),
+            &mut ranges,
+        );
 
         ranges
     }
@@ -164,12 +171,35 @@ impl RangeMeta {
     fn push_unordered_file_ranges(
         num_memtables: usize,
         files: &[FileHandle],
+        cache: Option<&CacheManager>,
         ranges: &mut Vec<RangeMeta>,
     ) {
         // For append mode, we can parallelize reading row groups.
         for (i, file) in files.iter().enumerate() {
             let file_index = num_memtables + i;
-            if file.meta_ref().num_row_groups > 0 {
+            let parquet_meta =
+                cache.and_then(|c| c.get_parquet_meta_data_mem(file.region_id(), file.file_id()));
+            // Get parquet meta from the cache.
+            if let Some(parquet_meta) = parquet_meta {
+                // Scans each row group.
+                for row_group_index in 0..file.meta_ref().num_row_groups {
+                    let time_range = parquet_row_group_time_range(
+                        file.meta_ref(),
+                        &parquet_meta,
+                        row_group_index as usize,
+                    );
+                    let num_rows = parquet_meta.row_group(row_group_index as usize).num_rows();
+                    ranges.push(RangeMeta {
+                        time_range: time_range.unwrap_or_else(|| file.time_range()),
+                        indices: smallvec![file_index],
+                        row_group_indices: smallvec![RowGroupIndex {
+                            index: file_index,
+                            row_group_index: row_group_index as i64,
+                        }],
+                        num_rows: num_rows as usize,
+                    });
+                }
+            } else if file.meta_ref().num_row_groups > 0 {
                 // Scans each row group.
                 for row_group_index in 0..file.meta_ref().num_row_groups {
                     ranges.push(RangeMeta {

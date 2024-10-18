@@ -111,7 +111,8 @@ pub struct FileMeta {
     pub region_id: RegionId,
     /// Compared to normal file names, FileId ignore the extension
     pub file_id: FileId,
-    /// Timestamp range of file.
+    /// Timestamp range of file. The timestamps have the same time unit as the
+    /// data in the SST.
     pub time_range: FileTimeRange,
     /// SST level of the file.
     pub level: Level,
