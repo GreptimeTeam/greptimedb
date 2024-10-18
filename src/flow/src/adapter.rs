@@ -301,7 +301,7 @@ impl FlowWorkerManager {
                                 if row.len() != proto_schema.len() {
                                     InternalSnafu {
                                         reason: format!(
-                                            "Row len mismatch, expect {} got {}",
+                                            "Flow output row length mismatch, expect {} got {}",
                                             proto_schema.len(),
                                             row.len()
                                         ),
