@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RowValue"],"struct":["InsertIntoExpr"],"type":["RowValues"]};

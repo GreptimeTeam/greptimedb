@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["table_info","table_name","table_route","view_info"]};

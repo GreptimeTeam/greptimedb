@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_schema_columns","pg_type_schema_columns"]};

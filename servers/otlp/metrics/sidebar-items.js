@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["APPROXIMATE_COLUMN_COUNT","HISTOGRAM_LE_COLUMN"],"fn":["encode_exponential_histogram","encode_gauge","encode_histogram","encode_metrics","encode_sum","encode_summary","normalize_otlp_name","to_grpc_insert_requests","write_attributes","write_data_point_value","write_tags_and_timestamp","write_timestamp"]};

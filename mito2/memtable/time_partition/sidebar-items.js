@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["partition_start_timestamp"],"struct":["PartTimeRange","PartitionToWrite","PartitionsInner","TimePartition","TimePartitions"],"type":["PartitionVec","TimePartitionsRef"]};

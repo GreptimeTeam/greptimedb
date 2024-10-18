@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["metadata_after_alteration"]};

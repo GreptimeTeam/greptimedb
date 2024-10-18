@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["from_bytes","from_substrait_literal","from_substrait_type","from_substrait_user_defined_type","to_substrait_literal"]};
