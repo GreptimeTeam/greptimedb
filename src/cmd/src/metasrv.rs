@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -167,6 +168,23 @@ struct StartCommand {
     backend: Option<BackendImpl>,
 }
 
+/// The context for the command.
+pub struct CmdContext {
+    // The config file path.
+    pub config_file: Option<String>,
+    // The environment variable prefix.
+    pub env_prefix: String,
+}
+
+impl CmdContext {
+    fn new(config_file: Option<String>, env_prefix: String) -> Self {
+        Self {
+            config_file,
+            env_prefix,
+        }
+    }
+}
+
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
         let mut opts = MetasrvOptions::load_layered_options(
@@ -275,6 +293,11 @@ impl StartCommand {
 
         let opts = opts.component;
         let mut plugins = Plugins::new();
+        // Injects the command context into the plugins for further use.
+        plugins.insert(Arc::new(CmdContext::new(
+            self.config_file.clone(),
+            self.env_prefix.clone(),
+        )));
         plugins::setup_metasrv_plugins(&mut plugins, &opts)
             .await
             .context(StartMetaServerSnafu)?;
