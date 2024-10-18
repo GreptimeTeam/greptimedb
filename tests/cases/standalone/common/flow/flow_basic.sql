@@ -80,6 +80,7 @@ INSERT INTO
     distinct_basic
 VALUES
     (20, "2021-07-01 00:00:00.200"),
+    (20, "2021-07-01 00:00:00.200"),
     (22, "2021-07-01 00:00:00.600");
 
 admin flush_flow('test_distinct_basic');
@@ -461,3 +462,39 @@ DROP FLOW calc_ngx_distribution;
 DROP TABLE ngx_access_log;
 
 DROP TABLE ngx_distribution;
+
+CREATE TABLE requests (
+    service_name STRING,
+    service_ip STRING,
+    val INT,
+    ts TIMESTAMP TIME INDEX
+);
+
+CREATE TABLE requests_without_ip (
+    service_name STRING,
+    val INT,
+    ts TIMESTAMP TIME INDEX,
+);
+
+CREATE FLOW requests_long_term
+SINK TO requests_without_ip
+AS
+SELECT
+    service_name,
+    val,
+    ts
+FROM requests;
+
+INSERT INTO requests VALUES 
+    ("svc1", "10.0.0.1", 100, "2024-10-18 19:00:00"),
+    ("svc1", "10.0.0.2", 100, "2024-10-18 19:00:00"),
+    ("svc1", "10.0.0.1", 200, "2024-10-18 19:00:30"),
+    ("svc1", "10.0.0.2", 200, "2024-10-18 19:00:30"),
+    ("svc1", "10.0.0.1", 300, "2024-10-18 19:01:00"),
+    ("svc1", "10.0.0.2", 100, "2024-10-18 19:01:01"),
+    ("svc1", "10.0.0.1", 400, "2024-10-18 19:01:30"),
+    ("svc1", "10.0.0.2", 200, "2024-10-18 19:01:31");
+
+admin flush_flow('requests_long_term');
+
+SELECT * FROM requests_without_ip;
