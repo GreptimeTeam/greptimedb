@@ -14,15 +14,18 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
+use api::v1::region::alter_request::Kind;
 use api::v1::region::{
     alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{self, Rows, SemanticType};
+use common_base::readable_size::ReadableSize;
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
 use snafu::{ensure, OptionExt};
@@ -33,6 +36,7 @@ use crate::metadata::{
     ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
     RegionMetadata, Result,
 };
+use crate::mito_engine_options::TTL_KEY;
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
@@ -389,6 +393,8 @@ pub enum AlterKind {
         /// Columns to change.
         columns: Vec<ChangeColumnType>,
     },
+    /// Change table options.
+    ChangeTableOptions { options: Vec<ChangeTableOption> },
 }
 
 impl AlterKind {
@@ -412,6 +418,7 @@ impl AlterKind {
                     col_to_change.validate(metadata)?;
                 }
             }
+            AlterKind::ChangeTableOptions { .. } => {}
         }
         Ok(())
     }
@@ -429,6 +436,11 @@ impl AlterKind {
             AlterKind::ChangeColumnTypes { columns } => columns
                 .iter()
                 .any(|col_to_change| col_to_change.need_alter(metadata)),
+            AlterKind::ChangeTableOptions { .. } => {
+                // we need to update region options for `ChangeTableOptions`.
+                // todo: we need to check if ttl has ever changed.
+                true
+            }
         }
     }
 
@@ -473,9 +485,35 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
             }
+            Kind::ChangeTableOptions(change_options) => AlterKind::ChangeTableOptions {
+                options: change_options
+                    .change_table_options
+                    .iter()
+                    .map(TryFrom::try_from)
+                    .collect::<Result<Vec<_>>>()?,
+            },
         };
 
         Ok(alter_kind)
+    }
+}
+
+impl TryFrom<&v1::ChangeTableOption> for ChangeTableOption {
+    type Error = MetadataError;
+
+    fn try_from(option: &v1::ChangeTableOption) -> std::result::Result<Self, Self::Error> {
+        if option.key == TTL_KEY {
+            let ttl_value = if option.value.is_empty() {
+                None
+            } else {
+                // todo: remove this unwrap
+                let d = humantime::parse_duration(&option.value).unwrap();
+                Some(d)
+            };
+            Ok(ChangeTableOption::TTL(ttl_value))
+        } else {
+            todo!("raise error on other types")
+        }
     }
 }
 
@@ -639,6 +677,14 @@ impl From<v1::ChangeColumnType> for ChangeColumnType {
     }
 }
 
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum ChangeTableOption {
+    WriteBufferSize(Option<ReadableSize>),
+    TTL(Option<Duration>),
+    Extra((String, String)),
+}
+
+#[derive(Debug, Default)]
 #[derive(Debug, Clone, Default)]
 pub struct RegionFlushRequest {
     pub row_group_size: Option<usize>,
