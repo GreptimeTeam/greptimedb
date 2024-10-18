@@ -137,6 +137,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Changing table option `{}` is not supported", key))]
+    UnsupportedTableAttr {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -157,6 +164,7 @@ impl ErrorExt for Error {
             Error::Unsupported { .. } => StatusCode::Unsupported,
             Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
             Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
+            Error::UnsupportedTableAttr { .. } => StatusCode::Unsupported,
         }
     }
 

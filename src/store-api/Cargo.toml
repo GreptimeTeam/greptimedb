@@ -27,6 +27,7 @@ serde_json.workspace = true
 snafu.workspace = true
 strum.workspace = true
 tokio.workspace = true
+humantime.workspace = true
 
 [dev-dependencies]
 async-stream.workspace = true
