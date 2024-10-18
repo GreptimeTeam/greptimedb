@@ -44,7 +44,7 @@ impl<'a> TableReference<'a> {
     }
 }
 
-impl<'a> Display for TableReference<'a> {
+impl Display for TableReference<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}.{}.{}", self.catalog, self.schema, self.table)
     }

@@ -22,7 +22,7 @@ use index::inverted_index::Bytes;
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> InvertedIndexApplierBuilder<'a> {
+impl InvertedIndexApplierBuilder<'_> {
     /// Collects an eq expression in the form of `column = lit`.
     pub(crate) fn collect_eq(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
         let Some(column_name) = Self::column_name(left).or_else(|| Self::column_name(right)) else {

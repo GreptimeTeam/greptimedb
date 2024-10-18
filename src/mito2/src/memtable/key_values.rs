@@ -126,7 +126,7 @@ pub struct KeyValue<'a> {
     op_type: OpType,
 }
 
-impl<'a> KeyValue<'a> {
+impl KeyValue<'_> {
     /// Get primary key columns.
     pub fn primary_keys(&self) -> impl Iterator<Item = ValueRef> {
         self.helper.indices[..self.helper.num_primary_key_column]

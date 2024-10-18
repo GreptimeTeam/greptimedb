@@ -77,7 +77,7 @@ impl DatanodeTableKey {
     }
 }
 
-impl<'a> MetadataKey<'a, DatanodeTableKey> for DatanodeTableKey {
+impl MetadataKey<'_, DatanodeTableKey> for DatanodeTableKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }

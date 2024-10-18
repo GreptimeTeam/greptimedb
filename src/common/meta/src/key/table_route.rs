@@ -245,7 +245,7 @@ impl LogicalTableRouteValue {
     }
 }
 
-impl<'a> MetadataKey<'a, TableRouteKey> for TableRouteKey {
+impl MetadataKey<'_, TableRouteKey> for TableRouteKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
@@ -472,6 +472,8 @@ pub struct TableRouteStorage {
     kv_backend: KvBackendRef,
 }
 
+pub type TableRouteValueDecodeResult = Result<Option<DeserializedValueWithBytes<TableRouteValue>>>;
+
 impl TableRouteStorage {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
@@ -485,9 +487,7 @@ impl TableRouteStorage {
         table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.to_bytes();
@@ -510,9 +510,7 @@ impl TableRouteStorage {
         new_table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.to_bytes();

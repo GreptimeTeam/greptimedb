@@ -22,7 +22,7 @@ use crate::statements::statement::Statement;
 
 /// `admin` extension parser: `admin function(arg1, arg2, ...)`
 /// or `admin function`
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     /// Parse `admin function(arg1, arg2, ...)` or `admin function` statement
     pub(crate) fn parse_admin_command(&mut self) -> Result<Statement> {
         let _token = self.parser.next_token();

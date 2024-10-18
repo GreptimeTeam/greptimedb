@@ -46,6 +46,8 @@ lazy_static! {
 /// The layout: `__flow/name/{catalog_name}/{flow_name}`.
 pub struct FlowNameKey<'a>(FlowScoped<FlowNameKeyInner<'a>>);
 
+pub type FlowNameDecodeResult = Result<Option<DeserializedValueWithBytes<FlowNameValue>>>;
+
 #[allow(dead_code)]
 impl<'a> FlowNameKey<'a> {
     /// Returns the [FlowNameKey]
@@ -223,9 +225,7 @@ impl FlowNameManager {
         flow_id: FlowId,
     ) -> Result<(
         Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<FlowNameValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> FlowNameDecodeResult,
     )> {
         let key = FlowNameKey::new(catalog_name, flow_name);
         let raw_key = key.to_bytes();

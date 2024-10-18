@@ -61,7 +61,7 @@ pub struct Context<'referred, 'df> {
     pub err_collector: ErrCollector,
 }
 
-impl<'referred, 'df> Drop for Context<'referred, 'df> {
+impl Drop for Context<'_, '_> {
     fn drop(&mut self) {
         for bundle in std::mem::take(&mut self.input_collection)
             .into_values()
@@ -92,7 +92,7 @@ impl<'referred, 'df> Drop for Context<'referred, 'df> {
     }
 }
 
-impl<'referred, 'df> Context<'referred, 'df> {
+impl Context<'_, '_> {
     pub fn insert_global(&mut self, id: GlobalId, collection: CollectionBundle) {
         self.input_collection.insert(id, collection);
     }
@@ -120,7 +120,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
     }
 }
 
-impl<'referred, 'df> Context<'referred, 'df> {
+impl Context<'_, '_> {
     /// Like `render_plan` but in Batch Mode
     pub fn render_plan_batch(&mut self, plan: TypedPlan) -> Result<CollectionBundle<Batch>, Error> {
         match plan.plan {

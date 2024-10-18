@@ -92,7 +92,7 @@ macro_rules! impl_min_max_values {
     }};
 }
 
-impl<'a> PruningStatistics for RowGroupPruningStatistics<'a> {
+impl PruningStatistics for RowGroupPruningStatistics<'_> {
     fn min_values(&self, column: &Column) -> Option<ArrayRef> {
         impl_min_max_values!(self, column, min)
     }

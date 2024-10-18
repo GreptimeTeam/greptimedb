@@ -230,7 +230,7 @@ impl<'a> RecordBatchRowIterator<'a> {
     }
 }
 
-impl<'a> Iterator for RecordBatchRowIterator<'a> {
+impl Iterator for RecordBatchRowIterator<'_> {
     type Item = Vec<Value>;
 
     fn next(&mut self) -> Option<Self::Item> {

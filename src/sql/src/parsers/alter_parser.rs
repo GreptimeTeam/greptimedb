@@ -23,7 +23,7 @@ use crate::parser::ParserContext;
 use crate::statements::alter::{AlterTable, AlterTableOperation};
 use crate::statements::statement::Statement;
 
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
         let alter_table = self.parse_alter_table().context(error::SyntaxSnafu)?;
         Ok(Statement::Alter(alter_table))
