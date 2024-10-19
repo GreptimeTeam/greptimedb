@@ -46,7 +46,7 @@ impl ParserContext<'_> {
                 let location = if self.parser.parse_keyword(Keyword::FIRST) {
                     Some(AddColumnLocation::First)
                 } else if let Token::Word(word) = self.parser.peek_token().token {
-                    if word.value.to_ascii_uppercase() == "AFTER" {
+                    if word.value.eq_ignore_ascii_case("AFTER") {
                         let _ = self.parser.next_token();
                         let name = Self::canonicalize_identifier(self.parse_identifier()?);
                         Some(AddColumnLocation::After {
