@@ -6416,11 +6416,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "meter-core"
+version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac#a10facb353b41460eeb98578868ebf19c2084fac"
+dependencies = [
+ "anymap2",
+ "once_cell",
+ "parking_lot 0.12.3",
+]
+
+[[package]]
 name = "meter-macros"
 version = "0.1.0"
 source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd#80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd"
 dependencies = [
- "meter-core",
+ "meter-core 0.1.0 (git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd)",
 ]
 
 [[package]]
@@ -7585,7 +7595,7 @@ dependencies = [
  "futures-util",
  "lazy_static",
  "meta-client",
- "meter-core",
+ "meter-core 0.1.0 (git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac)",
  "meter-macros",
  "moka",
  "object-store",
@@ -8988,7 +8998,7 @@ dependencies = [
  "humantime",
  "itertools 0.10.5",
  "lazy_static",
- "meter-core",
+ "meter-core 0.1.0 (git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac)",
  "meter-macros",
  "num",
  "num-traits",
@@ -10862,7 +10872,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "derive_builder 0.12.0",
- "meter-core",
+ "meter-core 0.1.0 (git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac)",
  "snafu 0.8.5",
  "sql",
 ]
