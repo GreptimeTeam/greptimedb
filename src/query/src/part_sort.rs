@@ -33,6 +33,7 @@ use datafusion_common::{internal_err, DataFusionError};
 use datafusion_physical_expr::PhysicalSortExpr;
 use futures::Stream;
 use itertools::Itertools;
+use snafu::location;
 use store_api::region_engine::PartitionRange;
 
 use crate::error::Result;
@@ -204,7 +205,10 @@ impl PartSortStream {
 
         let sort_column =
             concat(&sort_columns.iter().map(|a| a.as_ref()).collect_vec()).map_err(|e| {
-                DataFusionError::ArrowError(e, Some("Fail to concat sort columns".to_string()))
+                DataFusionError::ArrowError(
+                    e,
+                    Some(format!("Fail to concat sort columns at {}", location!())),
+                )
             })?;
 
         let limit = self.remaining_fetch().and_then(|f| {
@@ -221,7 +225,10 @@ impl PartSortStream {
         }
 
         let indices = sort_to_indices(&sort_column, opt, limit).map_err(|e| {
-            DataFusionError::ArrowError(e, Some("Fail to sort to indices".to_string()))
+            DataFusionError::ArrowError(
+                e,
+                Some(format!("Fail to sort to indices at {}", location!())),
+            )
         })?;
 
         // reserve memory for the concat input and sorted output
@@ -236,14 +243,20 @@ impl PartSortStream {
         .map_err(|e| {
             DataFusionError::ArrowError(
                 e,
-                Some("Fail to concat input batches when sorting".to_string()),
+                Some(format!(
+                    "Fail to concat input batches when sorting at {}",
+                    location!()
+                )),
             )
         })?;
 
         let sorted = take_record_batch(&full_input, &indices).map_err(|e| {
             DataFusionError::ArrowError(
                 e,
-                Some("Fail to take result record batch when sorting".to_string()),
+                Some(format!(
+                    "Fail to take result record batch when sorting at {}",
+                    location!()
+                )),
             )
         })?;
 
