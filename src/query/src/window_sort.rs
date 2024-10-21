@@ -31,6 +31,7 @@ use arrow_schema::{DataType, SchemaRef, SortOptions};
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
+use common_telemetry::error;
 use common_time::Timestamp;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
 use datafusion::execution::{RecordBatchStream, TaskContext};
@@ -113,6 +114,12 @@ impl WindowedSortExec {
         input: Arc<dyn ExecutionPlan>,
     ) -> Result<Self> {
         check_partition_range_monotonicity(&ranges, expression.options.descending)?;
+
+        common_telemetry::info!(
+            "[DEBUG] input's output partitioning: {:?}, num partition ranges: {}",
+            input.output_partitioning(),
+            ranges.len()
+        );
 
         let properties = PlanProperties::new(
             input.equivalence_properties().clone(),
@@ -213,11 +220,16 @@ impl ExecutionPlan for WindowedSortExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
+        common_telemetry::info!("[DEBUG] WindowedSortExec::execute {}", partition);
         self.to_stream(context, partition)
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metrics.clone_inner())
+    }
+
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        vec![false; self.ranges.len()]
     }
 }
 
@@ -387,35 +399,31 @@ impl WindowedSortStream {
             let mut last_remaining = None;
             let mut run_iter = runs_with_batch.into_iter();
             loop {
-                let (sorted_rb, run_info) = if let Some(r) = last_remaining.take() {
-                    r
-                } else if let Some(r) = run_iter.next() {
-                    r
-                } else {
+                let Some((sorted_rb, run_info)) = last_remaining.take().or(run_iter.next()) else {
                     break;
                 };
                 if sorted_rb.num_rows() == 0 {
                     continue;
                 }
                 // determine if this batch is in current working range
-                let cur_range = {
-                    match run_info.get_time_range() {
-                        Some(r) => r,
-                        _ => internal_err!("Found NULL in time index column")?,
-                    }
+                let Some(cur_range) = run_info.get_time_range() else {
+                    internal_err!("Found NULL in time index column")?
                 };
-                let working_range = if let Some(r) = self.get_working_range() {
-                    r
-                } else {
+                let Some(working_range) = self.get_working_range() else {
                     internal_err!("No working range found")?
                 };
 
+                // ensure the current batch is in the working range
                 if sort_column.options.unwrap_or_default().descending {
                     if cur_range.end > working_range.end {
-                        internal_err!("Current batch have data on the right side of working range `{:?}`, something is very wrong", working_range)?;
+                        let uuid = uuid::Uuid::now_v7();
+                        error!("XRayID {uuid}: current range: {cur_range:?}, working range: {working_range:?}");
+                        internal_err!("Current batch have data on the right side of working range, something is very wrong. XRayID {uuid}")?;
                     }
                 } else if cur_range.start < working_range.start {
-                    internal_err!("Current batch have data on the left side of working range `{:?}`, something is very wrong", working_range)?;
+                    let uuid = uuid::Uuid::now_v7();
+                    error!("XRayID {uuid}: current range: {cur_range:?}, working range: {working_range:?}");
+                    internal_err!("Current batch have data on the left side of working range, something is very wrong. XRayID {uuid}")?;
                 }
 
                 if cur_range.is_subset(&working_range) {
