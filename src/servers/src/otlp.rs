@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod jsonb_path;
 pub mod logs;
 pub mod metrics;
 pub mod plugin;
