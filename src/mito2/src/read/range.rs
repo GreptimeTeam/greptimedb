@@ -28,7 +28,7 @@ use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 const ALL_ROW_GROUPS: i64 = -1;
 
 /// Index to access a row group.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RowGroupIndex {
     /// Index to the memtable/file.
     pub(crate) index: usize,
@@ -40,6 +40,7 @@ pub(crate) struct RowGroupIndex {
 /// Meta data of a partition range.
 /// If the scanner is [UnorderedScan], each meta only has one row group or memtable.
 /// If the scanner is [SeqScan], each meta may have multiple row groups and memtables.
+#[derive(Debug, PartialEq)]
 pub(crate) struct RangeMeta {
     /// The time range of the range.
     pub(crate) time_range: FileTimeRange,
@@ -412,5 +413,211 @@ mod tests {
         );
     }
 
-    // TODO(yingwen): Test split.
+    #[test]
+    fn test_merge_range() {
+        let mut left = RangeMeta {
+            time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
+            indices: smallvec![1],
+            row_group_indices: smallvec![
+                RowGroupIndex {
+                    index: 1,
+                    row_group_index: 1
+                },
+                RowGroupIndex {
+                    index: 1,
+                    row_group_index: 2
+                }
+            ],
+            num_rows: 5,
+        };
+        let right = RangeMeta {
+            time_range: (Timestamp::new_second(800), Timestamp::new_second(1200)),
+            indices: smallvec![2],
+            row_group_indices: smallvec![
+                RowGroupIndex {
+                    index: 2,
+                    row_group_index: 1
+                },
+                RowGroupIndex {
+                    index: 2,
+                    row_group_index: 2
+                }
+            ],
+            num_rows: 4,
+        };
+        left.merge(right);
+
+        assert_eq!(
+            left,
+            RangeMeta {
+                time_range: (Timestamp::new_second(800), Timestamp::new_second(2000)),
+                indices: smallvec![1, 2],
+                row_group_indices: smallvec![
+                    RowGroupIndex {
+                        index: 1,
+                        row_group_index: 1
+                    },
+                    RowGroupIndex {
+                        index: 1,
+                        row_group_index: 2
+                    },
+                    RowGroupIndex {
+                        index: 2,
+                        row_group_index: 1
+                    },
+                    RowGroupIndex {
+                        index: 2,
+                        row_group_index: 2
+                    },
+                ],
+                num_rows: 9,
+            }
+        );
+    }
+
+    #[test]
+    fn test_split_range() {
+        let range = RangeMeta {
+            time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
+            indices: smallvec![1],
+            row_group_indices: smallvec![
+                RowGroupIndex {
+                    index: 1,
+                    row_group_index: 1
+                },
+                RowGroupIndex {
+                    index: 1,
+                    row_group_index: 2
+                }
+            ],
+            num_rows: 5,
+        };
+
+        assert!(range.can_split_preserve_order());
+        let mut output = Vec::new();
+        range.maybe_split(&mut output);
+
+        assert_eq!(
+            output,
+            &[
+                RangeMeta {
+                    time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
+                    indices: smallvec![1],
+                    row_group_indices: smallvec![RowGroupIndex {
+                        index: 1,
+                        row_group_index: 1
+                    },],
+                    num_rows: 2,
+                },
+                RangeMeta {
+                    time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
+                    indices: smallvec![1],
+                    row_group_indices: smallvec![RowGroupIndex {
+                        index: 1,
+                        row_group_index: 2
+                    }],
+                    num_rows: 2,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn test_not_split_range() {
+        let range = RangeMeta {
+            time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
+            indices: smallvec![1, 2],
+            row_group_indices: smallvec![
+                RowGroupIndex {
+                    index: 1,
+                    row_group_index: 1
+                },
+                RowGroupIndex {
+                    index: 2,
+                    row_group_index: 1
+                }
+            ],
+            num_rows: 5,
+        };
+
+        assert!(!range.can_split_preserve_order());
+        let mut output = Vec::new();
+        range.maybe_split(&mut output);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_maybe_split_ranges() {
+        let ranges = vec![
+            RangeMeta {
+                time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
+                indices: smallvec![1],
+                row_group_indices: smallvec![
+                    RowGroupIndex {
+                        index: 1,
+                        row_group_index: 0
+                    },
+                    RowGroupIndex {
+                        index: 1,
+                        row_group_index: 1
+                    }
+                ],
+                num_rows: 4,
+            },
+            RangeMeta {
+                time_range: (Timestamp::new_second(3000), Timestamp::new_second(4000)),
+                indices: smallvec![2, 3],
+                row_group_indices: smallvec![
+                    RowGroupIndex {
+                        index: 2,
+                        row_group_index: 0
+                    },
+                    RowGroupIndex {
+                        index: 3,
+                        row_group_index: 0
+                    }
+                ],
+                num_rows: 5,
+            },
+        ];
+        let output = maybe_split_ranges_for_seq_scan(ranges);
+        assert_eq!(
+            output,
+            vec![
+                RangeMeta {
+                    time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
+                    indices: smallvec![1],
+                    row_group_indices: smallvec![RowGroupIndex {
+                        index: 1,
+                        row_group_index: 0
+                    },],
+                    num_rows: 2,
+                },
+                RangeMeta {
+                    time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
+                    indices: smallvec![1],
+                    row_group_indices: smallvec![RowGroupIndex {
+                        index: 1,
+                        row_group_index: 1
+                    }],
+                    num_rows: 2,
+                },
+                RangeMeta {
+                    time_range: (Timestamp::new_second(3000), Timestamp::new_second(4000)),
+                    indices: smallvec![2, 3],
+                    row_group_indices: smallvec![
+                        RowGroupIndex {
+                            index: 2,
+                            row_group_index: 0
+                        },
+                        RowGroupIndex {
+                            index: 3,
+                            row_group_index: 0
+                        }
+                    ],
+                    num_rows: 5,
+                },
+            ]
+        )
+    }
 }
