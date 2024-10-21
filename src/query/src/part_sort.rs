@@ -250,6 +250,8 @@ impl PartSortStream {
         // only clear after sorted for better debugging
         self.buffer.clear();
         self.produced += sorted.num_rows();
+        drop(full_input);
+        self.reservation.shrink(total_mem);
         Ok(Some(sorted))
     }
 
