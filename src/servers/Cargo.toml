@@ -17,10 +17,10 @@ workspace = true
 ahash = "0.8"
 aide = { version = "0.9", features = ["axum"] }
 api.workspace = true
+arrow.workspace = true
 arrow-flight.workspace = true
 arrow-ipc.workspace = true
 arrow-schema.workspace = true
-arrow.workspace = true
 async-trait = "0.1"
 auth.workspace = true
 axum = { workspace = true, features = ["multipart"] }
@@ -46,9 +46,9 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-version = { workspace = true, features = ["codec"] }
 dashmap.workspace = true
+datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
-datafusion.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures = "0.3"
@@ -82,6 +82,7 @@ promql-parser.workspace = true
 prost.workspace = true
 query.workspace = true
 rand.workspace = true
+ref-cast = "1.0"
 regex.workspace = true
 reqwest.workspace = true
 rust-embed = { version = "6.6", features = ["debug-embed"] }
@@ -97,18 +98,17 @@ snap = "1"
 sql.workspace = true
 strum.workspace = true
 table.workspace = true
+tokio.workspace = true
 tokio-rustls = "0.26"
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
-tokio.workspace = true
-tonic-reflection = "0.11"
 tonic.workspace = true
+tonic-reflection = "0.11"
 tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.4", features = ["full"] }
 urlencoding = "2.1"
 uuid.workspace = true
 zstd.workspace = true
-ref-cast = "1.0"
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
