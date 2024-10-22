@@ -34,7 +34,6 @@ use datafusion_physical_expr::PhysicalSortExpr;
 use futures::Stream;
 use itertools::Itertools;
 use snafu::location;
-use store_api::region_engine::PartitionRange;
 
 use crate::error::Result;
 
@@ -317,12 +316,12 @@ mod test {
     use std::io::Write;
     use std::sync::Arc;
 
-    use arrow::ipc::Time;
     use arrow::json::ArrayWriter;
     use arrow_schema::{DataType, Field, Schema, SortOptions, TimeUnit};
     use common_time::Timestamp;
     use datafusion_physical_expr::expressions::Column;
     use futures::StreamExt;
+    use store_api::region_engine::PartitionRange;
 
     use super::*;
     use crate::test_util::{new_ts_array, MockInputExec};
