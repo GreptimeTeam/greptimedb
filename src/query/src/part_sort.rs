@@ -333,7 +333,7 @@ mod test {
     use futures::StreamExt;
 
     use super::*;
-    use crate::window_sort::test::{new_array, MockInputExec};
+    use crate::test_util::{new_ts_array, MockInputExec};
 
     #[tokio::test]
     async fn fuzzy_test() {
@@ -411,7 +411,7 @@ mod test {
                         .map(|_| rng.i64(start.value()..end.value()))
                         .collect_vec();
                     sort_data.extend(data_gen.clone());
-                    let arr = new_array(unit.clone(), data_gen.clone());
+                    let arr = new_ts_array(unit.clone(), data_gen.clone());
 
                     let batch = DfRecordBatch::try_new(schema.clone(), vec![arr]).unwrap();
                     batches.push(batch);
@@ -459,7 +459,7 @@ mod test {
             let expected_output = output_data
                 .into_iter()
                 .map(|a| {
-                    DfRecordBatch::try_new(schema.clone(), vec![new_array(unit.clone(), a)])
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit.clone(), a)])
                         .unwrap()
                 })
                 .collect_vec();

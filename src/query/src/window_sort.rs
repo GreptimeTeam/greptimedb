@@ -1140,6 +1140,7 @@ pub(crate) mod test {
     use serde_json::json;
 
     use super::*;
+    use crate::test_util::{new_ts_array, MockInputExec};
     #[test]
     fn test_overlapping() {
         let testcases = [
@@ -2426,95 +2427,6 @@ pub(crate) mod test {
         }
     }
 
-    #[derive(Debug)]
-    pub struct MockInputExec {
-        input: Vec<DfRecordBatch>,
-        schema: SchemaRef,
-        properties: PlanProperties,
-    }
-
-    impl MockInputExec {
-        pub fn new(input: Vec<DfRecordBatch>, schema: SchemaRef) -> Self {
-            Self {
-                properties: PlanProperties::new(
-                    EquivalenceProperties::new(schema.clone()),
-                    Partitioning::UnknownPartitioning(1),
-                    ExecutionMode::Bounded,
-                ),
-                input,
-                schema,
-            }
-        }
-    }
-
-    impl DisplayAs for MockInputExec {
-        fn fmt_as(&self, _t: DisplayFormatType, _f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            unimplemented!()
-        }
-    }
-
-    impl ExecutionPlan for MockInputExec {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn properties(&self) -> &PlanProperties {
-            &self.properties
-        }
-
-        fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-            vec![]
-        }
-
-        fn with_new_children(
-            self: Arc<Self>,
-            _children: Vec<Arc<dyn ExecutionPlan>>,
-        ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
-            Ok(self)
-        }
-
-        fn execute(
-            &self,
-            _partition: usize,
-            _context: Arc<TaskContext>,
-        ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
-            let stream = MockStream {
-                stream: self.input.clone(),
-                schema: self.schema.clone(),
-                idx: 0,
-            };
-            Ok(Box::pin(stream))
-        }
-    }
-
-    struct MockStream {
-        stream: Vec<DfRecordBatch>,
-        schema: SchemaRef,
-        idx: usize,
-    }
-
-    impl Stream for MockStream {
-        type Item = datafusion_common::Result<DfRecordBatch>;
-        fn poll_next(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
-            if self.idx < self.stream.len() {
-                let ret = self.stream[self.idx].clone();
-                self.idx += 1;
-                Poll::Ready(Some(Ok(ret)))
-            } else {
-                Poll::Ready(None)
-            }
-        }
-    }
-
-    impl RecordBatchStream for MockStream {
-        fn schema(&self) -> SchemaRef {
-            self.schema.clone()
-        }
-    }
-
     #[tokio::test]
     async fn test_window_sort_stream() {
         let test_cases = [
@@ -3048,21 +2960,6 @@ pub(crate) mod test {
         }
     }
 
-    pub fn new_array(unit: TimeUnit, arr: Vec<i64>) -> ArrayRef {
-        match unit {
-            TimeUnit::Second => Arc::new(TimestampSecondArray::from_iter_values(arr)) as ArrayRef,
-            TimeUnit::Millisecond => {
-                Arc::new(TimestampMillisecondArray::from_iter_values(arr)) as ArrayRef
-            }
-            TimeUnit::Microsecond => {
-                Arc::new(TimestampMicrosecondArray::from_iter_values(arr)) as ArrayRef
-            }
-            TimeUnit::Nanosecond => {
-                Arc::new(TimestampNanosecondArray::from_iter_values(arr)) as ArrayRef
-            }
-        }
-    }
-
     #[tokio::test]
     async fn fuzzy_ish_test_window_sort_stream() {
         let test_cnt = 100;
@@ -3128,7 +3025,7 @@ pub(crate) mod test {
                     .sorted_by(ret_cmp_fn(descending))
                     .collect_vec();
                 output_data.extend(data_gen.clone());
-                let arr = new_array(unit.clone(), data_gen);
+                let arr = new_ts_array(unit.clone(), data_gen);
                 let range = PartitionRange {
                     start,
                     end,
@@ -3142,7 +3039,7 @@ pub(crate) mod test {
             if let Some(fetch) = fetch {
                 output_data.truncate(fetch);
             }
-            let output_arr = new_array(unit.clone(), output_data);
+            let output_arr = new_ts_array(unit.clone(), output_data);
 
             let test_stream = TestStream::new(
                 Column::new("ts", 0),
