@@ -25,7 +25,7 @@ use snafu::ensure;
 
 use crate::function::{Function, FunctionContext};
 
-/// Check if the given JSON data contains the given JSON path.
+/// Check if the given JSON data match the given JSON path's predicate.
 #[derive(Clone, Debug, Default)]
 pub struct JsonPathMatchFunction;
 
@@ -151,7 +151,7 @@ mod tests {
             None,
         ];
 
-        let results = vec![Some(true), Some(true), Some(false), None];
+        let results = [Some(true), Some(true), Some(false), None];
 
         let jsonbs = json_strings
             .into_iter()
