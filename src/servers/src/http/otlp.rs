@@ -39,7 +39,7 @@ use prost::Message;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 
-use super::header::constants::GREPTIME_LOG_SELECT_INFO_HEADER_NAME;
+use super::header::constants::GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME;
 use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::error::{self, Result};
 use crate::http::header::constants::{
@@ -192,12 +192,12 @@ where
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let select = parts.headers.get(GREPTIME_LOG_SELECT_INFO_HEADER_NAME);
+        let select = parts.headers.get(GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME);
 
         match select {
             Some(name) => {
                 let select_header =
-                    pipeline_header_error(name, GREPTIME_LOG_SELECT_INFO_HEADER_NAME)?;
+                    pipeline_header_error(name, GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME)?;
                 if select_header.is_empty() {
                     Ok(SelectInfoWrapper(Default::default()))
                 } else {
