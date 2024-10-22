@@ -339,7 +339,7 @@ impl TryFrom<String> for SelectInfo {
 }
 
 pub enum PipelineWay {
-    BuildInOtlpLog(Box<SelectInfo>),
+    OtlpLog(Box<SelectInfo>),
     Custom(std::sync::Arc<Pipeline<crate::GreptimeTransformer>>),
 }
 

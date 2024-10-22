@@ -253,7 +253,7 @@ pub async fn logs(
         };
         pipeline_way = PipelineWay::Custom(pipeline);
     } else {
-        pipeline_way = PipelineWay::BuildInOtlpLog(Box::new(select_info));
+        pipeline_way = PipelineWay::OtlpLog(Box::new(select_info));
     }
 
     handler

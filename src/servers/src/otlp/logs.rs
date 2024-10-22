@@ -26,7 +26,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use pipeline::{Array, Map, PipelineWay, SchemaInfo, SelectInfo, Value as PipelineValue};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 
 use super::trace::attributes::OtlpAnyValue;
 use crate::error::{
@@ -48,7 +48,7 @@ pub fn to_grpc_insert_requests(
     table_name: String,
 ) -> Result<(RowInsertRequests, usize)> {
     match pipeline {
-        PipelineWay::BuildInOtlpLog(select_info) => {
+        PipelineWay::OtlpLog(select_info) => {
             let rows = parse_export_logs_service_request_to_rows(request, select_info)?;
             let len = rows.rows.len();
             let insert_request = RowInsertRequest {
@@ -366,7 +366,7 @@ fn extract_field_from_attr_and_combine_schema(
     log_select: &SelectInfo,
     jsonb: &jsonb::Value<'static>,
 ) -> Result<Vec<GreptimeValue>> {
-    let mut append_value = Vec::new();
+    let mut append_value = Vec::with_capacity(schema_info.schema.len());
     for _ in schema_info.schema.iter() {
         append_value.push(GreptimeValue { value_data: None });
     }
@@ -376,15 +376,15 @@ fn extract_field_from_attr_and_combine_schema(
             if let Some((schema, value)) = decide_column_schema(k, value)? {
                 if let Some(index) = index {
                     let column_schema = &schema_info.schema[index];
-                    if column_schema.datatype != schema.datatype {
-                        return IncompatibleSchemaSnafu {
+                    ensure!(
+                        column_schema.datatype == schema.datatype,
+                        IncompatibleSchemaSnafu {
                             column_name: k.clone(),
                             datatype: column_schema.datatype().as_str_name(),
                             expected: column_schema.datatype,
                             actual: schema.datatype,
                         }
-                        .fail();
-                    }
+                    );
                     append_value[index] = value;
                 } else {
                     let key = k.clone();
@@ -466,55 +466,26 @@ fn decide_column_schema(
     })
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum OpenTelemetryLogRecordAttrType {
     Resource,
     Scope,
     Log,
 }
 
-fn merge_schema<'a>(
-    extra_resource_schema: &'a SchemaInfo,
-    extra_scope_schema: &'a SchemaInfo,
-    extra_log_schema: &'a SchemaInfo,
-) -> BTreeMap<&'a String, (OpenTelemetryLogRecordAttrType, usize, &'a ColumnSchema)> {
+fn merge_schema(
+    input_schemas: Vec<(&SchemaInfo, OpenTelemetryLogRecordAttrType)>,
+) -> BTreeMap<&String, (OpenTelemetryLogRecordAttrType, usize, &ColumnSchema)> {
     let mut schemas = BTreeMap::new();
-    for (resource_schema_key, resource_schema_index) in extra_resource_schema.index.iter() {
-        if let Some(column_schema) = extra_resource_schema.schema.get(*resource_schema_index) {
-            schemas.insert(
-                resource_schema_key,
-                (
-                    OpenTelemetryLogRecordAttrType::Resource,
-                    *resource_schema_index,
-                    column_schema,
-                ),
-            );
-        }
-    }
-    for (scope_schema_key, scope_schema_index) in extra_scope_schema.index.iter() {
-        if let Some(column_schema) = extra_scope_schema.schema.get(*scope_schema_index) {
-            schemas.insert(
-                scope_schema_key,
-                (
-                    OpenTelemetryLogRecordAttrType::Scope,
-                    *scope_schema_index,
-                    column_schema,
-                ),
-            );
-        }
-    }
-    for (log_schema_key, log_schema_index) in extra_log_schema.index.iter() {
-        if let Some(column_schema) = extra_log_schema.schema.get(*log_schema_index) {
-            schemas.insert(
-                log_schema_key,
-                (
-                    OpenTelemetryLogRecordAttrType::Log,
-                    *log_schema_index,
-                    column_schema,
-                ),
-            );
-        }
-    }
+    input_schemas
+        .into_iter()
+        .for_each(|(schema_info, attr_type)| {
+            for (key, index) in schema_info.index.iter() {
+                if let Some(col_schema) = schema_info.schema.get(*index) {
+                    schemas.insert(key, (attr_type, *index, col_schema));
+                }
+            }
+        });
     schemas
 }
 
@@ -534,11 +505,17 @@ fn parse_export_logs_service_request_to_rows(
         request.resource_logs,
     )?;
 
-    let final_extra_schema_info = merge_schema(
-        &extra_resource_schema,
-        &extra_scope_schema,
-        &extra_log_schema,
-    );
+    // order of schema is important
+    // resource < scope < log
+    // do not change the order
+    let final_extra_schema_info = merge_schema(vec![
+        (
+            &extra_resource_schema,
+            OpenTelemetryLogRecordAttrType::Resource,
+        ),
+        (&extra_scope_schema, OpenTelemetryLogRecordAttrType::Scope),
+        (&extra_log_schema, OpenTelemetryLogRecordAttrType::Log),
+    ]);
 
     let final_extra_schema = final_extra_schema_info
         .iter()
