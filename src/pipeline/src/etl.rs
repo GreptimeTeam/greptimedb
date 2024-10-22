@@ -317,12 +317,16 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
         .context(IntermediateKeyIndexSnafu { kind, key })
 }
 
+/// SelectInfo is used to store the selected keys from OpenTelemetry record attrs
 #[derive(Default)]
 pub struct SelectInfo {
     pub keys: Vec<String>,
 }
 
-// key1,key2
+/// Try to convert a string to SelectInfo
+/// The string should be a comma-separated list of keys
+/// example: "key1,key2,key3"
+/// The keys will be sorted and deduplicated
 impl TryFrom<String> for SelectInfo {
     fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
         let mut keys: Vec<String> = value.split(',').map(|s| s.to_string()).sorted().collect();

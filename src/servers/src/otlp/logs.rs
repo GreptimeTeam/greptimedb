@@ -372,10 +372,8 @@ fn extract_field_from_attr_and_combine_schema(
     }
     for k in &log_select.keys {
         let index = schema_info.index.get(k).copied();
-        let value = jsonb.get_by_name_ignore_case(k).cloned();
-        if let Some(value) = value {
-            let column_opt = decide_column_schema(k.clone(), value)?;
-            if let Some((schema, value)) = column_opt {
+        if let Some(value) = jsonb.get_by_name_ignore_case(k).cloned() {
+            if let Some((schema, value)) = decide_column_schema(k.clone(), value)? {
                 if let Some(index) = index {
                     let column_schema = &schema_info.schema[index];
                     if column_schema.datatype != schema.datatype {

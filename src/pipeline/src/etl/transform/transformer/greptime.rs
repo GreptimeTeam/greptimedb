@@ -214,21 +214,6 @@ pub struct SchemaInfo {
     pub index: HashMap<String, usize>,
 }
 
-impl SchemaInfo {
-    pub fn merge(&mut self, other: &SchemaInfo) {
-        for column in &other.schema {
-            let key = column.column_name.clone();
-            if let Some(index) = self.index.get(&key) {
-                let schema_column = self.schema.get_mut(*index).unwrap();
-                *schema_column = column.clone();
-            } else {
-                self.schema.push(column.clone());
-                self.index.insert(key, self.schema.len() - 1);
-            }
-        }
-    }
-}
-
 fn resolve_schema(
     index: Option<usize>,
     value_data: ValueData,

@@ -82,7 +82,6 @@ promql-parser.workspace = true
 prost.workspace = true
 query.workspace = true
 rand.workspace = true
-ref-cast = "1.0"
 regex.workspace = true
 reqwest.workspace = true
 rust-embed = { version = "6.6", features = ["debug-embed"] }
