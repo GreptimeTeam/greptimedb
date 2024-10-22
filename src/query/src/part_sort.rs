@@ -255,7 +255,8 @@ impl PartSortStream {
         self.buffer.clear();
         self.produced += sorted.num_rows();
         drop(full_input);
-        self.reservation.shrink(total_mem);
+        // here remove both buffer and full_input memory
+        self.reservation.shrink(2 * total_mem);
         Ok(Some(sorted))
     }
 
