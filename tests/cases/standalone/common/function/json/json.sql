@@ -9,6 +9,7 @@ SELECT json_path_exists(parse_json('[1, 2]'), '[2]');
 
 SELECT json_path_exists(parse_json('[1, 2]'), NULL);
 
+-- SELECT json_path_exists(NULL, '$.a');
 
 --- json_path_match ---
 
@@ -20,4 +21,4 @@ SELECT json_path_match(parse_json('{"a":1,"b":[1,2,3]}'), '$.b[1 to last] >= 2')
 
 SELECT json_path_match(parse_json('{"a":1,"b":[1,2,3]}'), NULL);
 
--- SELECT JSON_PATH_MATCH(NULL, '$.a == 1');
+SELECT json_path_match(NULL, '$.a == 1');
