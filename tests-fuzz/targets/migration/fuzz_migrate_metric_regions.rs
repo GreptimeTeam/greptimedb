@@ -79,6 +79,7 @@ impl Arbitrary<'_> for FuzzInput {
         let rows = rng.gen_range(2..max_rows);
         let max_tables = get_gt_fuzz_input_max_tables();
         let tables = rng.gen_range(1..max_tables);
+
         Ok(FuzzInput { rows, seed, tables })
     }
 }
@@ -291,9 +292,54 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
                 info!("Region: {region_id},  datanode: {}", partition.datanode_id);
                 partition.datanode_id == migration.to_peer
             },
-            Duration::from_secs(5),
+            Duration::from_secs(1),
         )
         .await;
+    }
+
+    // Validates value rows
+    info!("Validates num of rows");
+    for (table_ctx, insert_expr) in tables.values() {
+        let sql = format!("select count(1) as count from {}", table_ctx.name);
+        let values = count_values(&ctx.greptime, &sql).await?;
+        let expected_rows = insert_expr.values_list.len() as u64;
+        assert_eq!(
+            values.count as u64, expected_rows,
+            "Expected rows: {}, got: {}, table: {}",
+            expected_rows, values.count, table_ctx.name
+        );
+    }
+
+    // Creates more logical tables and inserts values
+    for _ in 0..input.tables {
+        let translator = CreateTableExprTranslator;
+        let create_logical_table_expr =
+            generate_create_logical_table_expr(physical_table_ctx.clone(), &mut rng).unwrap();
+        if tables.contains_key(&create_logical_table_expr.table_name) {
+            // Ignores same name logical table.
+            continue;
+        }
+        let sql = translator.translate(&create_logical_table_expr)?;
+        let result = sqlx::query(&sql)
+            .execute(&ctx.greptime)
+            .await
+            .context(error::ExecuteQuerySnafu { sql: &sql })?;
+        info!("Create logical table: {sql}, result: {result:?}");
+        let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
+
+        let insert_expr =
+            insert_values(input.rows, &ctx, &mut rng, logical_table_ctx.clone()).await?;
+        if rng.gen_bool(0.1) {
+            flush_memtable(&ctx.greptime, &physical_table_ctx.name).await?;
+        }
+        if rng.gen_bool(0.1) {
+            compact_table(&ctx.greptime, &physical_table_ctx.name).await?;
+        }
+
+        tables.insert(
+            logical_table_ctx.name.clone(),
+            (logical_table_ctx.clone(), insert_expr),
+        );
     }
 
     // Validates value rows
@@ -359,7 +405,7 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
                 info!("Region: {region_id},  datanode: {}", partition.datanode_id);
                 partition.datanode_id == migration.to_peer
             },
-            Duration::from_secs(5),
+            Duration::from_secs(1),
         )
         .await;
     }
