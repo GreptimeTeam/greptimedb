@@ -15,7 +15,7 @@
 use std::fmt::{self, Display};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::Signature;
+use common_query::prelude::{Signature, TypeSignature};
 use datafusion::logical_expr::Volatility;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
@@ -41,10 +41,24 @@ impl Function for JsonPathMatchFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(
+        Signature::one_of(
             vec![
-                ConcreteDataType::json_datatype(),
-                ConcreteDataType::string_datatype(),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ]),
             ],
             Volatility::Immutable,
         )
@@ -64,16 +78,15 @@ impl Function for JsonPathMatchFunction {
         let paths = &columns[1];
 
         let size = jsons.len();
-        let datatype = jsons.data_type();
         let mut results = BooleanVectorBuilder::with_capacity(size);
 
-        match datatype {
-            // JSON data type uses binary vector
-            ConcreteDataType::Binary(_) => {
-                for i in 0..size {
-                    let json = jsons.get_ref(i);
-                    let path = paths.get_ref(i);
+        for i in 0..size {
+            let json = jsons.get_ref(i);
+            let path = paths.get_ref(i);
 
+            match json.data_type() {
+                // JSON data type uses binary vector
+                ConcreteDataType::Binary(_) => {
                     let json = json.as_binary();
                     let path = path.as_string();
                     let result = match (json, path) {
@@ -89,13 +102,16 @@ impl Function for JsonPathMatchFunction {
 
                     results.push(result);
                 }
-            }
-            _ => {
-                return UnsupportedInputDataTypeSnafu {
-                    function: NAME,
-                    datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
+
+                ConcreteDataType::Null(_) => results.push(None),
+
+                _ => {
+                    return UnsupportedInputDataTypeSnafu {
+                        function: NAME,
+                        datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
+                    }
+                    .fail();
                 }
-                .fail();
             }
         }
 
@@ -132,9 +148,27 @@ mod tests {
 
         assert!(matches!(json_path_match.signature(),
                          Signature {
-                             type_signature: TypeSignature::Exact(valid_types),
+                             type_signature: TypeSignature::OneOf(valid_types),
                              volatility: Volatility::Immutable
-                         } if  valid_types == vec![ConcreteDataType::json_datatype(), ConcreteDataType::string_datatype()]
+                         } if
+            valid_types == vec![
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ])
+            ]
         ));
 
         let json_strings = [
@@ -142,6 +176,8 @@ mod tests {
             Some(r#"{"a": 1, "b": [1,2,3]}"#.to_string()),
             Some(r#"{"a": 1 ,"b": [1,2,3]}"#.to_string()),
             Some(r#"{"a":1,"b":[1,2,3]}"#.to_string()),
+            None,
+            None,
         ];
 
         let paths = vec![
@@ -149,9 +185,11 @@ mod tests {
             Some("$.b[1 to last] >= 2".to_string()),
             Some("$.c > 0".to_string()),
             None,
+            Some("$.c > 0".to_string()),
+            None,
         ];
 
-        let results = [Some(true), Some(true), Some(false), None];
+        let results = [Some(true), Some(true), Some(false), None, None, None];
 
         let jsonbs = json_strings
             .into_iter()
@@ -165,7 +203,7 @@ mod tests {
             .eval(FunctionContext::default(), &args)
             .unwrap();
 
-        assert_eq!(4, vector.len());
+        assert_eq!(6, vector.len());
         for (i, expected) in results.iter().enumerate() {
             let result = vector.get_ref(i);
 
