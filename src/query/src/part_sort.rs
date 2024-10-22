@@ -466,7 +466,7 @@ mod test {
                 TimeUnit::Millisecond,
                 vec![
                     ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
-                    ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
+                    ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
                 ],
                 false,
                 Some(11),
@@ -476,11 +476,37 @@ mod test {
                 TimeUnit::Millisecond,
                 vec![
                     ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
-                    ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
+                    ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
                 ],
                 true,
                 Some(11),
-                vec![vec![9, 8, 7, 6, 5, 4, 3, 2, 1], vec![9, 8]],
+                vec![vec![9, 8, 7, 6, 5, 4, 3, 2, 1], vec![8, 7]],
+            ),
+            (
+                TimeUnit::Millisecond,
+                vec![
+                    ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
+                    ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
+                ],
+                false,
+                None,
+                vec![
+                    vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+                    vec![1, 2, 3, 4, 5, 6, 7, 8],
+                ],
+            ),
+            (
+                TimeUnit::Millisecond,
+                vec![
+                    ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
+                    ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
+                ],
+                true,
+                None,
+                vec![
+                    vec![9, 8, 7, 6, 5, 4, 3, 2, 1],
+                    vec![8, 7, 6, 5, 4, 3, 2, 1],
+                ],
             ),
         ];
 
