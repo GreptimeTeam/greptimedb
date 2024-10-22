@@ -366,6 +366,9 @@ fn extract_field_from_attr_and_combine_schema(
     log_select: &SelectInfo,
     jsonb: &jsonb::Value<'static>,
 ) -> Result<Vec<GreptimeValue>> {
+    if log_select.keys.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut append_value = Vec::with_capacity(schema_info.schema.len());
     for _ in schema_info.schema.iter() {
         append_value.push(GreptimeValue { value_data: None });

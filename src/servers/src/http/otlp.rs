@@ -201,13 +201,7 @@ where
                 if select_header.is_empty() {
                     Ok(SelectInfoWrapper(Default::default()))
                 } else {
-                    match SelectInfo::try_from(select_header) {
-                        Ok(info) => Ok(SelectInfoWrapper(info)),
-                        Err(e) => Err((
-                            StatusCode::BAD_REQUEST,
-                            format!("Invalid select info: {}", e),
-                        )),
-                    }
+                    Ok(SelectInfoWrapper(SelectInfo::from(select_header)))
                 }
             }
             None => Ok(SelectInfoWrapper(Default::default())),

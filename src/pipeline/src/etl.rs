@@ -327,15 +327,19 @@ pub struct SelectInfo {
 /// The string should be a comma-separated list of keys
 /// example: "key1,key2,key3"
 /// The keys will be sorted and deduplicated
-impl TryFrom<String> for SelectInfo {
-    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+impl From<String> for SelectInfo {
+    fn from(value: String) -> Self {
         let mut keys: Vec<String> = value.split(',').map(|s| s.to_string()).sorted().collect();
         keys.dedup();
 
-        Ok(SelectInfo { keys })
+        SelectInfo { keys }
     }
+}
 
-    type Error = error::Error;
+impl SelectInfo {
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
 }
 
 pub enum PipelineWay {
