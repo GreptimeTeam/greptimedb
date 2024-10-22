@@ -49,8 +49,6 @@ pub struct PartSortExec {
     expression: PhysicalSortExpr,
     /// Optional number of rows to fetch. Stops producing rows after this fetch
     fetch: Option<usize>,
-    /// The input ranges indicate input stream will be composed of those ranges in given order
-    ranges: Vec<PartitionRange>,
     input: Arc<dyn ExecutionPlan>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
@@ -61,7 +59,6 @@ impl PartSortExec {
     pub fn try_new(
         expression: PhysicalSortExpr,
         fetch: Option<usize>,
-        ranges: Vec<PartitionRange>,
         input: Arc<dyn ExecutionPlan>,
     ) -> Result<Self> {
         let metrics = ExecutionPlanMetricsSet::new();
@@ -74,7 +71,6 @@ impl PartSortExec {
         Ok(Self {
             expression,
             fetch,
-            ranges,
             input,
             metrics,
             properties,
@@ -130,7 +126,6 @@ impl ExecutionPlan for PartSortExec {
         Ok(Arc::new(Self::try_new(
             self.expression.clone(),
             self.fetch,
-            self.ranges.clone(),
             new_input.clone(),
         )?))
     }
@@ -158,8 +153,6 @@ struct PartSortStream {
     input: DfSendableRecordBatchStream,
     input_complete: bool,
     schema: SchemaRef,
-    /// The current PartitionRange's index
-    range_idx: usize,
 }
 
 impl PartSortStream {
@@ -178,7 +171,6 @@ impl PartSortStream {
             input,
             input_complete: false,
             schema: sort.input.schema(),
-            range_idx: 0,
         }
     }
 }
@@ -192,7 +184,7 @@ impl PartSortStream {
     ///
     /// this function should return None if RecordBatch is empty
     fn sort_buffer(&mut self) -> datafusion_common::Result<Option<DfRecordBatch>> {
-        if self.buffer.is_empty() || self.buffer.iter().map(|r| r.num_rows()).sum::<usize>() == 0 {
+        if self.buffer.iter().map(|r| r.num_rows()).sum::<usize>() == 0 {
             return Ok(None);
         }
         let mut sort_columns = Vec::with_capacity(self.buffer.len());
@@ -285,7 +277,6 @@ impl PartSortStream {
                 Poll::Ready(Some(Ok(batch))) => {
                     if batch.num_rows() == 0 {
                         // mark end of current PartitionRange
-                        self.range_idx += 1;
                         return Poll::Ready(self.sort_buffer().transpose());
                     }
                     self.buffer.push(batch);
@@ -326,6 +317,7 @@ mod test {
     use std::io::Write;
     use std::sync::Arc;
 
+    use arrow::ipc::Time;
     use arrow::json::ArrayWriter;
     use arrow_schema::{DataType, Field, Schema, SortOptions, TimeUnit};
     use common_time::Timestamp;
@@ -349,7 +341,7 @@ mod test {
         rng.seed(1337);
 
         for case_id in 0..test_cnt {
-            let mut bound_val = None;
+            let mut bound_val: Option<i64> = None;
             let mut produced = 0;
             let descending = rng.bool();
             let nulls_first = rng.bool();
@@ -383,7 +375,7 @@ mod test {
                 // generate each `PartitionRange`'s timestamp range
                 let (start, end) = if descending {
                     let end = bound_val
-                        .map(|i| i - rng.i64(0..range_offset_bound))
+                        .map(|i| i.checked_sub(rng.i64(0..range_offset_bound)).expect("Bad luck, fuzzy test generate data that will overflow, change seed and try again"))
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(end);
                     let start = end - rng.i64(1..range_size_bound);
@@ -446,15 +438,6 @@ mod test {
                     output_data.push(sort_data);
                 }
             }
-            let (ranges, batches): (Vec<_>, Vec<_>) = input_ranged_data.clone().into_iter().unzip();
-
-            let batches = batches
-                .into_iter()
-                .flat_map(|mut cols| {
-                    cols.push(DfRecordBatch::new_empty(schema.clone()));
-                    cols
-                })
-                .collect_vec();
 
             let expected_output = output_data
                 .into_iter()
@@ -467,11 +450,89 @@ mod test {
             assert!(!expected_output.is_empty());
             run_test(
                 case_id,
-                batches,
+                input_ranged_data,
                 schema,
                 opt,
                 fetch,
-                ranges,
+                expected_output,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn simple_case() {
+        let testcases = vec![
+            (
+                TimeUnit::Millisecond,
+                vec![
+                    ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
+                    ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
+                ],
+                false,
+                Some(11),
+                vec![vec![1, 2, 3, 4, 5, 6, 7, 8, 9], vec![1, 2]],
+            ),
+            (
+                TimeUnit::Millisecond,
+                vec![
+                    ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
+                    ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
+                ],
+                true,
+                Some(11),
+                vec![vec![9, 8, 7, 6, 5, 4, 3, 2, 1], vec![9, 8]],
+            ),
+        ];
+
+        for (identifier, (unit, input_ranged_data, descending, fetch, expected_output)) in
+            testcases.into_iter().enumerate()
+        {
+            let schema = Schema::new(vec![Field::new(
+                "ts",
+                DataType::Timestamp(unit.clone(), None),
+                false,
+            )]);
+            let schema = Arc::new(schema);
+            let opt = SortOptions {
+                descending,
+                ..Default::default()
+            };
+            let input_ranged_data = input_ranged_data
+                .into_iter()
+                .map(|(range, data)| {
+                    let part = PartitionRange {
+                        start: Timestamp::new(range.0, unit.clone().into()),
+                        end: Timestamp::new(range.1, unit.clone().into()),
+                        num_rows: data.iter().map(|b| b.len()).sum(),
+                        identifier,
+                    };
+
+                    let batches = data
+                        .into_iter()
+                        .map(|b| {
+                            let arr = new_ts_array(unit.clone(), b);
+                            DfRecordBatch::try_new(schema.clone(), vec![arr]).unwrap()
+                        })
+                        .collect_vec();
+                    (part, batches)
+                })
+                .collect_vec();
+
+            let expected_output = expected_output
+                .into_iter()
+                .map(|a| {
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit.clone(), a)])
+                        .unwrap()
+                })
+                .collect_vec();
+
+            run_test(
+                0,
+                input_ranged_data,
+                schema.clone(),
+                opt,
+                fetch,
                 expected_output,
             )
             .await;
@@ -480,13 +541,21 @@ mod test {
 
     async fn run_test(
         case_id: usize,
-        batches: Vec<DfRecordBatch>,
+        input_ranged_data: Vec<(PartitionRange, Vec<DfRecordBatch>)>,
         schema: SchemaRef,
         opt: SortOptions,
         fetch: Option<usize>,
-        ranges: Vec<PartitionRange>,
         expected_output: Vec<DfRecordBatch>,
     ) {
+        let (_ranges, batches): (Vec<_>, Vec<_>) = input_ranged_data.clone().into_iter().unzip();
+
+        let batches = batches
+            .into_iter()
+            .flat_map(|mut cols| {
+                cols.push(DfRecordBatch::new_empty(schema.clone()));
+                cols
+            })
+            .collect_vec();
         let mock_input = MockInputExec::new(batches, schema.clone());
 
         let exec = PartSortExec::try_new(
@@ -495,7 +564,6 @@ mod test {
                 options: opt,
             },
             fetch,
-            ranges,
             Arc::new(mock_input),
         )
         .unwrap();
@@ -507,8 +575,7 @@ mod test {
         // a makeshift solution for compare large data
         if real_output != expected_output {
             {
-                let mut f_res =
-                    std::fs::File::create(format!("case_{}_real_output.json", case_id)).unwrap();
+                let mut f_res = std::io::stderr();
                 let mut buf = String::new();
                 for batch in &real_output {
                     let mut rb_json: Vec<u8> = Vec::new();
@@ -521,9 +588,7 @@ mod test {
                 f_res.write_all(format!("[{buf}]").as_bytes()).unwrap();
             }
             {
-                let mut f_res =
-                    std::fs::File::create(format!("case_{}_expected_output.json", case_id))
-                        .unwrap();
+                let mut f_res = std::io::stderr();
                 let mut buf = String::new();
                 for batch in &expected_output {
                     let mut rb_json: Vec<u8> = Vec::new();

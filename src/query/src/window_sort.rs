@@ -1126,15 +1126,10 @@ pub(crate) mod test {
     use std::io::Write;
     use std::sync::Arc;
 
-    use arrow::array::{
-        ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray,
-    };
+    use arrow::array::{ArrayRef, TimestampMillisecondArray};
     use arrow::compute::concat_batches;
     use arrow::json::ArrayWriter;
     use arrow_schema::{Field, Schema, TimeUnit};
-    use datafusion::physical_plan::ExecutionMode;
-    use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
     use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -3067,8 +3062,7 @@ pub(crate) mod test {
 
             if res_concat != expected_concat {
                 {
-                    let mut f_input =
-                        std::fs::File::create(format!("case_{}_input.json", case_id)).unwrap();
+                    let mut f_input = std::io::stderr();
                     f_input.write_all(b"[").unwrap();
                     for (input_range, input_arr) in test_stream.input {
                         let range_json = json!({
@@ -3090,8 +3084,7 @@ pub(crate) mod test {
                     f_input.write_all(b"]").unwrap();
                 }
                 {
-                    let mut f_res =
-                        std::fs::File::create(format!("case_{}_result.json", case_id)).unwrap();
+                    let mut f_res = std::io::stderr();
                     f_res.write_all(b"[").unwrap();
                     for batch in &res {
                         let mut res_writer = ArrayWriter::new(f_res);
@@ -3102,21 +3095,18 @@ pub(crate) mod test {
                     }
                     f_res.write_all(b"]").unwrap();
 
-                    let f_res_concat =
-                        std::fs::File::create(format!("case_{}_result_concat.json", case_id))
-                            .unwrap();
+                    let f_res_concat = std::io::stderr();
                     let mut res_writer = ArrayWriter::new(f_res_concat);
                     res_writer.write(&res_concat).unwrap();
                     res_writer.finish().unwrap();
 
-                    let f_expected =
-                        std::fs::File::create(format!("case_{}_expected.json", case_id)).unwrap();
+                    let f_expected = std::io::stderr();
                     let mut expected_writer = ArrayWriter::new(f_expected);
                     expected_writer.write(&expected_concat).unwrap();
                     expected_writer.finish().unwrap();
                 }
                 panic!(
-                    "case failed, case id: {0}, output and expected save to case_{0}_*.json file",
+                    "case failed, case id: {0}, output and expected output to stderr",
                     case_id
                 );
             }

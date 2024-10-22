@@ -13,47 +13,22 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use arrow::array::types::{
-    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-    TimestampSecondType,
-};
 use arrow::array::{
-    Array, ArrayRef, PrimitiveArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray,
+    ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
 };
-use arrow::compute::{concat_batches, SortColumn};
-use arrow::json::ArrayWriter;
-use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions, TimeUnit};
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
+use arrow_schema::{SchemaRef, TimeUnit};
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
-use common_telemetry::error;
-use common_time::Timestamp;
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
 use datafusion::execution::{RecordBatchStream, TaskContext};
-use datafusion::physical_plan::memory::MemoryStream;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::sorts::streaming_merge::streaming_merge;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, ExecutionPlanProperties,
-    PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
 };
-use datafusion_common::utils::bisect;
-use datafusion_common::{internal_err, DataFusionError};
-use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
-use datatypes::value::Value;
-use futures::{Stream, StreamExt};
-use itertools::Itertools;
-use snafu::ResultExt;
-use store_api::region_engine::PartitionRange;
-
-use crate::error::{QueryExecutionSnafu, Result};
+use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
+use futures::Stream;
 
 pub fn new_ts_array(unit: TimeUnit, arr: Vec<i64>) -> ArrayRef {
     match unit {

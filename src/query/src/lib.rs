@@ -37,9 +37,10 @@ mod range_select;
 pub mod region_query;
 pub mod sql;
 pub mod stats;
-pub(crate) mod test_util;
 pub(crate) mod window_sort;
 
+#[cfg(test)]
+pub(crate) mod test_util;
 #[cfg(test)]
 mod tests;
 
