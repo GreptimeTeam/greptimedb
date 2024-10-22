@@ -17,7 +17,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use arrow::array::Array;
 use arrow::compute::{concat, take_record_batch};
 use arrow_schema::SchemaRef;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
@@ -46,8 +45,6 @@ use crate::error::Result;
 pub struct PartSortExec {
     /// Physical sort expressions(that is, sort by timestamp)
     expression: PhysicalSortExpr,
-    /// Optional number of rows to fetch. Stops producing rows after this fetch
-    fetch: Option<usize>,
     input: Arc<dyn ExecutionPlan>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
@@ -55,11 +52,7 @@ pub struct PartSortExec {
 }
 
 impl PartSortExec {
-    pub fn try_new(
-        expression: PhysicalSortExpr,
-        fetch: Option<usize>,
-        input: Arc<dyn ExecutionPlan>,
-    ) -> Result<Self> {
+    pub fn try_new(expression: PhysicalSortExpr, input: Arc<dyn ExecutionPlan>) -> Result<Self> {
         let metrics = ExecutionPlanMetricsSet::new();
         let properties = PlanProperties::new(
             input.equivalence_properties().clone(),
@@ -69,7 +62,6 @@ impl PartSortExec {
 
         Ok(Self {
             expression,
-            fetch,
             input,
             metrics,
             properties,
@@ -124,7 +116,6 @@ impl ExecutionPlan for PartSortExec {
         };
         Ok(Arc::new(Self::try_new(
             self.expression.clone(),
-            self.fetch,
             new_input.clone(),
         )?))
     }
@@ -147,7 +138,6 @@ struct PartSortStream {
     reservation: MemoryReservation,
     buffer: Vec<DfRecordBatch>,
     expression: PhysicalSortExpr,
-    fetch: Option<usize>,
     produced: usize,
     input: DfSendableRecordBatchStream,
     input_complete: bool,
@@ -165,7 +155,6 @@ impl PartSortStream {
                 .register(&context.runtime_env().memory_pool),
             buffer: Vec::new(),
             expression: sort.expression.clone(),
-            fetch: sort.fetch,
             produced: 0,
             input,
             input_complete: false,
@@ -175,10 +164,6 @@ impl PartSortStream {
 }
 
 impl PartSortStream {
-    fn remaining_fetch(&self) -> Option<usize> {
-        self.fetch.map(|fetch| fetch - self.produced)
-    }
-
     /// Sort and clear the buffer and return the sorted record batch
     ///
     /// this function should return None if RecordBatch is empty
@@ -202,20 +187,7 @@ impl PartSortStream {
                 )
             })?;
 
-        let limit = self.remaining_fetch().and_then(|f| {
-            let len = sort_column.len();
-            if f < len {
-                Some(f)
-            } else {
-                None
-            }
-        });
-
-        if let Some(0) = limit {
-            return Ok(None);
-        }
-
-        let indices = sort_to_indices(&sort_column, opt, limit).map_err(|e| {
+        let indices = sort_to_indices(&sort_column, opt, None).map_err(|e| {
             DataFusionError::ArrowError(
                 e,
                 Some(format!("Fail to sort to indices at {}", location!())),
@@ -335,14 +307,12 @@ mod test {
         let range_offset_bound = 100;
         let batch_cnt_bound = 20;
         let batch_size_bound = 100;
-        let fetch_bound = 100;
 
         let mut rng = fastrand::Rng::new();
         rng.seed(1337);
 
         for case_id in 0..test_cnt {
             let mut bound_val: Option<i64> = None;
-            let mut produced = 0;
             let descending = rng.bool();
             let nulls_first = rng.bool();
             let opt = SortOptions {
@@ -354,11 +324,6 @@ mod test {
                 1 => TimeUnit::Millisecond,
                 2 => TimeUnit::Microsecond,
                 _ => TimeUnit::Nanosecond,
-            };
-            let fetch = if rng.bool() {
-                Some(rng.usize(0..fetch_bound))
-            } else {
-                None
             };
 
             let schema = Schema::new(vec![Field::new(
@@ -423,20 +388,8 @@ mod test {
                 } else {
                     sort_data.sort();
                 }
-                if let Some(remain) = fetch.map(|f| f.saturating_sub(produced)) {
-                    if remain != 0 {
-                        if remain < sort_data.len() {
-                            produced += remain;
-                            output_data.push(sort_data[0..remain].to_vec());
-                        } else {
-                            produced += sort_data.len();
-                            output_data.push(sort_data);
-                        }
-                    }
-                } else {
-                    produced += sort_data.len();
-                    output_data.push(sort_data);
-                }
+
+                output_data.push(sort_data);
             }
 
             let expected_output = output_data
@@ -448,15 +401,7 @@ mod test {
                 .collect_vec();
 
             assert!(!expected_output.is_empty());
-            run_test(
-                case_id,
-                input_ranged_data,
-                schema,
-                opt,
-                fetch,
-                expected_output,
-            )
-            .await;
+            run_test(case_id, input_ranged_data, schema, opt, expected_output).await;
         }
     }
 
@@ -470,27 +415,6 @@ mod test {
                     ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
                 ],
                 false,
-                Some(11),
-                vec![vec![1, 2, 3, 4, 5, 6, 7, 8, 9], vec![1, 2]],
-            ),
-            (
-                TimeUnit::Millisecond,
-                vec![
-                    ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
-                    ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
-                ],
-                true,
-                Some(11),
-                vec![vec![9, 8, 7, 6, 5, 4, 3, 2, 1], vec![8, 7]],
-            ),
-            (
-                TimeUnit::Millisecond,
-                vec![
-                    ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
-                    ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
-                ],
-                false,
-                None,
                 vec![
                     vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
                     vec![1, 2, 3, 4, 5, 6, 7, 8],
@@ -503,7 +427,6 @@ mod test {
                     ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
                 ],
                 true,
-                None,
                 vec![
                     vec![9, 8, 7, 6, 5, 4, 3, 2, 1],
                     vec![8, 7, 6, 5, 4, 3, 2, 1],
@@ -511,7 +434,7 @@ mod test {
             ),
         ];
 
-        for (identifier, (unit, input_ranged_data, descending, fetch, expected_output)) in
+        for (identifier, (unit, input_ranged_data, descending, expected_output)) in
             testcases.into_iter().enumerate()
         {
             let schema = Schema::new(vec![Field::new(
@@ -553,15 +476,7 @@ mod test {
                 })
                 .collect_vec();
 
-            run_test(
-                0,
-                input_ranged_data,
-                schema.clone(),
-                opt,
-                fetch,
-                expected_output,
-            )
-            .await;
+            run_test(0, input_ranged_data, schema.clone(), opt, expected_output).await;
         }
     }
 
@@ -570,7 +485,6 @@ mod test {
         input_ranged_data: Vec<(PartitionRange, Vec<DfRecordBatch>)>,
         schema: SchemaRef,
         opt: SortOptions,
-        fetch: Option<usize>,
         expected_output: Vec<DfRecordBatch>,
     ) {
         let (_ranges, batches): (Vec<_>, Vec<_>) = input_ranged_data.clone().into_iter().unzip();
@@ -589,7 +503,6 @@ mod test {
                 expr: Arc::new(Column::new("ts", 0)),
                 options: opt,
             },
-            fetch,
             Arc::new(mock_input),
         )
         .unwrap();
@@ -626,10 +539,7 @@ mod test {
                 }
                 f_res.write_all(format!("[{buf}]").as_bytes()).unwrap();
             }
-            panic!(
-                "case_{} failed, opt: {:?}, fetch: {:?}",
-                case_id, opt, fetch
-            );
+            panic!("case_{} failed, opt: {:?}", case_id, opt);
         }
     }
 }
