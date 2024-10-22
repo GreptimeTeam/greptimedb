@@ -373,7 +373,7 @@ fn extract_field_from_attr_and_combine_schema(
     for k in &log_select.keys {
         let index = schema_info.index.get(k).copied();
         if let Some(value) = jsonb.get_by_name_ignore_case(k).cloned() {
-            if let Some((schema, value)) = decide_column_schema(k.clone(), value)? {
+            if let Some((schema, value)) = decide_column_schema(k, value)? {
                 if let Some(index) = index {
                     let column_schema = &schema_info.schema[index];
                     if column_schema.datatype != schema.datatype {
@@ -399,7 +399,7 @@ fn extract_field_from_attr_and_combine_schema(
 }
 
 fn decide_column_schema(
-    column_name: String,
+    column_name: &str,
     value: JsonbValue,
 ) -> Result<Option<(ColumnSchema, GreptimeValue)>> {
     let column_info = match value {
@@ -445,17 +445,16 @@ fn decide_column_schema(
             SemanticType::Field,
             None,
         ))),
-        JsonbValue::Array(_) | JsonbValue::Object(_) => OpenTelemetryNestValueIsComplicatedSnafu {
-            key: column_name.as_str(),
+        JsonbValue::Array(_) | JsonbValue::Object(_) => {
+            OpenTelemetryNestValueIsComplicatedSnafu { key: column_name }.fail()
         }
-        .fail(),
         JsonbValue::Null => Ok(None),
     };
     column_info.map(|c| {
         c.map(|(value, column_type, semantic_type, datatype_extension)| {
             (
                 ColumnSchema {
-                    column_name,
+                    column_name: column_name.to_string(),
                     datatype: column_type as i32,
                     semantic_type: semantic_type as i32,
                     datatype_extension,
@@ -552,9 +551,9 @@ fn parse_export_logs_service_request_to_rows(
     let mut results = Vec::with_capacity(parse_infos.len());
     for parse_info in parse_infos.into_iter() {
         let mut row = parse_info.values;
-        let mut resource_values = parse_info.resource_values;
-        let mut scope_values = parse_info.scope_values;
-        let mut log_values = parse_info.log_values;
+        let mut resource_values = parse_info.resource_extracted_values;
+        let mut scope_values = parse_info.scope_extracted_values;
+        let mut log_values = parse_info.log_extracted_values;
 
         let mut final_extra_values = vec![GreptimeValue { value_data: None }; extra_schema_len];
         for (idx, (_, (attr_type, index, _))) in final_extra_schema_info.iter().enumerate() {
@@ -564,8 +563,8 @@ fn parse_export_logs_service_request_to_rows(
                 OpenTelemetryLogRecordAttrType::Log => log_values.get_mut(*index),
             };
             if let Some(value) = value {
+                // swap value to final_extra_values
                 mem::swap(&mut final_extra_values[idx], value);
-                // final_extra_values[*index] = value.clone();
             }
         }
 
@@ -591,7 +590,7 @@ fn parse_resource(
             .resource
             .map(|resource| key_value_to_jsonb(resource.attributes))
             .unwrap_or(JsonbValue::Null);
-        let resource_values = extract_field_from_attr_and_combine_schema(
+        let resource_extracted_values = extract_field_from_attr_and_combine_schema(
             extra_resource_schema,
             select_info,
             &resource_attr,
@@ -602,7 +601,7 @@ fn parse_resource(
             select_info,
             r.scope_logs,
             resource_attr,
-            resource_values,
+            resource_extracted_values,
         )?;
         results.extend(rows);
     }
@@ -621,12 +620,12 @@ fn parse_scope(
     select_info: &SelectInfo,
     scopes_log_vec: Vec<ScopeLogs>,
     resource_attr: JsonbValue<'static>,
-    resource_values: Vec<GreptimeValue>,
+    resource_extracted_values: Vec<GreptimeValue>,
 ) -> Result<Vec<ParseInfo>> {
     let mut results = Vec::new();
     for scope_logs in scopes_log_vec {
         let (scope_attrs, scope_version, scope_name) = scope_to_jsonb(scope_logs.scope);
-        let scope_values = extract_field_from_attr_and_combine_schema(
+        let scope_extracted_values = extract_field_from_attr_and_combine_schema(
             extra_scope_schema,
             select_info,
             &scope_attrs,
@@ -635,14 +634,14 @@ fn parse_scope(
             extra_log_schema,
             select_info,
             scope_logs.log_records,
-            resource_attr.clone(),
+            &resource_attr,
             ScopeInfo {
                 scope_name,
                 scope_version,
                 scope_attrs,
             },
-            resource_values.clone(),
-            scope_values,
+            &resource_extracted_values,
+            &scope_extracted_values,
         )?;
         results.extend(rows);
     }
@@ -653,14 +652,14 @@ fn parse_log(
     extra_log_schema: &mut SchemaInfo,
     select_info: &SelectInfo,
     log_records: Vec<LogRecord>,
-    resource_attr: JsonbValue<'static>,
+    resource_attr: &JsonbValue<'static>,
     ScopeInfo {
         scope_name,
         scope_version,
         scope_attrs,
     }: ScopeInfo,
-    resource_values: Vec<GreptimeValue>,
-    scope_values: Vec<GreptimeValue>,
+    resource_extracted_values: &[GreptimeValue],
+    scope_extracted_values: &[GreptimeValue],
 ) -> Result<Vec<ParseInfo>> {
     let mut result = Vec::with_capacity(log_records.len());
 
@@ -675,26 +674,25 @@ fn parse_log(
             scope_attrs.clone(),
         );
 
-        let log_values =
+        let log_extracted_values =
             extract_field_from_attr_and_combine_schema(extra_log_schema, select_info, &log_attr)?;
 
         let parse_info = ParseInfo {
             values: row,
-            resource_values: resource_values.clone(),
-            scope_values: scope_values.clone(),
-            log_values,
+            resource_extracted_values: resource_extracted_values.to_vec(),
+            scope_extracted_values: scope_extracted_values.to_vec(),
+            log_extracted_values,
         };
         result.push(parse_info);
-        // result.push(row);
     }
     Ok(result)
 }
 
 struct ParseInfo {
     values: Row,
-    resource_values: Vec<GreptimeValue>,
-    scope_values: Vec<GreptimeValue>,
-    log_values: Vec<GreptimeValue>,
+    resource_extracted_values: Vec<GreptimeValue>,
+    scope_extracted_values: Vec<GreptimeValue>,
+    log_extracted_values: Vec<GreptimeValue>,
 }
 
 /// transform otlp logs request to pipeline value
