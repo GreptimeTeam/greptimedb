@@ -291,6 +291,7 @@ mod test {
 
     use arrow::json::ArrayWriter;
     use arrow_schema::{DataType, Field, Schema, SortOptions, TimeUnit};
+    use common_telemetry::error;
     use common_time::Timestamp;
     use datafusion_physical_expr::expressions::Column;
     use futures::StreamExt;
@@ -514,30 +515,30 @@ mod test {
         // a makeshift solution for compare large data
         if real_output != expected_output {
             {
-                let mut f_res = std::io::stderr();
-                let mut buf = String::new();
+                let mut buf = Vec::with_capacity(10 * real_output.len());
                 for batch in &real_output {
                     let mut rb_json: Vec<u8> = Vec::new();
                     let mut writer = ArrayWriter::new(&mut rb_json);
                     writer.write(batch).unwrap();
                     writer.finish().unwrap();
-                    buf += &String::from_utf8_lossy(&rb_json);
-                    buf += ",";
+                    buf.append(&mut rb_json);
+                    buf.push(b',');
                 }
-                f_res.write_all(format!("[{buf}]").as_bytes()).unwrap();
+                let buf = String::from_utf8_lossy(&buf);
+                error!("case_id:{case_id}, real_output: [{buf}]");
             }
             {
-                let mut f_res = std::io::stderr();
-                let mut buf = String::new();
+                let mut buf = Vec::with_capacity(10 * real_output.len());
                 for batch in &expected_output {
                     let mut rb_json: Vec<u8> = Vec::new();
                     let mut writer = ArrayWriter::new(&mut rb_json);
                     writer.write(batch).unwrap();
                     writer.finish().unwrap();
-                    buf += &String::from_utf8_lossy(&rb_json);
-                    buf += ",";
+                    buf.append(&mut rb_json);
+                    buf.push(b',');
                 }
-                f_res.write_all(format!("[{buf}]").as_bytes()).unwrap();
+                let buf = String::from_utf8_lossy(&buf);
+                error!("case_id:{case_id}, expected_output: [{buf}]");
             }
             panic!("case_{} failed, opt: {:?}", case_id, opt);
         }
