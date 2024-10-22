@@ -286,7 +286,6 @@ impl RecordBatchStream for PartSortStream {
 
 #[cfg(test)]
 mod test {
-    use std::io::Write;
     use std::sync::Arc;
 
     use arrow::json::ArrayWriter;
