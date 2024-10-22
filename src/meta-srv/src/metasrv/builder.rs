@@ -14,7 +14,6 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
 
 use client::client_manager::NodeClients;
 use common_base::Plugins;
@@ -250,13 +249,9 @@ impl MetasrvBuilder {
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
         let node_manager = node_manager.unwrap_or_else(|| {
             let datanode_client_channel_config = ChannelConfig::new()
-                .timeout(Duration::from_millis(
-                    options.datanode.client_options.timeout_millis,
-                ))
-                .connect_timeout(Duration::from_millis(
-                    options.datanode.client_options.connect_timeout_millis,
-                ))
-                .tcp_nodelay(options.datanode.client_options.tcp_nodelay);
+                .timeout(options.datanode.client.timeout)
+                .connect_timeout(options.datanode.client.connect_timeout)
+                .tcp_nodelay(options.datanode.client.tcp_nodelay);
             Arc::new(NodeClients::new(datanode_client_channel_config))
         });
         let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
