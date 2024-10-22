@@ -1122,7 +1122,7 @@ fn get_timestamp_from_idx(
 }
 
 #[cfg(test)]
-pub(crate) mod test {
+mod test {
     use std::io::Write;
     use std::sync::Arc;
 
@@ -1136,6 +1136,7 @@ pub(crate) mod test {
 
     use super::*;
     use crate::test_util::{new_ts_array, MockInputExec};
+
     #[test]
     fn test_overlapping() {
         let testcases = [
