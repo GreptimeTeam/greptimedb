@@ -26,6 +26,7 @@ use datafusion_physical_expr::expressions::Column as PhysicalColumn;
 use store_api::region_engine::PartitionRange;
 use table::table::scan::RegionScanExec;
 
+use crate::part_sort::PartSortExec;
 use crate::window_sort::WindowedSortExec;
 
 /// Optimize rule for windowed sort.
@@ -87,11 +88,16 @@ impl WindowedSortPhysicalRule {
                     }
 
                     // TODO: append another pre-sort plan
+                    let first_sort_expr = sort_exec.expr().first().unwrap().clone();
+                    let part_sort_exec = Arc::new(PartSortExec::new(
+                        first_sort_expr.clone(),
+                        sort_exec.input().clone(),
+                    ));
                     let windowed_sort_exec = WindowedSortExec::try_new(
-                        sort_exec.expr().first().unwrap().clone(),
+                        first_sort_expr,
                         sort_exec.fetch(),
                         scanner_info.partition_ranges,
-                        sort_exec.input().clone(),
+                        part_sort_exec,
                     )?;
 
                     return Ok(Transformed::yes(Arc::new(windowed_sort_exec)));

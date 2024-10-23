@@ -34,8 +34,6 @@ use futures::Stream;
 use itertools::Itertools;
 use snafu::location;
 
-use crate::error::Result;
-
 /// Sort input within given PartitionRange
 ///
 /// Input is assumed to be segmented by empty RecordBatch, which indicates a new `PartitionRange` is starting
@@ -52,7 +50,7 @@ pub struct PartSortExec {
 }
 
 impl PartSortExec {
-    pub fn try_new(expression: PhysicalSortExpr, input: Arc<dyn ExecutionPlan>) -> Result<Self> {
+    pub fn new(expression: PhysicalSortExpr, input: Arc<dyn ExecutionPlan>) -> Self {
         let metrics = ExecutionPlanMetricsSet::new();
         let properties = PlanProperties::new(
             input.equivalence_properties().clone(),
@@ -60,12 +58,12 @@ impl PartSortExec {
             input.execution_mode(),
         );
 
-        Ok(Self {
+        Self {
             expression,
             input,
             metrics,
             properties,
-        })
+        }
     }
 
     pub fn to_stream(
@@ -114,10 +112,10 @@ impl ExecutionPlan for PartSortExec {
         } else {
             internal_err!("No children found")?
         };
-        Ok(Arc::new(Self::try_new(
+        Ok(Arc::new(Self::new(
             self.expression.clone(),
             new_input.clone(),
-        )?))
+        )))
     }
 
     fn execute(
@@ -498,14 +496,13 @@ mod test {
             .collect_vec();
         let mock_input = MockInputExec::new(batches, schema.clone());
 
-        let exec = PartSortExec::try_new(
+        let exec = PartSortExec::new(
             PhysicalSortExpr {
                 expr: Arc::new(Column::new("ts", 0)),
                 options: opt,
             },
             Arc::new(mock_input),
-        )
-        .unwrap();
+        );
 
         let exec_stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
 

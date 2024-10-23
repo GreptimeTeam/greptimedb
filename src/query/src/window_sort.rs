@@ -416,14 +416,12 @@ impl WindowedSortStream {
                 // ensure the current batch is in the working range
                 if sort_column.options.unwrap_or_default().descending {
                     if cur_range.end > working_range.end {
-                        let uuid = uuid::Uuid::now_v7();
-                        error!("XRayID {uuid}: current range: {cur_range:?}, working range: {working_range:?}");
-                        internal_err!("Current batch have data on the right side of working range, something is very wrong. XRayID {uuid}")?;
+                        error!("Invalid range: {:?} > {:?}", cur_range, working_range);
+                        internal_err!("Current batch have data on the right side of working range, something is very wrong")?;
                     }
                 } else if cur_range.start < working_range.start {
-                    let uuid = uuid::Uuid::now_v7();
-                    error!("XRayID {uuid}: current range: {cur_range:?}, working range: {working_range:?}");
-                    internal_err!("Current batch have data on the left side of working range, something is very wrong. XRayID {uuid}")?;
+                    error!("Invalid range: {:?} < {:?}", cur_range, working_range);
+                    internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
                 }
 
                 if cur_range.is_subset(&working_range) {
