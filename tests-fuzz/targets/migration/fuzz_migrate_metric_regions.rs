@@ -193,7 +193,9 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let physical_table_ctx = create_physical_table(&ctx, &mut rng).await?;
     let mut tables = HashMap::with_capacity(input.tables);
 
-    for _ in 0..input.tables {
+    let table_num = (input.tables / 3).max(1);
+
+    for _ in 0..table_num {
         let translator = CreateTableExprTranslator;
         let create_logical_table_expr =
             generate_create_logical_table_expr(physical_table_ctx.clone(), &mut rng).unwrap();
@@ -311,7 +313,7 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     }
 
     // Creates more logical tables and inserts values
-    for _ in 0..input.tables {
+    for _ in 0..table_num {
         let translator = CreateTableExprTranslator;
         let create_logical_table_expr =
             generate_create_logical_table_expr(physical_table_ctx.clone(), &mut rng).unwrap();
@@ -411,7 +413,7 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     }
 
     // Creates more logical tables and inserts values
-    for _ in 0..input.tables {
+    for _ in 0..table_num {
         let translator = CreateTableExprTranslator;
         let create_logical_table_expr =
             generate_create_logical_table_expr(physical_table_ctx.clone(), &mut rng).unwrap();
