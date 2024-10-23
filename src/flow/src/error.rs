@@ -21,6 +21,7 @@ use common_error::ext::BoxedError;
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
+use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
 
 use crate::adapter::FlowId;
@@ -41,6 +42,18 @@ pub enum Error {
     #[snafu(display("Internal error"))]
     Internal {
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Flow output type mismatch: expected: {:?}, actual: {:?}",
+        expected,
+        actual
+    ))]
+    FlowOutputTypeMismatch {
+        expected: ConcreteDataType,
+        actual: ConcreteDataType,
         #[snafu(implicit)]
         location: Location,
     },
@@ -213,7 +226,9 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Self::MetaClientInit { source, .. } => source.status_code(),
-            Self::ParseAddr { .. } => StatusCode::InvalidArguments,
+            Self::ParseAddr { .. } | Self::FlowOutputTypeMismatch { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 

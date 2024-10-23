@@ -16,6 +16,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
+use get_size2::GetSize;
 use hydroflow::scheduled::graph::Hydroflow;
 use hydroflow::scheduled::SubgraphId;
 
@@ -108,6 +109,10 @@ impl DataflowState {
 
     pub fn expire_after(&self) -> Option<Timestamp> {
         self.expire_after
+    }
+
+    pub fn get_state_size(&self) -> usize {
+        self.arrange_used.iter().map(|x| x.read().get_size()).sum()
     }
 }
 

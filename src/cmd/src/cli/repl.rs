@@ -28,11 +28,12 @@ use common_base::Plugins;
 use common_config::Mode;
 use common_error::ext::ErrorExt;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::kv_backend::KvBackendRef;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::debug;
 use either::Either;
-use meta_client::client::MetaClientBuilder;
+use meta_client::client::{ClusterKvBackend, MetaClientBuilder};
 use query::datafusion::DatafusionQueryEngine;
 use query::parser::QueryLanguageParser;
 use query::query_engine::{DefaultSerializer, QueryEngineState};
@@ -47,9 +48,9 @@ use crate::cli::cmd::ReplCommand;
 use crate::cli::helper::RustylineHelper;
 use crate::cli::AttachCommand;
 use crate::error::{
-    CollectRecordBatchesSnafu, ParseSqlSnafu, PlanStatementSnafu, PrettyPrintRecordBatchesSnafu,
-    ReadlineSnafu, ReplCreationSnafu, RequestDatabaseSnafu, Result, StartMetaClientSnafu,
-    SubstraitEncodeLogicalPlanSnafu,
+    CollectRecordBatchesSnafu, MetaClusterClientSnafu, ParseSqlSnafu, PlanStatementSnafu,
+    PrettyPrintRecordBatchesSnafu, ReadlineSnafu, ReplCreationSnafu, RequestDatabaseSnafu, Result,
+    StartMetaClientSnafu, SubstraitEncodeLogicalPlanSnafu,
 };
 use crate::{error, DistributedInformationExtension};
 
