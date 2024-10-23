@@ -10998,6 +10998,7 @@ dependencies = [
  "hyper 0.14.30",
  "influxdb_line_protocol",
  "itertools 0.10.5",
+ "json5",
  "jsonb",
  "lazy_static",
  "loki-api",

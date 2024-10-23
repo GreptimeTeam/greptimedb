@@ -44,8 +44,8 @@ use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    DecodeOtlpRequestSnafu, Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result,
-    UnsupportedContentTypeSnafu,
+    DecodeOtlpRequestSnafu, Error, InvalidParameterSnafu, ParseJson5Snafu, ParseJsonSnafu,
+    PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
 use crate::http::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
@@ -407,8 +407,10 @@ pub async fn loki_ingest(
 
     for stream in req.streams {
         // parse labels for each row
-        let labels: HashMap<String, String> =
-            serde_json::from_str(&stream.labels).context(ParseJsonSnafu)?;
+        // encoding: https://github.com/grafana/alloy/blob/be34410b9e841cc0c37c153f9550d9086a304bca/internal/component/common/loki/client/batch.go#L114-L145
+        // use very dirty hack to parse labels
+        let labels = stream.labels.replace("=", ":");
+        let labels: HashMap<String, String> = json5::from_str(&labels).context(ParseJson5Snafu)?;
 
         // process entries
         for entry in stream.entries {
