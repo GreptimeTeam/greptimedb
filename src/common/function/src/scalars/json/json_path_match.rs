@@ -15,7 +15,7 @@
 use std::fmt::{self, Display};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::{Signature, TypeSignature};
+use common_query::prelude::Signature;
 use datafusion::logical_expr::Volatility;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
@@ -41,24 +41,10 @@ impl Function for JsonPathMatchFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::one_of(
+        Signature::exact(
             vec![
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::string_datatype(),
-                ]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::null_datatype(),
-                    ConcreteDataType::string_datatype(),
-                ]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::null_datatype(),
-                ]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::null_datatype(),
-                    ConcreteDataType::null_datatype(),
-                ]),
+                ConcreteDataType::json_datatype(),
+                ConcreteDataType::string_datatype(),
             ],
             Volatility::Immutable,
         )
@@ -91,10 +77,14 @@ impl Function for JsonPathMatchFunction {
                     let path = path.as_string();
                     let result = match (json, path) {
                         (Ok(Some(json)), Ok(Some(path))) => {
-                            let json_path = jsonb::jsonpath::parse_json_path(path.as_bytes());
-                            match json_path {
-                                Ok(json_path) => jsonb::path_match(json, json_path).ok(),
-                                Err(_) => None,
+                            if jsonb::is_object(json) {
+                                let json_path = jsonb::jsonpath::parse_json_path(path.as_bytes());
+                                match json_path {
+                                    Ok(json_path) => jsonb::path_match(json, json_path).ok(),
+                                    Err(_) => None,
+                                }
+                            } else {
+                                None
                             }
                         }
                         _ => None,
@@ -102,8 +92,6 @@ impl Function for JsonPathMatchFunction {
 
                     results.push(result);
                 }
-
-                ConcreteDataType::Null(_) => results.push(None),
 
                 _ => {
                     return UnsupportedInputDataTypeSnafu {
@@ -148,27 +136,9 @@ mod tests {
 
         assert!(matches!(json_path_match.signature(),
                          Signature {
-                             type_signature: TypeSignature::OneOf(valid_types),
+                             type_signature: TypeSignature::Exact(valid_types),
                              volatility: Volatility::Immutable
-                         } if
-            valid_types == vec![
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::string_datatype(),
-                ]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::null_datatype(),
-                    ConcreteDataType::string_datatype(),
-                ]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::null_datatype(),
-                ]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::null_datatype(),
-                    ConcreteDataType::null_datatype(),
-                ])
-            ]
+                         } if valid_types == vec![ConcreteDataType::json_datatype(), ConcreteDataType::string_datatype()],
         ));
 
         let json_strings = [
@@ -176,17 +146,17 @@ mod tests {
             Some(r#"{"a": 1, "b": [1,2,3]}"#.to_string()),
             Some(r#"{"a": 1 ,"b": [1,2,3]}"#.to_string()),
             Some(r#"{"a":1,"b":[1,2,3]}"#.to_string()),
-            None,
-            None,
+            Some(r#"null"#.to_string()),
+            Some(r#"null"#.to_string()),
         ];
 
         let paths = vec![
             Some("$.a.b == 2".to_string()),
             Some("$.b[1 to last] >= 2".to_string()),
             Some("$.c > 0".to_string()),
-            None,
+            Some(r#"null"#.to_string()),
             Some("$.c > 0".to_string()),
-            None,
+            Some(r#"null"#.to_string()),
         ];
 
         let results = [Some(true), Some(true), Some(false), None, None, None];
