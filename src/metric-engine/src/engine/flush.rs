@@ -14,54 +14,39 @@
 
 use snafu::ResultExt;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{AffectedRows, RegionCatchupRequest, RegionRequest};
+use store_api::region_request::{AffectedRows, RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
-use crate::error::{MitoCatchupOperationSnafu, Result, UnsupportedRegionRequestSnafu};
+use crate::error::{MitoFlushOperationSnafu, Result, UnsupportedRegionRequestSnafu};
 use crate::utils;
 
 impl MetricEngineInner {
-    pub async fn catchup_region(
+    pub async fn flush_region(
         &self,
         region_id: RegionId,
-        req: RegionCatchupRequest,
+        req: RegionFlushRequest,
     ) -> Result<AffectedRows> {
         if !self.is_physical_region(region_id) {
             return UnsupportedRegionRequestSnafu {
-                request: RegionRequest::Catchup(req),
+                request: RegionRequest::Flush(req),
             }
             .fail();
         }
+
         let metadata_region_id = utils::to_metadata_region_id(region_id);
-        // TODO(weny): improve the catchup, we can read the wal entries only once.
+        // Flushes the metadata region as well
         self.mito
-            .handle_request(
-                metadata_region_id,
-                RegionRequest::Catchup(RegionCatchupRequest {
-                    set_writable: req.set_writable,
-                    entry_id: None,
-                    location_id: req.location_id,
-                }),
-            )
+            .handle_request(metadata_region_id, RegionRequest::Flush(req.clone()))
             .await
-            .context(MitoCatchupOperationSnafu)?;
+            .context(MitoFlushOperationSnafu)
+            .map(|response| response.affected_rows)?;
 
         let data_region_id = utils::to_data_region_id(region_id);
         self.mito
-            .handle_request(
-                data_region_id,
-                RegionRequest::Catchup(RegionCatchupRequest {
-                    set_writable: req.set_writable,
-                    entry_id: req.entry_id,
-                    location_id: req.location_id,
-                }),
-            )
+            .handle_request(data_region_id, RegionRequest::Flush(req.clone()))
             .await
-            .context(MitoCatchupOperationSnafu)
-            .map(|response| response.affected_rows)?;
-
-        self.recover_states(region_id).await?;
-        Ok(0)
+            .context(MitoFlushOperationSnafu)
+            .map(|response| response.affected_rows)
     }
 }

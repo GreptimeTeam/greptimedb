@@ -342,6 +342,8 @@ impl StartCommand {
         // Some queries are expected to take long time.
         let channel_config = ChannelConfig {
             timeout: None,
+            tcp_nodelay: opts.datanode.client.tcp_nodelay,
+            connect_timeout: Some(opts.datanode.client.connect_timeout),
             ..Default::default()
         };
         let client = NodeClients::new(channel_config);

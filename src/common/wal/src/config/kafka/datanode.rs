@@ -46,6 +46,8 @@ pub struct DatanodeKafkaConfig {
     pub create_index: bool,
     #[serde(with = "humantime_serde")]
     pub dump_index_interval: Duration,
+    /// Ignore missing entries during read WAL.
+    pub overwrite_entry_start_id: bool,
 }
 
 impl Default for DatanodeKafkaConfig {
@@ -60,6 +62,7 @@ impl Default for DatanodeKafkaConfig {
             auto_create_topics: true,
             create_index: true,
             dump_index_interval: Duration::from_secs(60),
+            overwrite_entry_start_id: false,
         }
     }
 }

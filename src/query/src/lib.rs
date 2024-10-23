@@ -28,6 +28,7 @@ pub mod executor;
 pub mod metrics;
 mod optimizer;
 pub mod parser;
+mod part_sort;
 pub mod physical_wrapper;
 pub mod plan;
 pub mod planner;
@@ -37,8 +38,10 @@ mod range_select;
 pub mod region_query;
 pub mod sql;
 pub mod stats;
-mod window_sort;
+pub(crate) mod window_sort;
 
+#[cfg(test)]
+pub(crate) mod test_util;
 #[cfg(test)]
 mod tests;
 
