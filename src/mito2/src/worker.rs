@@ -148,12 +148,10 @@ impl WorkerGroup {
         let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
             .await?
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
-        // FIXME(yingwen): Divide configs
-        let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_jobs));
+        let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
+        let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         // We use another scheduler to avoid purge jobs blocking other jobs.
-        // A purge job is cheaper than other background jobs so they share the same job limit.
-        let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
+        let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_purges));
         let write_cache = write_cache_from_config(
             &config,
             object_store_manager.clone(),
@@ -284,10 +282,9 @@ impl WorkerGroup {
                     .with_notifier(flush_sender.clone()),
             )
         });
-        // FIXME(yingwen): divide config
-        let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
+        let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
+        let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
+        let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let puffin_manager_factory = PuffinManagerFactory::new(
             &config.index.aux_path,
             config.index.staging_size.as_bytes(),

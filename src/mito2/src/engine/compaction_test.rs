@@ -272,7 +272,7 @@ async fn test_readonly_during_compaction() {
         .create_engine_with(
             MitoConfig {
                 // Ensure there is only one background worker for purge task.
-                max_background_jobs: 1,
+                max_background_purges: 1,
                 ..Default::default()
             },
             None,
@@ -310,7 +310,7 @@ async fn test_readonly_during_compaction() {
     listener.wake();
 
     let notify = Arc::new(Notify::new());
-    // We already sets max background jobs to 1, so we can submit a task to the
+    // We already sets max background purges to 1, so we can submit a task to the
     // purge scheduler to ensure all purge tasks are finished.
     let job_notify = notify.clone();
     engine
