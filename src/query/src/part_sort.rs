@@ -24,7 +24,7 @@ use datafusion::common::arrow::compute::sort_to_indices;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::execution::{RecordBatchStream, TaskContext};
 use datafusion::physical_plan::coalesce_batches::concat_batches;
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
 };
@@ -74,7 +74,7 @@ impl PartSortExec {
         let input_stream: DfSendableRecordBatchStream =
             self.input.execute(partition, context.clone())?;
 
-        let df_stream = Box::pin(PartSortStream::new(context, self, input_stream)) as _;
+        let df_stream = Box::pin(PartSortStream::new(context, self, input_stream, partition)) as _;
 
         Ok(df_stream)
     }
@@ -129,6 +129,10 @@ impl ExecutionPlan for PartSortExec {
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metrics.clone_inner())
     }
+
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        vec![false]
+    }
 }
 
 struct PartSortStream {
@@ -140,6 +144,7 @@ struct PartSortStream {
     input: DfSendableRecordBatchStream,
     input_complete: bool,
     schema: SchemaRef,
+    metrics: BaselineMetrics,
 }
 
 impl PartSortStream {
@@ -147,6 +152,7 @@ impl PartSortStream {
         context: Arc<TaskContext>,
         sort: &PartSortExec,
         input: DfSendableRecordBatchStream,
+        partition: usize,
     ) -> Self {
         Self {
             reservation: MemoryConsumer::new("PartSortStream".to_string())
@@ -157,6 +163,7 @@ impl PartSortStream {
             input,
             input_complete: false,
             schema: sort.input.schema(),
+            metrics: BaselineMetrics::new(&sort.metrics, partition),
         }
     }
 }
@@ -269,10 +276,11 @@ impl Stream for PartSortStream {
     type Item = datafusion_common::Result<DfRecordBatch>;
 
     fn poll_next(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
-        self.poll_next_inner(cx)
+        let result = self.as_mut().poll_next_inner(cx);
+        self.metrics.record_poll(result)
     }
 }
 

@@ -115,14 +115,11 @@ impl WindowedSortExec {
     ) -> Result<Self> {
         check_partition_range_monotonicity(&ranges, expression.options.descending)?;
 
-        common_telemetry::info!(
-            "[DEBUG] input's output partitioning: {:?}, num partition ranges: {}",
-            input.output_partitioning(),
-            ranges.len()
-        );
-
         let properties = PlanProperties::new(
-            input.equivalence_properties().clone(),
+            input
+                .equivalence_properties()
+                .clone()
+                .with_reorder(vec![expression.clone()]),
             input.output_partitioning().clone(),
             input.execution_mode(),
         );
@@ -134,12 +131,6 @@ impl WindowedSortExec {
                 compute_all_working_ranges(&overlap_counts, expression.options.descending);
             all_avail_working_range.push(working_ranges);
         }
-
-        common_telemetry::info!("[DEBUG] ranges: {:?}", ranges);
-        common_telemetry::info!(
-            "[DEBUG] all_avail_working_range: {:?}",
-            all_avail_working_range
-        );
 
         Ok(Self {
             expression,
@@ -220,7 +211,6 @@ impl ExecutionPlan for WindowedSortExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
-        common_telemetry::info!("[DEBUG] WindowedSortExec::execute {}", partition);
         self.to_stream(context, partition)
     }
 
@@ -273,7 +263,7 @@ pub struct WindowedSortStream {
     /// working ranges promise once input stream get a value out of current range, future values will never be in this range
     all_avail_working_range: Vec<(TimeRange, BTreeSet<usize>)>,
     /// Execution metrics
-    metrics: ExecutionPlanMetricsSet,
+    metrics: BaselineMetrics,
 }
 
 impl WindowedSortStream {
@@ -299,7 +289,7 @@ impl WindowedSortStream {
             produced: 0,
             batch_size: context.session_config().batch_size(),
             all_avail_working_range: exec.all_avail_working_range[partition].clone(),
-            metrics: exec.metrics.clone(),
+            metrics: BaselineMetrics::new(&exec.metrics, partition),
         }
     }
 }
@@ -564,7 +554,7 @@ impl WindowedSortStream {
             streams,
             self.schema(),
             &[self.expression.clone()],
-            BaselineMetrics::new(&self.metrics, 0),
+            self.metrics.clone(),
             self.batch_size,
             fetch,
             reservation,
@@ -586,10 +576,11 @@ impl Stream for WindowedSortStream {
     type Item = datafusion_common::Result<DfRecordBatch>;
 
     fn poll_next(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
-        self.poll_next_inner(cx)
+        let result = self.as_mut().poll_next_inner(cx);
+        self.metrics.record_poll(result)
     }
 }
 

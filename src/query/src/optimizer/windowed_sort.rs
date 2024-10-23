@@ -66,6 +66,8 @@ impl WindowedSortPhysicalRule {
         let result = plan
             .transform_down(|plan| {
                 if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
+                    common_telemetry::info!("[DEBUG] encounter SortExec");
+
                     // TODO: support multiple expr in windowed sort
                     if !sort_exec.preserve_partitioning() || sort_exec.expr().len() != 1 {
                         return Ok(Transformed::no(plan));
@@ -98,9 +100,17 @@ impl WindowedSortPhysicalRule {
                         sort_exec.fetch(),
                         scanner_info.partition_ranges,
                         part_sort_exec,
+                        // sort_exec.input().clone(),
                     )?;
 
-                    return Ok(Transformed::yes(Arc::new(windowed_sort_exec)));
+                    common_telemetry::info!("[DEBUG] WindowedSortRule applied");
+
+                    // return Ok(Transformed::yes(Arc::new(windowed_sort_exec)));
+                    return Ok(Transformed {
+                        data: Arc::new(windowed_sort_exec),
+                        transformed: true,
+                        tnr: datafusion_common::tree_node::TreeNodeRecursion::Stop,
+                    });
                 }
 
                 Ok(Transformed::no(plan))
@@ -126,6 +136,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             || plan.as_any().is::<CoalesceBatchesExec>()
             || plan.as_any().is::<CoalescePartitionsExec>()
             || plan.as_any().is::<SortExec>()
+            || plan.as_any().is::<WindowedSortExec>()
         {
             partition_ranges = None;
         }
