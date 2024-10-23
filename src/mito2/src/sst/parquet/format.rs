@@ -561,6 +561,7 @@ fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
 }
 
 /// Gets the min/max time index of the row group from the parquet meta.
+/// It assumes the parquet is created by the mito engine.
 pub(crate) fn parquet_row_group_time_range(
     file_meta: &FileMeta,
     parquet_meta: &ParquetMetaData,
