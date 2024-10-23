@@ -31,6 +31,7 @@ use arrow_schema::{DataType, SchemaRef, SortOptions};
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
+use common_telemetry::error;
 use common_time::Timestamp;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
 use datafusion::execution::{RecordBatchStream, TaskContext};
@@ -376,9 +377,11 @@ impl WindowedSortStream {
 
                         if sort_column.options.unwrap_or_default().descending {
                             if cur_range.end > working_range.end {
+                                error!("Invalid range: {:?} > {:?}", cur_range, working_range);
                                 internal_err!("Current batch have data on the right side of working range, something is very wrong")?;
                             }
                         } else if cur_range.start < working_range.start {
+                            error!("Invalid range: {:?} < {:?}", cur_range, working_range);
                             internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
                         }
 
@@ -1123,20 +1126,17 @@ mod test {
     use std::io::Write;
     use std::sync::Arc;
 
-    use arrow::array::{
-        ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray,
-    };
+    use arrow::array::{ArrayRef, TimestampMillisecondArray};
     use arrow::compute::concat_batches;
     use arrow::json::ArrayWriter;
     use arrow_schema::{Field, Schema, TimeUnit};
-    use datafusion::physical_plan::ExecutionMode;
-    use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
     use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
     use super::*;
+    use crate::test_util::{new_ts_array, MockInputExec};
+
     #[test]
     fn test_overlapping() {
         let testcases = [
@@ -2423,95 +2423,6 @@ mod test {
         }
     }
 
-    #[derive(Debug)]
-    struct MockInputExec {
-        input: Vec<DfRecordBatch>,
-        schema: SchemaRef,
-        properties: PlanProperties,
-    }
-
-    impl MockInputExec {
-        fn new(input: Vec<DfRecordBatch>, schema: SchemaRef) -> Self {
-            Self {
-                properties: PlanProperties::new(
-                    EquivalenceProperties::new(schema.clone()),
-                    Partitioning::UnknownPartitioning(1),
-                    ExecutionMode::Bounded,
-                ),
-                input,
-                schema,
-            }
-        }
-    }
-
-    impl DisplayAs for MockInputExec {
-        fn fmt_as(&self, _t: DisplayFormatType, _f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            unimplemented!()
-        }
-    }
-
-    impl ExecutionPlan for MockInputExec {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn properties(&self) -> &PlanProperties {
-            &self.properties
-        }
-
-        fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-            vec![]
-        }
-
-        fn with_new_children(
-            self: Arc<Self>,
-            _children: Vec<Arc<dyn ExecutionPlan>>,
-        ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
-            Ok(self)
-        }
-
-        fn execute(
-            &self,
-            _partition: usize,
-            _context: Arc<TaskContext>,
-        ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
-            let stream = MockStream {
-                stream: self.input.clone(),
-                schema: self.schema.clone(),
-                idx: 0,
-            };
-            Ok(Box::pin(stream))
-        }
-    }
-
-    struct MockStream {
-        stream: Vec<DfRecordBatch>,
-        schema: SchemaRef,
-        idx: usize,
-    }
-
-    impl Stream for MockStream {
-        type Item = datafusion_common::Result<DfRecordBatch>;
-        fn poll_next(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
-            if self.idx < self.stream.len() {
-                let ret = self.stream[self.idx].clone();
-                self.idx += 1;
-                Poll::Ready(Some(Ok(ret)))
-            } else {
-                Poll::Ready(None)
-            }
-        }
-    }
-
-    impl RecordBatchStream for MockStream {
-        fn schema(&self) -> SchemaRef {
-            self.schema.clone()
-        }
-    }
-
     #[tokio::test]
     async fn test_window_sort_stream() {
         let test_cases = [
@@ -3045,21 +2956,6 @@ mod test {
         }
     }
 
-    fn new_array(unit: TimeUnit, arr: Vec<i64>) -> ArrayRef {
-        match unit {
-            TimeUnit::Second => Arc::new(TimestampSecondArray::from_iter_values(arr)) as ArrayRef,
-            TimeUnit::Millisecond => {
-                Arc::new(TimestampMillisecondArray::from_iter_values(arr)) as ArrayRef
-            }
-            TimeUnit::Microsecond => {
-                Arc::new(TimestampMicrosecondArray::from_iter_values(arr)) as ArrayRef
-            }
-            TimeUnit::Nanosecond => {
-                Arc::new(TimestampNanosecondArray::from_iter_values(arr)) as ArrayRef
-            }
-        }
-    }
-
     #[tokio::test]
     async fn fuzzy_ish_test_window_sort_stream() {
         let test_cnt = 100;
@@ -3067,6 +2963,7 @@ mod test {
         let range_size_bound = 100;
         let range_offset_bound = 100;
         let in_range_datapoint_cnt_bound = 100;
+        let fetch_bound = 100;
 
         let mut rng = fastrand::Rng::new();
         rng.seed(1337);
@@ -3087,6 +2984,11 @@ mod test {
                 1 => TimeUnit::Millisecond,
                 2 => TimeUnit::Microsecond,
                 _ => TimeUnit::Nanosecond,
+            };
+            let fetch = if rng.bool() {
+                Some(rng.usize(0..fetch_bound))
+            } else {
+                None
             };
 
             let mut input_ranged_data = vec![];
@@ -3119,7 +3021,7 @@ mod test {
                     .sorted_by(ret_cmp_fn(descending))
                     .collect_vec();
                 output_data.extend(data_gen.clone());
-                let arr = new_array(unit.clone(), data_gen);
+                let arr = new_ts_array(unit.clone(), data_gen);
                 let range = PartitionRange {
                     start,
                     end,
@@ -3130,7 +3032,10 @@ mod test {
             }
 
             output_data.sort_by(ret_cmp_fn(descending));
-            let output_arr = new_array(unit.clone(), output_data);
+            if let Some(fetch) = fetch {
+                output_data.truncate(fetch);
+            }
+            let output_arr = new_ts_array(unit.clone(), output_data);
 
             let test_stream = TestStream::new(
                 Column::new("ts", 0),
@@ -3138,7 +3043,7 @@ mod test {
                     descending,
                     nulls_first: true,
                 },
-                None,
+                fetch,
                 vec![Field::new(
                     "ts",
                     DataType::Timestamp(unit.clone(), None),
@@ -3158,8 +3063,7 @@ mod test {
 
             if res_concat != expected_concat {
                 {
-                    let mut f_input =
-                        std::fs::File::create(format!("case_{}_input.json", case_id)).unwrap();
+                    let mut f_input = std::io::stderr();
                     f_input.write_all(b"[").unwrap();
                     for (input_range, input_arr) in test_stream.input {
                         let range_json = json!({
@@ -3181,8 +3085,7 @@ mod test {
                     f_input.write_all(b"]").unwrap();
                 }
                 {
-                    let mut f_res =
-                        std::fs::File::create(format!("case_{}_result.json", case_id)).unwrap();
+                    let mut f_res = std::io::stderr();
                     f_res.write_all(b"[").unwrap();
                     for batch in &res {
                         let mut res_writer = ArrayWriter::new(f_res);
@@ -3193,21 +3096,18 @@ mod test {
                     }
                     f_res.write_all(b"]").unwrap();
 
-                    let f_res_concat =
-                        std::fs::File::create(format!("case_{}_result_concat.json", case_id))
-                            .unwrap();
+                    let f_res_concat = std::io::stderr();
                     let mut res_writer = ArrayWriter::new(f_res_concat);
                     res_writer.write(&res_concat).unwrap();
                     res_writer.finish().unwrap();
 
-                    let f_expected =
-                        std::fs::File::create(format!("case_{}_expected.json", case_id)).unwrap();
+                    let f_expected = std::io::stderr();
                     let mut expected_writer = ArrayWriter::new(f_expected);
                     expected_writer.write(&expected_concat).unwrap();
                     expected_writer.finish().unwrap();
                 }
                 panic!(
-                    "case failed, case id: {0}, output and expected save to case_{0}_*.json file",
+                    "case failed, case id: {0}, output and expected output to stderr",
                     case_id
                 );
             }
