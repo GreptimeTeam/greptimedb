@@ -114,8 +114,10 @@ pub(crate) const MAX_INITIAL_CHECK_DELAY_SECS: u64 = 60 * 3;
 pub(crate) struct WorkerGroup {
     /// Workers of the group.
     workers: Vec<RegionWorker>,
-    /// Global background job scheduelr.
-    scheduler: SchedulerRef,
+    /// Flush background job pool.
+    flush_job_pool: SchedulerRef,
+    /// Compaction background job pool.
+    compact_job_pool: SchedulerRef,
     /// Scheduler for file purgers.
     purge_scheduler: SchedulerRef,
     /// Cache.
@@ -146,7 +148,9 @@ impl WorkerGroup {
         let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
             .await?
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
-        let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
+        // FIXME(yingwen): Divide configs
+        let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_jobs));
+        let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_jobs));
         // We use another scheduler to avoid purge jobs blocking other jobs.
         // A purge job is cheaper than other background jobs so they share the same job limit.
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
@@ -178,7 +182,8 @@ impl WorkerGroup {
                     log_store: log_store.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
-                    scheduler: scheduler.clone(),
+                    flush_job_pool: flush_job_pool.clone(),
+                    compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
                     listener: WorkerListener::default(),
                     cache_manager: cache_manager.clone(),
@@ -195,7 +200,8 @@ impl WorkerGroup {
 
         Ok(WorkerGroup {
             workers,
-            scheduler,
+            flush_job_pool,
+            compact_job_pool,
             purge_scheduler,
             cache_manager,
         })
@@ -205,8 +211,11 @@ impl WorkerGroup {
     pub(crate) async fn stop(&self) -> Result<()> {
         info!("Stop region worker group");
 
+        // TODO(yingwen): Do we need to stop gracefully?
         // Stops the scheduler gracefully.
-        self.scheduler.stop(true).await?;
+        self.compact_job_pool.stop(true).await?;
+        // Stops the scheduler gracefully.
+        self.flush_job_pool.stop(true).await?;
         // Stops the purge scheduler gracefully.
         self.purge_scheduler.stop(true).await?;
 
@@ -275,7 +284,9 @@ impl WorkerGroup {
                     .with_notifier(flush_sender.clone()),
             )
         });
-        let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
+        // FIXME(yingwen): divide config
+        let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_jobs));
+        let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let puffin_manager_factory = PuffinManagerFactory::new(
             &config.index.aux_path,
@@ -310,7 +321,8 @@ impl WorkerGroup {
                     log_store: log_store.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
-                    scheduler: scheduler.clone(),
+                    flush_job_pool: flush_job_pool.clone(),
+                    compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
                     listener: WorkerListener::new(listener.clone()),
                     cache_manager: cache_manager.clone(),
@@ -327,7 +339,8 @@ impl WorkerGroup {
 
         Ok(WorkerGroup {
             workers,
-            scheduler,
+            flush_job_pool,
+            compact_job_pool,
             purge_scheduler,
             cache_manager,
         })
@@ -382,7 +395,8 @@ struct WorkerStarter<S> {
     log_store: Arc<S>,
     object_store_manager: ObjectStoreManagerRef,
     write_buffer_manager: WriteBufferManagerRef,
-    scheduler: SchedulerRef,
+    compact_job_pool: SchedulerRef,
+    flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
     listener: WorkerListener,
     cache_manager: CacheManagerRef,
@@ -423,9 +437,9 @@ impl<S: LogStore> WorkerStarter<S> {
             ),
             purge_scheduler: self.purge_scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
-            flush_scheduler: FlushScheduler::new(self.scheduler.clone()),
+            flush_scheduler: FlushScheduler::new(self.flush_job_pool),
             compaction_scheduler: CompactionScheduler::new(
-                self.scheduler,
+                self.compact_job_pool,
                 sender.clone(),
                 self.cache_manager.clone(),
                 self.config,
