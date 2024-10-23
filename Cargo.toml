@@ -140,6 +140,7 @@ opentelemetry-proto = { version = "0.5", features = [
     "with-serde",
     "logs",
 ] }
+parking_lot = "0.12"
 parquet = { version = "51.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
@@ -148,6 +149,7 @@ promql-parser = { version = "0.4.1" }
 prost = "0.12"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
+ratelimit = "0.9"
 regex = "1.8"
 regex-automata = { version = "0.4" }
 reqwest = { version = "0.12", default-features = false, features = [

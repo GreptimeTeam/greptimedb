@@ -21,6 +21,7 @@ use once_cell::sync::Lazy;
 use paste::paste;
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::{BuilderBuild, RuntimeTrait};
 use crate::{Builder, JoinHandle, Runtime};
 
 const GLOBAL_WORKERS: usize = 8;
