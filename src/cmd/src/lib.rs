@@ -15,6 +15,15 @@
 #![feature(assert_matches, let_chains)]
 
 use async_trait::async_trait;
+use catalog::information_schema::InformationExtension;
+use client::api::v1::meta::ProcedureStatus;
+use common_error::ext::BoxedError;
+use common_meta::cluster::{ClusterInfo, NodeInfo};
+use common_meta::datanode::RegionStat;
+use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
+use common_meta::key::flow::flow_state::FlowStat;
+use common_meta::rpc::procedure;
+use common_procedure::{ProcedureInfo, ProcedureState};
 use common_telemetry::{error, info};
 
 use crate::error::Result;
@@ -118,5 +127,79 @@ fn log_env_flags() {
     info!("command line arguments");
     for argument in std::env::args() {
         info!("argument: {}", argument);
+    }
+}
+
+pub struct DistributedInformationExtension {
+    meta_client: MetaClientRef,
+}
+
+impl DistributedInformationExtension {
+    pub fn new(meta_client: MetaClientRef) -> Self {
+        Self { meta_client }
+    }
+}
+
+#[async_trait::async_trait]
+impl InformationExtension for DistributedInformationExtension {
+    type Error = catalog::error::Error;
+
+    async fn nodes(&self) -> std::result::Result<Vec<NodeInfo>, Self::Error> {
+        self.meta_client
+            .list_nodes(None)
+            .await
+            .map_err(BoxedError::new)
+            .context(catalog::error::ListNodesSnafu)
+    }
+
+    async fn procedures(&self) -> std::result::Result<Vec<(String, ProcedureInfo)>, Self::Error> {
+        let procedures = self
+            .meta_client
+            .list_procedures(&ExecutorContext::default())
+            .await
+            .map_err(BoxedError::new)
+            .context(catalog::error::ListProceduresSnafu)?
+            .procedures;
+        let mut result = Vec::with_capacity(procedures.len());
+        for procedure in procedures {
+            let pid = match procedure.id {
+                Some(pid) => pid,
+                None => return catalog::error::ProcedureIdNotFoundSnafu {}.fail(),
+            };
+            let pid = procedure::pb_pid_to_pid(&pid)
+                .map_err(BoxedError::new)
+                .context(catalog::error::ConvertProtoDataSnafu)?;
+            let status = ProcedureStatus::try_from(procedure.status)
+                .map(|v| v.as_str_name())
+                .unwrap_or("Unknown")
+                .to_string();
+            let procedure_info = ProcedureInfo {
+                id: pid,
+                type_name: procedure.type_name,
+                start_time_ms: procedure.start_time_ms,
+                end_time_ms: procedure.end_time_ms,
+                state: ProcedureState::Running,
+                lock_keys: procedure.lock_keys,
+            };
+            result.push((status, procedure_info));
+        }
+
+        Ok(result)
+    }
+
+    async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error> {
+        self.meta_client
+            .list_region_stats()
+            .await
+            .map_err(BoxedError::new)
+            .context(catalog::error::ListRegionStatsSnafu)
+    }
+
+    async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
+        self.meta_client
+            .list_flow_stats()
+            .await
+            .map_err(BoxedError::new)
+            .context(catalog::error::ListFlowStatsSnafu)
     }
 }

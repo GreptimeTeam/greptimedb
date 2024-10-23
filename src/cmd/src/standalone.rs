@@ -34,6 +34,7 @@ use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRe
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
+use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -70,7 +71,7 @@ use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
@@ -507,7 +508,7 @@ impl StartCommand {
             procedure_manager.clone(),
         ));
         let catalog_manager = KvBackendCatalogManager::new(
-            information_extension,
+            information_extension.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
             Some(procedure_manager.clone()),
@@ -531,6 +532,14 @@ impl StartCommand {
                 .map_err(BoxedError::new)
                 .context(OtherSnafu)?,
         );
+
+        // set the ref to query for the local flow state
+        {
+            let flow_worker_manager = flownode.flow_worker_manager();
+            information_extension
+                .set_flow_worker_manager(flow_worker_manager.clone())
+                .await;
+        }
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
@@ -669,6 +678,7 @@ pub struct StandaloneInformationExtension {
     region_server: RegionServer,
     procedure_manager: ProcedureManagerRef,
     start_time_ms: u64,
+    flow_worker_manager: RwLock<Option<Arc<FlowWorkerManager>>>,
 }
 
 impl StandaloneInformationExtension {
@@ -677,7 +687,14 @@ impl StandaloneInformationExtension {
             region_server,
             procedure_manager,
             start_time_ms: common_time::util::current_time_millis() as u64,
+            flow_worker_manager: RwLock::new(None),
         }
+    }
+
+    /// Set the flow worker manager for the standalone instance.
+    pub async fn set_flow_worker_manager(&self, flow_worker_manager: Arc<FlowWorkerManager>) {
+        let mut guard = self.flow_worker_manager.write().await;
+        *guard = Some(flow_worker_manager);
     }
 }
 
@@ -749,6 +766,18 @@ impl InformationExtension for StandaloneInformationExtension {
             })
             .collect::<Vec<_>>();
         Ok(stats)
+    }
+
+    async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
+        let state = self
+            .flow_worker_manager
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .gen_state_report()
+            .await;
+        Ok(Some(state))
     }
 }
 

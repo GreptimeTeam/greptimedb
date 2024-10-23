@@ -569,6 +569,12 @@ SELECT
 FROM
     requests_without_ip;
 
+-- Test if FLOWS table works, but don't care about the result since it vary from runs
+SELECT
+    1
+FROM
+    INFORMATION_SCHEMA.FLOWS;
+
 DROP FLOW requests_long_term;
 
 DROP TABLE requests_without_ip;

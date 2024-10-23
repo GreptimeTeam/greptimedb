@@ -137,6 +137,7 @@ use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
 use crate::error::{self, Result, SerdeJsonSnafu};
+use crate::key::flow::flow_state::FlowStateValue;
 use crate::key::node_address::NodeAddressValue;
 use crate::key::table_route::TableRouteKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
@@ -1263,6 +1264,7 @@ impl_metadata_value! {
     TableFlowValue,
     NodeAddressValue,
     SchemaNameValue
+    FlowStateValue,
 }
 
 impl_optional_metadata_value! {

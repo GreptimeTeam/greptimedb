@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime};
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use common_config::Configurable;
 use common_error::ext::BoxedError;
+use common_meta::key::flow::flow_state::{FlowStat, FlowStateValue, LocalFlowStateReporter};
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -51,12 +52,14 @@ use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{
-    EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu, TableNotFoundSnafu,
-    UnexpectedSnafu,
+    EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowOutputTypeMismatchSnafu, InternalSnafu,
+    TableNotFoundSnafu, UnexpectedSnafu,
 };
 use crate::expr::{Batch, GlobalId};
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_RUN_INTERVAL_MS};
 use crate::repr::{self, DiffRow, Row, BATCH_SIZE};
+
+// TODO(discord9): change type mismatch information to a more user friendly message in this PR
 
 mod flownode_impl;
 mod parse_expr;
@@ -69,6 +72,7 @@ pub(crate) mod node_context;
 mod table_source;
 
 use crate::error::Error;
+use crate::utils::StateReportHandler;
 use crate::FrontendInvoker;
 
 // `GREPTIME_TIMESTAMP` is not used to distinguish when table is created automatically by flow
@@ -137,6 +141,8 @@ pub struct FlowWorkerManager {
     ///
     /// So that a series of event like `inserts -> flush` can be handled correctly
     flush_lock: RwLock<()>,
+    /// receive a oneshot sender to send state size report
+    state_report_handler: RwLock<Option<StateReportHandler>>,
 }
 
 /// Building FlownodeManager
@@ -170,7 +176,13 @@ impl FlowWorkerManager {
             tick_manager,
             node_id,
             flush_lock: RwLock::new(()),
+            state_report_handler: RwLock::new(None),
         }
+    }
+
+    pub async fn with_state_report_handler(self, handler: StateReportHandler) -> Self {
+        *self.state_report_handler.write().await = Some(handler);
+        self
     }
 
     /// Create a flownode manager with one worker
@@ -257,8 +269,16 @@ impl FlowWorkerManager {
             let (catalog, schema) = (table_name[0].clone(), table_name[1].clone());
             let ctx = Arc::new(QueryContext::with(&catalog, &schema));
 
-            let (is_ts_placeholder, proto_schema) =
-                self.try_fetch_or_create_table(&table_name).await?;
+            let first_row = reqs
+                .first()
+                .and_then(|r| match r {
+                    DiffRequest::Insert(rows) => rows.first(),
+                    DiffRequest::Delete(rows) => rows.first(),
+                })
+                .map(|(row, _ts)| row);
+            let (is_ts_placeholder, proto_schema) = self
+                .try_fetch_or_create_table(&table_name, first_row)
+                .await?;
             let schema_len = proto_schema.len();
 
             trace!(
@@ -406,6 +426,7 @@ impl FlowWorkerManager {
     async fn try_fetch_or_create_table(
         &self,
         table_name: &TableName,
+        first_row: Option<&Row>,
     ) -> Result<(bool, Vec<api::v1::ColumnSchema>), Error> {
         // TODO(discord9): instead of auto build table from request schema, actually build table
         // before `create flow` to be able to assign pk and ts etc.
@@ -515,13 +536,72 @@ impl FlowWorkerManager {
 
             (primary_keys, with_auto_added_col, no_time_index)
         };
+        if let Some(first_row) = first_row {
+            for (expected_type, actual_type) in schema.iter().zip(first_row.iter()) {
+                ensure!(
+                    expected_type.data_type == actual_type.data_type() || actual_type.is_null(),
+                    FlowOutputTypeMismatchSnafu {
+                        expected: expected_type.data_type.clone(),
+                        actual: actual_type.data_type()
+                    }
+                );
+            }
+        }
+
         let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
         Ok((is_ts_placeholder, proto_schema))
     }
 }
 
+#[async_trait::async_trait]
+impl LocalFlowStateReporter for FlowWorkerManager {
+    async fn report(&self) -> common_meta::key::flow::flow_state::FlowStateValue {
+        FlowStateValue::new(self.gen_state_report().await.state_size)
+    }
+}
+
 /// Flow Runtime related methods
 impl FlowWorkerManager {
+    pub async fn gen_state_report(&self) -> FlowStat {
+        let mut full_report = BTreeMap::new();
+        for worker in self.worker_handles.iter() {
+            let worker = worker.lock().await;
+            match worker.get_state_size().await {
+                Ok(state_size) => {
+                    full_report.extend(state_size.into_iter().map(|(k, v)| (k as u32, v)))
+                }
+                Err(err) => {
+                    common_telemetry::error!(err; "Get state size error");
+                }
+            }
+        }
+
+        FlowStat {
+            state_size: full_report,
+        }
+    }
+
+    /// Start state report handler, which will receive a sender from HeartbeatTask to send state size report back
+    ///
+    /// if heartbeat task is shutdown, this future will exit too
+    async fn start_state_report_handler(self: Arc<Self>) -> Option<JoinHandle<()>> {
+        let state_report_handler = self.state_report_handler.write().await.take();
+        if let Some(mut handler) = state_report_handler {
+            let zelf = self.clone();
+            let handler = common_runtime::spawn_global(async move {
+                while let Some(ret_handler) = handler.recv().await {
+                    let state_report = zelf.gen_state_report().await;
+                    ret_handler.send(state_report).unwrap_or_else(|err| {
+                        common_telemetry::error!(err; "Send state size report error");
+                    });
+                }
+            });
+            Some(handler)
+        } else {
+            None
+        }
+    }
+
     /// run in common_runtime background runtime
     pub fn run_background(
         self: Arc<Self>,
@@ -529,6 +609,7 @@ impl FlowWorkerManager {
     ) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
         common_runtime::spawn_global(async move {
+            let _state_report_handler = self.clone().start_state_report_handler().await;
             self.run(shutdown).await;
         })
     }

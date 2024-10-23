@@ -338,6 +338,13 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
+    #[snafu(display("Failed to get meta cluster client"))]
+    MetaClusterClient {
+        #[snafu(implicit)]
+        location: Location,
+        source: meta_client::error::Error,
+    },
+
     #[snafu(display("Cannot find schema {schema} in catalog {catalog}"))]
     SchemaNotFound {
         catalog: String,
@@ -405,6 +412,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::MetaClientInit { source, .. } => source.status_code(),
+            Error::MetaClusterClient { source, .. } => source.status_code(),
             Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
         }
     }

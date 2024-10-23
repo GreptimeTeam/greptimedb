@@ -1045,6 +1045,18 @@ FROM
 | svc1         | 200 | 2024-10-18T19:01:31 |
 +--------------+-----+---------------------+
 
+-- Test if FLOWS table works, but don't care about the result since it vary from runs
+SELECT
+    1
+FROM
+    INFORMATION_SCHEMA.FLOWS;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
 DROP FLOW requests_long_term;
 
 Affected Rows: 0
