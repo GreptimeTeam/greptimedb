@@ -113,6 +113,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .plugins
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
+
         let (requests, rows) = otlp::logs::to_grpc_insert_requests(request, pipeline, table_name)?;
         self.handle_log_inserts(requests, ctx)
             .await
