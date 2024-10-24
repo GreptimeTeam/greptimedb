@@ -45,7 +45,6 @@ common-grpc-expr.workspace = true
 datanode.workspace = true
 derive-new = "0.5"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies.substrait_proto]
 package = "substrait"

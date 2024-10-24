@@ -239,7 +239,7 @@ impl StandaloneOptions {
 
 pub struct Instance {
     datanode: Datanode,
-    frontend: FeInstance,
+    pub frontend: FeInstance,
     // TODO(discord9): wrapped it in flownode instance instead
     flow_worker_manager: Arc<FlowWorkerManager>,
     flow_shutdown: broadcast::Sender<()>,
@@ -331,7 +331,7 @@ pub struct StartCommand {
     #[clap(long)]
     tls_key_path: Option<String>,
     #[clap(long)]
-    user_provider: Option<String>,
+    pub user_provider: Option<String>,
     #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
     pub env_prefix: String,
     /// The working home directory of this standalone instance.
@@ -340,7 +340,8 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(
+    /// Load the GreptimeDB options from various sources (command line, config file or env).
+    pub fn load_options(
         &self,
         global_options: &GlobalOptions,
     ) -> Result<GreptimeOptions<StandaloneOptions>> {
@@ -430,7 +431,8 @@ impl StartCommand {
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+    /// Build GreptimeDB instance with the loaded options.
+    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -741,6 +743,7 @@ impl InformationExtension for StandaloneInformationExtension {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::default::Default;
     use std::io::Write;
     use std::time::Duration;

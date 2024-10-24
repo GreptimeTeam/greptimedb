@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 auth.workspace = true
 common-base.workspace = true
+common-plugins.workspace = true
 datanode.workspace = true
 frontend.workspace = true
 meta-srv.workspace = true

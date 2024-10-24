@@ -106,7 +106,7 @@ pub async fn sql_to_flow_plan(
         .context(ExternalSnafu)?;
     let plan = engine
         .planner()
-        .plan(stmt, query_ctx)
+        .plan(&stmt, query_ctx)
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;

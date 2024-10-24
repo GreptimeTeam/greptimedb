@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// This crate is designed to be at the bottom of the depencey tree
-/// to provide common and useful utils and consts to all plugin usage,
-/// since `plugins` crate is at the top depending on crates like `frontend` and `datanode`
-mod consts;
-pub mod options;
+use std::any::Any;
+use std::fmt::Debug;
 
-pub use consts::{GREPTIME_EXEC_PREFIX, GREPTIME_EXEC_READ_COST, GREPTIME_EXEC_WRITE_COST};
+/// Options trait for plugins. Implementing it then your plugin options can be conveyed in our
+/// configuration system. Checkout [`GreptimeOptions`] to see how.
+#[typetag::serde(tag = "type")]
+pub trait PluginOptions: Debug {
+    fn as_any(&self) -> &dyn Any;
+}

@@ -97,7 +97,7 @@ fn test_load_datanode_example_config() {
         ..Default::default()
     };
 
-    similar_asserts::assert_eq!(options, expected);
+    similar_asserts::assert_eq!(options.component, expected.component);
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn test_load_frontend_example_config() {
         },
         ..Default::default()
     };
-    similar_asserts::assert_eq!(options, expected);
+    similar_asserts::assert_eq!(options.component, expected.component);
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn test_load_metasrv_example_config() {
         },
         ..Default::default()
     };
-    similar_asserts::assert_eq!(options, expected);
+    similar_asserts::assert_eq!(options.component, expected.component);
 }
 
 #[test]
@@ -228,5 +228,5 @@ fn test_load_standalone_example_config() {
         },
         ..Default::default()
     };
-    similar_asserts::assert_eq!(options, expected);
+    similar_asserts::assert_eq!(options.component, expected.component);
 }
