@@ -62,7 +62,8 @@ impl Default for WriteOptions {
 
 /// Parquet SST info returned by the writer.
 pub struct SstInfo {
-    /// Time range of the SST.
+    /// Time range of the SST. The timestamps have the same time unit as the
+    /// data in the SST.
     pub time_range: FileTimeRange,
     /// File size in bytes.
     pub file_size: u64,
