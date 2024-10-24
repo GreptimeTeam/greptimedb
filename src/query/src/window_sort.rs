@@ -264,8 +264,6 @@ pub struct WindowedSortStream {
     all_avail_working_range: Vec<(TimeRange, BTreeSet<usize>)>,
     /// The input partition ranges
     ranges: Vec<PartitionRange>,
-    /// Index of `ranges` for quick lookup
-    range_idx: BTreeMap<TimeRange, usize>,
     /// Execution metrics
     metrics: BaselineMetrics,
 }
@@ -277,11 +275,6 @@ impl WindowedSortStream {
         input: DfSendableRecordBatchStream,
         partition: usize,
     ) -> Self {
-        let range_idx = exec.ranges[partition]
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (TimeRange::new(r.start, r.end), i))
-            .collect();
         Self {
             memory_pool: context.runtime_env().memory_pool.clone(),
             in_progress: Vec::new(),
@@ -299,7 +292,6 @@ impl WindowedSortStream {
             batch_size: context.session_config().batch_size(),
             all_avail_working_range: exec.all_avail_working_range[partition].clone(),
             ranges: exec.ranges[partition].clone(),
-            range_idx,
             metrics: BaselineMetrics::new(&exec.metrics, partition),
         }
     }
@@ -321,17 +313,36 @@ impl WindowedSortStream {
                 .iter()
                 .filter(|r| TimeRange::from(*r).is_subset(cur_range))
                 .collect_vec();
+            let only_overlap = self
+                .ranges
+                .iter()
+                .filter(|r| {
+                    let r = TimeRange::from(*r);
+                    r.is_overlapping(cur_range) && !r.is_subset(cur_range)
+                })
+                .collect_vec();
             error!(
-                "Bad input, found {} ranges that are subset of current range, those ranges are: {:?}",
+                "Bad input, found {} ranges that are subset of current range, also found {} ranges that only overlap, subset ranges are: {:?}; overlap ranges are: {:?}",
                 subset_ranges.len(),
-                subset_ranges
+                only_overlap.len(),
+                subset_ranges,
+                only_overlap
             );
         } else {
+            let only_overlap = self
+                .ranges
+                .iter()
+                .filter(|r| {
+                    let r = TimeRange::from(*r);
+                    r.is_overlapping(cur_range) && !cur_range.is_subset(&r)
+                })
+                .collect_vec();
             error!(
-                "Found current range {:?} to be subset of {} ranges, those ranges are:{:?}",
-                cur_range,
+                "Found current range to be subset of {} ranges, also found {} ranges that only overlap, of subset ranges are:{:?}; overlap ranges are: {:?}",
                 cur_is_subset_to.len(),
-                cur_is_subset_to
+                only_overlap.len(),
+                cur_is_subset_to,
+                only_overlap
             );
         }
     }
