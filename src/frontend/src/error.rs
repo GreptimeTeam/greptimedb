@@ -315,6 +315,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to init plugin"))]
+    // this comment is to bypass the unused snafu check in "check-snafu.py"
     InitPlugin {
         #[snafu(implicit)]
         location: Location,
