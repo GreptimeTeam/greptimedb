@@ -341,6 +341,17 @@ impl WindowedSortStream {
                 only_overlap
             );
         }
+        let all_overlap_working_range = self
+            .all_avail_working_range
+            .iter()
+            .filter(|(range, _)| range.is_overlapping(cur_range))
+            .map(|(range, _)| range)
+            .collect_vec();
+        error!(
+            "Found {} working ranges that overlap with current range: {:?}",
+            all_overlap_working_range.len(),
+            all_overlap_working_range
+        );
     }
 
     /// Poll the next RecordBatch from the merge-sort's output stream
