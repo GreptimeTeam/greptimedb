@@ -30,8 +30,7 @@ use snafu::{ensure, ResultExt};
 
 use super::trace::attributes::OtlpAnyValue;
 use crate::error::{
-    IncompatibleSchemaSnafu, OpenTelemetryLogSnafu, OpenTelemetryNestValueIsComplicatedSnafu,
-    Result,
+    IncompatibleSchemaSnafu, OpenTelemetryLogSnafu, Result, UnsupportedJsonDataTypeForTagSnafu,
 };
 use crate::otlp::trace::span::bytes_to_hex_string;
 
@@ -423,14 +422,11 @@ fn decide_column_schema(
                 SemanticType::Tag,
                 None,
             ))),
-            JsonbNumber::Float64(f) => Ok(Some((
-                GreptimeValue {
-                    value_data: Some(ValueData::F64Value(f)),
-                },
-                ColumnDataType::Float64,
-                SemanticType::Tag,
-                None,
-            ))),
+            JsonbNumber::Float64(_) => UnsupportedJsonDataTypeForTagSnafu {
+                ty: "FLOAT".to_string(),
+                key: column_name,
+            }
+            .fail(),
             JsonbNumber::UInt64(u) => Ok(Some((
                 GreptimeValue {
                     value_data: Some(ValueData::U64Value(u)),
@@ -445,12 +441,14 @@ fn decide_column_schema(
                 value_data: Some(ValueData::BoolValue(b)),
             },
             ColumnDataType::Boolean,
-            SemanticType::Field,
+            SemanticType::Tag,
             None,
         ))),
-        JsonbValue::Array(_) | JsonbValue::Object(_) => {
-            OpenTelemetryNestValueIsComplicatedSnafu { key: column_name }.fail()
+        JsonbValue::Array(_) | JsonbValue::Object(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "Json".to_string(),
+            key: column_name,
         }
+        .fail(),
         JsonbValue::Null => Ok(None),
     };
     column_info.map(|c| {

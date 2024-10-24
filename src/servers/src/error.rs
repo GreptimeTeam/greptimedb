@@ -538,9 +538,10 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("OpenTelemetry select key {} is complicated structure.", key))]
-    OpenTelemetryNestValueIsComplicated {
+    #[snafu(display("Unsupported json data type for tag: {} {}", key, ty))]
+    UnsupportedJsonDataTypeForTag {
         key: String,
+        ty: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -610,7 +611,7 @@ impl ErrorExt for Error {
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }
             | OpenTelemetryLog { .. }
-            | OpenTelemetryNestValueIsComplicated { .. } => StatusCode::InvalidArguments,
+            | UnsupportedJsonDataTypeForTag { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
