@@ -243,14 +243,14 @@ fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
         (
             "trace_id",
             ColumnDataType::String,
-            SemanticType::Tag,
+            SemanticType::Field,
             None,
             None,
         ),
         (
             "span_id",
             ColumnDataType::String,
-            SemanticType::Tag,
+            SemanticType::Field,
             None,
             None,
         ),
