@@ -8330,6 +8330,7 @@ dependencies = [
  "datanode",
  "frontend",
  "meta-srv",
+ "serde",
  "snafu 0.8.5",
 ]
 

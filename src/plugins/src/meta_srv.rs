@@ -16,10 +16,13 @@ use common_base::Plugins;
 use meta_srv::error::Result;
 use meta_srv::metasrv::MetasrvOptions;
 
+use crate::options::PluginOptions;
+
 #[allow(unused_variables)]
 pub async fn setup_metasrv_plugins(
     _plugins: &mut Plugins,
     metasrv_opts: &MetasrvOptions,
+    plugin_options: &[PluginOptions],
 ) -> Result<()> {
     Ok(())
 }

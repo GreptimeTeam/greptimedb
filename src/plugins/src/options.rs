@@ -12,22 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_base::Plugins;
-use datanode::config::DatanodeOptions;
-use datanode::error::Result;
+use serde::{Deserialize, Serialize};
 
-use crate::options::PluginOptions;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DummyOptions;
 
-#[allow(unused_variables)]
-#[allow(unused_mut)]
-pub async fn setup_datanode_plugins(
-    plugins: &mut Plugins,
-    dn_opts: &DatanodeOptions,
-    plugin_options: &[PluginOptions],
-) -> Result<()> {
-    Ok(())
-}
-
-pub async fn start_datanode_plugins(_plugins: Plugins) -> Result<()> {
-    Ok(())
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PluginOptions {
+    Dummy(DummyOptions),
 }
