@@ -1585,34 +1585,57 @@ pub async fn test_otlp_traces(store_type: StorageType) {
 
 pub async fn test_otlp_logs(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_traces").await;
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_logs").await;
 
+    let client = TestClient::new(app);
     let content = r#"
 {"resourceLogs":[{"resource":{"attributes":[{"key":"resource-attr","value":{"stringValue":"resource-attr-val-1"}}]},"schemaUrl":"https://opentelemetry.io/schemas/1.0.0/resourceLogs","scopeLogs":[{"scope":{},"schemaUrl":"https://opentelemetry.io/schemas/1.0.0/scopeLogs","logRecords":[{"flags":1,"timeUnixNano":1581452773000009875,"observedTimeUnixNano":1581452773000009875,"severityNumber":9,"severityText":"Info","body":{"value":{"stringValue":"This is a log message"}},"attributes":[{"key":"app","value":{"stringValue":"server"}},{"key":"instance_num","value":{"intValue":1}}],"droppedAttributesCount":1,"traceId":[48,56,48,52,48,50,48,49,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48],"spanId":[48,49,48,50,48,52,48,56,48,48,48,48,48,48,48,48]},{"flags":1,"timeUnixNano":1581452773000000789,"observedTimeUnixNano":1581452773000000789,"severityNumber":9,"severityText":"Info","body":{"value":{"stringValue":"something happened"}},"attributes":[{"key":"customer","value":{"stringValue":"acme"}},{"key":"env","value":{"stringValue":"dev"}}],"droppedAttributesCount":1,"traceId":[48],"spanId":[48]}]}]}]}
 "#;
 
     let req: ExportLogsServiceRequest = serde_json::from_str(content).unwrap();
     let body = req.encode_to_vec();
+    {
+        // write log data
+        let res = send_req(
+            &client,
+            vec![
+                (
+                    HeaderName::from_static("x-greptime-log-table-name"),
+                    HeaderValue::from_static("logs"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-log-extract-keys"),
+                    HeaderValue::from_static("resource-attr,instance_num,app,not-exist"),
+                ),
+            ],
+            "/v1/otlp/v1/logs?db=public",
+            body.clone(),
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status());
 
-    // handshake
-    let client = TestClient::new(app);
+        let expected = r#"[["","",{},{"resource-attr":"resource-attr-val-1"},{"customer":"acme","env":"dev"},1581452773000000789,1581452773000000789,"30","30",1,"Info",9,"something happened",null,null,"resource-attr-val-1"],["","",{},{"resource-attr":"resource-attr-val-1"},{"app":"server","instance_num":1},1581452773000009875,1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030",1,"Info",9,"This is a log message","server",1,"resource-attr-val-1"]]"#;
+        validate_data(&client, "select * from logs;", expected).await;
+    }
 
-    // write traces data
-    let res = send_req(
-        &client,
-        vec![(
-            HeaderName::from_static("x-greptime-log-table-name"),
-            HeaderValue::from_static("logs"),
-        )],
-        "/v1/otlp/v1/logs?db=public",
-        body.clone(),
-        false,
-    )
-    .await;
-    assert_eq!(StatusCode::OK, res.status());
-
-    let expected = r#"[["","",{},{"resource-attr":"resource-attr-val-1"},{"customer":"acme","env":"dev"},1581452773000000789,1581452773000000789,"30","30",1,"Info",9,"something happened"],["","",{},{"resource-attr":"resource-attr-val-1"},{"app":"server","instance_num":1},1581452773000009875,1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030",1,"Info",9,"This is a log message"]]"#;
-    validate_data(&client, "select * from logs;", expected).await;
+    {
+        // write log data
+        let res = send_req(
+            &client,
+            vec![(
+                HeaderName::from_static("x-greptime-log-table-name"),
+                HeaderValue::from_static("logs1"),
+            )],
+            "/v1/otlp/v1/logs?db=public",
+            body.clone(),
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status());
+        let expected = r#"[["","",{},{"resource-attr":"resource-attr-val-1"},{"customer":"acme","env":"dev"},1581452773000000789,1581452773000000789,"30","30",1,"Info",9,"something happened"],["","",{},{"resource-attr":"resource-attr-val-1"},{"app":"server","instance_num":1},1581452773000009875,1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030",1,"Info",9,"This is a log message"]]"#;
+        validate_data(&client, "select * from logs1;", expected).await;
+    }
 
     guard.remove_all().await;
 }
