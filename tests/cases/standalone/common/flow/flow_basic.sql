@@ -406,8 +406,8 @@ CREATE TABLE ngx_distribution (
     bucket_size INT,
     total_logs BIGINT,
     time_window TIMESTAMP TIME INDEX,
-    update_at TIMESTAMP,
     -- auto generated column by flow engine
+    update_at TIMESTAMP,
     PRIMARY KEY(stat, bucket_size)
 );
 
