@@ -135,11 +135,6 @@ impl UnorderedScan {
         let part_ranges = self.properties.partitions[partition].clone();
         let distinguish_range = self.properties.distinguish_partition_range();
 
-        info!(
-            "[DEBUG] scan partition {} with part_ranges: {:?}",
-            partition, part_ranges
-        );
-
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
@@ -196,8 +191,6 @@ impl UnorderedScan {
                 // Yields an empty part to indicate this range is terminated.
                 // The query engine can use this to optimize some queries.
                 if distinguish_range {
-                    info!("[DEBUG] yield empty batch for partition {} with part_range: {:?}, min: {:?}, max: {:?}, num_rows: {}, num_non_empty_batches: {}", partition, part_range, min, max, metrics.num_rows, metrics.num_batches);
-
                     let yield_start = Instant::now();
                     yield stream_ctx.input.mapper.empty_record_batch();
                     metrics.yield_cost += yield_start.elapsed();

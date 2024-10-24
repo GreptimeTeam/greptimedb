@@ -183,11 +183,6 @@ impl PartSortStream {
         partition_ranges: Vec<PartitionRange>,
         partition: usize,
     ) -> Self {
-        common_telemetry::info!(
-            "[DEBUG]: Part sort stream for partition: {}, ranges: {:?}",
-            partition,
-            partition_ranges
-        );
         Self {
             reservation: MemoryConsumer::new("PartSortStream".to_string())
                 .register(&context.runtime_env().memory_pool),
