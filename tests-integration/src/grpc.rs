@@ -542,7 +542,7 @@ CREATE TABLE {table_name} (
         let plan = instance
             .frontend()
             .statement_executor()
-            .plan(stmt, QueryContext::arc())
+            .plan(&stmt, QueryContext::arc())
             .await
             .unwrap();
         let plan = DFLogicalSubstraitConvertor

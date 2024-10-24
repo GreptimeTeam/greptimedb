@@ -313,6 +313,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to init plugin"))]
+    InitPlugin {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -375,8 +382,9 @@ impl ErrorExt for Error {
             | Error::ExecLogicalPlan { source, .. } => source.status_code(),
 
             Error::InvokeRegionServer { source, .. } => source.status_code(),
-
-            Error::External { source, .. } => source.status_code(),
+            Error::External { source, .. } | Error::InitPlugin { source, .. } => {
+                source.status_code()
+            }
             Error::FindTableRoute { source, .. } => source.status_code(),
 
             #[cfg(feature = "python")]

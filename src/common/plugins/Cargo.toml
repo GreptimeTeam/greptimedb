@@ -8,3 +8,5 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+serde.workspace = true
+typetag.workspace = true

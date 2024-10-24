@@ -278,7 +278,7 @@ mod test {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let plan = engine
             .planner()
-            .plan(stmt, QueryContext::arc())
+            .plan(&stmt, QueryContext::arc())
             .await
             .unwrap();
         let plan = apply_df_optimizer(plan).await.unwrap();
@@ -300,7 +300,7 @@ mod test {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let plan = engine
             .planner()
-            .plan(stmt, QueryContext::arc())
+            .plan(&stmt, QueryContext::arc())
             .await
             .unwrap();
         let plan = apply_df_optimizer(plan).await;
