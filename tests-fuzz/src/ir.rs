@@ -18,6 +18,7 @@ pub(crate) mod alter_expr;
 pub(crate) mod create_expr;
 pub(crate) mod insert_expr;
 pub(crate) mod select_expr;
+pub(crate) mod delete_expr;
 
 use core::fmt;
 use std::collections::HashMap;
@@ -33,6 +34,7 @@ use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use derive_builder::Builder;
 pub use insert_expr::InsertIntoExpr;
+pub use delete_expr::DeleteExpr;
 use lazy_static::lazy_static;
 use rand::seq::SliceRandom;
 use rand::Rng;
