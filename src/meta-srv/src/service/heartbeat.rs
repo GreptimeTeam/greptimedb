@@ -71,7 +71,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
                             pusher_id = register_pusher(&handler_group, header, tx.clone()).await;
                         }
                         if let Some(k) = &pusher_id {
-                            METRIC_META_HEARTBEAT_RECV.with_label_values(&[&format!("{k:?}")]);
+                            METRIC_META_HEARTBEAT_RECV.with_label_values(&[&k.to_string()]);
                         } else {
                             METRIC_META_HEARTBEAT_RECV.with_label_values(&["none"]);
                         }
