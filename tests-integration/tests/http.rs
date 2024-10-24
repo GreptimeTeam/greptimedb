@@ -1245,7 +1245,7 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
     );
 
     let expected = r#"[["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"],["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"]]"#;
-    validate_data(&client, "desc logs", expected).await;
+    validate_data("identity_schema", &client, "desc logs", expected).await;
 
     guard.remove_all().await;
 }
@@ -1527,7 +1527,7 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
 
     // select metrics data
     let expected = r#"[[1726053452870391000,9471.0]]"#;
-    validate_data(&client, "select * from gen;", expected).await;
+    validate_data("otlp_metrics", &client, "select * from gen;", expected).await;
 
     // drop table
     let res = client.get("/v1/sql?sql=drop table gen;").send().await;
@@ -1538,7 +1538,13 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // select metrics data again
-    validate_data(&client, "select * from gen;", expected).await;
+    validate_data(
+        "otlp_metrics_with_gzip",
+        &client,
+        "select * from gen;",
+        expected,
+    )
+    .await;
 
     guard.remove_all().await;
 }
@@ -1564,7 +1570,13 @@ pub async fn test_otlp_traces(store_type: StorageType) {
 
     // select traces data
     let expected = r#"[["b5e5fb572cf0a3335dd194a14145fef5","3364d2da58c9fd2b","","{\"service.name\":\"telemetrygen\"}","telemetrygen","","{}","","lets-go","SPAN_KIND_CLIENT","STATUS_CODE_UNSET","","{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-server\"}","[]","[]",1726631197820927000,1726631197821050000,0.123,1726631197820927000],["b5e5fb572cf0a3335dd194a14145fef5","74c82efa6f628e80","3364d2da58c9fd2b","{\"service.name\":\"telemetrygen\"}","telemetrygen","","{}","","okey-dokey-0","SPAN_KIND_SERVER","STATUS_CODE_UNSET","","{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-client\"}","[]","[]",1726631197820927000,1726631197821050000,0.123,1726631197820927000]]"#;
-    validate_data(&client, "select * from traces_preview_v01;", expected).await;
+    validate_data(
+        "otlp_traces",
+        &client,
+        "select * from traces_preview_v01;",
+        expected,
+    )
+    .await;
 
     // drop table
     let res = client
@@ -1573,12 +1585,18 @@ pub async fn test_otlp_traces(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    // write metrics data with gzip
+    // write traces data with gzip
     let res = send_req(&client, vec![], "/v1/otlp/v1/traces", body.clone(), true).await;
     assert_eq!(StatusCode::OK, res.status());
 
-    // select metrics data again
-    validate_data(&client, "select * from traces_preview_v01;", expected).await;
+    // select traces data again
+    validate_data(
+        "otlp_traces_with_gzip",
+        &client,
+        "select * from traces_preview_v01;",
+        expected,
+    )
+    .await;
 
     guard.remove_all().await;
 }
@@ -1594,8 +1612,27 @@ pub async fn test_otlp_logs(store_type: StorageType) {
 
     let req: ExportLogsServiceRequest = serde_json::from_str(content).unwrap();
     let body = req.encode_to_vec();
+
     {
         // write log data
+        let res = send_req(
+            &client,
+            vec![(
+                HeaderName::from_static("x-greptime-log-table-name"),
+                HeaderValue::from_static("logs1"),
+            )],
+            "/v1/otlp/v1/logs?db=public",
+            body.clone(),
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status());
+        let expected = r#"[[1581452773000000789,"30","30","Info",9,"something happened",{"customer":"acme","env":"dev"},1,"","",{},"https://opentelemetry.io/schemas/1.0.0/scopeLogs",{"resource-attr":"resource-attr-val-1"},"https://opentelemetry.io/schemas/1.0.0/resourceLogs"],[1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030","Info",9,"This is a log message",{"app":"server","instance_num":1},1,"","",{},"https://opentelemetry.io/schemas/1.0.0/scopeLogs",{"resource-attr":"resource-attr-val-1"},"https://opentelemetry.io/schemas/1.0.0/resourceLogs"]]"#;
+        validate_data("otlp_logs", &client, "select * from logs1;", expected).await;
+    }
+
+    {
+        // write log data with selector
         let res = send_req(
             &client,
             vec![
@@ -1615,32 +1652,20 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         .await;
         assert_eq!(StatusCode::OK, res.status());
 
-        let expected = r#"[["","",{},{"resource-attr":"resource-attr-val-1"},{"customer":"acme","env":"dev"},1581452773000000789,1581452773000000789,"30","30",1,"Info",9,"something happened",null,null,"resource-attr-val-1"],["","",{},{"resource-attr":"resource-attr-val-1"},{"app":"server","instance_num":1},1581452773000009875,1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030",1,"Info",9,"This is a log message","server",1,"resource-attr-val-1"]]"#;
-        validate_data(&client, "select * from logs;", expected).await;
-    }
-
-    {
-        // write log data
-        let res = send_req(
+        let expected = r#"[[1581452773000000789,"30","30","Info",9,"something happened",{"customer":"acme","env":"dev"},1,"","",{},"https://opentelemetry.io/schemas/1.0.0/scopeLogs",{"resource-attr":"resource-attr-val-1"},"https://opentelemetry.io/schemas/1.0.0/resourceLogs",null,null,"resource-attr-val-1"],[1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030","Info",9,"This is a log message",{"app":"server","instance_num":1},1,"","",{},"https://opentelemetry.io/schemas/1.0.0/scopeLogs",{"resource-attr":"resource-attr-val-1"},"https://opentelemetry.io/schemas/1.0.0/resourceLogs","server",1,"resource-attr-val-1"]]"#;
+        validate_data(
+            "otlp_logs_with_selector",
             &client,
-            vec![(
-                HeaderName::from_static("x-greptime-log-table-name"),
-                HeaderValue::from_static("logs1"),
-            )],
-            "/v1/otlp/v1/logs?db=public",
-            body.clone(),
-            false,
+            "select * from logs;",
+            expected,
         )
         .await;
-        assert_eq!(StatusCode::OK, res.status());
-        let expected = r#"[["","",{},{"resource-attr":"resource-attr-val-1"},{"customer":"acme","env":"dev"},1581452773000000789,1581452773000000789,"30","30",1,"Info",9,"something happened"],["","",{},{"resource-attr":"resource-attr-val-1"},{"app":"server","instance_num":1},1581452773000009875,1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030",1,"Info",9,"This is a log message"]]"#;
-        validate_data(&client, "select * from logs1;", expected).await;
     }
 
     guard.remove_all().await;
 }
 
-async fn validate_data(client: &TestClient, sql: &str, expected: &str) {
+async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected: &str) {
     let res = client
         .get(format!("/v1/sql?sql={sql}").as_str())
         .send()
@@ -1649,7 +1674,7 @@ async fn validate_data(client: &TestClient, sql: &str, expected: &str) {
     let resp = res.text().await;
     let v = get_rows_from_output(&resp);
 
-    assert_eq!(v, expected);
+    assert_eq!(v, expected, "validate {test_name} fail");
 }
 
 async fn send_req(
