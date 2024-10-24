@@ -16,10 +16,13 @@ use common_base::Plugins;
 use datanode::config::DatanodeOptions;
 use datanode::error::Result;
 
+use crate::options::PluginOptions;
+
 #[allow(unused_variables)]
 #[allow(unused_mut)]
 pub async fn setup_datanode_plugins(
     plugins: &mut Plugins,
+    plugin_options: &[PluginOptions],
     dn_opts: &DatanodeOptions,
 ) -> Result<()> {
     Ok(())

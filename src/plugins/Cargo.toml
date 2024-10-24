@@ -13,4 +13,5 @@ common-base.workspace = true
 datanode.workspace = true
 frontend.workspace = true
 meta-srv.workspace = true
+serde.workspace = true
 snafu.workspace = true
