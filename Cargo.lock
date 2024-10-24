@@ -2379,7 +2379,6 @@ dependencies = [
  "atty",
  "backtrace",
  "common-error",
- "common-plugins",
  "console-subscriber",
  "greptime-proto",
  "humantime-serde",

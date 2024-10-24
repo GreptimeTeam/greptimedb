@@ -180,7 +180,6 @@ sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "5
 ] }
 strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
-typetag = "0.2"
 tokio = { version = "1.40", features = ["full"] }
 tokio-postgres = "0.7"
 tokio-stream = { version = "0.1" }
@@ -190,6 +189,7 @@ tonic = { version = "0.11", features = ["tls", "gzip", "zstd"] }
 tower = { version = "0.4" }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+typetag = "0.2"
 uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
 zstd = "0.13"
 
