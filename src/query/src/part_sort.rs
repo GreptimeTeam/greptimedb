@@ -170,6 +170,7 @@ struct PartSortStream {
     input_complete: bool,
     schema: SchemaRef,
     partition_ranges: Vec<PartitionRange>,
+    partition: usize,
     cur_part_idx: usize,
     metrics: BaselineMetrics,
 }
@@ -182,6 +183,11 @@ impl PartSortStream {
         partition_ranges: Vec<PartitionRange>,
         partition: usize,
     ) -> Self {
+        common_telemetry::info!(
+            "[DEBUG]: Part sort stream for partition: {}, ranges: {:?}",
+            partition,
+            partition_ranges
+        );
         Self {
             reservation: MemoryConsumer::new("PartSortStream".to_string())
                 .register(&context.runtime_env().memory_pool),
@@ -192,6 +198,7 @@ impl PartSortStream {
             input_complete: false,
             schema: sort.input.schema(),
             partition_ranges,
+            partition,
             cur_part_idx: 0,
             metrics: BaselineMetrics::new(&sort.metrics, partition),
         }
@@ -299,7 +306,16 @@ impl PartSortStream {
                 indices.value(0) as usize,
                 indices.value(indices.len() - 1) as usize,
             ),
-        )?;
+        )
+        .inspect_err(|e| {
+            common_telemetry::error!(
+                "Fail to check sort column in range at {}, current_idx: {}, num_rows: {}, err: {}",
+                self.partition,
+                self.cur_part_idx,
+                sort_column.len(),
+                e
+            );
+        })?;
 
         // reserve memory for the concat input and sorted output
         let total_mem: usize = self.buffer.iter().map(|r| r.get_array_memory_size()).sum();
