@@ -39,7 +39,7 @@ use crate::{DfContextProviderAdapter, QueryEngineContext};
 
 #[async_trait]
 pub trait LogicalPlanner: Send + Sync {
-    async fn plan(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan>;
+    async fn plan(&self, stmt: &QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan>;
 
     fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan>;
 
@@ -61,8 +61,8 @@ impl DfLogicalPlanner {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn plan_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
-        let df_stmt = (&stmt).try_into().context(SqlSnafu)?;
+    async fn plan_sql(&self, stmt: &Statement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+        let df_stmt = stmt.try_into().context(SqlSnafu)?;
 
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
@@ -142,7 +142,7 @@ impl DfLogicalPlanner {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn plan_pql(&self, stmt: EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+    async fn plan_pql(&self, stmt: &EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let plan_decoder = Arc::new(DefaultPlanDecoder::new(
             self.session_state.clone(),
             &query_ctx,
@@ -175,7 +175,7 @@ impl DfLogicalPlanner {
 #[async_trait]
 impl LogicalPlanner for DfLogicalPlanner {
     #[tracing::instrument(skip_all)]
-    async fn plan(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+    async fn plan(&self, stmt: &QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         match stmt {
             QueryStatement::Sql(stmt) => self.plan_sql(stmt, query_ctx).await,
             QueryStatement::Promql(stmt) => self.plan_pql(stmt, query_ctx).await,

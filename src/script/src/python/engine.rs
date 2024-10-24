@@ -315,7 +315,7 @@ impl Script for PyScript {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(stmt, ctx.query_ctx.clone())
+                .plan(&stmt, ctx.query_ctx.clone())
                 .await
                 .context(DatabaseQuerySnafu)?;
             let res = self

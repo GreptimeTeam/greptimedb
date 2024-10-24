@@ -59,7 +59,7 @@ tokio-stream = { workspace = true, features = ["net"] }
 toml.workspace = true
 tonic.workspace = true
 tower.workspace = true
-typetag = "0.2"
+typetag.workspace = true
 url = "2.3"
 
 [dev-dependencies]
@@ -69,4 +69,4 @@ common-meta = { workspace = true, features = ["testing"] }
 common-procedure-test.workspace = true
 session.workspace = true
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber.workspace = true

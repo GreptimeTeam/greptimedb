@@ -266,9 +266,10 @@ impl StartCommand {
         info!("Frontend start command: {:#?}", self);
         info!("Frontend options: {:#?}", opts);
 
+        let mut plugin_options = opts.plugins;
         let opts = opts.component;
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &opts)
+        plugins::setup_frontend_plugins(&mut plugins, &opts, &mut plugin_options)
             .await
             .context(StartFrontendSnafu)?;
 
@@ -378,6 +379,7 @@ impl StartCommand {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::io::Write;
     use std::time::Duration;
 
@@ -474,7 +476,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &fe_opts, &mut HashMap::new())
             .await
             .unwrap();
 
