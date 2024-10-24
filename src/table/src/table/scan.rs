@@ -112,7 +112,8 @@ impl RegionScanExec {
 
         {
             let mut scanner = self.scanner.lock().unwrap();
-            scanner.prepare(partitions)?;
+            let distinguish_partition_range = scanner.properties().distinguish_partition_range();
+            scanner.prepare(partitions, distinguish_partition_range)?;
         }
 
         Ok(Self {
@@ -124,6 +125,13 @@ impl RegionScanExec {
             append_mode: self.append_mode,
             total_rows: self.total_rows,
         })
+    }
+
+    pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {
+        let mut scanner = self.scanner.lock().unwrap();
+        let partition_ranges = scanner.properties().partitions.clone();
+        // set distinguish_partition_range won't fail
+        let _ = scanner.prepare(partition_ranges, distinguish_partition_range);
     }
 
     pub fn time_index(&self) -> Option<String> {
