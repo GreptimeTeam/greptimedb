@@ -137,6 +137,16 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Changing table option `{}` is not supported", key))]
+    UnsupportedTableOptionChange {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Table options value is not valid, key: `{}`, value: `{}`", key, value))]
+    InvalidTableOptionValue { key: String, value: String },
 }
 
 impl ErrorExt for Error {
@@ -157,6 +167,8 @@ impl ErrorExt for Error {
             Error::Unsupported { .. } => StatusCode::Unsupported,
             Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
             Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
+            Error::UnsupportedTableOptionChange { .. } => StatusCode::Unsupported,
+            Error::InvalidTableOptionValue { .. } => StatusCode::InvalidArguments,
         }
     }
 

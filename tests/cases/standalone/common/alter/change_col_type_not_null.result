@@ -15,7 +15,7 @@ SELECT * FROM test;
 | 1970-01-01T00:00:00.002 | 2 |
 +-------------------------+---+
 
-ALTER TABLE test MODIFY j STRING;
+ALTER TABLE test MODIFY COLUMN j STRING;
 
 Error: 1004(InvalidArguments), Invalid alter table(test) request: column 'j' must be nullable to ensure safe conversion.
 
