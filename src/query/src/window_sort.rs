@@ -262,6 +262,10 @@ pub struct WindowedSortStream {
     ///
     /// working ranges promise once input stream get a value out of current range, future values will never be in this range
     all_avail_working_range: Vec<(TimeRange, BTreeSet<usize>)>,
+    /// The input partition ranges
+    ranges: Vec<PartitionRange>,
+    /// Index of `ranges` for quick lookup
+    range_idx: BTreeMap<TimeRange, usize>,
     /// Execution metrics
     metrics: BaselineMetrics,
 }
@@ -273,6 +277,11 @@ impl WindowedSortStream {
         input: DfSendableRecordBatchStream,
         partition: usize,
     ) -> Self {
+        let range_idx = exec.ranges[partition]
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (TimeRange::new(r.start, r.end), i))
+            .collect();
         Self {
             memory_pool: context.runtime_env().memory_pool.clone(),
             in_progress: Vec::new(),
@@ -289,12 +298,44 @@ impl WindowedSortStream {
             produced: 0,
             batch_size: context.session_config().batch_size(),
             all_avail_working_range: exec.all_avail_working_range[partition].clone(),
+            ranges: exec.ranges[partition].clone(),
+            range_idx,
             metrics: BaselineMetrics::new(&exec.metrics, partition),
         }
     }
 }
 
 impl WindowedSortStream {
+    #[cfg(debug_assertions)]
+    fn check_subset_ranges(&self, cur_range: &TimeRange) {
+        let cur_is_subset_to = self
+            .ranges
+            .iter()
+            .filter(|r| cur_range.is_subset(&TimeRange::from(*r)))
+            .collect_vec();
+        if cur_is_subset_to.is_empty() {
+            error!("Current range is not a subset of any PartitionRange");
+            // found in all ranges that are subset of current range
+            let subset_ranges = self
+                .ranges
+                .iter()
+                .filter(|r| TimeRange::from(*r).is_subset(cur_range))
+                .collect_vec();
+            error!(
+                "Bad input, found {} ranges that are subset of current range, those ranges are: {:?}",
+                subset_ranges.len(),
+                subset_ranges
+            );
+        } else {
+            error!(
+                "Found current range {:?} to be subset of {} ranges, those ranges are:{:?}",
+                cur_range,
+                cur_is_subset_to.len(),
+                cur_is_subset_to
+            );
+        }
+    }
+
     /// Poll the next RecordBatch from the merge-sort's output stream
     fn poll_result_stream(
         &mut self,
@@ -407,10 +448,14 @@ impl WindowedSortStream {
                 if sort_column.options.unwrap_or_default().descending {
                     if cur_range.end > working_range.end {
                         error!("Invalid range: {:?} > {:?}", cur_range, working_range);
+                        #[cfg(debug_assertions)]
+                        self.check_subset_ranges(&cur_range);
                         internal_err!("Current batch have data on the right side of working range, something is very wrong")?;
                     }
                 } else if cur_range.start < working_range.start {
                     error!("Invalid range: {:?} < {:?}", cur_range, working_range);
+                    #[cfg(debug_assertions)]
+                    self.check_subset_ranges(&cur_range);
                     internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
                 }
 
