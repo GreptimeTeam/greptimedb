@@ -95,7 +95,7 @@ impl RegionScanExec {
         ranges
     }
 
-    /// Similiar to [`Self::get_partition_ranges`] but don't collapse the ranges.
+    /// Similar to [`Self::get_partition_ranges`] but don't collapse the ranges.
     pub fn get_uncollapsed_partition_ranges(&self) -> Vec<Vec<PartitionRange>> {
         let scanner = self.scanner.lock().unwrap();
         scanner.properties().partitions.clone()
