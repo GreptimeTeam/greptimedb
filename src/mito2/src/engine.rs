@@ -169,7 +169,7 @@ impl MitoEngine {
         request: ScanRequest,
     ) -> Result<RegionScannerRef> {
         let scanner = self.scanner(region_id, request)?;
-        scanner.region_scanner().await
+        scanner.region_scanner()
     }
 
     /// Scans a region.

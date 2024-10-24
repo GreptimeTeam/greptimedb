@@ -80,12 +80,6 @@ impl RegionScanExec {
         }
     }
 
-    /// Set the expected output ordering for the plan.
-    pub fn with_output_ordering(mut self, output_ordering: Vec<PhysicalSortExpr>) -> Self {
-        self.output_ordering = Some(output_ordering);
-        self
-    }
-
     /// Get the partition ranges of the scanner. This method will collapse the ranges into
     /// a single vector.
     pub fn get_partition_ranges(&self) -> Vec<PartitionRange> {

@@ -66,8 +66,6 @@ impl WindowedSortPhysicalRule {
         let result = plan
             .transform_down(|plan| {
                 if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
-                    common_telemetry::info!("[DEBUG] encounter SortExec");
-
                     // TODO: support multiple expr in windowed sort
                     if !sort_exec.preserve_partitioning() || sort_exec.expr().len() != 1 {
                         return Ok(Transformed::no(plan));
@@ -79,17 +77,17 @@ impl WindowedSortPhysicalRule {
                     };
 
                     if let Some(first_sort_expr) = sort_exec.expr().first()
+                        && !first_sort_expr.options.descending
                         && let Some(column_expr) = first_sort_expr
                             .expr
                             .as_any()
                             .downcast_ref::<PhysicalColumn>()
-                        && column_expr.name() == &scanner_info.time_index
+                        && column_expr.name() == scanner_info.time_index
                     {
                     } else {
                         return Ok(Transformed::no(plan));
                     }
 
-                    // TODO: append another pre-sort plan
                     let first_sort_expr = sort_exec.expr().first().unwrap().clone();
                     let part_sort_exec = Arc::new(PartSortExec::new(
                         first_sort_expr.clone(),
@@ -100,12 +98,8 @@ impl WindowedSortPhysicalRule {
                         sort_exec.fetch(),
                         scanner_info.partition_ranges,
                         part_sort_exec,
-                        // sort_exec.input().clone(),
                     )?;
 
-                    common_telemetry::info!("[DEBUG] WindowedSortRule applied");
-
-                    // return Ok(Transformed::yes(Arc::new(windowed_sort_exec)));
                     return Ok(Transformed {
                         data: Arc::new(windowed_sort_exec),
                         transformed: true,
@@ -131,7 +125,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
     let mut time_index = None;
 
     input.transform_up(|plan| {
-        // Unappliable case, reset the result.
+        // Unappliable case, reset the state.
         if plan.as_any().is::<RepartitionExec>()
             || plan.as_any().is::<CoalesceBatchesExec>()
             || plan.as_any().is::<CoalescePartitionsExec>()
