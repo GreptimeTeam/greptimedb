@@ -24,6 +24,7 @@ pub mod mock {
     use client::Client;
     use common_grpc::channel_manager::ChannelManager;
     use common_meta::peer::Peer;
+    use common_runtime::runtime::BuilderBuild;
     use common_runtime::{Builder as RuntimeBuilder, Runtime};
     use servers::grpc::region_server::{RegionServerHandler, RegionServerRequestHandler};
     use tokio::sync::mpsc;

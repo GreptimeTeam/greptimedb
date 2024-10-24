@@ -25,6 +25,7 @@ use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
+use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, tracing};
