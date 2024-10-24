@@ -275,7 +275,7 @@ impl StartCommand {
         let plugin_opts = opts.plugins;
         let opts = opts.component;
         let mut plugins = Plugins::new();
-        plugins::setup_datanode_plugins(&mut plugins, &opts, &plugin_opts)
+        plugins::setup_datanode_plugins(&mut plugins, &plugin_opts, &opts)
             .await
             .context(StartDatanodeSnafu)?;
 
