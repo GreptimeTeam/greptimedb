@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -114,10 +114,16 @@ impl HeartbeatAccumulator {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 pub struct PusherId {
     pub role: Role,
     pub id: u64,
+}
+
+impl Debug for PusherId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}-{}", self.role, self.id)
+    }
 }
 
 impl Display for PusherId {

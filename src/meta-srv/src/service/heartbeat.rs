@@ -111,7 +111,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
                 }
             }
 
-            info!("Heartbeat stream closed: {}", pusher_id);
+            info!("Heartbeat stream closed: {pusher_id:?}");
 
             if let Some(pusher_id) = pusher_id {
                 let _ = handler_group.deregister_push(pusher_id).await;
