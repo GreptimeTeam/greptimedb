@@ -77,7 +77,7 @@ impl Function for JsonPathMatchFunction {
                     let path = path.as_string();
                     let result = match (json, path) {
                         (Ok(Some(json)), Ok(Some(path))) => {
-                            if jsonb::is_object(json) {
+                            if !jsonb::is_null(json) {
                                 let json_path = jsonb::jsonpath::parse_json_path(path.as_bytes());
                                 match json_path {
                                     Ok(json_path) => jsonb::path_match(json, json_path).ok(),
@@ -145,6 +145,7 @@ mod tests {
             Some(r#"{"a": {"b": 2}, "b": 2, "c": 3}"#.to_string()),
             Some(r#"{"a": 1, "b": [1,2,3]}"#.to_string()),
             Some(r#"{"a": 1 ,"b": [1,2,3]}"#.to_string()),
+            Some(r#"[1,2,3]"#.to_string()),
             Some(r#"{"a":1,"b":[1,2,3]}"#.to_string()),
             Some(r#"null"#.to_string()),
             Some(r#"null"#.to_string()),
@@ -154,12 +155,21 @@ mod tests {
             Some("$.a.b == 2".to_string()),
             Some("$.b[1 to last] >= 2".to_string()),
             Some("$.c > 0".to_string()),
+            Some("$[0 to last] > 0".to_string()),
             Some(r#"null"#.to_string()),
             Some("$.c > 0".to_string()),
             Some(r#"null"#.to_string()),
         ];
 
-        let results = [Some(true), Some(true), Some(false), None, None, None];
+        let results = [
+            Some(true),
+            Some(true),
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+        ];
 
         let jsonbs = json_strings
             .into_iter()
@@ -173,7 +183,7 @@ mod tests {
             .eval(FunctionContext::default(), &args)
             .unwrap();
 
-        assert_eq!(6, vector.len());
+        assert_eq!(7, vector.len());
         for (i, expected) in results.iter().enumerate() {
             let result = vector.get_ref(i);
 
