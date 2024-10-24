@@ -21,10 +21,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use arrow::array::types::{
-    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-    TimestampSecondType,
-};
 use arrow::array::{Array, ArrayRef, PrimitiveArray};
 use arrow::compute::SortColumn;
 use arrow_schema::{DataType, SchemaRef, SortOptions};
@@ -695,21 +691,22 @@ fn split_batch_to_sorted_run(
 /// Downcast a temporal array to a specific type
 ///
 /// usage similar to `downcast_primitive!` in `arrow-array` crate
+#[macro_export]
 macro_rules! downcast_ts_array {
     ($data_type:expr => ($m:path $(, $args:tt)*), $($p:pat => $fallback:expr $(,)*)*) =>
     {
         match $data_type {
             arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Second, _) => {
-                $m!(TimestampSecondType $(, $args)*)
+                $m!(arrow::datatypes::TimestampSecondType, arrow_schema::TimeUnit::Second $(, $args)*)
             }
             arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, _) => {
-                $m!(TimestampMillisecondType $(, $args)*)
+                $m!(arrow::datatypes::TimestampMillisecondType, arrow_schema::TimeUnit::Millisecond $(, $args)*)
             }
             arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, _) => {
-                $m!(TimestampMicrosecondType $(, $args)*)
+                $m!(arrow::datatypes::TimestampMicrosecondType, arrow_schema::TimeUnit::Microsecond $(, $args)*)
             }
             arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, _) => {
-                $m!(TimestampNanosecondType $(, $args)*)
+                $m!(arrow::datatypes::TimestampNanosecondType, arrow_schema::TimeUnit::Nanosecond $(, $args)*)
             }
             $($p => $fallback,)*
         }
@@ -782,7 +779,7 @@ fn find_slice_from_range(
 }
 
 macro_rules! array_iter_helper {
-    ($t:ty, $arr:expr) => {{
+    ($t:ty, $unit:expr, $arr:expr) => {{
         let typed = $arr.as_any().downcast_ref::<PrimitiveArray<$t>>().unwrap();
         let iter = typed.iter().enumerate();
         Box::new(iter) as Box<dyn Iterator<Item = (usize, Option<i64>)>>

@@ -91,6 +91,7 @@ impl WindowedSortPhysicalRule {
                     let first_sort_expr = sort_exec.expr().first().unwrap().clone();
                     let part_sort_exec = Arc::new(PartSortExec::new(
                         first_sort_expr.clone(),
+                        scanner_info.partition_ranges.clone(),
                         sort_exec.input().clone(),
                     ));
                     let windowed_sort_exec = WindowedSortExec::try_new(

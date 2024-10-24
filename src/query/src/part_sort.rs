@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use arrow::array::ArrayRef;
 use arrow::compute::{concat, take_record_batch};
 use arrow_schema::SchemaRef;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
@@ -33,6 +34,9 @@ use datafusion_physical_expr::PhysicalSortExpr;
 use futures::Stream;
 use itertools::Itertools;
 use snafu::location;
+use store_api::region_engine::PartitionRange;
+
+use crate::downcast_ts_array;
 
 /// Sort input within given PartitionRange
 ///
@@ -46,11 +50,16 @@ pub struct PartSortExec {
     input: Arc<dyn ExecutionPlan>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
+    partition_ranges: Vec<Vec<PartitionRange>>,
     properties: PlanProperties,
 }
 
 impl PartSortExec {
-    pub fn new(expression: PhysicalSortExpr, input: Arc<dyn ExecutionPlan>) -> Self {
+    pub fn new(
+        expression: PhysicalSortExpr,
+        partition_ranges: Vec<Vec<PartitionRange>>,
+        input: Arc<dyn ExecutionPlan>,
+    ) -> Self {
         let metrics = ExecutionPlanMetricsSet::new();
         let properties = PlanProperties::new(
             input.equivalence_properties().clone(),
@@ -62,6 +71,7 @@ impl PartSortExec {
             expression,
             input,
             metrics,
+            partition_ranges,
             properties,
         }
     }
@@ -74,7 +84,21 @@ impl PartSortExec {
         let input_stream: DfSendableRecordBatchStream =
             self.input.execute(partition, context.clone())?;
 
-        let df_stream = Box::pin(PartSortStream::new(context, self, input_stream, partition)) as _;
+        if partition >= self.partition_ranges.len() {
+            internal_err!(
+                "Partition index out of range: {} >= {}",
+                partition,
+                self.partition_ranges.len()
+            )?;
+        }
+
+        let df_stream = Box::pin(PartSortStream::new(
+            context,
+            self,
+            input_stream,
+            self.partition_ranges[partition].clone(),
+            partition,
+        )) as _;
 
         Ok(df_stream)
     }
@@ -114,6 +138,7 @@ impl ExecutionPlan for PartSortExec {
         };
         Ok(Arc::new(Self::new(
             self.expression.clone(),
+            self.partition_ranges.clone(),
             new_input.clone(),
         )))
     }
@@ -144,6 +169,8 @@ struct PartSortStream {
     input: DfSendableRecordBatchStream,
     input_complete: bool,
     schema: SchemaRef,
+    partition_ranges: Vec<PartitionRange>,
+    cur_part_idx: usize,
     metrics: BaselineMetrics,
 }
 
@@ -152,6 +179,7 @@ impl PartSortStream {
         context: Arc<TaskContext>,
         sort: &PartSortExec,
         input: DfSendableRecordBatchStream,
+        partition_ranges: Vec<PartitionRange>,
         partition: usize,
     ) -> Self {
         Self {
@@ -163,12 +191,78 @@ impl PartSortStream {
             input,
             input_complete: false,
             schema: sort.input.schema(),
+            partition_ranges,
+            cur_part_idx: 0,
             metrics: BaselineMetrics::new(&sort.metrics, partition),
         }
     }
 }
 
+macro_rules! array_check_helper {
+    ($t:ty, $unit:expr, $arr:expr, $cur_range:expr, $min_max_idx:expr) => {{
+            if $cur_range.start.unit().as_arrow_time_unit() != $unit
+            || $cur_range.end.unit().as_arrow_time_unit() != $unit
+        {
+            internal_err!(
+                "PartitionRange unit mismatch, expect {:?}, found {:?}",
+                $cur_range.start.unit(),
+                $unit
+            )?;
+        }
+        let arr = $arr
+            .as_any()
+            .downcast_ref::<arrow::array::PrimitiveArray<$t>>()
+            .unwrap();
+
+        let min = arr.value($min_max_idx.0);
+        let max = arr.value($min_max_idx.1);
+        let (min, max) = if min < max{
+            (min, max)
+        } else {
+            (max, min)
+        };
+        let cur_min = $cur_range.start.value();
+        let cur_max = $cur_range.end.value();
+        // note that PartitionRange is left inclusive and right exclusive
+        if !(min >= cur_min && max < cur_max) {
+            internal_err!(
+                    "Sort column min/max value out of partition range: [{:?}, {:?}] not in [{:?}, {:?}]",
+                    min,
+                    max,
+                    cur_min,
+                    cur_max
+                )?;
+        }
+    }};
+}
+
 impl PartSortStream {
+    /// check whether the sort column's min/max value is within the partition range
+    fn check_in_range(
+        &self,
+        sort_column: &ArrayRef,
+        min_max_idx: (usize, usize),
+    ) -> datafusion_common::Result<()> {
+        if self.cur_part_idx >= self.partition_ranges.len() {
+            internal_err!(
+                "Partition index out of range: {} >= {}",
+                self.cur_part_idx,
+                self.partition_ranges.len()
+            )?;
+        }
+        let cur_range = self.partition_ranges[self.cur_part_idx];
+
+        downcast_ts_array!(
+            sort_column.data_type() => (array_check_helper, sort_column, cur_range, min_max_idx),
+            _ => internal_err!(
+                "Unsupported data type for sort column: {:?}",
+                sort_column.data_type()
+            )?,
+        );
+
+        Ok(())
+    }
+
     /// Sort and clear the buffer and return the sorted record batch
     ///
     /// this function should return None if RecordBatch is empty
@@ -198,6 +292,14 @@ impl PartSortStream {
                 Some(format!("Fail to sort to indices at {}", location!())),
             )
         })?;
+
+        self.check_in_range(
+            &sort_column,
+            (
+                indices.value(0) as usize,
+                indices.value(indices.len() - 1) as usize,
+            ),
+        )?;
 
         // reserve memory for the concat input and sorted output
         let total_mem: usize = self.buffer.iter().map(|r| r.get_array_memory_size()).sum();
@@ -254,7 +356,9 @@ impl PartSortStream {
                 Poll::Ready(Some(Ok(batch))) => {
                     if batch.num_rows() == 0 {
                         // mark end of current PartitionRange
-                        return Poll::Ready(self.sort_buffer().transpose());
+                        let ret = Poll::Ready(self.sort_buffer().transpose());
+                        self.cur_part_idx += 1;
+                        return ret;
                     }
                     self.buffer.push(batch);
                     // keep polling until boundary(a empty RecordBatch) is reached
@@ -296,7 +400,6 @@ mod test {
 
     use arrow::json::ArrayWriter;
     use arrow_schema::{DataType, Field, Schema, SortOptions, TimeUnit};
-    use common_telemetry::error;
     use common_time::Timestamp;
     use datafusion_physical_expr::expressions::Column;
     use futures::StreamExt;
@@ -418,25 +521,19 @@ mod test {
                 TimeUnit::Millisecond,
                 vec![
                     ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
-                    ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
+                    ((5, 10), vec![vec![5, 6], vec![7, 8]]),
                 ],
                 false,
-                vec![
-                    vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
-                    vec![1, 2, 3, 4, 5, 6, 7, 8],
-                ],
+                vec![vec![1, 2, 3, 4, 5, 6, 7, 8, 9], vec![5, 6, 7, 8]],
             ),
             (
                 TimeUnit::Millisecond,
                 vec![
-                    ((5, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]),
+                    ((5, 10), vec![vec![5, 6], vec![7, 8, 9]]),
                     ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
                 ],
                 true,
-                vec![
-                    vec![9, 8, 7, 6, 5, 4, 3, 2, 1],
-                    vec![8, 7, 6, 5, 4, 3, 2, 1],
-                ],
+                vec![vec![9, 8, 7, 6, 5], vec![8, 7, 6, 5, 4, 3, 2, 1]],
             ),
         ];
 
@@ -493,7 +590,7 @@ mod test {
         opt: SortOptions,
         expected_output: Vec<DfRecordBatch>,
     ) {
-        let (_ranges, batches): (Vec<_>, Vec<_>) = input_ranged_data.clone().into_iter().unzip();
+        let (ranges, batches): (Vec<_>, Vec<_>) = input_ranged_data.clone().into_iter().unzip();
 
         let batches = batches
             .into_iter()
@@ -509,6 +606,7 @@ mod test {
                 expr: Arc::new(Column::new("ts", 0)),
                 options: opt,
             },
+            vec![ranges],
             Arc::new(mock_input),
         );
 
@@ -518,6 +616,7 @@ mod test {
 
         // a makeshift solution for compare large data
         if real_output != expected_output {
+            let mut full_msg = String::new();
             {
                 let mut buf = Vec::with_capacity(10 * real_output.len());
                 for batch in &real_output {
@@ -529,7 +628,7 @@ mod test {
                     buf.push(b',');
                 }
                 let buf = String::from_utf8_lossy(&buf);
-                error!("case_id:{case_id}, real_output: [{buf}]");
+                full_msg += &format!("case_id:{case_id}, real_output: [{buf}]");
             }
             {
                 let mut buf = Vec::with_capacity(10 * real_output.len());
@@ -542,9 +641,12 @@ mod test {
                     buf.push(b',');
                 }
                 let buf = String::from_utf8_lossy(&buf);
-                error!("case_id:{case_id}, expected_output: [{buf}]");
+                full_msg += &format!("case_id:{case_id}, expected_output: [{buf}]");
             }
-            panic!("case_{} failed, opt: {:?}", case_id, opt);
+            panic!(
+                "case_{} failed, opt: {:?}, full msg: {}",
+                case_id, opt, full_msg
+            );
         }
     }
 }
