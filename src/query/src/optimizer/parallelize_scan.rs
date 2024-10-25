@@ -51,6 +51,10 @@ impl ParallelizeScan {
         let result = plan
             .transform_down(|plan| {
                 if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
+                    if region_scan_exec.is_partition_set() {
+                        return Ok(Transformed::no(plan));
+                    }
+
                     let ranges = region_scan_exec.get_partition_ranges();
                     let total_range_num = ranges.len();
                     let expected_partition_num = config.execution.target_partitions;
@@ -72,7 +76,7 @@ impl ParallelizeScan {
                     let new_exec = region_scan_exec
                         .with_new_partitions(partition_ranges)
                         .map_err(|e| DataFusionError::External(e.into_inner()))?;
-                    return Ok(Transformed::no(Arc::new(new_exec)));
+                    return Ok(Transformed::yes(Arc::new(new_exec)));
                 }
 
                 // The plan might be modified, but it's modified in-place so we always return

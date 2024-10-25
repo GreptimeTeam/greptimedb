@@ -22,6 +22,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::warn;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
@@ -49,6 +50,7 @@ pub struct RegionScanExec {
     properties: PlanProperties,
     append_mode: bool,
     total_rows: usize,
+    is_partition_set: bool,
 }
 
 impl RegionScanExec {
@@ -77,6 +79,7 @@ impl RegionScanExec {
             properties,
             append_mode,
             total_rows,
+            is_partition_set: false,
         }
     }
 
@@ -101,11 +104,19 @@ impl RegionScanExec {
         scanner.properties().partitions.clone()
     }
 
+    pub fn is_partition_set(&self) -> bool {
+        self.is_partition_set
+    }
+
     /// Update the partition ranges of underlying scanner.
     pub fn with_new_partitions(
         &self,
         partitions: Vec<Vec<PartitionRange>>,
     ) -> Result<Self, BoxedError> {
+        if self.is_partition_set {
+            warn!("Setting partition ranges more than once for RegionScanExec");
+        }
+
         let num_partitions = partitions.len();
         let mut properties = self.properties.clone();
         properties.partitioning = Partitioning::UnknownPartitioning(num_partitions);
@@ -124,6 +135,7 @@ impl RegionScanExec {
             properties,
             append_mode: self.append_mode,
             total_rows: self.total_rows,
+            is_partition_set: true,
         })
     }
 

@@ -302,13 +302,14 @@ impl PartSortStream {
                 indices.value(indices.len() - 1) as usize,
             ),
         )
-        .inspect_err(|e| {
+        .inspect_err(|_e| {
+            #[cfg(debug_assertions)]
             common_telemetry::error!(
                 "Fail to check sort column in range at {}, current_idx: {}, num_rows: {}, err: {}",
                 self.partition,
                 self.cur_part_idx,
                 sort_column.len(),
-                e
+                _e
             );
         })?;
 
