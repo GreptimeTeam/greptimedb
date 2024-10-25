@@ -47,8 +47,8 @@ use crate::error::{
     DecodeOtlpRequestSnafu, Error, InvalidParameterSnafu, ParseJson5Snafu, ParseJsonSnafu,
     PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
-use crate::http::greptime_manage_resp::GreptimedbManageResponse;
-use crate::http::greptime_result_v1::GreptimedbV1Response;
+use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
+use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
 use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{

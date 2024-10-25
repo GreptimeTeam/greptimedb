@@ -12,29 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Write;
+
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
 use common_query::Output;
+use itertools::Itertools;
 use mime_guess::mime;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
 
-use super::process_with_limit;
-use crate::http::error_result::ErrorResponse;
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
-use crate::http::{handler, GreptimeQueryOutput, HttpResponse, ResponseFormat};
+// use super::process_with_limit;
+use crate::http::result::error_result::ErrorResponse;
+use crate::http::{handler, process_with_limit, GreptimeQueryOutput, HttpResponse, ResponseFormat};
 
-/// The json format here is different from the default json output of `GreptimedbV1` result.
-/// `JsonResponse` is intended to make it easier for user to consume data.
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
-pub struct JsonResponse {
+pub struct CsvResponse {
     output: Vec<GreptimeQueryOutput>,
     execution_time_ms: u64,
 }
 
-impl JsonResponse {
+impl CsvResponse {
     pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
         match handler::from_output(outputs).await {
             Err(err) => HttpResponse::Error(err),
@@ -42,10 +42,10 @@ impl JsonResponse {
                 if output.len() > 1 {
                     HttpResponse::Error(ErrorResponse::from_error_message(
                         StatusCode::InvalidArguments,
-                        "cannot output multi-statements result in json format".to_string(),
+                        "cannot output multi-statements result in csv format".to_string(),
                     ))
                 } else {
-                    HttpResponse::Json(JsonResponse {
+                    HttpResponse::Csv(CsvResponse {
                         output,
                         execution_time_ms: 0,
                     })
@@ -73,7 +73,7 @@ impl JsonResponse {
     }
 }
 
-impl IntoResponse for JsonResponse {
+impl IntoResponse for CsvResponse {
     fn into_response(mut self) -> Response {
         debug_assert!(
             self.output.len() <= 1,
@@ -84,54 +84,35 @@ impl IntoResponse for JsonResponse {
         let execution_time = self.execution_time_ms;
         let payload = match self.output.pop() {
             None => String::default(),
-            Some(GreptimeQueryOutput::AffectedRows(n)) => json!({
-                "data": [],
-                "affected_rows": n,
-                "execution_time_ms": execution_time,
-            })
-            .to_string(),
-
+            Some(GreptimeQueryOutput::AffectedRows(n)) => {
+                format!("{n}\n")
+            }
             Some(GreptimeQueryOutput::Records(records)) => {
-                let schema = records.schema();
-
-                let data: Vec<Map<String, Value>> = records
-                    .rows
-                    .iter()
-                    .map(|row| {
-                        schema
-                            .column_schemas
-                            .iter()
-                            .enumerate()
-                            .map(|(i, col)| (col.name.clone(), row[i].clone()))
-                            .collect::<Map<String, Value>>()
-                    })
-                    .collect();
-
-                json!({
-                    "data": data,
-                    "execution_time_ms": execution_time,
-                })
-                .to_string()
+                let mut result = String::new();
+                for row in records.rows {
+                    let row = row.iter().map(|v| v.to_string()).join(",");
+                    writeln!(result, "{row}").unwrap();
+                }
+                result
             }
         };
 
-        (
-            [
-                (
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static(mime::APPLICATION_JSON.as_ref()),
-                ),
-                (
-                    GREPTIME_DB_HEADER_FORMAT.clone(),
-                    HeaderValue::from_static(ResponseFormat::Json.as_str()),
-                ),
-                (
-                    GREPTIME_DB_HEADER_EXECUTION_TIME.clone(),
-                    HeaderValue::from(execution_time),
-                ),
-            ],
+        let mut resp = (
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref()),
+            )],
             payload,
         )
-            .into_response()
+            .into_response();
+        resp.headers_mut().insert(
+            &GREPTIME_DB_HEADER_FORMAT,
+            HeaderValue::from_static(ResponseFormat::Csv.as_str()),
+        );
+        resp.headers_mut().insert(
+            &GREPTIME_DB_HEADER_EXECUTION_TIME,
+            HeaderValue::from(execution_time),
+        );
+        resp
     }
 }

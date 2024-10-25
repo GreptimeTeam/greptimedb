@@ -45,7 +45,7 @@ use serde_json::Value;
 use session::context::QueryContext;
 use snafu::{Location, OptionExt, ResultExt};
 
-pub use super::prometheus_resp::PrometheusJsonResponse;
+pub use super::result::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
     CatalogSnafu, CollectRecordbatchSnafu, Error, InvalidQuerySnafu, Result, TableNotFoundSnafu,
     UnexpectedResultSnafu,

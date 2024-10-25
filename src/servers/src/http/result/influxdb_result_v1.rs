@@ -23,8 +23,8 @@ use serde_json::Value;
 use snafu::ResultExt;
 
 use crate::error::{Error, ToJsonSnafu};
-use crate::http::error_result::ErrorResponse;
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
+use crate::http::result::error_result::ErrorResponse;
 use crate::http::{Epoch, HttpResponse, ResponseFormat};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]

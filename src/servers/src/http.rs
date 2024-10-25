@@ -50,20 +50,20 @@ use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
-use self::table_result::TableResponse;
+use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AddressBindSnafu, AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
-use crate::http::arrow_result::ArrowResponse;
-use crate::http::csv_result::CsvResponse;
-use crate::http::error_result::ErrorResponse;
-use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
-use crate::http::influxdb_result_v1::InfluxdbV1Response;
-use crate::http::json_result::JsonResponse;
 use crate::http::prometheus::{
     build_info_query, format_query, instant_query, label_values_query, labels_query, parse_query,
     range_query, series_query,
 };
+use crate::http::result::arrow_result::ArrowResponse;
+use crate::http::result::csv_result::CsvResponse;
+use crate::http::result::error_result::ErrorResponse;
+use crate::http::result::greptime_result_v1::GreptimedbV1Response;
+use crate::http::result::influxdb_result_v1::InfluxdbV1Response;
+use crate::http::result::json_result::JsonResponse;
 use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
@@ -76,6 +76,8 @@ use crate::query_handler::{
 use crate::server::Server;
 
 pub mod authorize;
+#[cfg(feature = "dashboard")]
+mod dashboard;
 pub mod dyn_log;
 pub mod event;
 pub mod handler;
@@ -87,19 +89,8 @@ pub mod otlp;
 pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
-mod prometheus_resp;
+pub mod result;
 pub mod script;
-
-pub mod arrow_result;
-pub mod csv_result;
-#[cfg(feature = "dashboard")]
-mod dashboard;
-pub mod error_result;
-pub mod greptime_manage_resp;
-pub mod greptime_result_v1;
-pub mod influxdb_result_v1;
-pub mod json_result;
-pub mod table_result;
 mod timeout;
 
 pub(crate) use timeout::DynamicTimeoutLayer;
