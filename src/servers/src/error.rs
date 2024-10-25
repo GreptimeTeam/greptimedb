@@ -36,6 +36,15 @@ use crate::http::error_result::status_code_to_http_status;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to bind address: {}", addr))]
+    AddressBind {
+        addr: SocketAddr,
+        #[snafu(source)]
+        error: hyper::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Arrow error"))]
     Arrow {
         #[snafu(source)]
@@ -565,9 +574,9 @@ impl ErrorExt for Error {
             | Arrow { .. }
             | FileWatch { .. } => StatusCode::Internal,
 
-            AlreadyStarted { .. } | InvalidPromRemoteReadQueryResult { .. } => {
-                StatusCode::IllegalState
-            }
+            AddressBind { .. }
+            | AlreadyStarted { .. }
+            | InvalidPromRemoteReadQueryResult { .. } => StatusCode::IllegalState,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 

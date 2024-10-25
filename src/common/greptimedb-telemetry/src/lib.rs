@@ -325,7 +325,7 @@ mod tests {
             });
             let addr = ([127, 0, 0, 1], port).into();
 
-            let server = Server::bind(&addr).serve(make_svc);
+            let server = Server::try_bind(&addr).unwrap().serve(make_svc);
             let graceful = server.with_graceful_shutdown(async {
                 rx.await.ok();
             });
