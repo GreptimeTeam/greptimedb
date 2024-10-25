@@ -210,7 +210,7 @@ impl BuilderBuild<ThrottleableRuntime> for Builder {
 }
 
 #[cfg(tokio_unstable)]
-pub fn register_collector(name: String, handle: &Handle) {
+pub fn register_collector(name: String, handle: &tokio::runtime::Handle) {
     let name = name.replace("-", "_");
     let monitor = tokio_metrics::RuntimeMonitor::new(handle);
     let collector = tokio_metrics_collector::RuntimeCollector::new(monitor, name);
