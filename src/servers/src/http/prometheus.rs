@@ -1032,20 +1032,10 @@ pub struct ParseQuery {
 pub async fn parse_query(
     State(_handler): State<PrometheusHandlerRef>,
     Query(params): Query<ParseQuery>,
-    Extension(mut query_ctx): Extension<QueryContext>,
+    Extension(_query_ctx): Extension<QueryContext>,
     Form(form_params): Form<ParseQuery>,
 ) -> PrometheusJsonResponse {
-    if let Some(db) = &params.db {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
-    }
-    let query_ctx = Arc::new(query_ctx);
-
     if let Some(query) = params.query.or(form_params.query) {
-        let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
-            .with_label_values(&[query_ctx.get_db_string().as_str(), "series_query"])
-            .start_timer();
-
         match promql_parser::parser::parse(&query) {
             Ok(ast) => PrometheusJsonResponse::success(PrometheusResponse::ParseResult(ast)),
             Err(err) => {
