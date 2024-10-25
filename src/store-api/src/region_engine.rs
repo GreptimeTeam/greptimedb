@@ -205,7 +205,7 @@ pub struct ScannerProperties {
     total_rows: usize,
 
     /// Whether to yield an empty batch to distinguish partition ranges.
-    distinguish_partition_range: bool,
+    pub distinguish_partition_range: bool,
 }
 
 impl ScannerProperties {
@@ -224,12 +224,6 @@ impl ScannerProperties {
     /// Sets total rows for scanner.
     pub fn with_total_rows(mut self, total_rows: usize) -> Self {
         self.total_rows = total_rows;
-        self
-    }
-
-    /// Sets distinguish partition range for scanner.
-    pub fn with_distinguish_partition_range(mut self, distinguish_partition_range: bool) -> Self {
-        self.distinguish_partition_range = distinguish_partition_range;
         self
     }
 
@@ -274,7 +268,11 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Prepares the scanner with the given partition ranges.
     ///
     /// This method is for the planner to adjust the scanner's behavior based on the partition ranges.
-    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError>;
+    fn prepare(
+        &mut self,
+        ranges: Vec<Vec<PartitionRange>>,
+        distinguish_partition_range: bool,
+    ) -> Result<(), BoxedError>;
 
     /// Scans the partition and returns a stream of record batches.
     ///
@@ -441,8 +439,13 @@ impl RegionScanner for SinglePartitionScanner {
         self.schema.clone()
     }
 
-    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+    fn prepare(
+        &mut self,
+        ranges: Vec<Vec<PartitionRange>>,
+        distinguish_partition_range: bool,
+    ) -> Result<(), BoxedError> {
         self.properties.partitions = ranges;
+        self.properties.distinguish_partition_range = distinguish_partition_range;
         Ok(())
     }
 

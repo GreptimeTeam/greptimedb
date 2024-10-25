@@ -80,12 +80,6 @@ impl RegionScanExec {
         }
     }
 
-    /// Set the expected output ordering for the plan.
-    pub fn with_output_ordering(mut self, output_ordering: Vec<PhysicalSortExpr>) -> Self {
-        self.output_ordering = Some(output_ordering);
-        self
-    }
-
     /// Get the partition ranges of the scanner. This method will collapse the ranges into
     /// a single vector.
     pub fn get_partition_ranges(&self) -> Vec<PartitionRange> {
@@ -101,6 +95,12 @@ impl RegionScanExec {
         ranges
     }
 
+    /// Similar to [`Self::get_partition_ranges`] but don't collapse the ranges.
+    pub fn get_uncollapsed_partition_ranges(&self) -> Vec<Vec<PartitionRange>> {
+        let scanner = self.scanner.lock().unwrap();
+        scanner.properties().partitions.clone()
+    }
+
     /// Update the partition ranges of underlying scanner.
     pub fn with_new_partitions(
         &self,
@@ -112,7 +112,8 @@ impl RegionScanExec {
 
         {
             let mut scanner = self.scanner.lock().unwrap();
-            scanner.prepare(partitions)?;
+            let distinguish_partition_range = scanner.properties().distinguish_partition_range();
+            scanner.prepare(partitions, distinguish_partition_range)?;
         }
 
         Ok(Self {
@@ -124,6 +125,22 @@ impl RegionScanExec {
             append_mode: self.append_mode,
             total_rows: self.total_rows,
         })
+    }
+
+    pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {
+        let mut scanner = self.scanner.lock().unwrap();
+        let partition_ranges = scanner.properties().partitions.clone();
+        // set distinguish_partition_range won't fail
+        let _ = scanner.prepare(partition_ranges, distinguish_partition_range);
+    }
+
+    pub fn time_index(&self) -> Option<String> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .schema()
+            .timestamp_column()
+            .map(|x| x.name.clone())
     }
 }
 

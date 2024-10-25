@@ -9046,6 +9046,7 @@ dependencies = [
  "table",
  "tokio",
  "tokio-stream",
+ "uuid",
 ]
 
 [[package]]

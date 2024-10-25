@@ -532,15 +532,40 @@ impl Batch {
 #[derive(Default)]
 pub(crate) struct BatchChecker {
     last_batch: Option<Batch>,
+    start: Option<Timestamp>,
+    end: Option<Timestamp>,
 }
 
 #[cfg(debug_assertions)]
 impl BatchChecker {
+    /// Attaches the given start timestamp to the checker.
+    pub(crate) fn with_start(mut self, start: Option<Timestamp>) -> Self {
+        self.start = start;
+        self
+    }
+
+    /// Attaches the given end timestamp to the checker.
+    pub(crate) fn with_end(mut self, end: Option<Timestamp>) -> Self {
+        self.end = end;
+        self
+    }
+
     /// Returns true if the given batch is monotonic and behind
     /// the last batch.
     pub(crate) fn check_monotonic(&mut self, batch: &Batch) -> bool {
         if !batch.check_monotonic() {
             return false;
+        }
+
+        if let (Some(start), Some(first)) = (self.start, batch.first_timestamp()) {
+            if start > first {
+                return false;
+            }
+        }
+        if let (Some(end), Some(last)) = (self.end, batch.last_timestamp()) {
+            if end <= last {
+                return false;
+            }
         }
 
         // Checks the batch is behind the last batch.

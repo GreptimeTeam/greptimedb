@@ -20,6 +20,7 @@ pub mod string_normalization;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub mod type_conversion;
+pub mod windowed_sort;
 
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::Result;

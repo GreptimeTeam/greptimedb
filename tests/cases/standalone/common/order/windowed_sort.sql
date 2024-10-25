@@ -1,0 +1,19 @@
+CREATE TABLE test(i INTEGER, t TIMESTAMP TIME INDEX);
+
+INSERT INTO test VALUES (1, 1), (NULL, 2), (1, 3);
+
+ADMIN FLUSH_TABLE('test');
+
+INSERT INTO test VALUES (2, 4), (2, 5), (NULL, 6);
+
+ADMIN FLUSH_TABLE('test');
+
+INSERT INTO test VALUES (3, 7), (3, 8), (3, 9);
+
+ADMIN FLUSH_TABLE('test');
+
+INSERT INTO test VALUES (4, 10), (4, 11), (4, 12);
+
+SELECT * FROM test ORDER BY t LIMIT 5;
+
+DROP TABLE test;

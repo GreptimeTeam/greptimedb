@@ -22,6 +22,7 @@ use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_time::Timestamp;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
@@ -81,12 +82,14 @@ impl UnorderedScan {
     /// Scans a [PartitionRange] by its `identifier` and returns a stream.
     fn scan_partition_range(
         stream_ctx: Arc<StreamContext>,
-        part_range_id: usize,
+        part_range: PartitionRange,
         part_metrics: PartitionMetrics,
     ) -> impl Stream<Item = Result<Batch>> {
         stream! {
             // Gets range meta.
-            let range_meta = &stream_ctx.ranges[part_range_id];
+            let range_meta = &stream_ctx.ranges[part_range.identifier];
+            assert_eq!(range_meta.time_range.0.value(), part_range.start.value());
+            assert_eq!(range_meta.time_range.1.value() + 1, part_range.end.value());
             for index in &range_meta.row_group_indices {
                 if stream_ctx.is_mem_range_index(*index) {
                     let stream = scan_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index);
@@ -140,13 +143,17 @@ impl UnorderedScan {
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
                 #[cfg(debug_assertions)]
-                let mut checker = crate::read::BatchChecker::default();
+                let mut checker = crate::read::BatchChecker::default()
+                    .with_start(Some(part_range.start))
+                    .with_end(Some(part_range.end));
 
                 let stream = Self::scan_partition_range(
                     stream_ctx.clone(),
-                    part_range.identifier,
+                    part_range,
                     part_metrics.clone(),
                 );
+                let mut min: Option<Timestamp> = None;
+                let mut max: Option<Timestamp> = None;
                 for await batch in stream {
                     let batch = batch.map_err(BoxedError::new).context(ExternalSnafu)?;
                     metrics.scan_cost += fetch_start.elapsed();
@@ -166,6 +173,9 @@ impl UnorderedScan {
                         part_range,
                         &batch,
                     );
+
+                    min = min.map(|min| min.min(batch.first_timestamp().unwrap())).or_else(|| batch.first_timestamp());
+                    max = max.map(|max| max.max(batch.last_timestamp().unwrap())).or_else(|| batch.last_timestamp());
 
                     let convert_start = Instant::now();
                     let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
@@ -209,8 +219,13 @@ impl RegionScanner for UnorderedScan {
         self.stream_ctx.input.mapper.output_schema()
     }
 
-    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+    fn prepare(
+        &mut self,
+        ranges: Vec<Vec<PartitionRange>>,
+        distinguish_partition_range: bool,
+    ) -> Result<(), BoxedError> {
         self.properties.partitions = ranges;
+        self.properties.distinguish_partition_range = distinguish_partition_range;
         Ok(())
     }
 

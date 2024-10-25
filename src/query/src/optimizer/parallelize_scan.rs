@@ -56,16 +56,23 @@ impl ParallelizeScan {
                     let expected_partition_num = config.execution.target_partitions;
 
                     // assign ranges to each partition
-                    let partition_ranges =
+                    let mut partition_ranges =
                         Self::assign_partition_range(ranges, expected_partition_num);
                     debug!(
                         "Assign {total_range_num} ranges to {expected_partition_num} partitions"
                     );
+
+                    // sort the ranges in each partition
+                    // TODO: smart sort!
+                    for ranges in partition_ranges.iter_mut() {
+                        ranges.sort_by(|a, b| a.start.cmp(&b.start));
+                    }
+
                     // update the partition ranges
                     let new_exec = region_scan_exec
                         .with_new_partitions(partition_ranges)
                         .map_err(|e| DataFusionError::External(e.into_inner()))?;
-                    return Ok(Transformed::yes(Arc::new(new_exec)));
+                    return Ok(Transformed::no(Arc::new(new_exec)));
                 }
 
                 // The plan might be modified, but it's modified in-place so we always return
