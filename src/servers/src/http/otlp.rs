@@ -41,7 +41,7 @@ use snafu::prelude::*;
 
 use super::header::constants::GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME;
 use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
-use crate::error::{self, Result};
+use crate::error::{self, PipelineSnafu, Result};
 use crate::http::header::constants::{
     GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME, GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
     GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
@@ -227,15 +227,9 @@ pub async fn logs(
         .start_timer();
     let request = ExportLogsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
 
-    let pipeline_way;
-    if let Some(pipeline_name) = &pipeline_info.pipeline_name {
+    let pipeline_way = if let Some(pipeline_name) = &pipeline_info.pipeline_name {
         let pipeline_version =
-            to_pipeline_version(pipeline_info.pipeline_version).map_err(|_| {
-                error::InvalidParameterSnafu {
-                    reason: GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
-                }
-                .build()
-            })?;
+            to_pipeline_version(pipeline_info.pipeline_version).context(PipelineSnafu)?;
         let pipeline = match handler
             .get_pipeline(pipeline_name, pipeline_version, query_ctx.clone())
             .await
@@ -245,10 +239,10 @@ pub async fn logs(
                 return Err(e);
             }
         };
-        pipeline_way = PipelineWay::Custom(pipeline);
+        PipelineWay::Custom(pipeline)
     } else {
-        pipeline_way = PipelineWay::OtlpLog(Box::new(select_info));
-    }
+        PipelineWay::OtlpLog(Box::new(select_info))
+    };
 
     handler
         .logs(request, pipeline_way, table_info.table_name, query_ctx)
