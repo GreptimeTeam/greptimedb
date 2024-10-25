@@ -866,7 +866,6 @@ worker_channel_size = 128
 worker_request_batch_size = 64
 manifest_checkpoint_distance = 10
 compress_manifest = false
-max_background_jobs = 4
 auto_flush_interval = "30m"
 enable_experimental_write_cache = false
 experimental_write_cache_path = ""
@@ -939,6 +938,9 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "content_cache_size =",
         "name =",
         "recovery_parallelism =",
+        "max_background_flushes =",
+        "max_background_compactions =",
+        "max_background_purges =",
     ];
 
     input
