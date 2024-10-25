@@ -63,6 +63,25 @@ SHOW CREATE TABLE ato;
 |       |                                    |
 +-------+------------------------------------+
 
+ALTER TABLE ato MODIFY OPTIONS 'ttl'='0d';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE ato;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
+|       |   "i" INT NULL,                    |
+|       |   "j" TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX ("j")                 |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=mito                        |
+|       |                                    |
++-------+------------------------------------+
+
 DROP TABLE ato;
 
 Affected Rows: 0

@@ -392,8 +392,8 @@ pub enum AlterKind {
         /// Columns to change.
         columns: Vec<ChangeColumnType>,
     },
-    /// Change table options.
-    ChangeTableOptions { options: Vec<ChangeTableOption> },
+    /// Change region options.
+    ChangeRegionOptions { options: Vec<ChangeRegionOption> },
 }
 
 impl AlterKind {
@@ -417,7 +417,7 @@ impl AlterKind {
                     col_to_change.validate(metadata)?;
                 }
             }
-            AlterKind::ChangeTableOptions { .. } => {}
+            AlterKind::ChangeRegionOptions { .. } => {}
         }
         Ok(())
     }
@@ -435,7 +435,7 @@ impl AlterKind {
             AlterKind::ChangeColumnTypes { columns } => columns
                 .iter()
                 .any(|col_to_change| col_to_change.need_alter(metadata)),
-            AlterKind::ChangeTableOptions { .. } => {
+            AlterKind::ChangeRegionOptions { .. } => {
                 // we need to update region options for `ChangeTableOptions`.
                 // todo: we need to check if ttl has ever changed.
                 true
@@ -484,7 +484,7 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
             }
-            Kind::ChangeTableOptions(change_options) => AlterKind::ChangeTableOptions {
+            Kind::ChangeTableOptions(change_options) => AlterKind::ChangeRegionOptions {
                 options: change_options
                     .change_table_options
                     .iter()
@@ -497,7 +497,7 @@ impl TryFrom<alter_request::Kind> for AlterKind {
     }
 }
 
-impl TryFrom<&v1::ChangeTableOption> for ChangeTableOption {
+impl TryFrom<&v1::ChangeTableOption> for ChangeRegionOption {
     type Error = MetadataError;
 
     fn try_from(option: &v1::ChangeTableOption) -> std::result::Result<Self, Self::Error> {
@@ -514,7 +514,7 @@ impl TryFrom<&v1::ChangeTableOption> for ChangeTableOption {
                 })?;
                 Some(d)
             };
-            Ok(ChangeTableOption::TTL(ttl_value))
+            Ok(ChangeRegionOption::TTL(ttl_value))
         } else {
             InvalidRegionOptionChangeRequestSnafu {
                 key: &option.key,
@@ -686,7 +686,7 @@ impl From<v1::ChangeColumnType> for ChangeColumnType {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub enum ChangeTableOption {
+pub enum ChangeRegionOption {
     TTL(Option<Duration>),
 }
 

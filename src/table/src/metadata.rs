@@ -211,12 +211,12 @@ impl TableMeta {
                     .next_column_id(self.next_column_id);
                 Ok(meta_builder)
             }
-            AlterKind::ChangeTableOptions { options } => self.change_table_attrs(options),
+            AlterKind::ChangeTableOptions { options } => self.change_table_options(options),
         }
     }
 
     /// Creates a [TableMetaBuilder] with modified table options.
-    fn change_table_attrs(
+    fn change_table_options(
         &self,
         requests: &[ChangeTableOptionRequest],
     ) -> Result<TableMetaBuilder> {
@@ -225,7 +225,11 @@ impl TableMeta {
         for request in requests {
             match request {
                 ChangeTableOptionRequest::TTL(new_ttl) => {
-                    new_options.ttl = *new_ttl;
+                    if new_ttl.is_zero() {
+                        new_options.ttl = None;
+                    } else {
+                        new_options.ttl = Some(*new_ttl);
+                    }
                 }
             }
         }

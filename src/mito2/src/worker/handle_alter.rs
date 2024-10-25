@@ -20,7 +20,7 @@ use std::time::Duration;
 use common_telemetry::{debug, info};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
-use store_api::region_request::{AlterKind, ChangeTableOption, RegionAlterRequest};
+use store_api::region_request::{AlterKind, ChangeRegionOption, RegionAlterRequest};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -116,7 +116,7 @@ impl<S> RegionWorkerLoop<S> {
         );
 
         match request.kind {
-            AlterKind::ChangeTableOptions { options } => {
+            AlterKind::ChangeRegionOptions { options } => {
                 self.handle_alter_region_options(region, version, options, sender)
             }
             _ => self.handle_alter_region_metadata(region, version, request, sender),
@@ -151,7 +151,7 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region: MitoRegionRef,
         version: VersionRef,
-        options: Vec<ChangeTableOption>,
+        options: Vec<ChangeRegionOption>,
         sender: OptionOutputTx,
     ) {
         let mut builder = RegionMetadataBuilder::from_existing((*version.metadata).clone());
@@ -169,7 +169,7 @@ impl<S> RegionWorkerLoop<S> {
         };
         for option in options {
             match option {
-                ChangeTableOption::TTL(ttl) => {
+                ChangeRegionOption::TTL(ttl) => {
                     if let Some(ttl) = ttl {
                         change.ttl = Some(ttl);
                     } else {

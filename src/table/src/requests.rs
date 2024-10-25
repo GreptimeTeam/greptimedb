@@ -221,7 +221,7 @@ pub enum AlterKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChangeTableOptionRequest {
-    TTL(Option<Duration>),
+    TTL(Duration),
 }
 
 impl TryFrom<&ChangeTableOption> for ChangeTableOptionRequest {
@@ -231,12 +231,10 @@ impl TryFrom<&ChangeTableOption> for ChangeTableOptionRequest {
         let ChangeTableOption { key, value } = value;
         if key == TTL_KEY {
             let ttl = if value.is_empty() {
-                None
+                Duration::from_secs(0)
             } else {
-                Some(
-                    humantime::parse_duration(value)
-                        .map_err(|_| error::InvalidTableOptionValueSnafu { key, value }.build())?,
-                )
+                humantime::parse_duration(value)
+                    .map_err(|_| error::InvalidTableOptionValueSnafu { key, value }.build())?
             };
             Ok(Self::TTL(ttl))
         } else {
