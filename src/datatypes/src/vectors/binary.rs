@@ -36,6 +36,36 @@ impl BinaryVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
     }
+
+    /// Creates a new binary vector of JSONB from a binary vector.
+    /// The binary vector must contain valid JSON strings.
+    pub fn convert_binary_to_json(&self) -> Result<BinaryVector> {
+        let arrow_array = self.to_arrow_array();
+        let mut vector = vec![];
+        for binary in arrow_array
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap()
+            .iter()
+        {
+            let jsonb = if let Some(binary) = binary {
+                let s = String::from_utf8_lossy(binary);
+                match jsonb::parse_value(s.as_bytes()) {
+                    Ok(jsonb) => Some(jsonb.to_vec()),
+                    Err(_) => {
+                        return error::InvalidJsonSnafu {
+                            value: s.to_string(),
+                        }
+                        .fail()
+                    }
+                }
+            } else {
+                None
+            };
+            vector.push(jsonb);
+        }
+        Ok(BinaryVector::from(vector))
+    }
 }
 
 impl From<BinaryArray> for BinaryVector {

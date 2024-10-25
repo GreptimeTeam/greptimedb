@@ -961,7 +961,7 @@ pub(super) fn parameters_to_scalar_values(
                 if let Some(server_type) = &server_type {
                     match server_type {
                         ConcreteDataType::Binary(_) => {
-                            ScalarValue::Binary(data.map(|d| jsonb::Value::from(d).to_vec()))
+                            ScalarValue::Binary(data.map(|d| d.to_string().into_bytes()))
                         }
                         _ => {
                             return Err(invalid_parameter_error(
@@ -971,7 +971,7 @@ pub(super) fn parameters_to_scalar_values(
                         }
                     }
                 } else {
-                    ScalarValue::Binary(data.map(|d| jsonb::Value::from(d).to_vec()))
+                    ScalarValue::Binary(data.map(|d| d.to_string().into_bytes()))
                 }
             }
             _ => Err(invalid_parameter_error(
