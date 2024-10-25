@@ -242,8 +242,8 @@ pub struct WindowedSortStream {
     working_idx: usize,
     /// input stream assumed reading in order of `PartitionRange`
     input: DfSendableRecordBatchStream,
-    /// Whether the input stream is terminated, if it did, we should poll input again
-    is_input_terminated: bool,
+    /// Whether this stream is terminated. For reasons like limit reached or input stream is done.
+    is_terminated: bool,
     /// Output Schema, which is the same as input schema, since this is a sort plan
     schema: SchemaRef,
     /// Physical sort expressions(that is, sort by timestamp)
@@ -281,7 +281,7 @@ impl WindowedSortStream {
             working_idx: 0,
             schema: input.schema(),
             input,
-            is_input_terminated: false,
+            is_terminated: false,
             expression: exec.expression.clone(),
             fetch: exec.fetch,
             produced: 0,
@@ -364,6 +364,7 @@ impl WindowedSortStream {
                 Poll::Ready(Some(Ok(batch))) => {
                     let ret = if let Some(remaining) = self.remaining_fetch() {
                         if remaining == 0 {
+                            self.is_terminated = true;
                             None
                         } else if remaining < batch.num_rows() {
                             self.produced += remaining;
@@ -395,6 +396,7 @@ impl WindowedSortStream {
         // if no output stream is available
         Poll::Ready(None)
     }
+
     /// The core logic of merging sort multiple sorted ranges
     ///
     /// We try to maximize the number of sorted runs we can merge in one go, while emit the result as soon as possible.
@@ -405,7 +407,7 @@ impl WindowedSortStream {
         // first check and send out the merge result
         match self.poll_result_stream(cx) {
             Poll::Ready(None) => {
-                if self.is_input_terminated {
+                if self.is_terminated {
                     return Poll::Ready(None);
                 }
             }
@@ -413,7 +415,7 @@ impl WindowedSortStream {
         };
 
         // consume input stream
-        while !self.is_input_terminated {
+        while !self.is_terminated {
             // then we get a new RecordBatch from input stream
             let new_input_rbs = match self.input.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
@@ -424,7 +426,7 @@ impl WindowedSortStream {
                 }
                 Poll::Ready(None) => {
                     // input stream is done, we need to merge sort the remaining working set
-                    self.is_input_terminated = true;
+                    self.is_terminated = true;
                     None
                 }
                 Poll::Pending => return Poll::Pending,
