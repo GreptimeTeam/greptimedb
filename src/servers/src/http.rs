@@ -80,6 +80,7 @@ pub mod authorize;
 mod dashboard;
 pub mod dyn_log;
 pub mod event;
+mod extractor;
 pub mod handler;
 pub mod header;
 pub mod influxdb;

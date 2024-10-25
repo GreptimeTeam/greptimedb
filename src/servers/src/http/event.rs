@@ -47,13 +47,15 @@ use crate::error::{
     DecodeOtlpRequestSnafu, Error, InvalidParameterSnafu, ParseJson5Snafu, ParseJsonSnafu,
     PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
+use crate::http::extractor::LogTableName;
 use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
 use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_INGESTION_COUNTER, METRIC_HTTP_LOGS_INGESTION_ELAPSED,
-    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
+    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_LOKI_LOGS_INGESTION_COUNTER,
+    METRIC_LOKI_LOGS_INGESTION_ELAPSED, METRIC_SUCCESS_VALUE,
 };
 use crate::prom_store;
 use crate::query_handler::LogHandlerRef;
@@ -365,12 +367,15 @@ pub async fn loki_ingest(
     State(log_state): State<LogState>,
     Extension(mut ctx): Extension<QueryContext>,
     TypedHeader(content_type): TypedHeader<ContentType>,
+    LogTableName(table_name): LogTableName,
     bytes: Bytes,
 ) -> Result<HttpResponse> {
-    // TODO(shuiyisong): should change channel to loki
-    ctx.set_channel(Channel::Http);
+    ctx.set_channel(Channel::Loki);
     let ctx = Arc::new(ctx);
-    let exec_timer = std::time::Instant::now();
+    let db = ctx.get_db_string();
+    let db_str = db.as_str();
+    let table_name = table_name.unwrap_or("loki_logs".to_string());
+    let exec_timer = Instant::now();
 
     // decompress req
     ensure!(
@@ -480,8 +485,7 @@ pub async fn loki_ingest(
     };
 
     let ins_req = RowInsertRequest {
-        // TODO(shuiyisong): table name
-        table_name: "test_table_name".to_string(),
+        table_name,
         rows: Some(rows),
     };
     let ins_reqs = RowInsertRequests {
@@ -491,23 +495,22 @@ pub async fn loki_ingest(
     let handler = log_state.log_handler;
     let output = handler.insert_logs(ins_reqs, ctx).await;
 
-    // TODO(shuiyisong): add metrics
-    // if let Ok(Output {
-    //     data: OutputData::AffectedRows(rows),
-    //     meta: _,
-    // }) = &output
-    // {
-    //     METRIC_HTTP_LOGS_INGESTION_COUNTER
-    //         .with_label_values(&[db.as_str()])
-    //         .inc_by(*rows as u64);
-    //     METRIC_HTTP_LOGS_INGESTION_ELAPSED
-    //         .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
-    //         .observe(exec_timer.elapsed().as_secs_f64());
-    // } else {
-    //     METRIC_HTTP_LOGS_INGESTION_ELAPSED
-    //         .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-    //         .observe(exec_timer.elapsed().as_secs_f64());
-    // }
+    if let Ok(Output {
+        data: OutputData::AffectedRows(rows),
+        meta: _,
+    }) = &output
+    {
+        METRIC_LOKI_LOGS_INGESTION_COUNTER
+            .with_label_values(&[db_str])
+            .inc_by(*rows as u64);
+        METRIC_LOKI_LOGS_INGESTION_ELAPSED
+            .with_label_values(&[db_str, METRIC_SUCCESS_VALUE])
+            .observe(exec_timer.elapsed().as_secs_f64());
+    } else {
+        METRIC_LOKI_LOGS_INGESTION_ELAPSED
+            .with_label_values(&[db_str, METRIC_FAILURE_VALUE])
+            .observe(exec_timer.elapsed().as_secs_f64());
+    }
 
     let response = GreptimedbV1Response::from_output(vec![output])
         .await
