@@ -33,7 +33,7 @@ impl StaticUserProvider {
             value: value.to_string(),
             msg: "StaticUserProviderOption must be in format `<option>:<value>`",
         })?;
-        return match mode {
+        match mode {
             "file" => {
                 let users = load_credential_from_file(content)?
                     .context(InvalidConfigSnafu {
@@ -58,7 +58,7 @@ impl StaticUserProvider {
                 msg: "StaticUserProviderOption must be in format `file:<path>` or `cmd:<values>`",
             }
                 .fail(),
-        };
+        }
     }
 }
 

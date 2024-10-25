@@ -254,7 +254,7 @@ impl TimestampProcessor {
 }
 
 fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>> {
-    return match yaml.as_vec() {
+    match yaml.as_vec() {
         Some(formats_yaml) => {
             let mut formats = Vec::with_capacity(formats_yaml.len());
             for v in formats_yaml {
@@ -286,7 +286,7 @@ fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>>
             s: format!("{yaml:?}"),
         }
         .fail(),
-    };
+    }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessorBuilder {

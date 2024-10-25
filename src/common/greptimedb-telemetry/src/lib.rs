@@ -199,6 +199,7 @@ pub fn default_get_uuid(working_home: &Option<String>) -> Option<String> {
 }
 
 /// Report version info to GreptimeDB.
+///
 /// We do not collect any identity-sensitive information.
 /// This task is scheduled to run every 30 minutes.
 /// The task will be disabled default. It can be enabled by setting the build feature `greptimedb-telemetry`

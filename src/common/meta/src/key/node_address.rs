@@ -52,7 +52,7 @@ impl NodeAddressValue {
     }
 }
 
-impl<'a> MetadataKey<'a, NodeAddressKey> for NodeAddressKey {
+impl MetadataKey<'_, NodeAddressKey> for NodeAddressKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }

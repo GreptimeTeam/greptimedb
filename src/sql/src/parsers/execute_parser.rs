@@ -20,7 +20,7 @@ use sqlparser::parser::Parser;
 use crate::error::{Result, SyntaxSnafu};
 use crate::parser::ParserContext;
 
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     /// Parses MySQL style 'EXECUTE stmt_name USING param_list' into a stmt_name string and a list of parameters.
     /// Only use for MySQL. for PostgreSQL, use `sqlparser::parser::Parser::parse_execute` instead.
     pub(crate) fn parse_mysql_execute(&mut self) -> Result<(String, Vec<Expr>)> {

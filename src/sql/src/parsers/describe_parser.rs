@@ -21,7 +21,7 @@ use crate::statements::describe::DescribeTable;
 use crate::statements::statement::Statement;
 
 /// DESCRIBE statement parser implementation
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_describe(&mut self) -> Result<Statement> {
         if self.matches_keyword(Keyword::TABLE) {
             let _ = self.parser.next_token();

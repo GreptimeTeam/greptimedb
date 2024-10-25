@@ -28,7 +28,7 @@ pub type With = HashMap<String, String>;
 pub type Connection = HashMap<String, String>;
 
 // COPY tbl TO 'output.parquet';
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_copy(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
         let next = self.parser.peek_token();

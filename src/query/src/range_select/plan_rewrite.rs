@@ -62,7 +62,7 @@ pub struct RangeExprRewriter<'a> {
     query_ctx: &'a QueryContextRef,
 }
 
-impl<'a> RangeExprRewriter<'a> {
+impl RangeExprRewriter<'_> {
     pub fn get_range_expr(&self, args: &[Expr], i: usize) -> DFResult<Expr> {
         match args.get(i) {
             Some(Expr::Column(column)) => {
@@ -263,7 +263,7 @@ macro_rules! inconsistent_check {
     };
 }
 
-impl<'a> TreeNodeRewriter for RangeExprRewriter<'a> {
+impl TreeNodeRewriter for RangeExprRewriter<'_> {
     type Node = Expr;
 
     fn f_down(&mut self, node: Expr) -> DFResult<Transformed<Expr>> {

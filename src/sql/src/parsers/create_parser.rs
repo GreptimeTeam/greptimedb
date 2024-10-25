@@ -630,7 +630,7 @@ impl<'a> ParserContext<'a> {
         })
     }
 
-    fn parse_optional_column_option(parser: &mut Parser<'a>) -> Result<Option<ColumnOption>> {
+    fn parse_optional_column_option(parser: &mut Parser<'_>) -> Result<Option<ColumnOption>> {
         if parser.parse_keywords(&[Keyword::CHARACTER, Keyword::SET]) {
             Ok(Some(ColumnOption::CharacterSet(
                 parser.parse_object_name(false).context(SyntaxSnafu)?,
@@ -681,7 +681,7 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_column_extensions(
-        parser: &mut Parser<'a>,
+        parser: &mut Parser<'_>,
         column_name: &Ident,
         column_type: &DataType,
         column_extensions: &mut ColumnExtensions,

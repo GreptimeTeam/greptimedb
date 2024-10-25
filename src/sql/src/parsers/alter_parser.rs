@@ -23,7 +23,7 @@ use crate::parser::ParserContext;
 use crate::statements::alter::{AlterTable, AlterTableOperation};
 use crate::statements::statement::Statement;
 
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
         let alter_table = self.parse_alter_table().context(error::SyntaxSnafu)?;
         Ok(Statement::Alter(alter_table))
@@ -46,7 +46,7 @@ impl<'a> ParserContext<'a> {
                 let location = if self.parser.parse_keyword(Keyword::FIRST) {
                     Some(AddColumnLocation::First)
                 } else if let Token::Word(word) = self.parser.peek_token().token {
-                    if word.value.to_ascii_uppercase() == "AFTER" {
+                    if word.value.eq_ignore_ascii_case("AFTER") {
                         let _ = self.parser.next_token();
                         let name = Self::canonicalize_identifier(self.parse_identifier()?);
                         Some(AddColumnLocation::After {

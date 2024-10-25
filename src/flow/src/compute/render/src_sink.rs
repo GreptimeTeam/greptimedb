@@ -31,7 +31,7 @@ use crate::expr::{Batch, EvalError};
 use crate::repr::{DiffRow, Row, BROADCAST_CAP};
 
 #[allow(clippy::mutable_key_type)]
-impl<'referred, 'df> Context<'referred, 'df> {
+impl Context<'_, '_> {
     /// simply send the batch to downstream, without fancy features like buffering
     pub fn render_source_batch(
         &mut self,

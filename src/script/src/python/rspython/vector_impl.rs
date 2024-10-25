@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! PyVectors' rustpython specify methods
+
 use arrow::compute::kernels::numeric;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
@@ -40,7 +42,6 @@ use crate::python::ffi_types::vector::{
     arrow_rfloordiv, arrow_rsub, arrow_rtruediv, rspy_is_pyobj_scalar, wrap_result, PyVector,
 };
 use crate::python::rspython::utils::{is_instance, obj_cast_to};
-/// PyVectors' rustpython specify methods
 
 fn to_type_error(vm: &'_ VirtualMachine) -> impl FnOnce(String) -> PyBaseExceptionRef + '_ {
     |msg: String| vm.new_type_error(msg)

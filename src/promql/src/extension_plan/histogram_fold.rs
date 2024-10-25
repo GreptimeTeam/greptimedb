@@ -44,7 +44,9 @@ use datatypes::vectors::MutableVector;
 use futures::{ready, Stream, StreamExt};
 
 /// `HistogramFold` will fold the conventional (non-native) histogram ([1]) for later
-/// computing. Specifically, it will transform the `le` and `field` column into a complex
+/// computing.
+///
+/// Specifically, it will transform the `le` and `field` column into a complex
 /// type, and samples on other tag columns:
 /// - `le` will become a [ListArray] of [f64]. With each bucket bound parsed
 /// - `field` will become a [ListArray] of [f64]

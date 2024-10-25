@@ -19,7 +19,7 @@ use sqlparser::tokenizer::Token;
 use crate::error::{Result, SyntaxSnafu};
 use crate::parser::ParserContext;
 
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     /// Parses MySQL style 'PREPARE stmt_name FROM stmt' into a (stmt_name, stmt) tuple.
     /// Only use for MySQL. for PostgreSQL, use `sqlparser::parser::Parser::parse_prepare` instead.
     pub(crate) fn parse_mysql_prepare(&mut self) -> Result<(String, String)> {

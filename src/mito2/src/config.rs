@@ -499,7 +499,7 @@ fn divide_num_cpus(divisor: usize) -> usize {
     let cores = common_config::utils::get_cpus();
     debug_assert!(cores > 0);
 
-    (cores + divisor - 1) / divisor
+    cores.div_ceil(divisor)
 }
 
 #[cfg(test)]

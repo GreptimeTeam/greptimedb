@@ -14,7 +14,8 @@
 
 use datatypes::value::Value;
 
-/// Statistics for a relation
+/// Statistics for a relation.
+///
 /// Fields are optional and can be inexact because the sources
 /// sometimes provide approximate estimates for performance reasons
 /// and the transformations output are not always predictable.

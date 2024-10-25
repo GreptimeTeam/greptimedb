@@ -42,6 +42,8 @@ lazy_static! {
 /// The layout: `__flow/info/{flow_id}`.
 pub struct FlowInfoKey(FlowScoped<FlowInfoKeyInner>);
 
+pub type FlowInfoDecodeResult = Result<Option<DeserializedValueWithBytes<FlowInfoValue>>>;
+
 impl<'a> MetadataKey<'a, FlowInfoKey> for FlowInfoKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
@@ -203,9 +205,7 @@ impl FlowInfoManager {
         flow_value: &FlowInfoValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<FlowInfoValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> FlowInfoDecodeResult,
     )> {
         let key = FlowInfoKey::new(flow_id).to_bytes();
         let txn = Txn::put_if_not_exists(key.clone(), flow_value.try_as_raw_value()?);

@@ -31,8 +31,9 @@ pub fn supported_protocol_version() -> (ProtocolVersion, ProtocolVersion) {
 }
 
 /// Protocol action that used to block older clients from reading or writing the log when backwards
-/// incompatible changes are made to the protocol. clients should be tolerant of messages and
-/// fields that they do not understand.
+/// incompatible changes are made to the protocol.
+///
+/// clients should be tolerant of messages and fields that they do not understand.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtocolAction {
     pub min_reader_version: ProtocolVersion,
