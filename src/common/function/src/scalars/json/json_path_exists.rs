@@ -64,38 +64,40 @@ impl Function for JsonPathExistsFunction {
         let paths = &columns[1];
 
         let size = jsons.len();
-        let datatype = jsons.data_type();
         let mut results = BooleanVectorBuilder::with_capacity(size);
 
-        match datatype {
-            // JSON data type uses binary vector
-            ConcreteDataType::Binary(_) => {
-                for i in 0..size {
-                    let json = jsons.get_ref(i);
-                    let path = paths.get_ref(i);
+        for i in 0..size {
+            let json = jsons.get_ref(i);
+            let path = paths.get_ref(i);
 
+            match json.data_type() {
+                ConcreteDataType::Binary(_) => {
                     let json = json.as_binary();
                     let path = path.as_string();
                     let result = match (json, path) {
                         (Ok(Some(json)), Ok(Some(path))) => {
-                            let json_path = jsonb::jsonpath::parse_json_path(path.as_bytes());
-                            match json_path {
-                                Ok(json_path) => jsonb::path_exists(json, json_path).ok(),
-                                Err(_) => None,
+                            if !jsonb::is_null(json) && !jsonb::is_null(path.as_bytes()) {
+                                let json_path = jsonb::jsonpath::parse_json_path(path.as_bytes());
+                                match json_path {
+                                    Ok(json_path) => jsonb::path_exists(json, json_path).ok(),
+                                    Err(_) => None,
+                                }
+                            } else {
+                                None
                             }
                         }
                         _ => None,
                     };
-
                     results.push(result);
                 }
-            }
-            _ => {
-                return UnsupportedInputDataTypeSnafu {
-                    function: NAME,
-                    datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
+
+                _ => {
+                    return UnsupportedInputDataTypeSnafu {
+                        function: NAME,
+                        datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
+                    }
+                    .fail();
                 }
-                .fail();
             }
         }
 
@@ -143,9 +145,24 @@ mod tests {
             r#"{"a": 4, "b": {"c": 6}, "c": 6}"#,
             r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
             r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
+            r#"[1, 2, 3]"#,
+            r#"null"#,
+            r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
+            r#"null"#,
         ];
-        let paths = vec!["$.a.b.c", "$.b", "$.c.a", ".d"];
-        let results = [false, true, true, false];
+        let paths = vec![
+            "$.a.b.c", "$.b", "$.c.a", ".d", "$[0]", "$.a", "null", "null",
+        ];
+        let expected = [
+            Some(false),
+            Some(true),
+            Some(true),
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+        ];
 
         let jsonbs = json_strings
             .iter()
@@ -162,11 +179,16 @@ mod tests {
             .eval(FunctionContext::default(), &args)
             .unwrap();
 
-        assert_eq!(4, vector.len());
-        for (i, gt) in results.iter().enumerate() {
+        assert_eq!(8, vector.len());
+        for (i, gt) in expected.iter().enumerate() {
             let result = vector.get_ref(i);
-            let result = result.as_boolean().unwrap().unwrap();
-            assert_eq!(*gt, result);
+            if let Some(real) = gt {
+                assert!(!result.is_null());
+                let val = result.as_boolean().unwrap().unwrap();
+                assert_eq!(val, *real);
+            } else {
+                assert!(result.is_null());
+            }
         }
     }
 }
