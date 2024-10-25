@@ -201,12 +201,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86fdf8605db99b54d3cd748a44c6d04df638eb5dafb219b135d0149bd0db01f6"
 
 [[package]]
-name = "anymap"
-version = "1.0.0-beta.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f1f8f5a6f3d50d89e3797d7593a50f96bb2aaa20ca0cc7be1fb673232c91d72"
-
-[[package]]
 name = "anymap2"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6427,16 +6421,6 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd#80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd"
-dependencies = [
- "anymap",
- "once_cell",
- "parking_lot 0.12.3",
-]
-
-[[package]]
-name = "meter-core"
-version = "0.1.0"
 source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac#a10facb353b41460eeb98578868ebf19c2084fac"
 dependencies = [
  "anymap2",
@@ -6447,9 +6431,9 @@ dependencies = [
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd#80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac#a10facb353b41460eeb98578868ebf19c2084fac"
 dependencies = [
- "meter-core 0.1.0 (git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd)",
+ "meter-core",
 ]
 
 [[package]]
@@ -7614,7 +7598,7 @@ dependencies = [
  "futures-util",
  "lazy_static",
  "meta-client",
- "meter-core 0.1.0 (git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac)",
+ "meter-core",
  "meter-macros",
  "moka",
  "object-store",
@@ -9018,7 +9002,7 @@ dependencies = [
  "humantime",
  "itertools 0.10.5",
  "lazy_static",
- "meter-core 0.1.0 (git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac)",
+ "meter-core",
  "meter-macros",
  "num",
  "num-traits",
@@ -10903,7 +10887,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "derive_builder 0.12.0",
- "meter-core 0.1.0 (git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac)",
+ "meter-core",
  "snafu 0.8.5",
  "sql",
 ]
