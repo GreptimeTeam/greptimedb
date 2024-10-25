@@ -15,7 +15,7 @@
 use common_query::AddColumnLocation;
 use snafu::ResultExt;
 use sqlparser::keywords::Keyword;
-use sqlparser::parser::ParserError;
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::Token;
 
 use crate::error::{self, Result};
@@ -74,44 +74,13 @@ impl ParserContext<'_> {
                 )));
             }
         } else if self.consume_token("MODIFY") {
-            // Modify column type
-            if self.parser.parse_keyword(Keyword::COLUMN) {
-                let column_name =
-                    Self::canonicalize_identifier(self.parser.parse_identifier(false)?);
-                let target_type = self.parser.parse_data_type()?;
+            let _ = self.parser.parse_keyword(Keyword::COLUMN);
+            let column_name = Self::canonicalize_identifier(self.parser.parse_identifier(false)?);
+            let target_type = self.parser.parse_data_type()?;
 
-                AlterTableOperation::ChangeColumnType {
-                    column_name,
-                    target_type,
-                }
-            } else if self.consume_token("OPTIONS") {
-                // Modify table attributes.
-                let mut options = vec![];
-                loop {
-                    let key = self.parser.parse_literal_string()?;
-                    self.parser.expect_token(&Token::Eq)?;
-                    let value = if self.parser.parse_keyword(Keyword::NULL) {
-                        "".to_string()
-                    } else if let Ok(present) = self.parser.parse_literal_string() {
-                        present
-                    } else {
-                        return Err(ParserError::ParserError(format!(
-                            "Unexpected option value for alter table statements, expect string literal or NULL, got: `{}`",
-                            self.parser.next_token()
-                        )));
-                    };
-
-                    options.push(ChangeTableOption { key, value });
-                    if !self.parser.consume_token(&Token::Comma) {
-                        break;
-                    }
-                }
-                AlterTableOperation::ChangeTableOptions { options }
-            } else {
-                return Err(ParserError::ParserError(format!(
-                    "Expect `COLUMN` or `OPTIONS` after `MODIFY`, got: `{}`",
-                    self.parser.next_token()
-                )));
+            AlterTableOperation::ChangeColumnType {
+                column_name,
+                target_type,
             }
         } else if self.parser.parse_keyword(Keyword::RENAME) {
             let new_table_name_obj_raw = self.parse_object_name()?;
@@ -125,6 +94,14 @@ impl ParserContext<'_> {
                 }
             };
             AlterTableOperation::RenameTable { new_table_name }
+        } else if self.parser.parse_keyword(Keyword::SET) {
+            let options = self
+                .parser
+                .parse_comma_separated(parse_string_options)?
+                .into_iter()
+                .map(|(key, value)| ChangeTableOption { key, value })
+                .collect();
+            AlterTableOperation::ChangeTableOptions { options }
         } else {
             return Err(ParserError::ParserError(format!(
                 "expect keyword ADD or DROP or MODIFY or RENAME after ALTER TABLE, found {}",
@@ -133,6 +110,22 @@ impl ParserContext<'_> {
         };
         Ok(AlterTable::new(table_name, alter_operation))
     }
+}
+
+fn parse_string_options(parser: &mut Parser) -> std::result::Result<(String, String), ParserError> {
+    let name = parser.parse_literal_string()?;
+    parser.expect_token(&Token::Eq)?;
+    let value = if parser.parse_keyword(Keyword::NULL) {
+        "".to_string()
+    } else if let Ok(v) = parser.parse_literal_string() {
+        v
+    } else {
+        return Err(ParserError::ParserError(format!(
+            "Unexpected option value for alter table statements, expect string literal or NULL, got: `{}`",
+            parser.next_token()
+        )));
+    };
+    Ok((name, value))
 }
 
 #[cfg(test)]
@@ -459,25 +452,19 @@ mod tests {
 
     #[test]
     fn test_parse_alter_column() {
+        check_parse_alter_table("ALTER TABLE test_table SET 'a'='A';", &[("a", "A")]);
         check_parse_alter_table(
-            "ALTER TABLE test_table MODIFY OPTIONS 'a'='A';",
-            &[("a", "A")],
-        );
-        check_parse_alter_table(
-            "ALTER TABLE test_table MODIFY OPTIONS 'a'='A','b'='B'",
+            "ALTER TABLE test_table SET 'a'='A','b'='B'",
             &[("a", "A"), ("b", "B")],
         );
         check_parse_alter_table(
-            "ALTER TABLE test_table MODIFY OPTIONS 'a'='A','b'='B','c'='C';",
+            "ALTER TABLE test_table SET 'a'='A','b'='B','c'='C';",
             &[("a", "A"), ("b", "B"), ("c", "C")],
         );
-        check_parse_alter_table(
-            "ALTER TABLE test_table MODIFY OPTIONS 'a'=NULL;",
-            &[("a", "")],
-        );
+        check_parse_alter_table("ALTER TABLE test_table SET 'a'=NULL;", &[("a", "")]);
 
         ParserContext::create_with_dialect(
-            "ALTER TABLE test_table MODIFY a INTEGER",
+            "ALTER TABLE test_table SET a INTEGER",
             &GreptimeDbDialect {},
             ParseOptions::default(),
         )

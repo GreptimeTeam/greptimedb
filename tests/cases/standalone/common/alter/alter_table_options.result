@@ -2,7 +2,7 @@ CREATE TABLE ato(i INTEGER, j TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
-ALTER TABLE ato MODIFY OPTIONS 'ttl'='1d';
+ALTER TABLE ato SET 'ttl'='1d';
 
 Affected Rows: 0
 
@@ -23,7 +23,7 @@ SHOW CREATE TABLE ato;
 |       | )                                  |
 +-------+------------------------------------+
 
-ALTER TABLE ato MODIFY OPTIONS 'ttl'='2d';
+ALTER TABLE ato SET 'ttl'='2d';
 
 Affected Rows: 0
 
@@ -44,7 +44,7 @@ SHOW CREATE TABLE ato;
 |       | )                                  |
 +-------+------------------------------------+
 
-ALTER TABLE ato MODIFY OPTIONS 'ttl'=NULL;
+ALTER TABLE ato SET 'ttl'=NULL;
 
 Affected Rows: 0
 
@@ -63,7 +63,7 @@ SHOW CREATE TABLE ato;
 |       |                                    |
 +-------+------------------------------------+
 
-ALTER TABLE ato MODIFY OPTIONS 'ttl'='0d';
+ALTER TABLE ato SET 'ttl'='0d';
 
 Affected Rows: 0
 
