@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["topic_manager","topic_selector"]};

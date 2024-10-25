@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DOWN_SECONDS","INIT_CAPACITY","IS_LEADER","PEER_ADDR","PEER_ID","REGION_ID","STATUS"],"struct":["InformationSchemaRegionPeers","InformationSchemaRegionPeersBuilder"]};

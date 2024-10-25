@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["count_wildcard","parallelize_scan","remove_duplicate","scan_hint","string_normalization","type_conversion"],"trait":["ExtensionAnalyzerRule"]};

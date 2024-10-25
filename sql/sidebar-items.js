@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COLUMN_FULLTEXT_OPT_KEY_ANALYZER","COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE","ENGINE","MAXVALUE","TQL"],"mod":["ast","dialect","error","parser","parsers","statements","util"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ConvertError","FilterPushDownType","TableInfoBuilderError","TableMetaBuilderError","TableType"],"struct":["RawTableInfo","RawTableMeta","SplitResult","TableIdent","TableInfo","TableInfoBuilder","TableMeta","TableMetaBuilder"],"type":["ConvertResult","TableId","TableInfoRef","TableVersion"]};

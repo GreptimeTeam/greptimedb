@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["servers",[["impl&lt;S&gt; FromRequestParts&lt;S&gt; for <a class=\"struct\" href=\"servers/http/otlp/struct.PipelineInfo.html\" title=\"struct servers::http::otlp::PipelineInfo\">PipelineInfo</a><div class=\"where\">where\n    S: <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/marker/trait.Send.html\" title=\"trait core::marker::Send\">Send</a> + <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html\" title=\"trait core::marker::Sync\">Sync</a>,</div>"],["impl&lt;S&gt; FromRequestParts&lt;S&gt; for <a class=\"struct\" href=\"servers/http/otlp/struct.SelectInfoWrapper.html\" title=\"struct servers::http::otlp::SelectInfoWrapper\">SelectInfoWrapper</a><div class=\"where\">where\n    S: <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/marker/trait.Send.html\" title=\"trait core::marker::Send\">Send</a> + <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html\" title=\"trait core::marker::Sync\">Sync</a>,</div>"],["impl&lt;S&gt; FromRequestParts&lt;S&gt; for <a class=\"struct\" href=\"servers/http/otlp/struct.TableInfo.html\" title=\"struct servers::http::otlp::TableInfo\">TableInfo</a><div class=\"where\">where\n    S: <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/marker/trait.Send.html\" title=\"trait core::marker::Send\">Send</a> + <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html\" title=\"trait core::marker::Sync\">Sync</a>,</div>"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[1516]}

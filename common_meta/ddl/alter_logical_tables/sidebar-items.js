@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AlterTablesState"],"mod":["check","metadata","region_request","table_cache_keys","update_metadata"],"struct":["AlterLogicalTablesProcedure","AlterTablesData"]};

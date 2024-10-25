@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INITIAL_BUILDER_CAPACITY"],"fn":["primary_key_schema","prune_primary_key"],"struct":["Iter","LocalStats","Metrics","Series","SeriesSet","TimeSeriesIterBuilder","TimeSeriesMemtable","TimeSeriesMemtableBuilder","ValueBuilder","Values"],"type":["SeriesRwLockMap"]};

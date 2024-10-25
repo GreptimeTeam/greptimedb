@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["copr","py_recordbatch","utils","vector"]};
