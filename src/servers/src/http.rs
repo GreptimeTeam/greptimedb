@@ -819,7 +819,7 @@ impl HttpServer {
             .route("/query_range", routing::post(range_query).get(range_query))
             .route("/labels", routing::post(labels_query).get(labels_query))
             .route("/series", routing::post(series_query).get(series_query))
-            .route("/parse_query", routing::get(parse_query))
+            .route("/parse_query", routing::post(parse_query).get(parse_query))
             .route(
                 "/label/:label_name/values",
                 routing::get(label_values_query),
