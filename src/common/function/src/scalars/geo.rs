@@ -48,6 +48,7 @@ impl GeoFunctions {
         registry.register(Arc::new(h3::H3CellToChildrenSize));
         registry.register(Arc::new(h3::H3CellToChildPos));
         registry.register(Arc::new(h3::H3ChildPosToCell));
+        registry.register(Arc::new(h3::H3CellContains));
 
         // h3 grid traversal
         registry.register(Arc::new(h3::H3GridDisk));

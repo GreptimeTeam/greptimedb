@@ -38,6 +38,7 @@ static CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     vec![
         ConcreteDataType::int64_datatype(),
         ConcreteDataType::uint64_datatype(),
+        ConcreteDataType::string_datatype(),
     ]
 });
 
@@ -952,6 +953,81 @@ impl Function for H3GridPathCells {
     }
 }
 
+/// Tests if cells contains given cells
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3CellContains;
+
+impl Function for H3CellContains {
+    fn name(&self) -> &str {
+        "h3_cells_contains"
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::boolean_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        let multi_cell_types = vec![
+            ConcreteDataType::list_datatype(ConcreteDataType::int64_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::uint64_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
+            ConcreteDataType::string_datatype(),
+        ];
+
+        let mut signatures = Vec::with_capacity(multi_cell_types.len() * CELL_TYPES.len());
+        for multi_cell_type in &multi_cell_types {
+            for cell_type in CELL_TYPES.as_slice() {
+                signatures.push(TypeSignature::Exact(vec![
+                    multi_cell_type.clone(),
+                    cell_type.clone(),
+                ]));
+            }
+        }
+
+        Signature::one_of(signatures, Volatility::Stable)
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure_columns_n!(columns, 2);
+
+        let cells_vec = &columns[0];
+        let cell_this_vec = &columns[1];
+
+        let size = cell_this_vec.len();
+        let mut results = BooleanVectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let mut result = None;
+            match (
+                cells_from_value(cells_vec.get(i))?,
+                cell_from_value(cell_this_vec.get(i))?,
+            ) {
+                (cells, Some(cell_this)) => {
+                    result = Some(false);
+
+                    for cell_that in cells.iter() {
+                        // get cell resolution, and find cell_this's parent at
+                        //  this solution, test if cell_that equals the parent
+                        let resolution = cell_that.resolution();
+                        if let Some(cell_this_parent) = cell_this.parent(resolution) {
+                            if cell_this_parent == *cell_that {
+                                result = Some(true);
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            results.push(result);
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
 fn value_to_resolution(v: Value) -> Result<Resolution> {
     let r = match v {
         Value::Int8(v) => v as u8,
@@ -1073,7 +1149,100 @@ fn cell_from_value(v: Value) -> Result<Option<CellIndex>> {
                 })
                 .context(error::ExecuteSnafu)?,
         ),
+        Value::String(s) => Some(
+            CellIndex::from_str(s.as_utf8())
+                .map_err(|e| {
+                    BoxedError::new(PlainError::new(
+                        format!("H3 error: {}", e),
+                        StatusCode::EngineExecuteQuery,
+                    ))
+                })
+                .context(error::ExecuteSnafu)?,
+        ),
         _ => None,
     };
     Ok(cell)
+}
+
+/// extract cell array from all possible types including:
+/// - int64 list
+/// - uint64 list
+/// - string list
+/// - comma-separated string
+fn cells_from_value(v: Value) -> Result<Vec<CellIndex>> {
+    match v {
+        Value::List(list) => match list.datatype() {
+            ConcreteDataType::Int64(_) => list
+                .items()
+                .iter()
+                .map(|v| {
+                    if let Value::Int64(v) = v {
+                        CellIndex::try_from(*v as u64)
+                            .map_err(|e| {
+                                BoxedError::new(PlainError::new(
+                                    format!("H3 error: {}", e),
+                                    StatusCode::EngineExecuteQuery,
+                                ))
+                            })
+                            .context(error::ExecuteSnafu)
+                    } else {
+                        unreachable!()
+                    }
+                })
+                .collect::<Result<Vec<CellIndex>>>(),
+            ConcreteDataType::UInt64(_) => list
+                .items()
+                .iter()
+                .map(|v| {
+                    if let Value::UInt64(v) = v {
+                        CellIndex::try_from(*v)
+                            .map_err(|e| {
+                                BoxedError::new(PlainError::new(
+                                    format!("H3 error: {}", e),
+                                    StatusCode::EngineExecuteQuery,
+                                ))
+                            })
+                            .context(error::ExecuteSnafu)
+                    } else {
+                        unreachable!()
+                    }
+                })
+                .collect::<Result<Vec<CellIndex>>>(),
+            ConcreteDataType::String(_) => list
+                .items()
+                .iter()
+                .map(|v| {
+                    if let Value::String(v) = v {
+                        CellIndex::from_str(v.as_utf8().trim())
+                            .map_err(|e| {
+                                BoxedError::new(PlainError::new(
+                                    format!("H3 error: {}", e),
+                                    StatusCode::EngineExecuteQuery,
+                                ))
+                            })
+                            .context(error::ExecuteSnafu)
+                    } else {
+                        unreachable!()
+                    }
+                })
+                .collect::<Result<Vec<CellIndex>>>(),
+            _ => Ok(vec![]),
+        },
+        Value::String(csv) => {
+            let str_seq = csv.as_utf8().split(',');
+            str_seq
+                .map(|v| {
+                    CellIndex::from_str(v.trim())
+                        .map_err(|e| {
+                            BoxedError::new(PlainError::new(
+                                format!("H3 error: {}", e),
+                                StatusCode::EngineExecuteQuery,
+                            ))
+                        })
+                        .context(error::ExecuteSnafu)
+                })
+                .collect::<Result<Vec<CellIndex>>>()
+        }
+        _ => Ok(vec![]),
+    }
 }
