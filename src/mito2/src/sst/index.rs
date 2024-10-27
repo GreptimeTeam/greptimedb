@@ -20,6 +20,7 @@ pub(crate) mod puffin_manager;
 mod statistics;
 mod store;
 
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 
 use common_telemetry::{debug, warn};
@@ -212,13 +213,28 @@ impl<'a> IndexerBuilder<'a> {
             segment_row_count = row_group_size;
         }
 
+        // TODO(zhongzc): currently we only index tag columns, need to support field columns.
+        let indexed_column_ids = self
+            .metadata
+            .primary_key
+            .iter()
+            .filter(|id| {
+                !self
+                    .index_options
+                    .inverted_index
+                    .ignore_column_ids
+                    .contains(id)
+            })
+            .copied()
+            .collect::<HashSet<_>>();
+
         let indexer = InvertedIndexer::new(
             self.file_id,
             self.metadata,
             self.intermediate_manager.clone(),
             self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
-            &self.index_options.inverted_index.ignore_column_ids,
+            indexed_column_ids,
         );
 
         Some(indexer)
