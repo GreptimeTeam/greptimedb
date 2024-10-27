@@ -24,6 +24,7 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
 use datatypes::types::{IntervalType, TimestampType};
@@ -529,6 +530,21 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         )),
         &Type::DATE => Ok(ConcreteDataType::date_datatype()),
         &Type::TIME => Ok(ConcreteDataType::datetime_datatype()),
+        &Type::CHAR_ARRAY => Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::int8_datatype(),
+        )),
+        &Type::INT2_ARRAY => Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::int16_datatype(),
+        )),
+        &Type::INT4_ARRAY => Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::int32_datatype(),
+        )),
+        &Type::INT8_ARRAY => Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::int64_datatype(),
+        )),
+        &Type::VARCHAR_ARRAY => Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::string_datatype(),
+        )),
         _ => server_error::InternalSnafu {
             err_msg: format!("unimplemented datatype {origin:?}"),
         }
@@ -972,6 +988,42 @@ pub(super) fn parameters_to_scalar_values(
                     }
                 } else {
                     ScalarValue::Binary(data.map(|d| d.to_string().into_bytes()))
+                }
+            }
+            &Type::INT2_ARRAY => {
+                let data = portal.parameter::<Vec<i16>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int16))
+                } else {
+                    ScalarValue::Null
+                }
+            }
+            &Type::INT4_ARRAY => {
+                let data = portal.parameter::<Vec<i32>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int32))
+                } else {
+                    ScalarValue::Null
+                }
+            }
+            &Type::INT8_ARRAY => {
+                let data = portal.parameter::<Vec<i64>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int64))
+                } else {
+                    ScalarValue::Null
+                }
+            }
+            &Type::VARCHAR_ARRAY => {
+                let data = portal.parameter::<Vec<String>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Utf8))
+                } else {
+                    ScalarValue::Null
                 }
             }
             _ => Err(invalid_parameter_error(
