@@ -999,26 +999,23 @@ impl Function for H3CellContains {
 
         for i in 0..size {
             let mut result = None;
-            match (
+            if let (cells, Some(cell_this)) = (
                 cells_from_value(cells_vec.get(i))?,
                 cell_from_value(cell_this_vec.get(i))?,
             ) {
-                (cells, Some(cell_this)) => {
-                    result = Some(false);
+                result = Some(false);
 
-                    for cell_that in cells.iter() {
-                        // get cell resolution, and find cell_this's parent at
-                        //  this solution, test if cell_that equals the parent
-                        let resolution = cell_that.resolution();
-                        if let Some(cell_this_parent) = cell_this.parent(resolution) {
-                            if cell_this_parent == *cell_that {
-                                result = Some(true);
-                                break;
-                            }
+                for cell_that in cells.iter() {
+                    // get cell resolution, and find cell_this's parent at
+                    //  this solution, test if cell_that equals the parent
+                    let resolution = cell_that.resolution();
+                    if let Some(cell_this_parent) = cell_this.parent(resolution) {
+                        if cell_this_parent == *cell_that {
+                            result = Some(true);
+                            break;
                         }
                     }
                 }
-                _ => {}
             }
 
             results.push(result);
@@ -1186,7 +1183,11 @@ fn cells_from_value(v: Value) -> Result<Vec<CellIndex>> {
                             })
                             .context(error::ExecuteSnafu)
                     } else {
-                        unreachable!()
+                        Err(BoxedError::new(PlainError::new(
+                            "Invalid data type in array".to_string(),
+                            StatusCode::EngineExecuteQuery,
+                        )))
+                        .context(error::ExecuteSnafu)
                     }
                 })
                 .collect::<Result<Vec<CellIndex>>>(),
@@ -1204,7 +1205,11 @@ fn cells_from_value(v: Value) -> Result<Vec<CellIndex>> {
                             })
                             .context(error::ExecuteSnafu)
                     } else {
-                        unreachable!()
+                        Err(BoxedError::new(PlainError::new(
+                            "Invalid data type in array".to_string(),
+                            StatusCode::EngineExecuteQuery,
+                        )))
+                        .context(error::ExecuteSnafu)
                     }
                 })
                 .collect::<Result<Vec<CellIndex>>>(),
@@ -1222,7 +1227,11 @@ fn cells_from_value(v: Value) -> Result<Vec<CellIndex>> {
                             })
                             .context(error::ExecuteSnafu)
                     } else {
-                        unreachable!()
+                        Err(BoxedError::new(PlainError::new(
+                            "Invalid data type in array".to_string(),
+                            StatusCode::EngineExecuteQuery,
+                        )))
+                        .context(error::ExecuteSnafu)
                     }
                 })
                 .collect::<Result<Vec<CellIndex>>>(),
