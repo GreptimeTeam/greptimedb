@@ -854,6 +854,13 @@ impl RawTableInfo {
         self.meta.primary_key_indices = primary_key_indices;
         self.meta.value_indices = value_indices;
     }
+
+    /// Extracts region options from table info.
+    ///
+    /// All "region options" are actually a copy of table options for redundancy.
+    pub fn to_region_options(&self) -> HashMap<String, String> {
+        HashMap::from(&self.meta.options)
+    }
 }
 
 impl From<TableInfo> for RawTableInfo {
