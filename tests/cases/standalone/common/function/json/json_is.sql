@@ -22,19 +22,19 @@ SELECT json_is_float(parse_json('1'));
 -- test json_is functions in table rows and WHERE clause --
 CREATE TABLE jsons(j JSON, ts timestamp time index);
 
-INSERT INTO jsons VALUES('{"a": 1}', 1);
+INSERT INTO jsons VALUES(parse_json('{"a": 1}'), 1);
 
-INSERT INTO jsons VALUES('[1, 2, 3]', 2);
+INSERT INTO jsons VALUES(parse_json('[1, 2, 3]'), 2);
 
-INSERT INTO jsons VALUES('1', 3);
+INSERT INTO jsons VALUES(parse_json('1'), 3);
 
-INSERT INTO jsons VALUES('true', 4);
+INSERT INTO jsons VALUES(parse_json('true'), 4);
 
-INSERT INTO jsons VALUES('null', 5);
+INSERT INTO jsons VALUES(parse_json('null'), 5);
 
-INSERT INTO jsons VALUES('1.2', 6);
+INSERT INTO jsons VALUES(parse_json('1.2'), 6);
 
-INSERT INTO jsons VALUES('"foo"', 7);
+INSERT INTO jsons VALUES(parse_json('"foo"'), 7);
 
 SELECT json_to_string(j) FROM jsons WHERE json_is_object(j);
 

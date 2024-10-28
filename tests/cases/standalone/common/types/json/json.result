@@ -41,19 +41,19 @@ INSERT INTO jsons VALUES('[null]', 0),
 
 Affected Rows: 12
 
-INSERT INTO jsons VALUES('[null]', 12),
-('[true]', 13),
-('[false]', 14),
-('[0]', 15),
-('["foo"]', 16),
-('[]', 17),
-('{}', 18),
-('[0,1]', 19),
-('{"foo":"bar"}', 20),
-('{"a":null,"foo":"bar"}', 21),
-('[-1]', 22),
-('[-2147483648]', 23),
-('{"entities": {
+INSERT INTO jsons VALUES(parse_json('[null]'), 12),
+(parse_json('[true]'), 13),
+(parse_json('[false]'), 14),
+(parse_json('[0]'), 15),
+(parse_json('["foo"]'), 16),
+(parse_json('[]'), 17),
+(parse_json('{}'), 18),
+(parse_json('[0,1]'), 19),
+(parse_json('{"foo":"bar"}'), 20),
+(parse_json('{"a":null,"foo":"bar"}'), 21),
+(parse_json('[-1]'), 22),
+(parse_json('[-2147483648]'), 23),
+(parse_json('{"entities": {
             "description": {
                 "urls": [
                     {
@@ -76,7 +76,7 @@ INSERT INTO jsons VALUES('[null]', 12),
                     }
                 ]
             }
-        }}', 24);
+        }}'), 24);
 
 Affected Rows: 13
 
@@ -117,13 +117,13 @@ DELETE FROM jsons;
 
 Affected Rows: 25
 
-INSERT INTO jsons VALUES('{"a":1, "b":2, "c":3', 4);
+INSERT INTO jsons VALUES(parse_json('{"a":1, "b":2, "c":3'), 4);
 
-Error: 2000(InvalidSyntax), Failed to parse value: Failed to parse {"a":1, "b":2, "c":3 to Json value
+Error: 3001(EngineExecuteQuery), DataFusion error: Invalid function args: Cannot convert the string to json, have: {"a":1, "b":2, "c":3
 
-INSERT INTO jsons VALUES('Morning my friends, have a nice day :)', 5);
+INSERT INTO jsons VALUES(parse_json('Morning my friends, have a nice day :)'), 5);
 
-Error: 2000(InvalidSyntax), Failed to parse value: Failed to parse Morning my friends, have a nice day :) to Json value
+Error: 3001(EngineExecuteQuery), DataFusion error: Invalid function args: Cannot convert the string to json, have: Morning my friends, have a nice day :)
 
 SELECT json_to_string(j), t FROM jsons;
 
