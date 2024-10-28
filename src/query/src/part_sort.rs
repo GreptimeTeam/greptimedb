@@ -233,7 +233,7 @@ macro_rules! array_check_helper {
         // note that PartitionRange is left inclusive and right exclusive
         if !(min >= cur_min && max < cur_max) {
             internal_err!(
-                "Sort column min/max value out of partition range: [{:?}, {:?}] not in [{:?}, {:?}]",
+                "Sort column min/max value out of partition range: sort_column.min_max=[{:?}, {:?}] not in PartitionRange=[{:?}, {:?}]",
                 min,
                 max,
                 cur_min,
@@ -273,9 +273,9 @@ impl PartSortStream {
     /// Sort and clear the buffer and return the sorted record batch
     ///
     /// this function should return None if RecordBatch is empty
-    fn sort_buffer(&mut self) -> datafusion_common::Result<Option<DfRecordBatch>> {
-        if self.buffer.iter().map(|r| r.num_rows()).sum::<usize>() == 0 {
-            return Ok(None);
+    fn sort_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
+        if self.buffer.is_empty() {
+            return Ok(DfRecordBatch::new_empty(self.schema.clone()));
         }
         let mut sort_columns = Vec::with_capacity(self.buffer.len());
         let mut opt = None;
@@ -353,7 +353,7 @@ impl PartSortStream {
         drop(full_input);
         // here remove both buffer and full_input memory
         self.reservation.shrink(2 * total_mem);
-        Ok(Some(sorted))
+        Ok(sorted)
     }
 
     pub fn poll_next_inner(
@@ -365,7 +365,7 @@ impl PartSortStream {
                 if self.buffer.is_empty() {
                     return Poll::Ready(None);
                 } else {
-                    return Poll::Ready(self.sort_buffer().transpose());
+                    return Poll::Ready(Some(self.sort_buffer()));
                 }
             }
             let res = self.input.as_mut().poll_next(cx);
@@ -373,13 +373,13 @@ impl PartSortStream {
                 Poll::Ready(Some(Ok(batch))) => {
                     if batch.num_rows() == 0 {
                         // mark end of current PartitionRange
-                        let sorted_batch = self.sort_buffer().transpose();
+                        let sorted_batch = self.sort_buffer()?;
                         self.cur_part_idx += 1;
-                        if sorted_batch.is_none() {
+                        if sorted_batch.num_rows() == 0 {
                             // Current part is empty, continue polling next part.
                             continue;
                         }
-                        return Poll::Ready(sorted_batch);
+                        return Poll::Ready(Some(Ok(sorted_batch)));
                     }
                     self.buffer.push(batch);
                     // keep polling until boundary(a empty RecordBatch) is reached
@@ -492,18 +492,20 @@ mod test {
                 let mut sort_data = vec![];
                 let mut batches = vec![];
                 for _batch_idx in 0..rng.usize(1..batch_cnt_bound) {
-                    let cnt = rng.usize(0..batch_size_bound) + 2;
-                    let iter = 0..rng.usize(1..cnt);
+                    let cnt = rng.usize(0..batch_size_bound) + 1;
+                    let iter = 0..rng.usize(0..cnt);
                     let data_gen = iter
                         .map(|_| rng.i64(start.value()..end.value()))
                         .collect_vec();
+                    if data_gen.is_empty() {
+                        // current batch is empty, skip
+                        continue;
+                    }
                     sort_data.extend(data_gen.clone());
                     let arr = new_ts_array(unit.clone(), data_gen.clone());
-
                     let batch = DfRecordBatch::try_new(schema.clone(), vec![arr]).unwrap();
                     batches.push(batch);
                 }
-                assert!(batches.iter().all(|i| i.num_rows() >= 1));
 
                 let range = PartitionRange {
                     start,
@@ -518,7 +520,9 @@ mod test {
                 } else {
                     sort_data.sort();
                 }
-
+                if sort_data.is_empty() {
+                    continue;
+                }
                 output_data.push(sort_data);
             }
 
@@ -555,6 +559,26 @@ mod test {
                 ],
                 true,
                 vec![vec![9, 8, 7, 6, 5], vec![8, 7, 6, 5, 4, 3, 2, 1]],
+            ),
+            (
+                TimeUnit::Millisecond,
+                vec![
+                    ((5, 10), vec![]),
+                    ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
+                ],
+                true,
+                vec![vec![8, 7, 6, 5, 4, 3, 2, 1]],
+            ),
+            (
+                TimeUnit::Millisecond,
+                vec![
+                    ((15, 20), vec![vec![17, 18, 19]]),
+                    ((10, 15), vec![]),
+                    ((5, 10), vec![]),
+                    ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
+                ],
+                true,
+                vec![vec![19, 18, 17], vec![8, 7, 6, 5, 4, 3, 2, 1]],
             ),
         ];
 
@@ -648,8 +672,9 @@ mod test {
                     buf.append(&mut rb_json);
                     buf.push(b',');
                 }
-                let buf = String::from_utf8_lossy(&buf);
-                full_msg += &format!("case_id:{case_id}, real_output: [{buf}]");
+                // TODO(discord9): better ways to print buf
+                let _buf = String::from_utf8_lossy(&buf);
+                full_msg += &format!("case_id:{case_id}, real_output");
             }
             {
                 let mut buf = Vec::with_capacity(10 * real_output.len());
@@ -661,8 +686,8 @@ mod test {
                     buf.append(&mut rb_json);
                     buf.push(b',');
                 }
-                let buf = String::from_utf8_lossy(&buf);
-                full_msg += &format!("case_id:{case_id}, expected_output: [{buf}]");
+                let _buf = String::from_utf8_lossy(&buf);
+                full_msg += &format!("case_id:{case_id}, expected_output");
             }
             panic!(
                 "case_{} failed, opt: {:?}, full msg: {}",
