@@ -208,10 +208,6 @@ async fn insert_values<R: Rng + 'static>(
     let insert_expr = generate_insert_expr(rows, rng, logical_table_ctx.clone())?;
     let translator = InsertIntoExprTranslator;
     let sql = translator.translate(&insert_expr)?;
-    if sql.contains("non") {
-        info!("Insert SQL: {sql}");
-    }
-
     let result = ctx
         .greptime
         // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
