@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(option_get_or_insert_default)]
 #![feature(let_chains)]
 #![feature(map_try_insert)]
 

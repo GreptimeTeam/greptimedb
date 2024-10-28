@@ -19,7 +19,7 @@ use index::inverted_index::Bytes;
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> InvertedIndexApplierBuilder<'a> {
+impl InvertedIndexApplierBuilder<'_> {
     /// Collects a comparison expression in the form of
     /// `column < lit`, `column > lit`, `column <= lit`, `column >= lit`,
     /// `lit < column`, `lit > column`, `lit <= column`, `lit >= column`.

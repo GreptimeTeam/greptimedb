@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashSet};
+use std::fmt::{Debug, Display};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -113,6 +114,34 @@ impl HeartbeatAccumulator {
     }
 }
 
+#[derive(Copy, Clone)]
+pub struct PusherId {
+    pub role: Role,
+    pub id: u64,
+}
+
+impl Debug for PusherId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}-{}", self.role, self.id)
+    }
+}
+
+impl Display for PusherId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}-{}", self.role, self.id)
+    }
+}
+
+impl PusherId {
+    pub fn new(role: Role, id: u64) -> Self {
+        Self { role, id }
+    }
+
+    pub fn string_key(&self) -> String {
+        format!("{}-{}", self.role as i32, self.id)
+    }
+}
+
 /// The pusher of the heartbeat response.
 pub struct Pusher {
     sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
@@ -154,10 +183,11 @@ impl Pusher {
 pub struct Pushers(Arc<RwLock<BTreeMap<String, Pusher>>>);
 
 impl Pushers {
-    async fn push(&self, pusher_id: &str, mailbox_message: MailboxMessage) -> Result<()> {
+    async fn push(&self, pusher_id: PusherId, mailbox_message: MailboxMessage) -> Result<()> {
+        let pusher_id = pusher_id.string_key();
         let pushers = self.0.read().await;
         let pusher = pushers
-            .get(pusher_id)
+            .get(&pusher_id)
             .context(error::PusherNotFoundSnafu { pusher_id })?;
         pusher
             .push(HeartbeatResponse {
@@ -234,21 +264,19 @@ pub struct HeartbeatHandlerGroup {
 
 impl HeartbeatHandlerGroup {
     /// Registers the heartbeat response [`Pusher`] with the given key to the group.
-    pub async fn register_pusher(&self, key: impl AsRef<str>, pusher: Pusher) {
-        let key = key.as_ref();
+    pub async fn register_pusher(&self, pusher_id: PusherId, pusher: Pusher) {
         METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
-        info!("Pusher register: {}", key);
-        let _ = self.pushers.insert(key.to_string(), pusher).await;
+        info!("Pusher register: {}", pusher_id);
+        let _ = self.pushers.insert(pusher_id.string_key(), pusher).await;
     }
 
     /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
     ///
     /// Returns the [`Pusher`] if it exists.
-    pub async fn deregister_push(&self, key: impl AsRef<str>) -> Option<Pusher> {
-        let key = key.as_ref();
+    pub async fn deregister_push(&self, pusher_id: PusherId) -> Option<Pusher> {
         METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
-        info!("Pusher unregister: {}", key);
-        self.pushers.remove(key).await
+        info!("Pusher unregister: {}", pusher_id);
+        self.pushers.remove(&pusher_id.string_key()).await
     }
 
     /// Returns the [`Pushers`] of the group.
@@ -417,7 +445,7 @@ impl Mailbox for HeartbeatMailbox {
         let _ = self.timeouts.insert(message_id, deadline);
         self.timeout_notify.notify_one();
 
-        self.pushers.push(&pusher_id, msg).await?;
+        self.pushers.push(pusher_id, msg).await?;
 
         Ok(MailboxReceiver::new(message_id, rx, *ch))
     }
@@ -720,7 +748,7 @@ mod tests {
     use common_meta::sequence::SequenceBuilder;
     use tokio::sync::mpsc;
 
-    use super::{HeartbeatHandlerGroupBuilder, Pushers};
+    use super::{HeartbeatHandlerGroupBuilder, PusherId, Pushers};
     use crate::error;
     use crate::handler::collect_stats_handler::CollectStatsHandler;
     use crate::handler::response_header_handler::ResponseHeaderHandler;
@@ -761,11 +789,10 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             ..Default::default()
         };
+        let pusher_id = PusherId::new(Role::Datanode, datanode_id);
         let pusher: Pusher = Pusher::new(pusher_tx, &res_header);
         let handler_group = HeartbeatHandlerGroup::default();
-        handler_group
-            .register_pusher(format!("{}-{}", Role::Datanode as i32, datanode_id), pusher)
-            .await;
+        handler_group.register_pusher(pusher_id, pusher).await;
 
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let seq = SequenceBuilder::new("test_seq", kv_backend).build();

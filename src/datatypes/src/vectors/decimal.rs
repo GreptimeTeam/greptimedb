@@ -247,7 +247,7 @@ pub struct Decimal128Iter<'a> {
     iter: ArrayIter<&'a Decimal128Array>,
 }
 
-impl<'a> Iterator for Decimal128Iter<'a> {
+impl Iterator for Decimal128Iter<'_> {
     type Item = Option<Decimal128>;
 
     fn next(&mut self) -> Option<Self::Item> {

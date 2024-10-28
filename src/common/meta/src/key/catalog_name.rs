@@ -35,7 +35,7 @@ pub struct CatalogNameKey<'a> {
     pub catalog: &'a str,
 }
 
-impl<'a> Default for CatalogNameKey<'a> {
+impl Default for CatalogNameKey<'_> {
     fn default() -> Self {
         Self {
             catalog: DEFAULT_CATALOG_NAME,

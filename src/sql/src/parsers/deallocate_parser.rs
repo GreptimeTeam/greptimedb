@@ -18,7 +18,7 @@ use sqlparser::keywords::Keyword;
 use crate::error::{Result, SyntaxSnafu};
 use crate::parser::ParserContext;
 
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     /// Parses MySQL style 'PREPARE stmt_name' into a stmt_name string.
     pub(crate) fn parse_deallocate(&mut self) -> Result<String> {
         self.parser

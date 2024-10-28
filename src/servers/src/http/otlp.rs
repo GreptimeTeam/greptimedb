@@ -34,13 +34,14 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 use pipeline::util::to_pipeline_version;
-use pipeline::PipelineWay;
+use pipeline::{PipelineWay, SelectInfo};
 use prost::Message;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 
+use super::header::constants::GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME;
 use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
-use crate::error::{self, Result};
+use crate::error::{self, PipelineSnafu, Result};
 use crate::http::header::constants::{
     GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME, GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
     GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
@@ -181,13 +182,41 @@ where
     }
 }
 
+pub struct SelectInfoWrapper(SelectInfo);
+
+#[async_trait]
+impl<S> FromRequestParts<S> for SelectInfoWrapper
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
+        let select = parts.headers.get(GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME);
+
+        match select {
+            Some(name) => {
+                let select_header =
+                    pipeline_header_error(name, GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME)?;
+                if select_header.is_empty() {
+                    Ok(SelectInfoWrapper(Default::default()))
+                } else {
+                    Ok(SelectInfoWrapper(SelectInfo::from(select_header)))
+                }
+            }
+            None => Ok(SelectInfoWrapper(Default::default())),
+        }
+    }
+}
+
 #[axum_macros::debug_handler]
-#[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "traces"))]
+#[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "logs"))]
 pub async fn logs(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(mut query_ctx): Extension<QueryContext>,
     pipeline_info: PipelineInfo,
     table_info: TableInfo,
+    SelectInfoWrapper(select_info): SelectInfoWrapper,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportLogsServiceResponse>> {
     let db = query_ctx.get_db_string();
@@ -198,15 +227,9 @@ pub async fn logs(
         .start_timer();
     let request = ExportLogsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
 
-    let pipeline_way;
-    if let Some(pipeline_name) = &pipeline_info.pipeline_name {
+    let pipeline_way = if let Some(pipeline_name) = &pipeline_info.pipeline_name {
         let pipeline_version =
-            to_pipeline_version(pipeline_info.pipeline_version).map_err(|_| {
-                error::InvalidParameterSnafu {
-                    reason: GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
-                }
-                .build()
-            })?;
+            to_pipeline_version(pipeline_info.pipeline_version).context(PipelineSnafu)?;
         let pipeline = match handler
             .get_pipeline(pipeline_name, pipeline_version, query_ctx.clone())
             .await
@@ -216,10 +239,10 @@ pub async fn logs(
                 return Err(e);
             }
         };
-        pipeline_way = PipelineWay::Custom(pipeline);
+        PipelineWay::Custom(pipeline)
     } else {
-        pipeline_way = PipelineWay::Identity;
-    }
+        PipelineWay::OtlpLog(Box::new(select_info))
+    };
 
     handler
         .logs(request, pipeline_way, table_info.table_name, query_ctx)

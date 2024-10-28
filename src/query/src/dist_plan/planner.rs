@@ -40,6 +40,7 @@ use crate::error::{CatalogSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
 
 /// Planner for convert merge sort logical plan to physical plan
+///
 /// it is currently a fallback to sort, and doesn't change the execution plan:
 /// `MergeSort(MergeScan) -> Sort(MergeScan) - to physical plan -> ...`
 /// It should be applied after `DistExtensionPlanner`

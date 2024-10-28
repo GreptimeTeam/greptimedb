@@ -33,6 +33,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to build runtime rate limiter"))]
+    BuildRuntimeRateLimiter {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: ratelimit::Error,
+    },
+
     #[snafu(display("Repeated task {} is already started", name))]
     IllegalState {
         name: String,

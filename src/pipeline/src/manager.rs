@@ -26,6 +26,7 @@ pub mod table;
 pub mod util;
 
 /// Pipeline version. An optional timestamp with nanosecond precision.
+///
 /// If the version is None, it means the latest version of the pipeline.
 /// User can specify the version by providing a timestamp string formatted as iso8601.
 /// When it used in cache key, it will be converted to i64 meaning the number of nanoseconds since the epoch.

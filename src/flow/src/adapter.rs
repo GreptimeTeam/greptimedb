@@ -271,10 +271,17 @@ impl FlowWorkerManager {
                         let rows_proto: Vec<v1::Row> = insert
                             .into_iter()
                             .map(|(mut row, _ts)| {
-                                // `update_at` col
-                                row.extend([Value::from(common_time::Timestamp::new_millisecond(
-                                    now,
-                                ))]);
+                                // extend `update_at` col if needed
+                                // if schema include a millisecond timestamp here, and result row doesn't have it, add it
+                                if row.len() < proto_schema.len()
+                                    && proto_schema[row.len()].datatype
+                                        == greptime_proto::v1::ColumnDataType::TimestampMillisecond
+                                            as i32
+                                {
+                                    row.extend([Value::from(
+                                        common_time::Timestamp::new_millisecond(now),
+                                    )]);
+                                }
                                 // ts col, if auto create
                                 if is_ts_placeholder {
                                     ensure!(
@@ -290,6 +297,17 @@ impl FlowWorkerManager {
                                     row.extend([Value::from(
                                         common_time::Timestamp::new_millisecond(0),
                                     )]);
+                                }
+                                if row.len() != proto_schema.len() {
+                                    InternalSnafu {
+                                        reason: format!(
+                                            "Flow output row length mismatch, expect {} got {}, the columns in schema are: {:?}",
+                                            proto_schema.len(),
+                                            row.len(),
+                                            proto_schema.iter().map(|c|&c.column_name).collect_vec()
+                                        ),
+                                    }
+                                    .fail()?;
                                 }
                                 Ok(row.into())
                             })

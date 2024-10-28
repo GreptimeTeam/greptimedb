@@ -134,7 +134,7 @@ impl PredicatesIndexApplier {
     fn bitmap_full_range(metadata: &InvertedIndexMetas) -> BitVec {
         let total_count = metadata.total_row_count;
         let segment_count = metadata.segment_row_count;
-        let len = (total_count + segment_count - 1) / segment_count;
+        let len = total_count.div_ceil(segment_count);
         BitVec::repeat(true, len as _)
     }
 }

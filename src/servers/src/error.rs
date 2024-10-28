@@ -36,6 +36,15 @@ use crate::http::error_result::status_code_to_http_status;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to bind address: {}", addr))]
+    AddressBind {
+        addr: SocketAddr,
+        #[snafu(source)]
+        error: hyper::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Arrow error"))]
     Arrow {
         #[snafu(source)]
@@ -538,6 +547,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Unsupported json data type for tag: {} {}", key, ty))]
+    UnsupportedJsonDataTypeForTag {
+        key: String,
+        ty: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -558,9 +574,9 @@ impl ErrorExt for Error {
             | Arrow { .. }
             | FileWatch { .. } => StatusCode::Internal,
 
-            AlreadyStarted { .. } | InvalidPromRemoteReadQueryResult { .. } => {
-                StatusCode::IllegalState
-            }
+            AddressBind { .. }
+            | AlreadyStarted { .. }
+            | InvalidPromRemoteReadQueryResult { .. } => StatusCode::IllegalState,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 
@@ -603,7 +619,8 @@ impl ErrorExt for Error {
             | ParseJson { .. }
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }
-            | OpenTelemetryLog { .. } => StatusCode::InvalidArguments,
+            | OpenTelemetryLog { .. }
+            | UnsupportedJsonDataTypeForTag { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),

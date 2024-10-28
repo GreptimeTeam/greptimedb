@@ -20,7 +20,7 @@ use index::inverted_index::search::predicate::{InListPredicate, Predicate};
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> InvertedIndexApplierBuilder<'a> {
+impl InvertedIndexApplierBuilder<'_> {
     /// Collects an in list expression in the form of `column IN (lit, lit, ...)`.
     pub(crate) fn collect_inlist(&mut self, inlist: &InList) -> Result<()> {
         if inlist.negated {

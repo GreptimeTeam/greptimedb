@@ -34,7 +34,7 @@ use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan, TypedP
 use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, KeyExpiryManager};
 
-impl<'referred, 'df> Context<'referred, 'df> {
+impl Context<'_, '_> {
     const REDUCE_BATCH: &'static str = "reduce_batch";
     /// Like `render_reduce`, but for batch mode, and only barebone implementation
     /// no support for distinct aggregation for now

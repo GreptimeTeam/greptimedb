@@ -21,7 +21,7 @@ use crate::statements::explain::Explain;
 use crate::statements::statement::Statement;
 
 /// EXPLAIN statement parser implementation
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_explain(&mut self) -> Result<Statement> {
         let explain_statement = self
             .parser

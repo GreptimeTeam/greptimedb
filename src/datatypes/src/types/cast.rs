@@ -82,8 +82,8 @@ pub fn cast_with_opt(
     }
 }
 
-/// Return true if the src_value can be casted to dest_type,
-/// Otherwise, return false.
+/// Return true if the src_value can be casted to dest_type, Otherwise, return false.
+///
 /// Notice: this function does not promise that the `cast_with_opt` will succeed,
 /// it only checks whether the src_value can be casted to dest_type.
 pub fn can_cast_type(src_value: &Value, dest_type: &ConcreteDataType) -> bool {

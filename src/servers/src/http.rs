@@ -53,7 +53,7 @@ use tower_http::trace::TraceLayer;
 use self::authorize::AuthState;
 use self::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
-use crate::error::{AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
+use crate::error::{AddressBindSnafu, AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
 use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
@@ -933,7 +933,8 @@ impl Server for HttpServer {
                 app = configurator.config_http(app);
             }
             let app = self.build(app);
-            let server = axum::Server::bind(&listening)
+            let server = axum::Server::try_bind(&listening)
+                .with_context(|_| AddressBindSnafu { addr: listening })?
                 .tcp_nodelay(true)
                 // Enable TCP keepalive to close the dangling established connections.
                 // It's configured to let the keepalive probes first send after the connection sits

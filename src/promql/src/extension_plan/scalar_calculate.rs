@@ -46,7 +46,8 @@ use crate::error::{ColumnNotFoundSnafu, DataFusionPlanningSnafu, DeserializeSnaf
 /// `ScalarCalculate` is the custom logical plan to calculate
 /// [`scalar`](https://prometheus.io/docs/prometheus/latest/querying/functions/#scalar)
 /// in PromQL, return NaN when have multiple time series.
-/// return the time series as scalar value when only have one time series.
+///
+/// Return the time series as scalar value when only have one time series.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScalarCalculate {
     start: Millisecond,

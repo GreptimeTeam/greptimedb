@@ -226,7 +226,7 @@ pub struct RecordBatchRowIterator<'a> {
 }
 
 impl<'a> RecordBatchRowIterator<'a> {
-    fn new(record_batch: &'a RecordBatch) -> RecordBatchRowIterator {
+    fn new(record_batch: &'a RecordBatch) -> RecordBatchRowIterator<'a> {
         RecordBatchRowIterator {
             record_batch,
             rows: record_batch.df_record_batch.num_rows(),
@@ -236,7 +236,7 @@ impl<'a> RecordBatchRowIterator<'a> {
     }
 }
 
-impl<'a> Iterator for RecordBatchRowIterator<'a> {
+impl Iterator for RecordBatchRowIterator<'_> {
     type Item = Vec<Value>;
 
     fn next(&mut self) -> Option<Self::Item> {

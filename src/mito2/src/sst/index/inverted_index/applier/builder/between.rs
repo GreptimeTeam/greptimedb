@@ -18,7 +18,7 @@ use index::inverted_index::search::predicate::{Bound, Predicate, Range, RangePre
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> InvertedIndexApplierBuilder<'a> {
+impl InvertedIndexApplierBuilder<'_> {
     /// Collects a `BETWEEN` expression in the form of `column BETWEEN lit AND lit`.
     pub(crate) fn collect_between(&mut self, between: &Between) -> Result<()> {
         if between.negated {

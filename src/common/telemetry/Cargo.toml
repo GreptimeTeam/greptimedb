@@ -26,7 +26,7 @@ opentelemetry = { version = "0.21.0", default-features = false, features = [
 opentelemetry-otlp = { version = "0.14.0", features = ["tokio"] }
 opentelemetry-semantic-conventions = "0.13.0"
 opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
-parking_lot = { version = "0.12" }
+parking_lot.workspace = true
 prometheus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
