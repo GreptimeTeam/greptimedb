@@ -189,6 +189,7 @@ async fn validate_values(
         "SELECT {} FROM {} ORDER BY {}",
         column_list, logical_table_ctx.name, primary_keys_column_list
     );
+    info!("Select SQL: {select_sql}");
     let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
     let mut expected_rows =
         replace_default(&insert_expr.values_list, &logical_table_ctx, insert_expr);
@@ -213,6 +214,8 @@ async fn insert_values<R: Rng + 'static>(
         .execute(sql.as_str())
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
+
+    info!("Insert values, result: {result:?}");
 
     ensure!(
         result.rows_affected() == rows as u64,
