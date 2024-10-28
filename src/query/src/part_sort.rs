@@ -373,9 +373,13 @@ impl PartSortStream {
                 Poll::Ready(Some(Ok(batch))) => {
                     if batch.num_rows() == 0 {
                         // mark end of current PartitionRange
-                        let ret = Poll::Ready(self.sort_buffer().transpose());
+                        let sorted_batch = self.sort_buffer().transpose();
                         self.cur_part_idx += 1;
-                        return ret;
+                        if sorted_batch.is_none() {
+                            // Current part is empty, continue polling next part.
+                            continue;
+                        }
+                        return Poll::Ready(sorted_batch);
                     }
                     self.buffer.push(batch);
                     // keep polling until boundary(a empty RecordBatch) is reached
