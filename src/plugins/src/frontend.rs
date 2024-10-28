@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use auth::UserProviderRef;
 use common_base::Plugins;
-use common_plugins::options::PluginOptions;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
 use snafu::ResultExt;
@@ -28,7 +25,6 @@ pub async fn setup_frontend_plugins(
     plugins: &mut Plugins,
     _plugin_options: &[PluginOptions],
     fe_opts: &FrontendOptions,
-    _plugin_options: &mut HashMap<String, Box<dyn PluginOptions>>,
 ) -> Result<()> {
     if let Some(user_provider) = fe_opts.user_provider.as_ref() {
         let provider =

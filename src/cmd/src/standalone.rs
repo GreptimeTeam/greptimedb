@@ -743,7 +743,6 @@ impl InformationExtension for StandaloneInformationExtension {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::default::Default;
     use std::io::Write;
     use std::time::Duration;

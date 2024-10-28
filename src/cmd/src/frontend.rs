@@ -379,7 +379,6 @@ impl StartCommand {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::io::Write;
     use std::time::Duration;
 
