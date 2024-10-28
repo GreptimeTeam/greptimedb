@@ -214,6 +214,11 @@ impl ExecutionPlan for WindowedSortExec {
         Some(self.metrics.clone_inner())
     }
 
+    /// # Explain
+    ///
+    /// This plan needs to be executed on each partition independently,
+    /// and is expected to run directly on storage engine's output
+    /// distribution / partition.
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
         vec![false; self.ranges.len()]
     }

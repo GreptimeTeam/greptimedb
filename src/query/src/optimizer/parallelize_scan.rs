@@ -67,7 +67,7 @@ impl ParallelizeScan {
                     );
 
                     // sort the ranges in each partition
-                    // TODO: smart sort!
+                    // TODO(ruihang): smart sort!
                     for ranges in partition_ranges.iter_mut() {
                         ranges.sort_by(|a, b| a.start.cmp(&b.start));
                     }

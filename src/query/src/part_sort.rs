@@ -155,6 +155,11 @@ impl ExecutionPlan for PartSortExec {
         Some(self.metrics.clone_inner())
     }
 
+    /// # Explain
+    ///
+    /// This plan needs to be executed on each partition independently,
+    /// and is expected to run directly on storage engine's output
+    /// distribution / partition.
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
         vec![false]
     }
@@ -228,12 +233,12 @@ macro_rules! array_check_helper {
         // note that PartitionRange is left inclusive and right exclusive
         if !(min >= cur_min && max < cur_max) {
             internal_err!(
-                    "Sort column min/max value out of partition range: [{:?}, {:?}] not in [{:?}, {:?}]",
-                    min,
-                    max,
-                    cur_min,
-                    cur_max
-                )?;
+                "Sort column min/max value out of partition range: [{:?}, {:?}] not in [{:?}, {:?}]",
+                min,
+                max,
+                cur_min,
+                cur_max
+            )?;
         }
     }};
 }

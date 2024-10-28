@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod windowed_sort;
-
 use std::collections::HashSet;
 
 use datafusion::datasource::DefaultTableSource;
