@@ -23,8 +23,8 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::{Scalar, ScalarVectorBuilder};
 use datatypes::value::{ListValue, Value};
 use datatypes::vectors::{
-    BooleanVectorBuilder, Int32VectorBuilder, ListVectorBuilder, MutableVector,
-    StringVectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
+    BooleanVectorBuilder, Float64VectorBuilder, Int32VectorBuilder, ListVectorBuilder,
+    MutableVector, StringVectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
 };
 use derive_more::Display;
 use h3o::{CellIndex, LatLng, Resolution};
@@ -1017,6 +1017,53 @@ impl Function for H3CellContains {
                     }
                 }
             }
+
+            results.push(result);
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
+/// Get WGS84 great circle distance of two cell centroid
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3CellDistanceSphereKm;
+
+impl Function for H3CellDistanceSphereKm {
+    fn name(&self) -> &str {
+        "h3_distance_sphere_km"
+    }
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::float64_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        signature_of_double_cells()
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure_columns_n!(columns, 2);
+
+        let cell_this_vec = &columns[0];
+        let cell_that_vec = &columns[1];
+        let size = cell_this_vec.len();
+
+        let mut results = Float64VectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let result = match (
+                cell_from_value(cell_this_vec.get(i))?,
+                cell_from_value(cell_that_vec.get(i))?,
+            ) {
+                (Some(cell_this), Some(cell_that)) => {
+                    let centroid_this = LatLng::from(cell_this);
+                    let centroid_that = LatLng::from(cell_that);
+
+                    Some(centroid_this.distance_km(centroid_that))
+                }
+                _ => None,
+            };
 
             results.push(result);
         }

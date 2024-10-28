@@ -56,6 +56,9 @@ impl GeoFunctions {
         registry.register(Arc::new(h3::H3GridDistance));
         registry.register(Arc::new(h3::H3GridPathCells));
 
+        // h3 measurement
+        registry.register(Arc::new(h3::H3CellDistanceSphereKm));
+
         // s2
         registry.register(Arc::new(s2::S2LatLngToCell));
         registry.register(Arc::new(s2::S2CellLevel));
