@@ -24,6 +24,7 @@ use opentelemetry_proto::tonic::trace::v1::{Span, Status};
 use serde::Serialize;
 
 use super::attributes::Attributes;
+use crate::otlp::utils::bytes_to_hex_string;
 
 #[derive(Debug, Clone)]
 pub struct TraceSpan {
@@ -142,8 +143,8 @@ impl SpanEvents {
 }
 
 pub fn parse_span(
-    resource_attrs: Vec<KeyValue>,
-    scope: InstrumentationScope,
+    resource_attrs: &[KeyValue],
+    scope: &InstrumentationScope,
     span: Span,
 ) -> TraceSpan {
     let (span_status_code, span_status_message) = status_to_string(&span.status);
@@ -156,9 +157,9 @@ pub fn parse_span(
         resource_attributes: Attributes::from(resource_attrs),
         trace_state: span.trace_state,
 
-        scope_name: scope.name,
-        scope_version: scope.version,
-        scope_attributes: Attributes::from(scope.attributes),
+        scope_name: scope.name.clone(),
+        scope_version: scope.version.clone(),
+        scope_attributes: Attributes::from(scope.attributes.clone()),
 
         span_name: span.name,
         span_kind,
@@ -173,10 +174,6 @@ pub fn parse_span(
 
         uplifted_span_attributes: vec![],
     }
-}
-
-pub fn bytes_to_hex_string(bs: &[u8]) -> String {
-    bs.iter().map(|b| format!("{:02x}", b)).join("")
 }
 
 pub fn status_to_string(status: &Option<Status>) -> (String, String) {

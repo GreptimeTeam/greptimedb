@@ -43,7 +43,7 @@ pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
         for scope_spans in resource_spans.scope_spans {
             let scope = scope_spans.scope.unwrap_or_default();
             for span in scope_spans.spans {
-                spans.push(parse_span(resource_attrs.clone(), scope.clone(), span));
+                spans.push(parse_span(&resource_attrs, &scope, span));
             }
         }
     }
@@ -86,18 +86,18 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     {
         // fields
         let str_fields_iter = vec![
-            ("resource_attributes", span.resource_attributes.to_string()),
+            //("resource_attributes", span.resource_attributes.to_string()),
             ("scope_name", span.scope_name),
             ("scope_version", span.scope_version),
-            ("scope_attributes", span.scope_attributes.to_string()),
+            //("scope_attributes", span.scope_attributes.to_string()),
             ("trace_state", span.trace_state),
             ("span_name", span.span_name),
             ("span_kind", span.span_kind),
             ("span_status_code", span.span_status_code),
             ("span_status_message", span.span_status_message),
-            ("span_attributes", span.span_attributes.to_string()),
-            ("span_events", span.span_events.to_string()),
-            ("span_links", span.span_links.to_string()),
+            //("span_attributes", span.span_attributes.to_string()),
+            // ("span_events", span.span_events.to_string()),
+            // ("span_links", span.span_links.to_string()),
         ]
         .into_iter()
         .map(|(col, val)| {
