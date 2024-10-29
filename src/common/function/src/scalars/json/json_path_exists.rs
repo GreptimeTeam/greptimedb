@@ -15,7 +15,7 @@
 use std::fmt::{self, Display};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::Signature;
+use common_query::prelude::{Signature, TypeSignature};
 use datafusion::logical_expr::Volatility;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
@@ -41,10 +41,24 @@ impl Function for JsonPathExistsFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(
+        Signature::one_of(
             vec![
-                ConcreteDataType::json_datatype(),
-                ConcreteDataType::string_datatype(),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ]),
             ],
             Volatility::Immutable,
         )
@@ -72,24 +86,38 @@ impl Function for JsonPathExistsFunction {
 
             match json.data_type() {
                 ConcreteDataType::Binary(_) => {
-                    let json = json.as_binary();
-                    let path = path.as_string();
-                    let result = match (json, path) {
-                        (Ok(Some(json)), Ok(Some(path))) => {
-                            if !jsonb::is_null(json) && !jsonb::is_null(path.as_bytes()) {
-                                let json_path = jsonb::jsonpath::parse_json_path(path.as_bytes());
-                                match json_path {
-                                    Ok(json_path) => jsonb::path_exists(json, json_path).ok(),
-                                    Err(_) => None,
-                                }
-                            } else {
-                                None
-                            }
+                    // Since `json.data_type()` is `Binary`, we simply
+                    // unwrap it without checking if it's `Null`.
+                    let json = if let Ok(Some(bytes)) = json.as_binary() {
+                        bytes
+                    } else {
+                        return InvalidFuncArgsSnafu {
+                            err_msg: format!("Illegal json binary: {:?}", json),
                         }
-                        _ => None,
+                        .fail();
                     };
+
+                    let result = if !path.is_null() {
+                        // Since path is not null, we simply
+                        // unwrap it without checking if it's `Null`.
+                        let path = if let Ok(Some(str)) = path.as_string() {
+                            str
+                        } else {
+                            return InvalidFuncArgsSnafu {
+                                err_msg: format!("Illegal json path: {:?}", path),
+                            }
+                            .fail();
+                        };
+                        let path = jsonb::jsonpath::parse_json_path(path.as_bytes()).unwrap();
+                        jsonb::path_exists(json, path).ok()
+                    } else {
+                        None
+                    };
+
                     results.push(result);
                 }
+
+                ConcreteDataType::Null(_) => results.push_null(),
 
                 _ => {
                     return UnsupportedInputDataTypeSnafu {
@@ -116,7 +144,6 @@ mod tests {
     use std::sync::Arc;
 
     use common_query::prelude::TypeSignature;
-    use datatypes::scalars::ScalarVector;
     use datatypes::vectors::{BinaryVector, StringVector};
 
     use super::*;
@@ -135,23 +162,52 @@ mod tests {
 
         assert!(matches!(json_path_exists.signature(),
                          Signature {
-                             type_signature: TypeSignature::Exact(valid_types),
+                             type_signature: TypeSignature::OneOf(valid_types),
                              volatility: Volatility::Immutable
-                         } if  valid_types == vec![ConcreteDataType::json_datatype(), ConcreteDataType::string_datatype()]
+                         } if valid_types ==
+            vec![
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ]),
+            ],
         ));
 
         let json_strings = [
-            r#"{"a": {"b": 2}, "b": 2, "c": 3}"#,
-            r#"{"a": 4, "b": {"c": 6}, "c": 6}"#,
-            r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
-            r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
-            r#"[1, 2, 3]"#,
-            r#"null"#,
-            r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
-            r#"null"#,
+            Some(r#"{"a": {"b": 2}, "b": 2, "c": 3}"#),
+            Some(r#"{"a": 4, "b": {"c": 6}, "c": 6}"#),
+            Some(r#"{"a": 7, "b": 8, "c": {"a": 7}}"#),
+            Some(r#"{"a": 7, "b": 8, "c": {"a": 7}}"#),
+            Some(r#"[1, 2, 3]"#),
+            Some(r#"null"#),
+            Some(r#"{"a": 7, "b": 8, "c": {"a": 7}}"#),
+            Some(r#"null"#),
+            None,
+            Some(r#"{"a": 7, "b": 8, "c": {"a": 7}}"#),
         ];
         let paths = vec![
-            "$.a.b.c", "$.b", "$.c.a", ".d", "$[0]", "$.a", "null", "null",
+            Some("$.a.b.c"),
+            Some("$.b"),
+            Some("$.c.a"),
+            Some(".d"),
+            Some("$[0]"),
+            Some("$.a"),
+            Some("null"),
+            Some("null"),
+            Some("$.a"),
+            None,
         ];
         let expected = [
             Some(false),
@@ -159,7 +215,9 @@ mod tests {
             Some(true),
             Some(false),
             Some(true),
-            None,
+            Some(false),
+            Some(false),
+            Some(false),
             None,
             None,
         ];
@@ -167,19 +225,23 @@ mod tests {
         let jsonbs = json_strings
             .iter()
             .map(|s| {
-                let value = jsonb::parse_value(s.as_bytes()).unwrap();
-                value.to_vec()
+                if s.is_some() {
+                    let value = jsonb::parse_value(s.unwrap().as_bytes()).unwrap();
+                    Some(value.to_vec())
+                } else {
+                    None
+                }
             })
             .collect::<Vec<_>>();
 
-        let json_vector = BinaryVector::from_vec(jsonbs);
-        let path_vector = StringVector::from_vec(paths);
+        let json_vector = BinaryVector::from(jsonbs);
+        let path_vector = StringVector::from(paths);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
         let vector = json_path_exists
             .eval(FunctionContext::default(), &args)
             .unwrap();
 
-        assert_eq!(8, vector.len());
+        assert_eq!(10, vector.len());
         for (i, gt) in expected.iter().enumerate() {
             let result = vector.get_ref(i);
             if let Some(real) = gt {
