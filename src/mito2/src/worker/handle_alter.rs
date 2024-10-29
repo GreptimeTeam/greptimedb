@@ -15,7 +15,6 @@
 //! Handling alter related requests.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use common_telemetry::{debug, info};
 use snafu::ResultExt;
@@ -48,6 +47,13 @@ impl<S> RegionWorkerLoop<S> {
 
         // Get the version before alter.
         let version = region.version();
+
+        // fast path for memory state changes like options.
+        if let AlterKind::ChangeRegionOptions { options } = request.kind {
+            self.handle_alter_region_options(region, version, options, sender);
+            return;
+        }
+
         if version.metadata.schema_version != request.schema_version {
             // This is possible if we retry the request.
             debug!(
@@ -70,6 +76,7 @@ impl<S> RegionWorkerLoop<S> {
             sender.send(Err(e).context(InvalidRegionRequestSnafu));
             return;
         }
+
         // Checks whether we need to alter the region.
         if !request.need_alter(&version.metadata) {
             debug!(
@@ -114,13 +121,7 @@ impl<S> RegionWorkerLoop<S> {
             version.metadata.schema_version,
             region.metadata().schema_version
         );
-
-        match request.kind {
-            AlterKind::ChangeRegionOptions { options } => {
-                self.handle_alter_region_options(region, version, options, sender)
-            }
-            _ => self.handle_alter_region_metadata(region, version, request, sender),
-        }
+        self.handle_alter_region_metadata(region, version, request, sender);
     }
 
     /// Handles region metadata changes.
@@ -139,14 +140,12 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
         // Persist the metadata to region's manifest.
-        let change = RegionChange {
-            metadata: new_meta,
-            ttl: None,
-        };
+        let change = RegionChange { metadata: new_meta };
         self.handle_manifest_region_change(region, change, sender)
     }
 
-    /// Handles requests that changes region options, like TTL.
+    /// Handles requests that changes region options, like TTL. It only affects memory state
+    /// since changes are persisted in the `DatanodeTableValue` in metasrv.
     fn handle_alter_region_options(
         &mut self,
         region: MitoRegionRef,
@@ -154,33 +153,17 @@ impl<S> RegionWorkerLoop<S> {
         options: Vec<ChangeRegionOption>,
         sender: OptionOutputTx,
     ) {
-        let mut builder = RegionMetadataBuilder::from_existing((*version.metadata).clone());
-        builder.bump_version();
-        let metadata = match builder.build().context(InvalidRegionRequestSnafu) {
-            Ok(new_meta) => Arc::new(new_meta),
-            Err(e) => {
-                sender.send(Err(e));
-                return;
-            }
-        };
-        let mut change = RegionChange {
-            metadata,
-            ttl: None,
-        };
+        let mut current_options = version.options.clone();
         for option in options {
             match option {
-                ChangeRegionOption::TTL(ttl) => {
-                    if let Some(ttl) = ttl {
-                        change.ttl = Some(ttl);
-                    } else {
-                        // Subtle difference: if ttl is absent in ChangeTableOption,
-                        // it actually means unset ttl.
-                        change.ttl = Some(Duration::from_secs(0));
-                    }
+                ChangeRegionOption::TTL(new_ttl) => {
+                    info!("update ttl to {:?}", new_ttl);
+                    current_options.ttl = new_ttl;
                 }
             }
         }
-        self.handle_manifest_region_change(region, change, sender);
+        region.version_control.alter_options(current_options);
+        sender.send(Ok(0));
     }
 }
 

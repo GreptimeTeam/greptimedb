@@ -45,8 +45,6 @@ pub enum RegionMetaAction {
 pub struct RegionChange {
     /// The metadata after changed.
     pub metadata: RegionMetadataRef,
-    #[serde(default, with = "humantime_serde")]
-    pub ttl: Option<Duration>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -92,9 +90,6 @@ pub struct RegionManifest {
     /// Inferred compaction time window.
     #[serde(with = "humantime_serde")]
     pub compaction_time_window: Option<Duration>,
-    /// Region data TTL
-    #[serde(default, with = "humantime_serde")]
-    pub ttl: Option<Duration>,
 }
 
 #[derive(Debug, Default)]
@@ -106,7 +101,6 @@ pub struct RegionManifestBuilder {
     manifest_version: ManifestVersion,
     truncated_entry_id: Option<EntryId>,
     compaction_time_window: Option<Duration>,
-    ttl: Option<Duration>,
 }
 
 impl RegionManifestBuilder {
@@ -121,7 +115,6 @@ impl RegionManifestBuilder {
                 flushed_sequence: s.flushed_sequence,
                 truncated_entry_id: s.truncated_entry_id,
                 compaction_time_window: s.compaction_time_window,
-                ttl: s.ttl,
             }
         } else {
             Default::default()
@@ -130,13 +123,6 @@ impl RegionManifestBuilder {
 
     pub fn apply_change(&mut self, manifest_version: ManifestVersion, change: RegionChange) {
         self.metadata = Some(change.metadata);
-        if let Some(ttl) = change.ttl {
-            if ttl.is_zero() {
-                self.ttl = None;
-            } else {
-                self.ttl = Some(ttl);
-            }
-        }
         self.manifest_version = manifest_version;
     }
 
@@ -182,7 +168,6 @@ impl RegionManifestBuilder {
             manifest_version: self.manifest_version,
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window: self.compaction_time_window,
-            ttl: self.ttl,
         })
     }
 }

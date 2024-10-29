@@ -298,7 +298,7 @@ impl RegionOpener {
         config: &MitoConfig,
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegion>> {
-        let mut region_options = self.options.as_ref().unwrap().clone();
+        let region_options = self.options.as_ref().unwrap().clone();
 
         let region_manifest_options = self.manifest_options(config, &region_options)?;
         let Some(manifest_manager) = RegionManifestManager::open(
@@ -312,10 +312,6 @@ impl RegionOpener {
 
         let manifest = manifest_manager.manifest();
         let metadata = manifest.metadata.clone();
-
-        if let Some(ttl) = manifest.ttl {
-            region_options.ttl = Some(ttl);
-        }
 
         let region_id = self.region_id;
         let provider = self.provider(&region_options.wal_options);
@@ -357,7 +353,6 @@ impl RegionOpener {
             0,
             part_duration,
         ));
-
         let version = VersionBuilder::new(metadata, mutable)
             .add_files(file_purger.clone(), manifest.files.values().cloned())
             .flushed_entry_id(manifest.flushed_entry_id)
