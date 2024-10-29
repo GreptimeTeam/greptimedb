@@ -441,6 +441,8 @@ mod test {
         let mut rng = fastrand::Rng::new();
         rng.seed(1337);
 
+        let mut test_cases = Vec::new();
+
         for case_id in 0..test_cnt {
             let mut bound_val: Option<i64> = None;
             let descending = rng.bool();
@@ -489,7 +491,7 @@ mod test {
                 };
                 assert!(start < end);
 
-                let mut sort_data = vec![];
+                let mut per_part_sort_data = vec![];
                 let mut batches = vec![];
                 for _batch_idx in 0..rng.usize(1..batch_cnt_bound) {
                     let cnt = rng.usize(0..batch_size_bound) + 1;
@@ -501,7 +503,7 @@ mod test {
                         // current batch is empty, skip
                         continue;
                     }
-                    sort_data.extend(data_gen.clone());
+                    per_part_sort_data.extend(data_gen.clone());
                     let arr = new_ts_array(unit.clone(), data_gen.clone());
                     let batch = DfRecordBatch::try_new(schema.clone(), vec![arr]).unwrap();
                     batches.push(batch);
@@ -516,14 +518,14 @@ mod test {
                 input_ranged_data.push((range, batches));
 
                 if descending {
-                    sort_data.sort_by(|a, b| b.cmp(a));
+                    per_part_sort_data.sort_by(|a, b| b.cmp(a));
                 } else {
-                    sort_data.sort();
+                    per_part_sort_data.sort();
                 }
-                if sort_data.is_empty() {
+                if per_part_sort_data.is_empty() {
                     continue;
                 }
-                output_data.push(sort_data);
+                output_data.push(per_part_sort_data);
             }
 
             let expected_output = output_data
@@ -533,8 +535,17 @@ mod test {
                         .unwrap()
                 })
                 .collect_vec();
+            test_cases.push((
+                case_id,
+                unit,
+                input_ranged_data,
+                schema,
+                opt,
+                expected_output,
+            ));
+        }
 
-            assert!(!expected_output.is_empty());
+        for (case_id, _unit, input_ranged_data, schema, opt, expected_output) in test_cases {
             run_test(case_id, input_ranged_data, schema, opt, expected_output).await;
         }
     }
