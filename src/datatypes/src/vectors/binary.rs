@@ -263,6 +263,8 @@ vectors::impl_try_from_arrow_array_for_vector!(BinaryArray, BinaryVector);
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use arrow::datatypes::DataType as ArrowDataType;
     use common_base::bytes::Bytes;
     use serde_json;
@@ -460,6 +462,5 @@ mod tests {
             .convert_binary_to_json()
             .unwrap_err();
         assert_matches!(error, error::Error::InvalidJson { .. });
-        );
     }
 }
