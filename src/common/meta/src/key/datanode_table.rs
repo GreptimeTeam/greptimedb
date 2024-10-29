@@ -238,13 +238,11 @@ impl DatanodeTableManager {
         // substitute region options only.
         region_info.region_options = new_region_options;
 
-        let mut txns = Vec::with_capacity(region_distribution.len() * 2);
+        let mut txns = Vec::with_capacity(region_distribution.len());
 
         for (datanode, regions) in region_distribution.into_iter() {
             let key = DatanodeTableKey::new(datanode, table_id);
             let key_bytes = key.to_bytes();
-            txns.push(TxnOp::Delete(key_bytes.clone()));
-
             let value_bytes = DatanodeTableValue::new(table_id, regions, region_info.clone())
                 .try_as_raw_value()?;
             txns.push(TxnOp::Put(key_bytes, value_bytes));
