@@ -18,6 +18,8 @@ mod find_unique;
 mod replicate;
 mod take;
 
+use std::sync::Arc;
+
 use common_base::BitVec;
 
 use crate::error::{self, Result};
@@ -89,6 +91,12 @@ macro_rules! impl_scalar_vector_op {
             }
 
             fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
+                if to_type == &ConcreteDataType::json_datatype() {
+                    if let Some(vector) = self.as_any().downcast_ref::<BinaryVector>() {
+                        let json_vector = vector.convert_binary_to_json()?;
+                        return Ok(Arc::new(json_vector) as VectorRef);
+                    }
+                }
                 cast::cast_non_constant!(self, to_type)
             }
 

@@ -36,6 +36,36 @@ impl BinaryVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
     }
+
+    /// Creates a new binary vector of JSONB from a binary vector.
+    /// The binary vector must contain valid JSON strings.
+    pub fn convert_binary_to_json(&self) -> Result<BinaryVector> {
+        let arrow_array = self.to_arrow_array();
+        let mut vector = vec![];
+        for binary in arrow_array
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap()
+            .iter()
+        {
+            let jsonb = if let Some(binary) = binary {
+                match jsonb::from_slice(binary) {
+                    Ok(jsonb) => Some(jsonb.to_vec()),
+                    Err(_) => {
+                        let s = String::from_utf8_lossy(binary);
+                        return error::InvalidJsonSnafu {
+                            value: s.to_string(),
+                        }
+                        .fail();
+                    }
+                }
+            } else {
+                None
+            };
+            vector.push(jsonb);
+        }
+        Ok(BinaryVector::from(vector))
+    }
 }
 
 impl From<BinaryArray> for BinaryVector {
@@ -233,6 +263,8 @@ vectors::impl_try_from_arrow_array_for_vector!(BinaryArray, BinaryVector);
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use arrow::datatypes::DataType as ArrowDataType;
     use common_base::bytes::Bytes;
     use serde_json;
@@ -382,5 +414,53 @@ mod tests {
         let vector = builder.finish_cloned();
         assert_eq!(b"four", vector.get_data(3).unwrap());
         assert_eq!(builder.len(), 4);
+    }
+
+    #[test]
+    fn test_binary_json_conversion() {
+        // json strings
+        let json_strings = vec![
+            b"{\"hello\": \"world\"}".to_vec(),
+            b"{\"foo\": 1}".to_vec(),
+            b"123".to_vec(),
+        ];
+        let json_vector = BinaryVector::from(json_strings.clone())
+            .convert_binary_to_json()
+            .unwrap();
+        let jsonbs = json_strings
+            .iter()
+            .map(|v| jsonb::parse_value(v).unwrap().to_vec())
+            .collect::<Vec<_>>();
+        for i in 0..3 {
+            assert_eq!(
+                json_vector.get_ref(i).as_binary().unwrap().unwrap(),
+                jsonbs.get(i).unwrap().as_slice()
+            );
+        }
+
+        // jsonb
+        let json_vector = BinaryVector::from(jsonbs.clone())
+            .convert_binary_to_json()
+            .unwrap();
+        for i in 0..3 {
+            assert_eq!(
+                json_vector.get_ref(i).as_binary().unwrap().unwrap(),
+                jsonbs.get(i).unwrap().as_slice()
+            );
+        }
+
+        // binary with jsonb header (0x80, 0x40, 0x20)
+        let binary_with_jsonb_header: Vec<u8> = [0x80, 0x23, 0x40, 0x22].to_vec();
+        let error = BinaryVector::from(vec![binary_with_jsonb_header])
+            .convert_binary_to_json()
+            .unwrap_err();
+        assert_matches!(error, error::Error::InvalidJson { .. });
+
+        // invalid json string
+        let json_strings = vec![b"{\"hello\": \"world\"".to_vec()];
+        let error = BinaryVector::from(json_strings)
+            .convert_binary_to_json()
+            .unwrap_err();
+        assert_matches!(error, error::Error::InvalidJson { .. });
     }
 }

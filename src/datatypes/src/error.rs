@@ -189,6 +189,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid JSON text: {}", value))]
+    InvalidJson {
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Value exceeds the precision {} bound", precision))]
     ValueExceedsPrecision {
         precision: u8,
@@ -222,7 +229,8 @@ impl ErrorExt for Error {
             | DefaultValueType { .. }
             | DuplicateMeta { .. }
             | InvalidTimestampPrecision { .. }
-            | InvalidPrecisionOrScale { .. } => StatusCode::InvalidArguments,
+            | InvalidPrecisionOrScale { .. }
+            | InvalidJson { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
             | CastType { .. }
