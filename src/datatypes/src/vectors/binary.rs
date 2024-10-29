@@ -49,17 +49,17 @@ impl BinaryVector {
             .iter()
         {
             let jsonb = if let Some(binary) = binary {
-                if jsonb::parse_jsonb(binary).is_ok() {
-                    Some(binary.to_vec())
-                } else {
-                    let s = String::from_utf8_lossy(binary);
-                    match jsonb::parse_value(s.as_bytes()) {
-                        Ok(jsonb) => Some(jsonb.to_vec()),
-                        Err(_) => {
+                match jsonb::parse_value(binary) {
+                    Ok(jsonb) => Some(jsonb.to_vec()),
+                    Err(_) => {
+                        if jsonb::parse_jsonb(binary).is_ok() {
+                            Some(binary.to_vec())
+                        } else {
+                            let s = String::from_utf8_lossy(binary);
                             return error::InvalidJsonSnafu {
                                 value: s.to_string(),
                             }
-                            .fail()
+                            .fail();
                         }
                     }
                 }
