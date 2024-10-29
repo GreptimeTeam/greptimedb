@@ -231,7 +231,7 @@ url = ""
 headers = { }
 
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
-[tracing]
+#+ [tracing]
 ## The tokio console address.
 ## @toml2docs:none-default
-tokio_console_addr = "127.0.0.1"
+#+ tokio_console_addr = "127.0.0.1"
