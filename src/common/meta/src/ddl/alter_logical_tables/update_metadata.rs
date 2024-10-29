@@ -23,7 +23,7 @@ use crate::ddl::physical_table_metadata;
 use crate::error;
 use crate::error::{ConvertAlterTableRequestSnafu, Result};
 use crate::key::table_info::TableInfoValue;
-use crate::key::{DeserializedValueWithBytes};
+use crate::key::DeserializedValueWithBytes;
 use crate::rpc::ddl::AlterTableTask;
 
 impl AlterLogicalTablesProcedure {
