@@ -4532,7 +4532,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/v0y4g3r/greptime-proto.git?rev=30927dfd62dfae7875da896b9832556e09ef1818#30927dfd62dfae7875da896b9832556e09ef1818"
+source = "git+https://github.com/v0y4g3r/greptime-proto.git?rev=53ab9a9553faca6e8074b46a4c36f464197f6024#53ab9a9553faca6e8074b46a4c36f464197f6024"
 dependencies = [
  "prost 0.12.6",
  "serde",
