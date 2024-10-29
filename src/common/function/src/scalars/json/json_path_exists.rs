@@ -80,17 +80,16 @@ impl Function for JsonPathExistsFunction {
         let size = jsons.len();
         let mut results = BooleanVectorBuilder::with_capacity(size);
 
-        for i in 0..size {
-            let json = jsons.get_ref(i);
-            let path = paths.get_ref(i);
+        match (jsons.data_type(), paths.data_type()) {
+            (ConcreteDataType::Binary(_), ConcreteDataType::String(_)) => {
+                for i in 0..size {
+                    let json = jsons.get_ref(i);
+                    let path = paths.get_ref(i);
 
-            match json.data_type() {
-                ConcreteDataType::Binary(_) => {
-                    // Since `json.data_type()` is `Binary`, we simply
-                    // unwrap it without checking if it's `Null`.
                     let json = if let Ok(Some(bytes)) = json.as_binary() {
                         bytes
                     } else {
+                        // This should never happen.
                         return InvalidFuncArgsSnafu {
                             err_msg: format!("Illegal json binary: {:?}", json),
                         }
@@ -105,12 +104,14 @@ impl Function for JsonPathExistsFunction {
                             {
                                 json_path
                             } else {
+                                // Should never happen.
                                 return InvalidFuncArgsSnafu {
                                     err_msg: format!("Illegal json path {:?}", path),
                                 }
                                 .fail();
                             }
                         } else {
+                            // Should never happen.
                             return InvalidFuncArgsSnafu {
                                 err_msg: format!("Illegal json path: {:?}", path),
                             }
@@ -119,21 +120,25 @@ impl Function for JsonPathExistsFunction {
 
                         jsonb::path_exists(json, path).ok()
                     } else {
+                        // Should never reach here since we `match` in advance.
                         None
                     };
 
                     results.push(result);
                 }
+            }
 
-                ConcreteDataType::Null(_) => results.push_null(),
+            // Any null args existence causes the result to be NULL.
+            (ConcreteDataType::Null(_), ConcreteDataType::String(_)) => results.push_nulls(size),
+            (ConcreteDataType::Binary(_), ConcreteDataType::Null(_)) => results.push_nulls(size),
+            (ConcreteDataType::Null(_), ConcreteDataType::Null(_)) => results.push_nulls(size),
 
-                _ => {
-                    return UnsupportedInputDataTypeSnafu {
-                        function: NAME,
-                        datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-                    }
-                    .fail();
+            _ => {
+                return UnsupportedInputDataTypeSnafu {
+                    function: NAME,
+                    datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
                 }
+                .fail();
             }
         }
 
@@ -152,7 +157,8 @@ mod tests {
     use std::sync::Arc;
 
     use common_query::prelude::TypeSignature;
-    use datatypes::vectors::{BinaryVector, StringVector};
+    use datatypes::prelude::ScalarVector;
+    use datatypes::vectors::{BinaryVector, NullVector, StringVector};
 
     use super::*;
 
@@ -193,72 +199,66 @@ mod tests {
             ],
         ));
 
+        // Using `Option` indicating items are not null.
         let json_strings = [
-            Some(r#"{"a": {"b": 2}, "b": 2, "c": 3}"#),
-            Some(r#"{"a": 4, "b": {"c": 6}, "c": 6}"#),
-            Some(r#"{"a": 7, "b": 8, "c": {"a": 7}}"#),
-            Some(r#"{"a": 7, "b": 8, "c": {"a": 7}}"#),
-            Some(r#"[1, 2, 3]"#),
-            Some(r#"null"#),
-            Some(r#"{"a": 7, "b": 8, "c": {"a": 7}}"#),
-            Some(r#"null"#),
-            None,
-            Some(r#"{"a": 7, "b": 8, "c": {"a": 7}}"#),
+            r#"{"a": {"b": 2}, "b": 2, "c": 3}"#,
+            r#"{"a": 4, "b": {"c": 6}, "c": 6}"#,
+            r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
+            r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
+            r#"[1, 2, 3]"#,
+            r#"null"#,
+            r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
+            r#"null"#,
         ];
         let paths = vec![
-            Some("$.a.b.c"),
-            Some("$.b"),
-            Some("$.c.a"),
-            Some(".d"),
-            Some("$[0]"),
-            Some("$.a"),
-            Some("null"),
-            Some("null"),
-            Some("$.a"),
-            None,
+            "$.a.b.c", "$.b", "$.c.a", ".d", "$[0]", "$.a", "null", "null",
         ];
-        let expected = [
-            Some(false),
-            Some(true),
-            Some(true),
-            Some(false),
-            Some(true),
-            Some(false),
-            Some(false),
-            Some(false),
-            None,
-            None,
-        ];
+        let expected = [false, true, true, false, true, false, false, false];
 
         let jsonbs = json_strings
             .iter()
             .map(|s| {
-                if s.is_some() {
-                    let value = jsonb::parse_value(s.unwrap().as_bytes()).unwrap();
-                    Some(value.to_vec())
-                } else {
-                    None
-                }
+                let value = jsonb::parse_value(s.as_bytes()).unwrap();
+                value.to_vec()
             })
             .collect::<Vec<_>>();
 
-        let json_vector = BinaryVector::from(jsonbs);
-        let path_vector = StringVector::from(paths);
+        let json_vector = BinaryVector::from_vec(jsonbs);
+        let path_vector = StringVector::from_vec(paths);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
         let vector = json_path_exists
             .eval(FunctionContext::default(), &args)
             .unwrap();
 
-        assert_eq!(10, vector.len());
-        for (i, gt) in expected.iter().enumerate() {
+        // Test for non-nulls.
+        assert_eq!(8, vector.len());
+        for (i, real) in expected.iter().enumerate() {
             let result = vector.get_ref(i);
-            if let Some(real) = gt {
-                assert!(!result.is_null());
-                let val = result.as_boolean().unwrap().unwrap();
-                assert_eq!(val, *real);
-            } else {
-                assert!(result.is_null());
-            }
+            assert!(!result.is_null());
+            let val = result.as_boolean().unwrap().unwrap();
+            assert_eq!(val, *real);
         }
+
+        // Test for nulls.
+        let json_bytes = jsonb::parse_value("{}".as_bytes()).unwrap().to_vec();
+        let json = BinaryVector::from_vec(vec![json_bytes]);
+        let null_json = NullVector::new(1);
+
+        let path = StringVector::from_vec(vec!["$.a"]);
+        let null_path = NullVector::new(1);
+
+        let args: Vec<VectorRef> = vec![Arc::new(null_json), Arc::new(path)];
+        let result1 = json_path_exists
+            .eval(FunctionContext::default(), &args)
+            .unwrap();
+        let args: Vec<VectorRef> = vec![Arc::new(json), Arc::new(null_path)];
+        let result2 = json_path_exists
+            .eval(FunctionContext::default(), &args)
+            .unwrap();
+
+        assert_eq!(result1.len(), 1);
+        assert!(result1.get_ref(0).is_null());
+        assert_eq!(result2.len(), 1);
+        assert!(result2.get_ref(0).is_null());
     }
 }
