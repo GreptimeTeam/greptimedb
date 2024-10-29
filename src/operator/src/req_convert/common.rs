@@ -114,6 +114,7 @@ fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
         (Float64, F64Value, f64_values),
         (Binary, BinaryValue, binary_values),
         (String, StringValue, string_values),
+        (Json, StringValue, string_values),
         (Date, DateValue, date_values),
         (Datetime, DatetimeValue, datetime_values),
         (
