@@ -101,14 +101,22 @@ impl Function for JsonPathExistsFunction {
                         // Since path is not null, we simply
                         // unwrap it without checking if it's `Null`.
                         let path = if let Ok(Some(str)) = path.as_string() {
-                            str
+                            if let Ok(json_path) = jsonb::jsonpath::parse_json_path(str.as_bytes())
+                            {
+                                json_path
+                            } else {
+                                return InvalidFuncArgsSnafu {
+                                    err_msg: format!("Illegal json path {:?}", path),
+                                }
+                                .fail();
+                            }
                         } else {
                             return InvalidFuncArgsSnafu {
                                 err_msg: format!("Illegal json path: {:?}", path),
                             }
                             .fail();
                         };
-                        let path = jsonb::jsonpath::parse_json_path(path.as_bytes()).unwrap();
+
                         jsonb::path_exists(json, path).ok()
                     } else {
                         None
