@@ -1840,7 +1840,6 @@ dependencies = [
  "common-grpc",
  "common-macro",
  "common-meta",
- "common-plugins",
  "common-procedure",
  "common-query",
  "common-recordbatch",
@@ -2239,10 +2238,6 @@ dependencies = [
 [[package]]
 name = "common-plugins"
 version = "0.9.5"
-dependencies = [
- "serde",
- "typetag",
-]
 
 [[package]]
 name = "common-pprof"
@@ -8334,7 +8329,6 @@ version = "0.9.5"
 dependencies = [
  "auth",
  "common-base",
- "common-plugins",
  "datanode",
  "frontend",
  "meta-srv",
