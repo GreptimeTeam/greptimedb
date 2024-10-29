@@ -416,6 +416,7 @@ mod tests {
 
     #[test]
     fn test_binary_json_conversion() {
+        // json strings
         let json_strings = vec![
             b"{\"hello\": \"world\"}".to_vec(),
             b"{\"foo\": 1}".to_vec(),
@@ -435,6 +436,7 @@ mod tests {
             );
         }
 
+        // jsonb
         let json_vector = BinaryVector::from(jsonbs.clone())
             .convert_binary_to_json()
             .unwrap();
@@ -444,5 +446,21 @@ mod tests {
                 jsonbs.get(i).unwrap().as_slice()
             );
         }
+
+        // binary with jsonb header (0x80, 0x40, 0x20)
+        let binary_with_jsonb_header: Vec<u8> = [0x80, 0x23, 0x40, 0x22].to_vec();
+        let json_vector =
+            BinaryVector::from(vec![binary_with_jsonb_header]).convert_binary_to_json();
+        assert!(json_vector.is_err());
+
+        // invalid json string
+        let json_strings = vec![b"{\"hello\": \"world\"".to_vec()];
+        let json_vector = BinaryVector::from(json_strings)
+            .convert_binary_to_json()
+            .unwrap_err();
+        assert_eq!(
+            "Invalid JSON text: {\"hello\": \"world\"",
+            json_vector.to_string()
+        );
     }
 }
