@@ -38,7 +38,8 @@ use tests_fuzz::generator::create_expr::{
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    generate_random_timestamp_for_mysql, generate_random_value, CreateTableExpr, InsertIntoExpr,
+    generate_random_timestamp_for_mysql, generate_random_value, CreateTableExpr, Ident,
+    InsertIntoExpr,
 };
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
@@ -187,18 +188,18 @@ struct Migration {
     region_id: RegionId,
 }
 
-async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
-    let mut rng = ChaCha20Rng::seed_from_u64(input.seed);
-    // Creates a physical table.
-    let physical_table_ctx = create_physical_table(&ctx, &mut rng).await?;
-    let mut tables = HashMap::with_capacity(input.tables);
-
-    let table_num = (input.tables / 3).max(1);
-
+async fn create_logical_table_and_insert_values(
+    ctx: &FuzzContext,
+    input: &FuzzInput,
+    rng: &mut ChaCha20Rng,
+    physical_table_ctx: &TableContextRef,
+    table_num: usize,
+    tables: &mut HashMap<Ident, (TableContextRef, InsertIntoExpr)>,
+) -> Result<()> {
     for _ in 0..table_num {
         let translator = CreateTableExprTranslator;
         let create_logical_table_expr =
-            generate_create_logical_table_expr(physical_table_ctx.clone(), &mut rng).unwrap();
+            generate_create_logical_table_expr(physical_table_ctx.clone(), rng).unwrap();
         if tables.contains_key(&create_logical_table_expr.table_name) {
             // Ignores same name logical table.
             continue;
@@ -211,8 +212,7 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         info!("Create logical table: {sql}, result: {result:?}");
         let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
 
-        let insert_expr =
-            insert_values(input.rows, &ctx, &mut rng, logical_table_ctx.clone()).await?;
+        let insert_expr = insert_values(input.rows, ctx, rng, logical_table_ctx.clone()).await?;
         if rng.gen_bool(0.1) {
             flush_memtable(&ctx.greptime, &physical_table_ctx.name).await?;
         }
@@ -225,6 +225,28 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
             (logical_table_ctx.clone(), insert_expr),
         );
     }
+
+    Ok(())
+}
+
+async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
+    let mut rng = ChaCha20Rng::seed_from_u64(input.seed);
+    // Creates a physical table.
+    let physical_table_ctx = create_physical_table(&ctx, &mut rng).await?;
+    let mut tables = HashMap::with_capacity(input.tables);
+
+    let table_num = (input.tables / 3).max(1);
+
+    // Creates more logical tables and inserts values
+    create_logical_table_and_insert_values(
+        &ctx,
+        &input,
+        &mut rng,
+        &physical_table_ctx,
+        table_num,
+        &mut tables,
+    )
+    .await?;
 
     // Fetches region distribution
     let partitions = fetch_partitions(&ctx.greptime, physical_table_ctx.name.clone()).await?;
@@ -313,36 +335,15 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     }
 
     // Creates more logical tables and inserts values
-    for _ in 0..table_num {
-        let translator = CreateTableExprTranslator;
-        let create_logical_table_expr =
-            generate_create_logical_table_expr(physical_table_ctx.clone(), &mut rng).unwrap();
-        if tables.contains_key(&create_logical_table_expr.table_name) {
-            // Ignores same name logical table.
-            continue;
-        }
-        let sql = translator.translate(&create_logical_table_expr)?;
-        let result = sqlx::query(&sql)
-            .execute(&ctx.greptime)
-            .await
-            .context(error::ExecuteQuerySnafu { sql: &sql })?;
-        info!("Create logical table: {sql}, result: {result:?}");
-        let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
-
-        let insert_expr =
-            insert_values(input.rows, &ctx, &mut rng, logical_table_ctx.clone()).await?;
-        if rng.gen_bool(0.1) {
-            flush_memtable(&ctx.greptime, &physical_table_ctx.name).await?;
-        }
-        if rng.gen_bool(0.1) {
-            compact_table(&ctx.greptime, &physical_table_ctx.name).await?;
-        }
-
-        tables.insert(
-            logical_table_ctx.name.clone(),
-            (logical_table_ctx.clone(), insert_expr),
-        );
-    }
+    create_logical_table_and_insert_values(
+        &ctx,
+        &input,
+        &mut rng,
+        &physical_table_ctx,
+        table_num,
+        &mut tables,
+    )
+    .await?;
 
     // Validates value rows
     info!("Validates num of rows");
@@ -413,36 +414,15 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     }
 
     // Creates more logical tables and inserts values
-    for _ in 0..table_num {
-        let translator = CreateTableExprTranslator;
-        let create_logical_table_expr =
-            generate_create_logical_table_expr(physical_table_ctx.clone(), &mut rng).unwrap();
-        if tables.contains_key(&create_logical_table_expr.table_name) {
-            // Ignores same name logical table.
-            continue;
-        }
-        let sql = translator.translate(&create_logical_table_expr)?;
-        let result = sqlx::query(&sql)
-            .execute(&ctx.greptime)
-            .await
-            .context(error::ExecuteQuerySnafu { sql: &sql })?;
-        info!("Create logical table: {sql}, result: {result:?}");
-        let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
-
-        let insert_expr =
-            insert_values(input.rows, &ctx, &mut rng, logical_table_ctx.clone()).await?;
-        if rng.gen_bool(0.1) {
-            flush_memtable(&ctx.greptime, &physical_table_ctx.name).await?;
-        }
-        if rng.gen_bool(0.1) {
-            compact_table(&ctx.greptime, &physical_table_ctx.name).await?;
-        }
-
-        tables.insert(
-            logical_table_ctx.name.clone(),
-            (logical_table_ctx.clone(), insert_expr),
-        );
-    }
+    create_logical_table_and_insert_values(
+        &ctx,
+        &input,
+        &mut rng,
+        &physical_table_ctx,
+        table_num,
+        &mut tables,
+    )
+    .await?;
 
     // Validates value rows
     info!("Validates num of rows");
