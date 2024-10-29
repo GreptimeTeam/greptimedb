@@ -17,10 +17,10 @@ use std::slice;
 use std::sync::Arc;
 
 use datafusion::arrow::util::pretty::pretty_format_batches;
-use datatypes::prelude::{ConcreteDataType, DataType};
+use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
-use datatypes::vectors::{BinaryVector, Helper, VectorRef};
+use datatypes::vectors::{Helper, VectorRef};
 use serde::ser::{Error, SerializeStruct};
 use serde::{Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
@@ -172,28 +172,12 @@ impl RecordBatch {
                         column_name,
                     })?;
             let vector = if vector_schema.data_type != column_schema.data_type {
-                if vector_schema.data_type == ConcreteDataType::binary_datatype()
-                    && column_schema.data_type == ConcreteDataType::json_datatype()
-                {
-                    // Safe to unwrap because we have checked the data type
-                    let vector = vector.as_any().downcast_ref::<BinaryVector>().unwrap();
-                    match vector.convert_binary_to_json() {
-                        Ok(jsonb_vector) => Arc::new(jsonb_vector) as VectorRef,
-                        Err(e) => {
-                            return Err(e).context(CastVectorSnafu {
-                                from_type: vector_schema.data_type.clone(),
-                                to_type: column_schema.data_type.clone(),
-                            })
-                        }
-                    }
-                } else {
-                    vector
-                        .cast(&column_schema.data_type)
-                        .with_context(|_| CastVectorSnafu {
-                            from_type: vector.data_type(),
-                            to_type: column_schema.data_type.clone(),
-                        })?
-                }
+                vector
+                    .cast(&column_schema.data_type)
+                    .with_context(|_| CastVectorSnafu {
+                        from_type: vector.data_type(),
+                        to_type: column_schema.data_type.clone(),
+                    })?
             } else {
                 vector.clone()
             };

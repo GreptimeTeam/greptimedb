@@ -49,7 +49,7 @@ impl BinaryVector {
             .iter()
         {
             let jsonb = if let Some(binary) = binary {
-                if is_jsonb(binary) {
+                if jsonb::parse_jsonb(binary).is_ok() {
                     Some(binary.to_vec())
                 } else {
                     let s = String::from_utf8_lossy(binary);
@@ -264,16 +264,6 @@ impl Serializable for BinaryVector {
 }
 
 vectors::impl_try_from_arrow_array_for_vector!(BinaryArray, BinaryVector);
-
-/// Copied from `jsonb` crate.
-fn is_jsonb(data: &[u8]) -> bool {
-    if let Some(v) = data.first() {
-        if matches!(*v, 0x80 | 0x40 | 0x20) {
-            return true;
-        }
-    }
-    false
-}
 
 #[cfg(test)]
 mod tests {
