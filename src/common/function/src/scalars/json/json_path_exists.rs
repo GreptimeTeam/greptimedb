@@ -199,7 +199,6 @@ mod tests {
             ],
         ));
 
-        // Using `Option` indicating items are not null.
         let json_strings = [
             r#"{"a": {"b": 2}, "b": 2, "c": 3}"#,
             r#"{"a": 4, "b": {"c": 6}, "c": 6}"#,
