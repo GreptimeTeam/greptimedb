@@ -140,7 +140,9 @@ impl UnorderedScan {
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
                 #[cfg(debug_assertions)]
-                let mut checker = crate::read::BatchChecker::default();
+                let mut checker = crate::read::BatchChecker::default()
+                    .with_start(Some(part_range.start))
+                    .with_end(Some(part_range.end));
 
                 let stream = Self::scan_partition_range(
                     stream_ctx.clone(),
@@ -209,8 +211,13 @@ impl RegionScanner for UnorderedScan {
         self.stream_ctx.input.mapper.output_schema()
     }
 
-    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+    fn prepare(
+        &mut self,
+        ranges: Vec<Vec<PartitionRange>>,
+        distinguish_partition_range: bool,
+    ) -> Result<(), BoxedError> {
         self.properties.partitions = ranges;
+        self.properties.distinguish_partition_range = distinguish_partition_range;
         Ok(())
     }
 

@@ -232,7 +232,10 @@ impl SeqScan {
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
                 #[cfg(debug_assertions)]
-                let mut checker = crate::read::BatchChecker::default();
+                let mut checker = crate::read::BatchChecker::default()
+                    .with_start(Some(part_range.start))
+                    .with_end(Some(part_range.end));
+
                 while let Some(batch) = reader
                     .next_batch()
                     .await
@@ -304,8 +307,13 @@ impl RegionScanner for SeqScan {
         self.scan_partition_impl(partition)
     }
 
-    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+    fn prepare(
+        &mut self,
+        ranges: Vec<Vec<PartitionRange>>,
+        distinguish_partition_range: bool,
+    ) -> Result<(), BoxedError> {
         self.properties.partitions = ranges;
+        self.properties.distinguish_partition_range = distinguish_partition_range;
         Ok(())
     }
 

@@ -15,6 +15,7 @@
 #![feature(let_chains)]
 #![feature(int_roundings)]
 #![feature(trait_upcasting)]
+#![feature(try_blocks)]
 
 mod analyze;
 pub mod dataframe;

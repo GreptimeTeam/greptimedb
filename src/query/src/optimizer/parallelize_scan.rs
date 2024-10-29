@@ -51,16 +51,27 @@ impl ParallelizeScan {
         let result = plan
             .transform_down(|plan| {
                 if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
+                    if region_scan_exec.is_partition_set() {
+                        return Ok(Transformed::no(plan));
+                    }
+
                     let ranges = region_scan_exec.get_partition_ranges();
                     let total_range_num = ranges.len();
                     let expected_partition_num = config.execution.target_partitions;
 
                     // assign ranges to each partition
-                    let partition_ranges =
+                    let mut partition_ranges =
                         Self::assign_partition_range(ranges, expected_partition_num);
                     debug!(
                         "Assign {total_range_num} ranges to {expected_partition_num} partitions"
                     );
+
+                    // sort the ranges in each partition
+                    // TODO(ruihang): smart sort!
+                    for ranges in partition_ranges.iter_mut() {
+                        ranges.sort_by(|a, b| a.start.cmp(&b.start));
+                    }
+
                     // update the partition ranges
                     let new_exec = region_scan_exec
                         .with_new_partitions(partition_ranges)

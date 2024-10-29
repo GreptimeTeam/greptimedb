@@ -163,13 +163,13 @@ impl MitoEngine {
     }
 
     /// Returns a region scanner to scan the region for `request`.
-    async fn region_scanner(
+    fn region_scanner(
         &self,
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<RegionScannerRef> {
         let scanner = self.scanner(region_id, request)?;
-        scanner.region_scanner().await
+        scanner.region_scanner()
     }
 
     /// Scans a region.
@@ -527,7 +527,6 @@ impl RegionEngine for MitoEngine {
         request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
         self.region_scanner(region_id, request)
-            .await
             .map_err(BoxedError::new)
     }
 

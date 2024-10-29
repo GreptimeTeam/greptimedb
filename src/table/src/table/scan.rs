@@ -22,6 +22,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::warn;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
@@ -49,6 +50,7 @@ pub struct RegionScanExec {
     properties: PlanProperties,
     append_mode: bool,
     total_rows: usize,
+    is_partition_set: bool,
 }
 
 impl RegionScanExec {
@@ -77,13 +79,8 @@ impl RegionScanExec {
             properties,
             append_mode,
             total_rows,
+            is_partition_set: false,
         }
-    }
-
-    /// Set the expected output ordering for the plan.
-    pub fn with_output_ordering(mut self, output_ordering: Vec<PhysicalSortExpr>) -> Self {
-        self.output_ordering = Some(output_ordering);
-        self
     }
 
     /// Get the partition ranges of the scanner. This method will collapse the ranges into
@@ -101,18 +98,33 @@ impl RegionScanExec {
         ranges
     }
 
+    /// Similar to [`Self::get_partition_ranges`] but don't collapse the ranges.
+    pub fn get_uncollapsed_partition_ranges(&self) -> Vec<Vec<PartitionRange>> {
+        let scanner = self.scanner.lock().unwrap();
+        scanner.properties().partitions.clone()
+    }
+
+    pub fn is_partition_set(&self) -> bool {
+        self.is_partition_set
+    }
+
     /// Update the partition ranges of underlying scanner.
     pub fn with_new_partitions(
         &self,
         partitions: Vec<Vec<PartitionRange>>,
     ) -> Result<Self, BoxedError> {
+        if self.is_partition_set {
+            warn!("Setting partition ranges more than once for RegionScanExec");
+        }
+
         let num_partitions = partitions.len();
         let mut properties = self.properties.clone();
         properties.partitioning = Partitioning::UnknownPartitioning(num_partitions);
 
         {
             let mut scanner = self.scanner.lock().unwrap();
-            scanner.prepare(partitions)?;
+            let distinguish_partition_range = scanner.properties().distinguish_partition_range();
+            scanner.prepare(partitions, distinguish_partition_range)?;
         }
 
         Ok(Self {
@@ -123,7 +135,24 @@ impl RegionScanExec {
             properties,
             append_mode: self.append_mode,
             total_rows: self.total_rows,
+            is_partition_set: true,
         })
+    }
+
+    pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {
+        let mut scanner = self.scanner.lock().unwrap();
+        let partition_ranges = scanner.properties().partitions.clone();
+        // set distinguish_partition_range won't fail
+        let _ = scanner.prepare(partition_ranges, distinguish_partition_range);
+    }
+
+    pub fn time_index(&self) -> Option<String> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .schema()
+            .timestamp_column()
+            .map(|x| x.name.clone())
     }
 }
 
