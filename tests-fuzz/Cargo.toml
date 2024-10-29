@@ -142,3 +142,10 @@ path = "targets/migration/fuzz_migrate_mito_regions.rs"
 test = false
 bench = false
 doc = false
+
+[[bin]]
+name = "fuzz_migrate_metric_regions"
+path = "targets/migration/fuzz_migrate_metric_regions.rs"
+test = false
+bench = false
+doc = false
