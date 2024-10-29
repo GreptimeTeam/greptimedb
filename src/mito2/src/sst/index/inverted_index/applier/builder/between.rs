@@ -28,7 +28,7 @@ impl InvertedIndexApplierBuilder<'_> {
         let Some(column_name) = Self::column_name(&between.expr) else {
             return Ok(());
         };
-        let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
+        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
             return Ok(());
         };
         let Some(low) = Self::nonnull_lit(&between.low) else {
@@ -78,7 +78,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -121,7 +121,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -147,7 +147,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -159,7 +159,24 @@ mod tests {
         };
 
         builder.collect_between(&between).unwrap();
-        assert!(builder.output.is_empty());
+
+        let predicates = builder.output.get(&3).unwrap();
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(
+            predicates[0],
+            Predicate::Range(RangePredicate {
+                range: Range {
+                    lower: Some(Bound {
+                        inclusive: true,
+                        value: encoded_string("abc"),
+                    }),
+                    upper: Some(Bound {
+                        inclusive: true,
+                        value: encoded_string("def"),
+                    }),
+                }
+            })
+        );
     }
 
     #[test]
@@ -173,7 +190,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -200,7 +217,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
