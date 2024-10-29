@@ -17,7 +17,7 @@ use std::slice;
 use std::sync::Arc;
 
 use datafusion::arrow::util::pretty::pretty_format_batches;
-use datatypes::prelude::{DataType, ConcreteDataType};
+use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
 use datatypes::vectors::{BinaryVector, Helper, VectorRef};
