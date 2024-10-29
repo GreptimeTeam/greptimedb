@@ -272,7 +272,7 @@ impl PartSortStream {
 
     /// Sort and clear the buffer and return the sorted record batch
     ///
-    /// this function should return None if RecordBatch is empty
+    /// this function should return a empty record batch if the buffer is empty
     fn sort_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
         if self.buffer.is_empty() {
             return Ok(DfRecordBatch::new_empty(self.schema.clone()));
@@ -590,6 +590,17 @@ mod test {
                 ],
                 true,
                 vec![vec![19, 18, 17], vec![8, 7, 6, 5, 4, 3, 2, 1]],
+            ),
+            (
+                TimeUnit::Millisecond,
+                vec![
+                    ((15, 20), vec![]),
+                    ((10, 15), vec![]),
+                    ((5, 10), vec![]),
+                    ((0, 10), vec![]),
+                ],
+                true,
+                vec![],
             ),
         ];
 

@@ -54,8 +54,14 @@ use crate::error::{QueryExecutionSnafu, Result};
 ///
 /// internally, it call [`streaming_merge`] multiple times to merge multiple sorted "working ranges"
 ///
-/// the input stream must be concated in the order of `PartitionRange` in `ranges`(and each `PartitionRange`
-/// is sorted within itself), or else the result will be incorrect.
+/// # Invariant Promise on Input Stream
+/// 1. The input stream must be sorted by timestamp and
+/// 2. in the order of `PartitionRange` in `ranges`
+/// 3. Each `PartitionRange` is sorted within itself(ascending or descending) but no need to be sorted across ranges
+/// 4. There can't be any RecordBatch that is cross multiple `PartitionRange` in the input stream
+///
+///  TODO(discord9): fix item 4, but since only use `PartSort` as input, this might not be a problem
+
 #[derive(Debug, Clone)]
 pub struct WindowedSortExec {
     /// Physical sort expressions(that is, sort by timestamp)
@@ -2526,6 +2532,78 @@ mod test {
                     false,
                 )],
                 vec![],
+                vec![],
+            ),
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                None,
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![
+                    // test one empty
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(2),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(3),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([2]))],
+                    ),
+                ],
+                vec![vec![Arc::new(TimestampMillisecondArray::from_iter_values(
+                    [2],
+                ))]],
+            ),
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                None,
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![
+                    // test one empty
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(2),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(3),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([]))],
+                    ),
+                ],
                 vec![],
             ),
             TestStream::new(
