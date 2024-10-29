@@ -22,11 +22,9 @@ use api::v1::{
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::region_request::ChangeOption;
 use table::metadata::TableId;
-use table::requests::{
-    AddColumnRequest, AlterKind, AlterTableRequest, ChangeColumnTypeRequest,
-    ChangeTableOptionRequest,
-};
+use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ChangeColumnTypeRequest};
 
 use crate::error::{
     InvalidChangeTableOptionRequestSnafu, InvalidColumnDefSnafu, MissingFieldSnafu,
@@ -100,8 +98,8 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
         }) => AlterKind::ChangeTableOptions {
             options: change_table_options
                 .iter()
-                .map(ChangeTableOptionRequest::try_from)
-                .collect::<std::result::Result<Vec<_>, table::Error>>()
+                .map(ChangeOption::try_from)
+                .collect::<std::result::Result<Vec<_>, _>>()
                 .context(InvalidChangeTableOptionRequestSnafu)?,
         },
     };

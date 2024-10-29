@@ -19,7 +19,7 @@ use std::sync::Arc;
 use common_telemetry::{debug, info};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
-use store_api::region_request::{AlterKind, ChangeRegionOption, RegionAlterRequest};
+use store_api::region_request::{AlterKind, ChangeOption, RegionAlterRequest};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -150,15 +150,22 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region: MitoRegionRef,
         version: VersionRef,
-        options: Vec<ChangeRegionOption>,
+        options: Vec<ChangeOption>,
         sender: OptionOutputTx,
     ) {
         let mut current_options = version.options.clone();
         for option in options {
             match option {
-                ChangeRegionOption::TTL(new_ttl) => {
-                    info!("update ttl to {:?}", new_ttl);
-                    current_options.ttl = new_ttl;
+                ChangeOption::TTL(new_ttl) => {
+                    info!(
+                        "Update region ttl: {}, previous: {:?} new: {:?}",
+                        region.region_id, current_options.ttl, new_ttl
+                    );
+                    if new_ttl.is_zero() {
+                        current_options.ttl = None;
+                    } else {
+                        current_options.ttl = Some(new_ttl);
+                    }
                 }
             }
         }

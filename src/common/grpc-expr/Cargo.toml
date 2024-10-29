@@ -19,6 +19,7 @@ datatypes.workspace = true
 prost.workspace = true
 snafu.workspace = true
 table.workspace = true
+store-api.workspace = true
 
 [dev-dependencies]
 paste = "1.0"

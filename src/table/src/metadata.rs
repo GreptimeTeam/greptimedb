@@ -24,12 +24,11 @@ use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRe
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::region_request::ChangeOption;
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
 use crate::error::{self, Result};
-use crate::requests::{
-    AddColumnRequest, AlterKind, ChangeColumnTypeRequest, ChangeTableOptionRequest, TableOptions,
-};
+use crate::requests::{AddColumnRequest, AlterKind, ChangeColumnTypeRequest, TableOptions};
 
 pub type TableId = u32;
 pub type TableVersion = u64;
@@ -216,15 +215,12 @@ impl TableMeta {
     }
 
     /// Creates a [TableMetaBuilder] with modified table options.
-    fn change_table_options(
-        &self,
-        requests: &[ChangeTableOptionRequest],
-    ) -> Result<TableMetaBuilder> {
+    fn change_table_options(&self, requests: &[ChangeOption]) -> Result<TableMetaBuilder> {
         let mut new_options = self.options.clone();
 
         for request in requests {
             match request {
-                ChangeTableOptionRequest::TTL(new_ttl) => {
+                ChangeOption::TTL(new_ttl) => {
                     if new_ttl.is_zero() {
                         new_options.ttl = None;
                     } else {

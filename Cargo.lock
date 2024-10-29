@@ -2149,6 +2149,7 @@ dependencies = [
  "paste",
  "prost 0.12.6",
  "snafu 0.8.5",
+ "store-api",
  "table",
 ]
 

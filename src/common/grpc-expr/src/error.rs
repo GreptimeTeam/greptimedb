@@ -19,6 +19,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
+use store_api::metadata::MetadataError;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -122,7 +123,7 @@ pub enum Error {
     #[snafu(display("Invalid change table option request"))]
     InvalidChangeTableOptionRequest {
         #[snafu(source)]
-        error: table::Error,
+        error: MetadataError,
     },
 }
 

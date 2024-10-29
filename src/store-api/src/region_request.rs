@@ -24,9 +24,10 @@ use api::v1::region::{
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, Rows, SemanticType};
+use api::v1::{self, ChangeTableOption, Rows, SemanticType};
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
+use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 use strum::IntoStaticStr;
 
@@ -393,7 +394,7 @@ pub enum AlterKind {
         columns: Vec<ChangeColumnType>,
     },
     /// Change region options.
-    ChangeRegionOptions { options: Vec<ChangeRegionOption> },
+    ChangeRegionOptions { options: Vec<ChangeOption> },
 }
 
 impl AlterKind {
@@ -494,34 +495,6 @@ impl TryFrom<alter_request::Kind> for AlterKind {
         };
 
         Ok(alter_kind)
-    }
-}
-
-impl TryFrom<&v1::ChangeTableOption> for ChangeRegionOption {
-    type Error = MetadataError;
-
-    fn try_from(option: &v1::ChangeTableOption) -> std::result::Result<Self, Self::Error> {
-        if option.key == TTL_KEY {
-            let ttl_value = if option.value.is_empty() {
-                None
-            } else {
-                let d = humantime::parse_duration(&option.value).map_err(|_| {
-                    InvalidRegionOptionChangeRequestSnafu {
-                        key: &option.key,
-                        value: &option.value,
-                    }
-                    .build()
-                })?;
-                Some(d)
-            };
-            Ok(ChangeRegionOption::TTL(ttl_value))
-        } else {
-            InvalidRegionOptionChangeRequestSnafu {
-                key: &option.key,
-                value: &option.value,
-            }
-            .fail()
-        }
     }
 }
 
@@ -685,9 +658,28 @@ impl From<v1::ChangeColumnType> for ChangeColumnType {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub enum ChangeRegionOption {
-    TTL(Option<Duration>),
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub enum ChangeOption {
+    TTL(Duration),
+}
+
+impl TryFrom<&ChangeTableOption> for ChangeOption {
+    type Error = MetadataError;
+
+    fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
+        let ChangeTableOption { key, value } = value;
+        if key == TTL_KEY {
+            let ttl = if value.is_empty() {
+                Duration::from_secs(0)
+            } else {
+                humantime::parse_duration(value)
+                    .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())?
+            };
+            Ok(Self::TTL(ttl))
+        } else {
+            InvalidRegionOptionChangeRequestSnafu { key, value }.fail()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

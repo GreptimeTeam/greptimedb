@@ -27,15 +27,14 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::ColumnSchema;
 use greptime_proto::v1::region::compact_request;
-use greptime_proto::v1::ChangeTableOption;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::is_mito_engine_option_key;
+use store_api::region_request::ChangeOption;
 
-use crate::error::{ParseTableOptionSnafu, Result, UnsupportedTableOptionChangeSnafu};
+use crate::error::{ParseTableOptionSnafu, Result};
 use crate::metadata::{TableId, TableVersion};
 use crate::table_reference::TableReference;
-use crate::{error, Error};
 
 pub const FILE_TABLE_META_KEY: &str = "__private.file_table_meta";
 pub const FILE_TABLE_LOCATION_KEY: &str = "location";
@@ -215,33 +214,33 @@ pub enum AlterKind {
         new_table_name: String,
     },
     ChangeTableOptions {
-        options: Vec<ChangeTableOptionRequest>,
+        options: Vec<ChangeOption>,
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ChangeTableOptionRequest {
-    TTL(Duration),
-}
+// #[derive(Debug, Clone, Serialize, Deserialize)]
+// pub enum ChangeTableOptionRequest {
+//     TTL(Duration),
+// }
 
-impl TryFrom<&ChangeTableOption> for ChangeTableOptionRequest {
-    type Error = Error;
-
-    fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
-        let ChangeTableOption { key, value } = value;
-        if key == TTL_KEY {
-            let ttl = if value.is_empty() {
-                Duration::from_secs(0)
-            } else {
-                humantime::parse_duration(value)
-                    .map_err(|_| error::InvalidTableOptionValueSnafu { key, value }.build())?
-            };
-            Ok(Self::TTL(ttl))
-        } else {
-            UnsupportedTableOptionChangeSnafu { key }.fail()
-        }
-    }
-}
+// impl TryFrom<&ChangeTableOption> for ChangeTableOptionRequest {
+//     type Error = Error;
+//
+//     fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
+//         let ChangeTableOption { key, value } = value;
+//         if key == TTL_KEY {
+//             let ttl = if value.is_empty() {
+//                 Duration::from_secs(0)
+//             } else {
+//                 humantime::parse_duration(value)
+//                     .map_err(|_| error::InvalidTableOptionValueSnafu { key, value }.build())?
+//             };
+//             Ok(Self::TTL(ttl))
+//         } else {
+//             UnsupportedTableOptionChangeSnafu { key }.fail()
+//         }
+//     }
+// }
 
 #[derive(Debug)]
 pub struct InsertRequest {
