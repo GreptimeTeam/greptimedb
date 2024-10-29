@@ -116,7 +116,7 @@ pub struct Instance {
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
-    pub servers: ServerHandlers,
+    servers: ServerHandlers,
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,

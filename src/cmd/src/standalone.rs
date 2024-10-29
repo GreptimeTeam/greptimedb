@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{fs, path};
 
@@ -239,7 +240,7 @@ impl StandaloneOptions {
 
 pub struct Instance {
     datanode: Datanode,
-    pub frontend: FeInstance,
+    frontend: FeInstance,
     // TODO(discord9): wrapped it in flownode instance instead
     flow_worker_manager: Arc<FlowWorkerManager>,
     flow_shutdown: broadcast::Sender<()>,
@@ -248,6 +249,13 @@ pub struct Instance {
 
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
+}
+
+impl Instance {
+    /// Find the socket addr of a server by its `name`.
+    pub async fn server_addr(&self, name: &str) -> Option<SocketAddr> {
+        self.frontend.server_handlers().addr(name).await
+    }
 }
 
 #[async_trait]
@@ -331,7 +339,7 @@ pub struct StartCommand {
     #[clap(long)]
     tls_key_path: Option<String>,
     #[clap(long)]
-    pub user_provider: Option<String>,
+    user_provider: Option<String>,
     #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
     pub env_prefix: String,
     /// The working home directory of this standalone instance.

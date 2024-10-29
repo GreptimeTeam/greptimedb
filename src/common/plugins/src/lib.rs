@@ -16,6 +16,5 @@
 /// to provide common and useful utils and consts to all plugin usage,
 /// since `plugins` crate is at the top depending on crates like `frontend` and `datanode`
 mod consts;
-pub mod options;
 
 pub use consts::{GREPTIME_EXEC_PREFIX, GREPTIME_EXEC_READ_COST, GREPTIME_EXEC_WRITE_COST};

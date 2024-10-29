@@ -36,7 +36,7 @@ pub struct GlobalOptions {
 
 // TODO(LFC): Move logging and tracing options into global options, like the runtime options.
 /// All the options of GreptimeDB.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GreptimeOptions<T> {
     /// The runtime options.
