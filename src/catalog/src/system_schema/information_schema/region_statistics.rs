@@ -225,6 +225,7 @@ impl InformationSchemaRegionStatisticsBuilder {
             Arc::new(self.region_ids.finish()),
             Arc::new(self.table_ids.finish()),
             Arc::new(self.region_numbers.finish()),
+            Arc::new(self.region_rows.finish()),
             Arc::new(self.disk_sizes.finish()),
             Arc::new(self.memtable_sizes.finish()),
             Arc::new(self.manifest_sizes.finish()),
