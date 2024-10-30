@@ -83,6 +83,8 @@ pub struct RegionStat {
     pub engine: String,
     /// The region role.
     pub role: RegionRole,
+    /// The number of rows
+    pub num_rows: u64,
     /// The size of the memtable in bytes.
     pub memtable_size: u64,
     /// The size of the manifest in bytes.
@@ -183,6 +185,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             approximate_bytes: value.approximate_bytes as u64,
             engine: value.engine.to_string(),
             role: RegionRole::from(value.role()),
+            num_rows: region_stat.num_rows,
             memtable_size: region_stat.memtable_size,
             manifest_size: region_stat.manifest_size,
             sst_size: region_stat.sst_size,

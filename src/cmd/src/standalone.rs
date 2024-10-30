@@ -729,6 +729,7 @@ impl InformationExtension for StandaloneInformationExtension {
                     approximate_bytes: region_stat.estimated_disk_size(),
                     engine: stat.engine,
                     role: RegionRole::from(stat.role).into(),
+                    num_rows: region_stat.num_rows,
                     memtable_size: region_stat.memtable_size,
                     manifest_size: region_stat.manifest_size,
                     sst_size: region_stat.sst_size,

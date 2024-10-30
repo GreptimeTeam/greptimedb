@@ -291,6 +291,9 @@ pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
 /// Represents the statistics of a region.
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct RegionStatistic {
+    /// The number of rows
+    #[serde(default)]
+    pub num_rows: u64,
     /// The size of memtable in bytes.
     pub memtable_size: u64,
     /// The size of WAL in bytes.
@@ -300,6 +303,7 @@ pub struct RegionStatistic {
     /// The size of SST data files in bytes.
     pub sst_size: u64,
     /// The size of SST index files in bytes.
+    #[serde(default)]
     pub index_size: u64,
 }
 

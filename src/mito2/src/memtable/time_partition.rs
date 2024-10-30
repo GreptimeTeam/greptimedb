@@ -216,6 +216,16 @@ impl TimePartitions {
             .sum()
     }
 
+    /// Returns the number of rows.
+    pub(crate) fn num_rows(&self) -> u64 {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .parts
+            .iter()
+            .map(|part| part.memtable.stats().num_rows as u64)
+            .sum()
+    }
+
     /// Append memtables in partitions to small vec.
     pub(crate) fn list_memtables_to_small_vec(&self, memtables: &mut SmallMemtableVec) {
         let inner = self.inner.lock().unwrap();

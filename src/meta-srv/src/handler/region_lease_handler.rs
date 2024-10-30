@@ -135,6 +135,7 @@ mod test {
             wcus: 0,
             approximate_bytes: 0,
             engine: String::new(),
+            num_rows: 0,
             memtable_size: 0,
             manifest_size: 0,
             sst_size: 0,
