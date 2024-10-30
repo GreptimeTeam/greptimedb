@@ -543,7 +543,7 @@ mod tests {
         assert!(!range.can_split_preserve_order());
         let mut output = Vec::new();
         range.maybe_split(&mut output);
-        assert!(output.is_empty());
+        assert_eq!(1, output.len());
     }
 
     #[test]
