@@ -88,8 +88,12 @@ impl WindowedSortPhysicalRule {
                     }
                     let first_sort_expr = sort_exec.expr().first().unwrap().clone();
 
-                    // PartSortExec is unnecessary if there is no tag columns
-                    let new_input = if scanner_info.tag_columns.is_empty() {
+                    // PartSortExec is unnecessary if:
+                    // - there is no tag column, and
+                    // - the sort is ascending on the time index column
+                    let new_input = if scanner_info.tag_columns.is_empty()
+                        && !first_sort_expr.options.descending
+                    {
                         sort_exec.input().clone()
                     } else {
                         Arc::new(PartSortExec::new(

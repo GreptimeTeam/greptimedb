@@ -102,6 +102,7 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t DESC LIMIT 5;
 | 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
 |_|_|_SortPreservingMergeExec: [t@1 DESC] REDACTED
 |_|_|_WindowedSortExec REDACTED
+|_|_|_PartSortExec t@1 DESC REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
