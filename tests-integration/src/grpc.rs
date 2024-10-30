@@ -298,7 +298,7 @@ CREATE TABLE {table_name} (
         let instance = &standalone.instance;
 
         let table_name = "my_table";
-        let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, c JSON, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b))");
+        let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, c JSON, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b, c))");
         create_table(instance, sql).await;
 
         test_insert_delete_and_query_on_existing_table(instance, table_name).await;
@@ -385,7 +385,7 @@ CREATE TABLE {table_name} (
                         string_values: json_strings,
                         ..Default::default()
                     }),
-                    semantic_type: SemanticType::Field as i32,
+                    semantic_type: SemanticType::Tag as i32,
                     datatype: ColumnDataType::Json as i32,
                     ..Default::default()
                 },
@@ -443,7 +443,7 @@ CREATE TABLE {table_name} (
 +---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+"#;
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
 
-        let new_grpc_delete_request = |a, b, ts, row_count| DeleteRequest {
+        let new_grpc_delete_request = |a, b, c, ts, row_count| DeleteRequest {
             table_name: table_name.to_string(),
             key_columns: vec![
                 Column {
@@ -467,6 +467,16 @@ CREATE TABLE {table_name} (
                     ..Default::default()
                 },
                 Column {
+                    column_name: "c".to_string(),
+                    values: Some(Values {
+                        string_values: c,
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Tag as i32,
+                    datatype: ColumnDataType::Json as i32,
+                    ..Default::default()
+                },
+                Column {
                     column_name: "ts".to_string(),
                     semantic_type: SemanticType::Timestamp as i32,
                     values: Some(Values {
@@ -487,6 +497,12 @@ CREATE TABLE {table_name} (
                 "ts: 1672557982000".to_string(),
                 "ts: 1672557986000".to_string(),
             ],
+            vec![
+                r#"{ "id": 2, "name": "Bob", "balance": 1234.56, "active": false }"#.to_string(),
+                r#"{ "id": 8, "contact": { "email": "hank@example.com", "phone": "+0987654321" } }"#.to_string(),
+                r#"{ "id": 11, "birthday": "1996-07-20", "location": { "city": "New York", "zip": "10001" } }"#.to_string(),
+                r#"{ "id": 15, "transactions": [{ "amount": 500, "date": "2024-01-01" }, { "amount": -200, "date": "2024-02-01" }] }"#.to_string(),
+            ],
             vec![1672557973000, 1672557979000, 1672557982000, 1672557986000],
             4,
         );
@@ -495,6 +511,11 @@ CREATE TABLE {table_name} (
             vec![
                 "ts: 1672557974000".to_string(),
                 "ts: 1672557987000".to_string(),
+            ],
+            vec![
+                r#"{ "id": 3, "tags": ["rust", "testing", "json"], "age": 28 }"#.to_string(),
+                r#"{ "id": 16, "transactions": [{ "amount": 500, "date": "2024-01-01" }] }"#
+                    .to_string(),
             ],
             vec![1672557974000, 1672557987000],
             2,
