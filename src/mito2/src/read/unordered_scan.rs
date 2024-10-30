@@ -26,6 +26,7 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
@@ -228,6 +229,10 @@ impl RegionScanner for UnorderedScan {
     fn has_predicate(&self) -> bool {
         let predicate = self.stream_ctx.input.predicate();
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
+    }
+
+    fn metadata(&self) -> RegionMetadataRef {
+        self.stream_ctx.input.mapper.metadata().clone()
     }
 }
 
