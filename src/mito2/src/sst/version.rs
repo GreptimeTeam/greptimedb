@@ -84,7 +84,7 @@ impl SstVersion {
         }
     }
 
-    /// Returns SST files'space occupied in current version.
+    /// Returns SST data files'space occupied in current version.
     pub(crate) fn sst_usage(&self) -> u64 {
         self.levels
             .iter()
@@ -94,7 +94,24 @@ impl SstVersion {
                     .values()
                     .map(|file_handle| {
                         let meta = file_handle.meta_ref();
-                        meta.file_size + meta.index_file_size
+                        meta.file_size
+                    })
+                    .sum::<u64>()
+            })
+            .sum()
+    }
+
+    /// Returns SST index files'space occupied in current version.
+    pub(crate) fn index_usage(&self) -> u64 {
+        self.levels
+            .iter()
+            .map(|level_meta| {
+                level_meta
+                    .files
+                    .values()
+                    .map(|file_handle| {
+                        let meta = file_handle.meta_ref();
+                        meta.index_file_size
                     })
                     .sum::<u64>()
             })

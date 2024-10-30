@@ -297,8 +297,10 @@ pub struct RegionStatistic {
     pub wal_size: u64,
     /// The size of manifest in bytes.
     pub manifest_size: u64,
-    /// The size of SST files in bytes.
+    /// The size of SST data files in bytes.
     pub sst_size: u64,
+    /// The size of SST index files in bytes.
+    pub index_size: u64,
 }
 
 impl RegionStatistic {
@@ -320,7 +322,7 @@ impl RegionStatistic {
 impl RegionStatistic {
     /// Returns the estimated disk size of the region.
     pub fn estimated_disk_size(&self) -> u64 {
-        self.wal_size + self.sst_size + self.manifest_size
+        self.wal_size + self.sst_size + self.manifest_size + self.index_size
     }
 }
 

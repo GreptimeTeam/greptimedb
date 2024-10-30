@@ -726,12 +726,13 @@ impl InformationExtension for StandaloneInformationExtension {
                     id: stat.region_id,
                     rcus: 0,
                     wcus: 0,
-                    approximate_bytes: region_stat.estimated_disk_size() as i64,
+                    approximate_bytes: region_stat.estimated_disk_size(),
                     engine: stat.engine,
                     role: RegionRole::from(stat.role).into(),
                     memtable_size: region_stat.memtable_size,
                     manifest_size: region_stat.manifest_size,
                     sst_size: region_stat.sst_size,
+                    index_size: region_stat.index_size,
                 }
             })
             .collect::<Vec<_>>();
