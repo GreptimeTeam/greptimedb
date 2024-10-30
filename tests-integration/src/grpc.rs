@@ -203,9 +203,10 @@ mod test {
 CREATE TABLE {table_name} (
     a INT,
     b STRING,
+    c JSON,
     ts TIMESTAMP,
     TIME INDEX (ts),
-    PRIMARY KEY (a, b)
+    PRIMARY KEY (a, b, c)
 ) PARTITION ON COLUMNS(a) (
     a < 10,
     a >= 10 AND a < 20,
@@ -413,7 +414,7 @@ CREATE TABLE {table_name} (
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(format!(
-                "SELECT ts, a, b, json_to_string(c) FROM {table_name} ORDER BY ts"
+                "SELECT ts, a, b, json_to_string(c) as c FROM {table_name} ORDER BY ts"
             ))),
         });
         let output = query(instance, request.clone()).await;
@@ -422,7 +423,7 @@ CREATE TABLE {table_name} (
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = r#"+---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+
-| ts                  | a  | b                 | json_to_string(my_table.c)                                                                        |
+| ts                  | a  | b                 | c                                                                                                 |
 +---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+
 | 2023-01-01T07:26:12 | 1  | ts: 1672557972000 | {"active":true,"age":30,"id":1,"name":"Alice"}                                                    |
 | 2023-01-01T07:26:13 | 2  | ts: 1672557973000 | {"active":false,"balance":1234.56,"id":2,"name":"Bob"}                                            |
@@ -535,7 +536,7 @@ CREATE TABLE {table_name} (
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = r#"+---------------------+----+-------------------+-------------------------------------------------------------------------------+
-| ts                  | a  | b                 | json_to_string(my_table.c)                                                    |
+| ts                  | a  | b                 | c                                                                             |
 +---------------------+----+-------------------+-------------------------------------------------------------------------------+
 | 2023-01-01T07:26:12 | 1  | ts: 1672557972000 | {"active":true,"age":30,"id":1,"name":"Alice"}                                |
 | 2023-01-01T07:26:15 | 4  | ts: 1672557975000 | {"id":4,"metadata":{"created_at":"2024-10-30T12:00:00Z","status":"inactive"}} |
@@ -548,7 +549,7 @@ CREATE TABLE {table_name} (
 | 2023-01-01T07:26:24 | 50 | ts: 1672557984000 | {"active":true,"id":13,"settings":{"brightness":0.6,"volume":0.8}}            |
 | 2023-01-01T07:26:25 | 51 | ts: 1672557985000 | {"id":14,"notes":["first note","second note"],"priority":1}                   |
 +---------------------+----+-------------------+-------------------------------------------------------------------------------+"#;
-        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+        similar_asserts::assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 
     async fn verify_data_distribution(
@@ -717,7 +718,7 @@ CREATE TABLE {table_name} (
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(
-                "SELECT ts, a, b, json_to_string(c) FROM auto_created_table order by ts"
+                "SELECT ts, a, b, json_to_string(c) as c FROM auto_created_table order by ts"
                     .to_string(),
             )),
         });
@@ -727,7 +728,7 @@ CREATE TABLE {table_name} (
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = r#"+---------------------+---+---+--------------------------------------------------------+
-| ts                  | a | b | json_to_string(auto_created_table.c)                   |
+| ts                  | a | b | c                                                      |
 +---------------------+---+---+--------------------------------------------------------+
 | 2023-01-01T07:26:15 | 4 |   | {"active":true,"age":30,"id":1,"name":"Alice"}         |
 | 2023-01-01T07:26:16 |   |   |                                                        |
@@ -736,7 +737,7 @@ CREATE TABLE {table_name} (
 | 2023-01-01T07:26:19 |   |   |                                                        |
 | 2023-01-01T07:26:20 |   | z |                                                        |
 +---------------------+---+---+--------------------------------------------------------+"#;
-        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+        similar_asserts::assert_eq!(recordbatches.pretty_print().unwrap(), expected);
 
         let delete = DeleteRequest {
             table_name: "auto_created_table".to_string(),
@@ -768,14 +769,14 @@ CREATE TABLE {table_name} (
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = r#"+---------------------+---+---+--------------------------------------------------------+
-| ts                  | a | b | json_to_string(auto_created_table.c)                   |
+| ts                  | a | b | c                                                      |
 +---------------------+---+---+--------------------------------------------------------+
 | 2023-01-01T07:26:16 |   |   |                                                        |
 | 2023-01-01T07:26:17 | 6 |   | {"active":false,"balance":1234.56,"id":2,"name":"Bob"} |
 | 2023-01-01T07:26:18 |   | x |                                                        |
 | 2023-01-01T07:26:20 |   | z |                                                        |
 +---------------------+---+---+--------------------------------------------------------+"#;
-        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+        similar_asserts::assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 
     #[tokio::test(flavor = "multi_thread")]
