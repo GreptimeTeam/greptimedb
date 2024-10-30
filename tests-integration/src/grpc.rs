@@ -291,13 +291,14 @@ CREATE TABLE {table_name} (
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_insert_and_query() {
+        common_telemetry::init_default_ut_logging();
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_insert_and_query")
             .build()
             .await;
         let instance = &standalone.instance;
 
         let table_name = "my_table";
-        let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b))");
+        let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, c JSON, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b))");
         create_table(instance, sql).await;
 
         test_insert_delete_and_query_on_existing_table(instance, table_name).await;
@@ -332,6 +333,25 @@ CREATE TABLE {table_name} (
             1672557986000,
             1672557987000,
         ];
+        let json_strings = vec![
+            r#"{ "id": 1, "name": "Alice", "age": 30, "active": true }"#.to_string(),
+            r#"{ "id": 2, "name": "Bob", "balance": 1234.56, "active": false }"#.to_string(),
+            r#"{ "id": 3, "tags": ["rust", "testing", "json"], "age": 28 }"#.to_string(),
+            r#"{ "id": 4, "metadata": { "created_at": "2024-10-30T12:00:00Z", "status": "inactive" } }"#.to_string(),
+            r#"{ "id": 5, "name": null, "phone": "+1234567890" }"#.to_string(),
+            r#"{ "id": 6, "height": 5.9, "weight": 72.5, "active": true }"#.to_string(),
+            r#"{ "id": 7, "languages": ["English", "Spanish"], "age": 29 }"#.to_string(),
+            r#"{ "id": 8, "contact": { "email": "hank@example.com", "phone": "+0987654321" } }"#.to_string(),
+            r#"{ "id": 9, "preferences": { "notifications": true, "theme": "dark" } }"#.to_string(),
+            r#"{ "id": 10, "scores": [88, 92, 76], "active": false }"#.to_string(),
+            r#"{ "id": 11, "birthday": "1996-07-20", "location": { "city": "New York", "zip": "10001" } }"#.to_string(),
+            r#"{ "id": 12, "subscription": { "type": "premium", "expires": "2025-01-01" } }"#.to_string(),
+            r#"{ "id": 13, "settings": { "volume": 0.8, "brightness": 0.6 }, "active": true }"#.to_string(),
+            r#"{ "id": 14, "notes": ["first note", "second note"], "priority": 1 }"#.to_string(),
+            r#"{ "id": 15, "transactions": [{ "amount": 500, "date": "2024-01-01" }, { "amount": -200, "date": "2024-02-01" }] }"#.to_string(),
+            r#"{ "id": 16, "transactions": [{ "amount": 500, "date": "2024-01-01" }] }"#.to_string(),
+        ];
+
         let insert = InsertRequest {
             table_name: table_name.to_string(),
             columns: vec![
@@ -360,6 +380,16 @@ CREATE TABLE {table_name} (
                     ..Default::default()
                 },
                 Column {
+                    column_name: "c".to_string(),
+                    values: Some(Values {
+                        string_values: json_strings,
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Field as i32,
+                    datatype: ColumnDataType::Json as i32,
+                    ..Default::default()
+                },
+                Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
                         timestamp_millisecond_values,
@@ -383,7 +413,7 @@ CREATE TABLE {table_name} (
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(format!(
-                "SELECT ts, a, b FROM {table_name} ORDER BY ts"
+                "SELECT ts, a, b, json_to_string(c) FROM {table_name} ORDER BY ts"
             ))),
         });
         let output = query(instance, request.clone()).await;
@@ -391,27 +421,26 @@ CREATE TABLE {table_name} (
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "\
-+---------------------+----+-------------------+
-| ts                  | a  | b                 |
-+---------------------+----+-------------------+
-| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 |
-| 2023-01-01T07:26:13 | 2  | ts: 1672557973000 |
-| 2023-01-01T07:26:14 | 3  | ts: 1672557974000 |
-| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 |
-| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 |
-| 2023-01-01T07:26:17 |    | ts: 1672557977000 |
-| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 |
-| 2023-01-01T07:26:19 | 12 | ts: 1672557979000 |
-| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 |
-| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 |
-| 2023-01-01T07:26:22 | 22 | ts: 1672557982000 |
-| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 |
-| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 |
-| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 |
-| 2023-01-01T07:26:26 | 52 | ts: 1672557986000 |
-| 2023-01-01T07:26:27 | 53 | ts: 1672557987000 |
-+---------------------+----+-------------------+";
+        let expected = r#"+---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+
+| ts                  | a  | b                 | json_to_string(my_table.c)                                                                        |
++---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+
+| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 | {"active":true,"age":30,"id":1,"name":"Alice"}                                                    |
+| 2023-01-01T07:26:13 | 2  | ts: 1672557973000 | {"active":false,"balance":1234.56,"id":2,"name":"Bob"}                                            |
+| 2023-01-01T07:26:14 | 3  | ts: 1672557974000 | {"age":28,"id":3,"tags":["rust","testing","json"]}                                                |
+| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 | {"id":4,"metadata":{"created_at":"2024-10-30T12:00:00Z","status":"inactive"}}                     |
+| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 | {"id":5,"name":null,"phone":"+1234567890"}                                                        |
+| 2023-01-01T07:26:17 |    | ts: 1672557977000 | {"active":true,"height":5.9,"id":6,"weight":72.5}                                                 |
+| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 | {"age":29,"id":7,"languages":["English","Spanish"]}                                               |
+| 2023-01-01T07:26:19 | 12 | ts: 1672557979000 | {"contact":{"email":"hank@example.com","phone":"+0987654321"},"id":8}                             |
+| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 | {"id":9,"preferences":{"notifications":true,"theme":"dark"}}                                      |
+| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 | {"active":false,"id":10,"scores":[88,92,76]}                                                      |
+| 2023-01-01T07:26:22 | 22 | ts: 1672557982000 | {"birthday":"1996-07-20","id":11,"location":{"city":"New York","zip":"10001"}}                    |
+| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 | {"id":12,"subscription":{"expires":"2025-01-01","type":"premium"}}                                |
+| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 | {"active":true,"id":13,"settings":{"brightness":0.6,"volume":0.8}}                                |
+| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 | {"id":14,"notes":["first note","second note"],"priority":1}                                       |
+| 2023-01-01T07:26:26 | 52 | ts: 1672557986000 | {"id":15,"transactions":[{"amount":500,"date":"2024-01-01"},{"amount":-200,"date":"2024-02-01"}]} |
+| 2023-01-01T07:26:27 | 53 | ts: 1672557987000 | {"id":16,"transactions":[{"amount":500,"date":"2024-01-01"}]}                                     |
++---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+"#;
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
 
         let new_grpc_delete_request = |a, b, ts, row_count| DeleteRequest {
@@ -484,21 +513,20 @@ CREATE TABLE {table_name} (
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "\
-+---------------------+----+-------------------+
-| ts                  | a  | b                 |
-+---------------------+----+-------------------+
-| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 |
-| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 |
-| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 |
-| 2023-01-01T07:26:17 |    | ts: 1672557977000 |
-| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 |
-| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 |
-| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 |
-| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 |
-| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 |
-| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 |
-+---------------------+----+-------------------+";
+        let expected = r#"+---------------------+----+-------------------+-------------------------------------------------------------------------------+
+| ts                  | a  | b                 | json_to_string(my_table.c)                                                    |
++---------------------+----+-------------------+-------------------------------------------------------------------------------+
+| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 | {"active":true,"age":30,"id":1,"name":"Alice"}                                |
+| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 | {"id":4,"metadata":{"created_at":"2024-10-30T12:00:00Z","status":"inactive"}} |
+| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 | {"id":5,"name":null,"phone":"+1234567890"}                                    |
+| 2023-01-01T07:26:17 |    | ts: 1672557977000 | {"active":true,"height":5.9,"id":6,"weight":72.5}                             |
+| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 | {"age":29,"id":7,"languages":["English","Spanish"]}                           |
+| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 | {"id":9,"preferences":{"notifications":true,"theme":"dark"}}                  |
+| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 | {"active":false,"id":10,"scores":[88,92,76]}                                  |
+| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 | {"id":12,"subscription":{"expires":"2025-01-01","type":"premium"}}            |
+| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 | {"active":true,"id":13,"settings":{"brightness":0.6,"volume":0.8}}            |
+| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 | {"id":14,"notes":["first note","second note"],"priority":1}                   |
++---------------------+----+-------------------+-------------------------------------------------------------------------------+"#;
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 
@@ -587,6 +615,22 @@ CREATE TABLE {table_name} (
                     ..Default::default()
                 },
                 Column {
+                    column_name: "c".to_string(),
+                    values: Some(Values {
+                        string_values: vec![
+                            r#"{ "id": 1, "name": "Alice", "age": 30, "active": true }"#
+                                .to_string(),
+                            r#"{ "id": 2, "name": "Bob", "balance": 1234.56, "active": false }"#
+                                .to_string(),
+                        ],
+                        ..Default::default()
+                    }),
+                    null_mask: vec![2],
+                    semantic_type: SemanticType::Field as i32,
+                    datatype: ColumnDataType::Json as i32,
+                    ..Default::default()
+                },
+                Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
                         timestamp_millisecond_values: vec![
@@ -652,7 +696,8 @@ CREATE TABLE {table_name} (
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(
-                "SELECT ts, a, b FROM auto_created_table order by ts".to_string(),
+                "SELECT ts, a, b, json_to_string(c) FROM auto_created_table order by ts"
+                    .to_string(),
             )),
         });
         let output = query(instance, request.clone()).await;
@@ -660,17 +705,16 @@ CREATE TABLE {table_name} (
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "\
-+---------------------+---+---+
-| ts                  | a | b |
-+---------------------+---+---+
-| 2023-01-01T07:26:15 | 4 |   |
-| 2023-01-01T07:26:16 |   |   |
-| 2023-01-01T07:26:17 | 6 |   |
-| 2023-01-01T07:26:18 |   | x |
-| 2023-01-01T07:26:19 |   |   |
-| 2023-01-01T07:26:20 |   | z |
-+---------------------+---+---+";
+        let expected = r#"+---------------------+---+---+--------------------------------------------------------+
+| ts                  | a | b | json_to_string(auto_created_table.c)                   |
++---------------------+---+---+--------------------------------------------------------+
+| 2023-01-01T07:26:15 | 4 |   | {"active":true,"age":30,"id":1,"name":"Alice"}         |
+| 2023-01-01T07:26:16 |   |   |                                                        |
+| 2023-01-01T07:26:17 | 6 |   | {"active":false,"balance":1234.56,"id":2,"name":"Bob"} |
+| 2023-01-01T07:26:18 |   | x |                                                        |
+| 2023-01-01T07:26:19 |   |   |                                                        |
+| 2023-01-01T07:26:20 |   | z |                                                        |
++---------------------+---+---+--------------------------------------------------------+"#;
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
 
         let delete = DeleteRequest {
@@ -702,15 +746,14 @@ CREATE TABLE {table_name} (
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "\
-+---------------------+---+---+
-| ts                  | a | b |
-+---------------------+---+---+
-| 2023-01-01T07:26:16 |   |   |
-| 2023-01-01T07:26:17 | 6 |   |
-| 2023-01-01T07:26:18 |   | x |
-| 2023-01-01T07:26:20 |   | z |
-+---------------------+---+---+";
+        let expected = r#"+---------------------+---+---+--------------------------------------------------------+
+| ts                  | a | b | json_to_string(auto_created_table.c)                   |
++---------------------+---+---+--------------------------------------------------------+
+| 2023-01-01T07:26:16 |   |   |                                                        |
+| 2023-01-01T07:26:17 | 6 |   | {"active":false,"balance":1234.56,"id":2,"name":"Bob"} |
+| 2023-01-01T07:26:18 |   | x |                                                        |
+| 2023-01-01T07:26:20 |   | z |                                                        |
++---------------------+---+---+--------------------------------------------------------+"#;
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 

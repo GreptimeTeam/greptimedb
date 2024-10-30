@@ -19,7 +19,7 @@ use api::v1::{DeleteRequests, DropFlowExpr, InsertRequests, RowDeleteRequests, R
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_query::Output;
-use common_telemetry::tracing;
+use common_telemetry::tracing::{self, warn};
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -63,6 +63,7 @@ impl GrpcQueryHandler for Instance {
                     Query::Sql(sql) => {
                         let timer = GRPC_HANDLE_SQL_ELAPSED.start_timer();
                         let mut result = SqlQueryHandler::do_query(self, &sql, ctx.clone()).await;
+                        warn!("run sql: {sql}");
                         ensure!(
                             result.len() == 1,
                             NotSupportedSnafu {

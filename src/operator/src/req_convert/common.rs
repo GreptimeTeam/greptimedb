@@ -17,9 +17,14 @@ pub(crate) mod partitioner;
 use std::collections::HashMap;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::column::Values;
+use api::v1::column_data_type_extension::TypeExt;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::value::ValueData;
-use api::v1::{Column, ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
+use api::v1::{
+    Column, ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row, Rows,
+    SemanticType, Value,
+};
 use common_base::BitVec;
 use datatypes::vectors::VectorRef;
 use snafu::prelude::*;
@@ -27,9 +32,47 @@ use snafu::ResultExt;
 use table::metadata::TableInfo;
 
 use crate::error::{
-    ColumnDataTypeSnafu, ColumnNotFoundSnafu, InvalidInsertRequestSnafu,
+    ColumnDataTypeSnafu, ColumnNotFoundSnafu, InvalidInsertRequestSnafu, InvalidJsonTextSnafu,
     MissingTimeIndexColumnSnafu, Result,
 };
+
+/// Preprocesses a column's data by converting specific data types (e.g., JSON)
+/// into a more suitable format for storage or processing.
+fn preprocess_column_data(mut column: Column) -> Result<Column> {
+    // Check if the column's data type is JSON.
+    let column = if column.datatype() == ColumnDataType::Json {
+        // JSON data is stored as strings in the column. Convert it to a binary format.
+        let json_values = column.values.clone().unwrap_or_default().string_values;
+
+        // Parse each JSON string value into binary JSON (jsonb) format.
+        let jsonb_values = json_values
+            .into_iter()
+            .map(|json| {
+                jsonb::parse_value(json.as_bytes())
+                    .map_err(|_| InvalidJsonTextSnafu { json: json.clone() }.build())
+                    .map(|jsonb| jsonb.to_vec())
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Update the column values to store the converted binary JSON values.
+        column.values = Some(Values {
+            binary_values: jsonb_values,
+            ..Default::default()
+        });
+
+        // Set the column's data type to binary to reflect the new format.
+        column.datatype_extension = Some(ColumnDataTypeExtension {
+            type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+        });
+        column.datatype = ColumnDataType::Binary.into();
+
+        column
+    } else {
+        column
+    };
+
+    Ok(column)
+}
 
 pub fn columns_to_rows(columns: Vec<Column>, row_count: u32) -> Result<Rows> {
     let row_count = row_count as usize;
@@ -42,6 +85,7 @@ pub fn columns_to_rows(columns: Vec<Column>, row_count: u32) -> Result<Rows> {
         row_count
     ];
     for column in columns {
+        let column = preprocess_column_data(column)?;
         let column_schema = ColumnSchema {
             column_name: column.column_name.clone(),
             datatype: column.datatype,

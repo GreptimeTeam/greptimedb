@@ -14,10 +14,11 @@
 
 use std::collections::HashSet;
 
+use api::v1::column_data_type_extension::TypeExt;
 use api::v1::column_def::contains_fulltext;
 use api::v1::{
     AddColumn, AddColumns, Column, ColumnDataType, ColumnDataTypeExtension, ColumnDef,
-    ColumnOptions, ColumnSchema, CreateTableExpr, SemanticType,
+    ColumnOptions, ColumnSchema, CreateTableExpr, JsonTypeExtension, SemanticType,
 };
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -72,6 +73,23 @@ impl<'a> From<&'a ColumnSchema> for ColumnExpr<'a> {
     }
 }
 
+fn infer_column_type(
+    datatype: i32,
+    datatype_extension: &Option<ColumnDataTypeExtension>,
+) -> Result<ColumnDataType> {
+    if let Some(ext) = datatype_extension {
+        if *ext.type_ext.as_ref().unwrap()
+            == TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())
+        {
+            return Ok(ColumnDataType::Json);
+        }
+    }
+
+    let column_type =
+        ColumnDataType::try_from(datatype).context(UnknownColumnDataTypeSnafu { datatype })?;
+    Ok(column_type)
+}
+
 pub fn build_create_table_expr(
     table_id: Option<TableId>,
     table_name: &TableReference<'_>,
@@ -124,8 +142,7 @@ pub fn build_create_table_expr(
             _ => {}
         }
 
-        let column_type =
-            ColumnDataType::try_from(datatype).context(UnknownColumnDataTypeSnafu { datatype })?;
+        let column_type = infer_column_type(datatype, datatype_extension)?;
 
         ensure!(
             !contains_fulltext(options) || column_type == ColumnDataType::String,

@@ -7596,6 +7596,7 @@ dependencies = [
  "file-engine",
  "futures",
  "futures-util",
+ "jsonb",
  "lazy_static",
  "meta-client",
  "meter-core",

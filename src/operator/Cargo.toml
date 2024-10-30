@@ -29,13 +29,14 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
-datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion.workspace = true
 datatypes.workspace = true
 file-engine.workspace = true
 futures = "0.3"
 futures-util.workspace = true
+jsonb.workspace = true
 lazy_static.workspace = true
 meta-client.workspace = true
 meter-core.workspace = true
@@ -54,8 +55,8 @@ sqlparser.workspace = true
 store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
-tokio.workspace = true
 tokio-util.workspace = true
+tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
