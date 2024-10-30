@@ -43,10 +43,10 @@ impl AlterLogicalTablesProcedure {
             &self.data.physical_columns,
         );
 
-        // Updates physical table's metadata
+        // Updates physical table's metadata, and we don't need to touch per-region settings.
         self.context
             .table_metadata_manager
-            .update_table_info(physical_table_info, new_raw_table_info)
+            .update_table_info(physical_table_info, None, new_raw_table_info)
             .await?;
 
         Ok(())

@@ -22,6 +22,7 @@ datafusion-physical-plan.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
+humantime.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true

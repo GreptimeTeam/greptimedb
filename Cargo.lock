@@ -2149,6 +2149,7 @@ dependencies = [
  "paste",
  "prost 0.12.6",
  "snafu 0.8.5",
+ "store-api",
  "table",
 ]
 
@@ -4531,7 +4532,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=9faf45e8bd83cba106ddfb09bba85784bf9ade2a#9faf45e8bd83cba106ddfb09bba85784bf9ade2a"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=255f87a3318ace3f88a67f76995a0e14910983f4#255f87a3318ace3f88a67f76995a0e14910983f4"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -11497,6 +11498,7 @@ dependencies = [
  "datatypes",
  "derive_builder 0.12.0",
  "futures",
+ "humantime",
  "serde",
  "serde_json",
  "snafu 0.8.5",

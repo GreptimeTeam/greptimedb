@@ -23,7 +23,7 @@ use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
 use super::MetadataKey;
-use crate::error::{InvalidMetadataSnafu, Result};
+use crate::error::{DatanodeTableInfoNotFoundSnafu, InvalidMetadataSnafu, Result};
 use crate::key::{
     MetadataValue, RegionDistribution, DATANODE_TABLE_KEY_PATTERN, DATANODE_TABLE_KEY_PREFIX,
 };
@@ -206,6 +206,49 @@ impl DatanodeTableManager {
 
         let txn = Txn::new().and_then(txns);
 
+        Ok(txn)
+    }
+
+    /// Builds a transaction to updates the redundant table options (including WAL options)
+    /// for given table id, if provided.
+    ///
+    /// Note that the provided `new_region_options` must be a
+    /// complete set of all options rather than incremental changes.
+    pub(crate) async fn build_update_table_options_txn(
+        &self,
+        table_id: TableId,
+        region_distribution: RegionDistribution,
+        new_region_options: HashMap<String, String>,
+    ) -> Result<Txn> {
+        assert!(!region_distribution.is_empty());
+        // safety: region_distribution must not be empty
+        let (any_datanode, _) = region_distribution.first_key_value().unwrap();
+
+        let mut region_info = self
+            .kv_backend
+            .get(&DatanodeTableKey::new(*any_datanode, table_id).to_bytes())
+            .await
+            .transpose()
+            .context(DatanodeTableInfoNotFoundSnafu {
+                datanode_id: *any_datanode,
+                table_id,
+            })?
+            .and_then(|r| DatanodeTableValue::try_from_raw_value(&r.value))?
+            .region_info;
+        // substitute region options only.
+        region_info.region_options = new_region_options;
+
+        let mut txns = Vec::with_capacity(region_distribution.len());
+
+        for (datanode, regions) in region_distribution.into_iter() {
+            let key = DatanodeTableKey::new(datanode, table_id);
+            let key_bytes = key.to_bytes();
+            let value_bytes = DatanodeTableValue::new(table_id, regions, region_info.clone())
+                .try_as_raw_value()?;
+            txns.push(TxnOp::Put(key_bytes, value_bytes));
+        }
+
+        let txn = Txn::new().and_then(txns);
         Ok(txn)
     }
 

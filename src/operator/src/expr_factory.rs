@@ -18,9 +18,9 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, ColumnDataType,
-    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
-    DropColumns, ExpireAfter, RenameTable, SemanticType, TableName,
+    AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, ChangeTableOptions,
+    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    DropColumn, DropColumns, ExpireAfter, RenameTable, SemanticType, TableName,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -438,7 +438,7 @@ pub(crate) fn to_alter_expr(
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
-    let kind = match alter_table.alter_operation() {
+    let kind = match alter_table.alter_operation {
         AlterTableOperation::AddConstraint(_) => {
             return NotSupportedSnafu {
                 feat: "ADD CONSTRAINT",
@@ -451,7 +451,7 @@ pub(crate) fn to_alter_expr(
         } => Kind::AddColumns(AddColumns {
             add_columns: vec![AddColumn {
                 column_def: Some(
-                    sql_column_def_to_grpc_column_def(column_def, Some(&query_ctx.timezone()))
+                    sql_column_def_to_grpc_column_def(&column_def, Some(&query_ctx.timezone()))
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?,
                 ),
@@ -463,13 +463,13 @@ pub(crate) fn to_alter_expr(
             target_type,
         } => {
             let target_type =
-                sql_data_type_to_concrete_data_type(target_type).context(ParseSqlSnafu)?;
+                sql_data_type_to_concrete_data_type(&target_type).context(ParseSqlSnafu)?;
             let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
                 .map(|w| w.to_parts())
                 .context(ColumnDataTypeSnafu)?;
             Kind::ChangeColumnTypes(ChangeColumnTypes {
                 change_column_types: vec![ChangeColumnType {
-                    column_name: column_name.value.to_string(),
+                    column_name: column_name.value,
                     target_type: target_type as i32,
                     target_type_extension,
                 }],
@@ -483,6 +483,11 @@ pub(crate) fn to_alter_expr(
         AlterTableOperation::RenameTable { new_table_name } => Kind::RenameTable(RenameTable {
             new_table_name: new_table_name.to_string(),
         }),
+        AlterTableOperation::ChangeTableOptions { options } => {
+            Kind::ChangeTableOptions(ChangeTableOptions {
+                change_table_options: options.into_iter().map(Into::into).collect(),
+            })
+        }
     };
 
     Ok(AlterExpr {
@@ -744,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_to_alter_change_column_type_expr() {
-        let sql = "ALTER TABLE monitor MODIFY mem_usage STRING;";
+        let sql = "ALTER TABLE monitor MODIFY COLUMN mem_usage STRING;";
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap()
