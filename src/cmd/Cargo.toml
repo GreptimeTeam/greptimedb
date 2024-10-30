@@ -78,7 +78,7 @@ table.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tonic.workspace = true
-tracing-appender = "0.2"
+tracing-appender.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemallocator = "0.6"

@@ -134,7 +134,7 @@ async fn test_query_validate() -> Result<()> {
             .unwrap();
     assert!(engine
         .planner()
-        .plan(stmt, QueryContext::arc())
+        .plan(&stmt, QueryContext::arc())
         .await
         .is_ok());
 
@@ -145,7 +145,7 @@ async fn test_query_validate() -> Result<()> {
     .unwrap();
     assert!(engine
         .planner()
-        .plan(stmt, QueryContext::arc())
+        .plan(&stmt, QueryContext::arc())
         .await
         .is_err());
     Ok(())

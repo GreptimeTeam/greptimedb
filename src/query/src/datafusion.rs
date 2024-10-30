@@ -570,7 +570,7 @@ mod tests {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let plan = engine
             .planner()
-            .plan(stmt, QueryContext::arc())
+            .plan(&stmt, QueryContext::arc())
             .await
             .unwrap();
 
@@ -592,7 +592,7 @@ mod tests {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let plan = engine
             .planner()
-            .plan(stmt, QueryContext::arc())
+            .plan(&stmt, QueryContext::arc())
             .await
             .unwrap();
 
@@ -671,7 +671,7 @@ mod tests {
 
         let plan = engine
             .planner()
-            .plan(stmt, QueryContext::arc())
+            .plan(&stmt, QueryContext::arc())
             .await
             .unwrap();
 

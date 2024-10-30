@@ -39,7 +39,7 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
     let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
     let plan = engine
         .planner()
-        .plan(stmt, query_ctx.clone())
+        .plan(&stmt, query_ctx.clone())
         .await
         .unwrap();
     let OutputData::Stream(stream) = engine.execute(plan, query_ctx).await.unwrap().data else {
