@@ -77,7 +77,6 @@ impl WindowedSortPhysicalRule {
                     };
 
                     if let Some(first_sort_expr) = sort_exec.expr().first()
-                        && !first_sort_expr.options.descending
                         && let Some(column_expr) = first_sort_expr
                             .expr
                             .as_any()
