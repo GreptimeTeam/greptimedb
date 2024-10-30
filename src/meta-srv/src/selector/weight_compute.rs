@@ -198,9 +198,11 @@ mod tests {
                 approximate_bytes: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
+                num_rows: 0,
                 memtable_size: 0,
                 manifest_size: 0,
                 sst_size: 0,
+                index_size: 0,
             }],
             ..Default::default()
         }
@@ -217,9 +219,11 @@ mod tests {
                 approximate_bytes: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
+                num_rows: 0,
                 memtable_size: 0,
                 manifest_size: 0,
                 sst_size: 0,
+                index_size: 0,
             }],
             ..Default::default()
         }
@@ -236,9 +240,11 @@ mod tests {
                 approximate_bytes: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
+                num_rows: 0,
                 memtable_size: 0,
                 manifest_size: 0,
                 sst_size: 0,
+                index_size: 0,
             }],
             ..Default::default()
         }

@@ -93,9 +93,11 @@ mod tests {
                 approximate_bytes: 0,
                 engine: default_engine().to_string(),
                 role: RegionRole::Follower,
+                num_rows: 0,
                 memtable_size: 0,
                 manifest_size: 0,
                 sst_size: 0,
+                index_size: 0,
             }
         }
         acc.stat = Some(Stat {

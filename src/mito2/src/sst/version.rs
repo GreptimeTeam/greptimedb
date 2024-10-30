@@ -84,7 +84,25 @@ impl SstVersion {
         }
     }
 
-    /// Returns SST files'space occupied in current version.
+    /// Returns the number of rows in SST files.
+    /// For historical reasons, the result is not precise for old SST files.
+    pub(crate) fn num_rows(&self) -> u64 {
+        self.levels
+            .iter()
+            .map(|level_meta| {
+                level_meta
+                    .files
+                    .values()
+                    .map(|file_handle| {
+                        let meta = file_handle.meta_ref();
+                        meta.num_rows
+                    })
+                    .sum::<u64>()
+            })
+            .sum()
+    }
+
+    /// Returns SST data files'space occupied in current version.
     pub(crate) fn sst_usage(&self) -> u64 {
         self.levels
             .iter()
@@ -94,7 +112,24 @@ impl SstVersion {
                     .values()
                     .map(|file_handle| {
                         let meta = file_handle.meta_ref();
-                        meta.file_size + meta.index_file_size
+                        meta.file_size
+                    })
+                    .sum::<u64>()
+            })
+            .sum()
+    }
+
+    /// Returns SST index files'space occupied in current version.
+    pub(crate) fn index_usage(&self) -> u64 {
+        self.levels
+            .iter()
+            .map(|level_meta| {
+                level_meta
+                    .files
+                    .values()
+                    .map(|file_handle| {
+                        let meta = file_handle.meta_ref();
+                        meta.index_file_size
                     })
                     .sum::<u64>()
             })

@@ -277,15 +277,19 @@ impl MitoRegion {
         let memtable_usage = (memtables.mutable_usage() + memtables.immutables_usage()) as u64;
 
         let sst_usage = version.ssts.sst_usage();
+        let index_usage = version.ssts.index_usage();
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
         let manifest_usage = self.stats.total_manifest_size();
+        let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
 
         RegionStatistic {
+            num_rows,
             memtable_size: memtable_usage,
             wal_size: wal_usage,
             manifest_size: manifest_usage,
             sst_size: sst_usage,
+            index_size: index_usage,
         }
     }
 
@@ -422,15 +426,15 @@ impl ManifestContext {
     /// Sets the [`RegionRole`].
     ///
     /// ```
-    ///     +------------------------------------------+    
-    ///     |                      +-----------------+ |    
-    ///     |                      |                 | |    
+    ///     +------------------------------------------+
+    ///     |                      +-----------------+ |
+    ///     |                      |                 | |
     /// +---+------+       +-------+-----+        +--v-v---+
     /// | Follower |       | Downgrading |        | Leader |
     /// +---^-^----+       +-----+-^-----+        +--+-+---+
-    ///     | |                  | |                 | |    
-    ///     | +------------------+ +-----------------+ |    
-    ///     +------------------------------------------+    
+    ///     | |                  | |                 | |
+    ///     | +------------------+ +-----------------+ |
+    ///     +------------------------------------------+
     ///
     /// Transition:
     /// - Follower -> Leader
