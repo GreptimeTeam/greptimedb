@@ -78,18 +78,21 @@ fn infer_column_datatype(
     datatype: i32,
     datatype_extension: &Option<ColumnDataTypeExtension>,
 ) -> Result<ColumnDataType> {
-    if let Some(ext) = datatype_extension {
-        let type_ext = ext
-            .type_ext
-            .as_ref()
-            .context(error::MissingFieldSnafu { field: "type_ext" })?;
-        if *type_ext == TypeExt::JsonType(JsonTypeExtension::JsonBinary.into()) {
-            return Ok(ColumnDataType::Json);
+    let column_type =
+        ColumnDataType::try_from(datatype).context(UnknownColumnDataTypeSnafu { datatype })?;
+
+    if matches!(&column_type, ColumnDataType::Binary) {
+        if let Some(ext) = datatype_extension {
+            let type_ext = ext
+                .type_ext
+                .as_ref()
+                .context(error::MissingFieldSnafu { field: "type_ext" })?;
+            if *type_ext == TypeExt::JsonType(JsonTypeExtension::JsonBinary.into()) {
+                return Ok(ColumnDataType::Json);
+            }
         }
     }
 
-    let column_type =
-        ColumnDataType::try_from(datatype).context(UnknownColumnDataTypeSnafu { datatype })?;
     Ok(column_type)
 }
 

@@ -772,7 +772,7 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid json text: {}", json))]
-    InvalidJsonText {
+    InvalidJsonFormat {
         #[snafu(implicit)]
         location: Location,
         json: String,
@@ -816,7 +816,7 @@ impl ErrorExt for Error {
             | Error::FunctionArityMismatch { .. }
             | Error::InvalidPartition { .. }
             | Error::PhysicalExpr { .. }
-            | Error::InvalidJsonText { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidJsonFormat { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists

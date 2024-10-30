@@ -31,15 +31,15 @@ use snafu::ResultExt;
 use table::metadata::TableInfo;
 
 use crate::error::{
-    ColumnDataTypeSnafu, ColumnNotFoundSnafu, InvalidInsertRequestSnafu, InvalidJsonTextSnafu,
+    ColumnDataTypeSnafu, ColumnNotFoundSnafu, InvalidInsertRequestSnafu, InvalidJsonFormatSnafu,
     MissingTimeIndexColumnSnafu, Result, UnexpectedSnafu,
 };
 
 /// Encodes a string value as JSONB binary data if the value is of `StringValue` type.
 fn encode_string_to_jsonb_binary(value_data: ValueData) -> Result<ValueData> {
-    if let ValueData::StringValue(json) = value_data {
+    if let ValueData::StringValue(json) = &value_data {
         let binary = jsonb::parse_value(json.as_bytes())
-            .map_err(|_| InvalidJsonTextSnafu { json: json.clone() }.build())
+            .map_err(|_| InvalidJsonFormatSnafu { json }.build())
             .map(|jsonb| jsonb.to_vec())?;
         Ok(ValueData::BinaryValue(binary))
     } else {
