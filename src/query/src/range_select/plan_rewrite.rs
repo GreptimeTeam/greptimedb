@@ -634,7 +634,7 @@ mod test {
     async fn do_query(sql: &str) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_test_engine().await;
-        engine.planner().plan(stmt, QueryContext::arc()).await
+        engine.planner().plan(&stmt, QueryContext::arc()).await
     }
 
     async fn query_plan_compare(sql: &str, expected: String) {

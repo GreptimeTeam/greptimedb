@@ -24,6 +24,7 @@ use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRe
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::region_request::ChangeOption;
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
 use crate::error::{self, Result};
@@ -209,7 +210,33 @@ impl TableMeta {
                     .next_column_id(self.next_column_id);
                 Ok(meta_builder)
             }
+            AlterKind::ChangeTableOptions { options } => self.change_table_options(options),
         }
+    }
+
+    /// Creates a [TableMetaBuilder] with modified table options.
+    fn change_table_options(&self, requests: &[ChangeOption]) -> Result<TableMetaBuilder> {
+        let mut new_options = self.options.clone();
+
+        for request in requests {
+            match request {
+                ChangeOption::TTL(new_ttl) => {
+                    if new_ttl.is_zero() {
+                        new_options.ttl = None;
+                    } else {
+                        new_options.ttl = Some(*new_ttl);
+                    }
+                }
+            }
+        }
+        let mut builder = TableMetaBuilder::default();
+        builder
+            .options(new_options)
+            .schema(self.schema.clone())
+            .primary_key_indices(self.primary_key_indices.clone())
+            .engine(self.engine.clone())
+            .next_column_id(self.next_column_id);
+        Ok(builder)
     }
 
     /// Allocate a new column for the table.
@@ -823,6 +850,13 @@ impl RawTableInfo {
         self.meta.primary_key_indices = primary_key_indices;
         self.meta.value_indices = value_indices;
     }
+
+    /// Extracts region options from table info.
+    ///
+    /// All "region options" are actually a copy of table options for redundancy.
+    pub fn to_region_options(&self) -> HashMap<String, String> {
+        HashMap::from(&self.meta.options)
+    }
 }
 
 impl From<TableInfo> for RawTableInfo {
@@ -857,7 +891,6 @@ impl TryFrom<RawTableInfo> for TableInfo {
 
 #[cfg(test)]
 mod tests {
-
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datatypes::data_type::ConcreteDataType;

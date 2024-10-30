@@ -19,13 +19,14 @@ use std::sync::Arc;
 use api::v1::alter_expr::Kind;
 use api::v1::region::{region_request, RegionRequest};
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, ColumnDataType, ColumnDef as PbColumnDef, DropColumn,
-    DropColumns, SemanticType,
+    AddColumn, AddColumns, AlterExpr, ChangeTableOption, ChangeTableOptions, ColumnDataType,
+    ColumnDef as PbColumnDef, DropColumn, DropColumns, SemanticType,
 };
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use store_api::storage::RegionId;
+use table::requests::TTL_KEY;
 use tokio::sync::mpsc::{self};
 
 use crate::ddl::alter_table::AlterTableProcedure;
@@ -34,6 +35,7 @@ use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::datanode_handler::{
     DatanodeWatcher, RequestOutdatedErrorDatanodeHandler,
 };
+use crate::key::datanode_table::DatanodeTableKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::peer::Peer;
@@ -293,12 +295,21 @@ async fn test_on_update_metadata_add_columns() {
     let table_name = "foo";
     let table_id = 1024;
     let task = test_create_table_task(table_name, table_id);
+
+    let region_id = RegionId::new(table_id, 0);
+    let mock_table_routes = vec![RegionRoute {
+        region: Region::new_test(region_id),
+        leader_peer: Some(Peer::default()),
+        follower_peers: vec![],
+        leader_state: None,
+        leader_down_since: None,
+    }];
     // Puts a value to table name key.
     ddl_context
         .table_metadata_manager
         .create_table_metadata(
             task.table_info.clone(),
-            TableRouteValue::physical(vec![]),
+            TableRouteValue::physical(mock_table_routes),
             HashMap::new(),
         )
         .await
@@ -326,6 +337,7 @@ async fn test_on_update_metadata_add_columns() {
     let mut procedure =
         AlterTableProcedure::new(cluster_id, table_id, task, ddl_context.clone()).unwrap();
     procedure.on_prepare().await.unwrap();
+    procedure.submit_alter_region_requests().await.unwrap();
     procedure.on_update_metadata().await.unwrap();
 
     let table_info = ddl_context
@@ -341,5 +353,78 @@ async fn test_on_update_metadata_add_columns() {
     assert_eq!(
         table_info.meta.schema.column_schemas.len() as u32,
         table_info.meta.next_column_id
+    );
+}
+
+#[tokio::test]
+async fn test_on_update_table_options() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let cluster_id = 1;
+    let table_name = "foo";
+    let table_id = 1024;
+    let task = test_create_table_task(table_name, table_id);
+
+    let region_id = RegionId::new(table_id, 0);
+    let mock_table_routes = vec![RegionRoute {
+        region: Region::new_test(region_id),
+        leader_peer: Some(Peer::default()),
+        follower_peers: vec![],
+        leader_state: None,
+        leader_down_since: None,
+    }];
+    // Puts a value to table name key.
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(mock_table_routes),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let task = AlterTableTask {
+        alter_table: AlterExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::ChangeTableOptions(ChangeTableOptions {
+                change_table_options: vec![ChangeTableOption {
+                    key: TTL_KEY.to_string(),
+                    value: "1d".to_string(),
+                }],
+            })),
+        },
+    };
+    let mut procedure =
+        AlterTableProcedure::new(cluster_id, table_id, task, ddl_context.clone()).unwrap();
+    procedure.on_prepare().await.unwrap();
+    procedure.submit_alter_region_requests().await.unwrap();
+    procedure.on_update_metadata().await.unwrap();
+
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+
+    let datanode_key = DatanodeTableKey::new(0, table_id);
+    let region_info = ddl_context
+        .table_metadata_manager
+        .datanode_table_manager()
+        .get(&datanode_key)
+        .await
+        .unwrap()
+        .unwrap()
+        .region_info;
+
+    assert_eq!(
+        region_info.region_options,
+        HashMap::from(&table_info.meta.options)
     );
 }

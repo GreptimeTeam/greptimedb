@@ -363,7 +363,7 @@ impl StatementExecutor {
 
     pub async fn plan(
         &self,
-        stmt: QueryStatement,
+        stmt: &QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
         self.query_engine
@@ -371,6 +371,14 @@ impl StatementExecutor {
             .plan(stmt, query_ctx)
             .await
             .context(PlanStatementSnafu)
+    }
+
+    /// Execute [`LogicalPlan`] directly.
+    pub async fn exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
+        self.query_engine
+            .execute(plan, query_ctx)
+            .await
+            .context(ExecLogicalPlanSnafu)
     }
 
     pub fn optimize_logical_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
@@ -382,11 +390,8 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     async fn plan_exec(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Output> {
-        let plan = self.plan(stmt, query_ctx.clone()).await?;
-        self.query_engine
-            .execute(plan, query_ctx)
-            .await
-            .context(ExecLogicalPlanSnafu)
+        let plan = self.plan(&stmt, query_ctx.clone()).await?;
+        self.exec_plan(plan, query_ctx).await
     }
 
     async fn get_table(&self, table_ref: &TableReference<'_>) -> Result<TableRef> {

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{fs, path};
 
@@ -250,6 +251,13 @@ pub struct Instance {
     _guard: Vec<WorkerGuard>,
 }
 
+impl Instance {
+    /// Find the socket addr of a server by its `name`.
+    pub async fn server_addr(&self, name: &str) -> Option<SocketAddr> {
+        self.frontend.server_handlers().addr(name).await
+    }
+}
+
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
@@ -340,7 +348,8 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(
+    /// Load the GreptimeDB options from various sources (command line, config file or env).
+    pub fn load_options(
         &self,
         global_options: &GlobalOptions,
     ) -> Result<GreptimeOptions<StandaloneOptions>> {
@@ -430,7 +439,8 @@ impl StartCommand {
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+    /// Build GreptimeDB instance with the loaded options.
+    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -726,12 +736,14 @@ impl InformationExtension for StandaloneInformationExtension {
                     id: stat.region_id,
                     rcus: 0,
                     wcus: 0,
-                    approximate_bytes: region_stat.estimated_disk_size() as i64,
+                    approximate_bytes: region_stat.estimated_disk_size(),
                     engine: stat.engine,
                     role: RegionRole::from(stat.role).into(),
+                    num_rows: region_stat.num_rows,
                     memtable_size: region_stat.memtable_size,
                     manifest_size: region_stat.manifest_size,
                     sst_size: region_stat.sst_size,
+                    index_size: region_stat.index_size,
                 }
             })
             .collect::<Vec<_>>();

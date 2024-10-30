@@ -1788,7 +1788,6 @@ dependencies = [
  "tokio-stream",
  "tonic 0.11.0",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2149,6 +2148,7 @@ dependencies = [
  "paste",
  "prost 0.12.6",
  "snafu 0.8.5",
+ "store-api",
  "table",
 ]
 
@@ -4531,7 +4531,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b4d301184eb0d01fd4d1042fcc7c5dfb54f3c1e3#b4d301184eb0d01fd4d1042fcc7c5dfb54f3c1e3"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=255f87a3318ace3f88a67f76995a0e14910983f4#255f87a3318ace3f88a67f76995a0e14910983f4"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -5524,7 +5524,7 @@ dependencies = [
 [[package]]
 name = "jsonb"
 version = "0.4.1"
-source = "git+https://github.com/datafuselabs/jsonb.git?rev=46ad50fc71cf75afbf98eec455f7892a6387c1fc#46ad50fc71cf75afbf98eec455f7892a6387c1fc"
+source = "git+https://github.com/databendlabs/jsonb.git?rev=46ad50fc71cf75afbf98eec455f7892a6387c1fc#46ad50fc71cf75afbf98eec455f7892a6387c1fc"
 dependencies = [
  "byteorder",
  "fast-float",
@@ -8627,9 +8627,9 @@ dependencies = [
 
 [[package]]
 name = "promql-parser"
-version = "0.4.1"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c1ad4a4cfa84ec4aa5831c82e57af0a3faf3f0af83bee13fa1390b2d0a32dc9"
+checksum = "7fe99e6f80a79abccf1e8fb48dd63473a36057e600cc6ea36147c8318698ae6f"
 dependencies = [
  "cfgrammar",
  "chrono",
@@ -8637,6 +8637,8 @@ dependencies = [
  "lrlex",
  "lrpar",
  "regex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -11497,6 +11499,7 @@ dependencies = [
  "datatypes",
  "derive_builder 0.12.0",
  "futures",
+ "humantime",
  "serde",
  "serde_json",
  "snafu 0.8.5",

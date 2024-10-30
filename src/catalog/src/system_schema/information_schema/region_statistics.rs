@@ -39,9 +39,12 @@ use crate::CatalogManager;
 const REGION_ID: &str = "region_id";
 const TABLE_ID: &str = "table_id";
 const REGION_NUMBER: &str = "region_number";
+const REGION_ROWS: &str = "region_rows";
+const DISK_SIZE: &str = "disk_size";
 const MEMTABLE_SIZE: &str = "memtable_size";
 const MANIFEST_SIZE: &str = "manifest_size";
 const SST_SIZE: &str = "sst_size";
+const INDEX_SIZE: &str = "index_size";
 const ENGINE: &str = "engine";
 const REGION_ROLE: &str = "region_role";
 
@@ -52,9 +55,12 @@ const INIT_CAPACITY: usize = 42;
 /// - `region_id`: The region id.
 /// - `table_id`: The table id.
 /// - `region_number`: The region number.
+/// - `region_rows`: The number of rows in region.
 /// - `memtable_size`: The memtable size in bytes.
+/// - `disk_size`: The approximate disk size in bytes.
 /// - `manifest_size`: The manifest size in bytes.
-/// - `sst_size`: The sst size in bytes.
+/// - `sst_size`: The sst data files size in bytes.
+/// - `index_size`: The sst index files size in bytes.
 /// - `engine`: The engine type.
 /// - `region_role`: The region role.
 ///
@@ -76,9 +82,12 @@ impl InformationSchemaRegionStatistics {
             ColumnSchema::new(REGION_ID, ConcreteDataType::uint64_datatype(), false),
             ColumnSchema::new(TABLE_ID, ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new(REGION_NUMBER, ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new(REGION_ROWS, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(DISK_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(MEMTABLE_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(MANIFEST_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(SST_SIZE, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(INDEX_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(ENGINE, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(REGION_ROLE, ConcreteDataType::string_datatype(), true),
         ]))
@@ -135,9 +144,12 @@ struct InformationSchemaRegionStatisticsBuilder {
     region_ids: UInt64VectorBuilder,
     table_ids: UInt32VectorBuilder,
     region_numbers: UInt32VectorBuilder,
+    region_rows: UInt64VectorBuilder,
+    disk_sizes: UInt64VectorBuilder,
     memtable_sizes: UInt64VectorBuilder,
     manifest_sizes: UInt64VectorBuilder,
     sst_sizes: UInt64VectorBuilder,
+    index_sizes: UInt64VectorBuilder,
     engines: StringVectorBuilder,
     region_roles: StringVectorBuilder,
 }
@@ -150,9 +162,12 @@ impl InformationSchemaRegionStatisticsBuilder {
             region_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             table_ids: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
             region_numbers: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            region_rows: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            disk_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             memtable_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             manifest_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             sst_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            index_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             engines: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             region_roles: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
@@ -177,9 +192,12 @@ impl InformationSchemaRegionStatisticsBuilder {
             (REGION_ID, &Value::from(region_stat.id.as_u64())),
             (TABLE_ID, &Value::from(region_stat.id.table_id())),
             (REGION_NUMBER, &Value::from(region_stat.id.region_number())),
+            (REGION_ROWS, &Value::from(region_stat.num_rows)),
+            (DISK_SIZE, &Value::from(region_stat.approximate_bytes)),
             (MEMTABLE_SIZE, &Value::from(region_stat.memtable_size)),
             (MANIFEST_SIZE, &Value::from(region_stat.manifest_size)),
             (SST_SIZE, &Value::from(region_stat.sst_size)),
+            (INDEX_SIZE, &Value::from(region_stat.index_size)),
             (ENGINE, &Value::from(region_stat.engine.as_str())),
             (REGION_ROLE, &Value::from(region_stat.role.to_string())),
         ];
@@ -192,9 +210,12 @@ impl InformationSchemaRegionStatisticsBuilder {
         self.table_ids.push(Some(region_stat.id.table_id()));
         self.region_numbers
             .push(Some(region_stat.id.region_number()));
+        self.region_rows.push(Some(region_stat.num_rows));
+        self.disk_sizes.push(Some(region_stat.approximate_bytes));
         self.memtable_sizes.push(Some(region_stat.memtable_size));
         self.manifest_sizes.push(Some(region_stat.manifest_size));
         self.sst_sizes.push(Some(region_stat.sst_size));
+        self.index_sizes.push(Some(region_stat.index_size));
         self.engines.push(Some(&region_stat.engine));
         self.region_roles.push(Some(&region_stat.role.to_string()));
     }
@@ -204,9 +225,12 @@ impl InformationSchemaRegionStatisticsBuilder {
             Arc::new(self.region_ids.finish()),
             Arc::new(self.table_ids.finish()),
             Arc::new(self.region_numbers.finish()),
+            Arc::new(self.region_rows.finish()),
+            Arc::new(self.disk_sizes.finish()),
             Arc::new(self.memtable_sizes.finish()),
             Arc::new(self.manifest_sizes.finish()),
             Arc::new(self.sst_sizes.finish()),
+            Arc::new(self.index_sizes.finish()),
             Arc::new(self.engines.finish()),
             Arc::new(self.region_roles.finish()),
         ];

@@ -23,6 +23,7 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use super::TABLE_INFO_KEY_PATTERN;
+use crate::ddl::utils::region_storage_path;
 use crate::error::{InvalidMetadataSnafu, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, MetadataKey, MetadataValue, TABLE_INFO_KEY_PREFIX};
@@ -124,6 +125,11 @@ impl TableInfoValue {
             schema_name: self.table_info.schema_name.to_string(),
             table_name: self.table_info.name.to_string(),
         }
+    }
+
+    /// Builds storage path for all regions in table.
+    pub fn region_storage_path(&self) -> String {
+        region_storage_path(&self.table_info.catalog_name, &self.table_info.schema_name)
     }
 }
 

@@ -22,12 +22,13 @@ use api::v1::{
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::region_request::ChangeOption;
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ChangeColumnTypeRequest};
 
 use crate::error::{
-    InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu, Result,
-    UnknownLocationTypeSnafu,
+    InvalidChangeTableOptionRequestSnafu, InvalidColumnDefSnafu, MissingFieldSnafu,
+    MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
 };
 
 const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
@@ -92,6 +93,15 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
         Kind::RenameTable(RenameTable { new_table_name }) => {
             AlterKind::RenameTable { new_table_name }
         }
+        Kind::ChangeTableOptions(api::v1::ChangeTableOptions {
+            change_table_options,
+        }) => AlterKind::ChangeTableOptions {
+            options: change_table_options
+                .iter()
+                .map(ChangeOption::try_from)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context(InvalidChangeTableOptionRequestSnafu)?,
+        },
     };
 
     let request = AlterTableRequest {

@@ -60,6 +60,8 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(SET FOREIGN_KEY_CHECKS(.*))",
         "(?i)^(SET AUTOCOMMIT(.*))",
         "(?i)^(SET SQL_LOG_BIN(.*))",
+        "(?i)^(SET SESSION TRANSACTION(.*))",
+        "(?i)^(SET TRANSACTION(.*))",
         "(?i)^(SET sql_mode(.*))",
         "(?i)^(SET SQL_SELECT_LIMIT(.*))",
         "(?i)^(SET @@(.*))",

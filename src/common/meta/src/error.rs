@@ -652,6 +652,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Datanode table info not found, table id: {}, datanode id: {}",
+        table_id,
+        datanode_id
+    ))]
+    DatanodeTableInfoNotFound {
+        datanode_id: DatanodeId,
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -752,6 +764,7 @@ impl ErrorExt for Error {
             PostgresExecution { .. } => StatusCode::Internal,
             #[cfg(feature = "pg_kvbackend")]
             ConnectPostgres { .. } => StatusCode::Internal,
+            Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
         }
     }
 
