@@ -60,6 +60,7 @@ macro_rules! sql_tests {
                 $service,
 
                 test_mysql_auth,
+                test_mysql_stmts,
                 test_mysql_crud,
                 test_mysql_timezone,
                 test_mysql_async_timestamp,
@@ -128,6 +129,25 @@ pub async fn test_mysql_auth(store_type: StorageType) {
         .await;
 
     assert!(conn_re.is_ok());
+
+    let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_mysql_stmts(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let (addr, mut guard, fe_mysql_server) = setup_mysql_server(store_type, "sql_crud").await;
+
+    let mut conn = MySqlConnection::connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    conn.execute("SET SESSION TRANSACTION READ ONLY")
+        .await
+        .unwrap();
+
+    conn.execute("SET TRANSACTION READ ONLY").await.unwrap();
 
     let _ = fe_mysql_server.shutdown().await;
     guard.remove_all().await;
