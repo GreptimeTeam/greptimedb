@@ -26,8 +26,9 @@ use table::metadata::TableId;
 use table::table_reference::TableReference;
 
 use crate::error::{
-    DuplicatedColumnNameSnafu, DuplicatedTimestampColumnSnafu, InvalidFulltextColumnTypeSnafu,
-    MissingTimestampColumnSnafu, Result, UnknownColumnDataTypeSnafu,
+    self, DuplicatedColumnNameSnafu, DuplicatedTimestampColumnSnafu,
+    InvalidFulltextColumnTypeSnafu, MissingTimestampColumnSnafu, Result,
+    UnknownColumnDataTypeSnafu,
 };
 pub struct ColumnExpr<'a> {
     pub column_name: &'a str,
@@ -73,14 +74,16 @@ impl<'a> From<&'a ColumnSchema> for ColumnExpr<'a> {
     }
 }
 
-fn infer_column_type(
+fn infer_column_datatype(
     datatype: i32,
     datatype_extension: &Option<ColumnDataTypeExtension>,
 ) -> Result<ColumnDataType> {
     if let Some(ext) = datatype_extension {
-        if *ext.type_ext.as_ref().unwrap()
-            == TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())
-        {
+        let type_ext = ext
+            .type_ext
+            .as_ref()
+            .context(error::MissingFieldSnafu { field: "type_ext" })?;
+        if *type_ext == TypeExt::JsonType(JsonTypeExtension::JsonBinary.into()) {
             return Ok(ColumnDataType::Json);
         }
     }
@@ -142,7 +145,7 @@ pub fn build_create_table_expr(
             _ => {}
         }
 
-        let column_type = infer_column_type(datatype, datatype_extension)?;
+        let column_type = infer_column_datatype(datatype, datatype_extension)?;
 
         ensure!(
             !contains_fulltext(options) || column_type == ColumnDataType::String,
