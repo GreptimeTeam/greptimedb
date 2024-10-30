@@ -671,7 +671,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     //  the json output directly.
     // the correctness should be covered by parser. In this test we only check
     //  response format.
-    let expected = "{\"status\":\"success\",\"data\":{\"type\":\"vectorSelector\",\"name\":\"http_requests\",\"matchers\":[],\"offset\":0}}";
+    let expected = "{\"status\":\"success\",\"data\":{\"type\":\"vectorSelector\",\"name\":\"http_requests\",\"matchers\":[],\"offset\":0,\"startOrEnd\":null,\"timestamp\":null}}";
     assert_eq!(expected, data);
 
     let res = client
