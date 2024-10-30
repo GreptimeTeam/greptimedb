@@ -87,18 +87,24 @@ impl WindowedSortPhysicalRule {
                     } else {
                         return Ok(Transformed::no(plan));
                     }
-
                     let first_sort_expr = sort_exec.expr().first().unwrap().clone();
-                    let part_sort_exec = Arc::new(PartSortExec::new(
-                        first_sort_expr.clone(),
-                        scanner_info.partition_ranges.clone(),
-                        sort_exec.input().clone(),
-                    ));
+
+                    // PartSortExec is unnecessary if there is no tag columns
+                    let new_input = if scanner_info.tag_columns.is_empty() {
+                        sort_exec.input().clone()
+                    } else {
+                        Arc::new(PartSortExec::new(
+                            first_sort_expr.clone(),
+                            scanner_info.partition_ranges.clone(),
+                            sort_exec.input().clone(),
+                        ))
+                    };
+
                     let windowed_sort_exec = WindowedSortExec::try_new(
                         first_sort_expr,
                         sort_exec.fetch(),
                         scanner_info.partition_ranges,
-                        part_sort_exec,
+                        new_input,
                     )?;
 
                     return Ok(Transformed {
@@ -119,11 +125,13 @@ impl WindowedSortPhysicalRule {
 struct ScannerInfo {
     partition_ranges: Vec<Vec<PartitionRange>>,
     time_index: String,
+    tag_columns: Vec<String>,
 }
 
 fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Option<ScannerInfo>> {
     let mut partition_ranges = None;
     let mut time_index = None;
+    let mut tag_columns = None;
 
     input.transform_up(|plan| {
         // Unappliable case, reset the state.
@@ -139,6 +147,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
         if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
             partition_ranges = Some(region_scan_exec.get_uncollapsed_partition_ranges());
             time_index = region_scan_exec.time_index();
+            tag_columns = Some(region_scan_exec.tag_columns());
 
             // set distinguish_partition_ranges to true, this is an incorrect workaround
             region_scan_exec.with_distinguish_partition_range(true);
@@ -151,6 +160,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
         ScannerInfo {
             partition_ranges: partition_ranges?,
             time_index: time_index?,
+            tag_columns: tag_columns?,
         }
     };
 

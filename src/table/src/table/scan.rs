@@ -154,6 +154,16 @@ impl RegionScanExec {
             .timestamp_column()
             .map(|x| x.name.clone())
     }
+
+    pub fn tag_columns(&self) -> Vec<String> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .metadata()
+            .primary_key_columns()
+            .map(|col| col.column_schema.name.clone())
+            .collect()
+    }
 }
 
 impl ExecutionPlan for RegionScanExec {
@@ -301,33 +311,45 @@ impl DfRecordBatchStream for StreamWithMetricWrapper {
 mod test {
     use std::sync::Arc;
 
+    use api::v1::SemanticType;
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datafusion::prelude::SessionContext;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-    use datatypes::vectors::Int32Vector;
+    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector};
     use futures::TryStreamExt;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::region_engine::SinglePartitionScanner;
+    use store_api::storage::RegionId;
 
     use super::*;
 
     #[tokio::test]
     async fn test_simple_table_scan() {
         let ctx = SessionContext::new();
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "a",
-            ConcreteDataType::int32_datatype(),
-            false,
-        )]));
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new(
+                "b",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
 
         let batch1 = RecordBatch::new(
             schema.clone(),
-            vec![Arc::new(Int32Vector::from_slice([1, 2])) as _],
+            vec![
+                Arc::new(Int32Vector::from_slice([1, 2])) as _,
+                Arc::new(TimestampMillisecondVector::from_slice([1000, 2000])) as _,
+            ],
         )
         .unwrap();
         let batch2 = RecordBatch::new(
             schema.clone(),
-            vec![Arc::new(Int32Vector::from_slice([3, 4, 5])) as _],
+            vec![
+                Arc::new(Int32Vector::from_slice([3, 4, 5])) as _,
+                Arc::new(TimestampMillisecondVector::from_slice([3000, 4000, 5000])) as _,
+            ],
         )
         .unwrap();
 
@@ -335,7 +357,26 @@ mod test {
             RecordBatches::try_new(schema.clone(), vec![batch1.clone(), batch2.clone()]).unwrap();
         let stream = recordbatches.as_stream();
 
-        let scanner = Box::new(SinglePartitionScanner::new(stream, false));
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5678));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "b",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![1]);
+        let region_metadata = Arc::new(builder.build().unwrap());
+
+        let scanner = Box::new(SinglePartitionScanner::new(stream, false, region_metadata));
         let plan = RegionScanExec::new(scanner);
         let actual: SchemaRef = Arc::new(
             plan.properties
