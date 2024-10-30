@@ -259,3 +259,56 @@ async fn test_prune_memtable_complex_expr() {
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
+
+#[tokio::test]
+async fn test_mem_range_prune() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(5, 8),
+        },
+    )
+    .await;
+
+    // Starts scan and gets the memtable time range.
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(10, 12),
+        },
+    )
+    .await;
+
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 5     | 5.0     | 1970-01-01T00:00:05 |
+| 6     | 6.0     | 1970-01-01T00:00:06 |
+| 7     | 7.0     | 1970-01-01T00:00:07 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}

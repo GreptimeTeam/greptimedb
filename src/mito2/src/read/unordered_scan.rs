@@ -89,7 +89,7 @@ impl UnorderedScan {
             let range_meta = &stream_ctx.ranges[part_range_id];
             for index in &range_meta.row_group_indices {
                 if stream_ctx.is_mem_range_index(*index) {
-                    let stream = scan_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index);
+                    let stream = scan_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index, range_meta.time_range);
                     for await batch in stream {
                         yield batch;
                     }

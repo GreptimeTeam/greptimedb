@@ -26,6 +26,7 @@ use crate::error::Result;
 use crate::read::range::RowGroupIndex;
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, ScannerMetrics, Source};
+use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::reader::ReaderMetrics;
 
 struct PartitionMetricsInner {
@@ -128,13 +129,14 @@ pub(crate) fn scan_mem_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
+    time_range: FileTimeRange,
 ) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
         let ranges = stream_ctx.build_mem_ranges(index);
         part_metrics.inc_num_mem_ranges(ranges.len());
         for range in ranges {
             let build_reader_start = Instant::now();
-            let iter = range.build_iter()?;
+            let iter = range.build_iter(time_range)?;
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
 
             let mut source = Source::Iter(iter);
