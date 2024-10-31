@@ -17,7 +17,7 @@ use common_meta::peer::Peer;
 use crate::error::Result;
 use crate::lease;
 use crate::metasrv::SelectorContext;
-use crate::selector::common::choose_peers;
+use crate::selector::common::choose_items;
 use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
 use crate::selector::{Namespace, Selector, SelectorOptions};
 
@@ -53,7 +53,7 @@ impl Selector for LeaseBasedSelector {
 
         // 3. choose peers by weight_array.
         let mut weighted_choose = RandomWeightedChoose::new(weight_array);
-        let selected = choose_peers(&opts, &mut weighted_choose)?;
+        let selected = choose_items(&opts, &mut weighted_choose)?;
 
         Ok(selected)
     }
