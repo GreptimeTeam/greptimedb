@@ -32,6 +32,14 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to choose items"))]
+    ChooseItems {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: rand::distributions::WeightedError,
+    },
+
     #[snafu(display("Exceeded deadline, operation: {}", operation))]
     ExceededDeadline {
         #[snafu(implicit)]
@@ -762,7 +770,8 @@ impl ErrorExt for Error {
             | Error::WeightArray { .. }
             | Error::NotSetWeightArray { .. }
             | Error::PeerUnavailable { .. }
-            | Error::ExceededDeadline { .. } => StatusCode::Internal,
+            | Error::ExceededDeadline { .. }
+            | Error::ChooseItems { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
