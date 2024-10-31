@@ -24,6 +24,7 @@ use futures::Future;
 use tokio::sync::oneshot;
 
 use crate::error::{self, Result};
+use crate::handler::PusherId;
 
 pub type MailboxRef = Arc<dyn Mailbox>;
 
@@ -53,11 +54,11 @@ impl Display for Channel {
 }
 
 impl Channel {
-    pub(crate) fn pusher_id(&self) -> String {
+    pub(crate) fn pusher_id(&self) -> PusherId {
         match self {
-            Channel::Datanode(id) => format!("{}-{}", Role::Datanode as i32, id),
-            Channel::Frontend(id) => format!("{}-{}", Role::Frontend as i32, id),
-            Channel::Flownode(id) => format!("{}-{}", Role::Flownode as i32, id),
+            Channel::Datanode(id) => PusherId::new(Role::Datanode, *id),
+            Channel::Frontend(id) => PusherId::new(Role::Frontend, *id),
+            Channel::Flownode(id) => PusherId::new(Role::Flownode, *id),
         }
     }
 }

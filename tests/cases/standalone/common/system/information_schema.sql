@@ -14,6 +14,8 @@ select * from information_schema.columns order by table_schema, table_name, colu
 create
 database my_db;
 
+use information_schema;
+
 use my_db;
 
 create table foo

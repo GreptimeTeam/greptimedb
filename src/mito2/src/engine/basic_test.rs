@@ -552,8 +552,8 @@ async fn test_region_usage() {
         .unwrap();
     // region is empty now, check manifest size
     let region = engine.get_region(region_id).unwrap();
-    let region_stat = region.region_usage();
-    assert_eq!(region_stat.manifest_usage, 686);
+    let region_stat = region.region_statistic();
+    assert_eq!(region_stat.manifest_size, 686);
 
     // put some rows
     let rows = Rows {
@@ -563,8 +563,8 @@ async fn test_region_usage() {
 
     put_rows(&engine, region_id, rows).await;
 
-    let region_stat = region.region_usage();
-    assert!(region_stat.wal_usage > 0);
+    let region_stat = region.region_statistic();
+    assert!(region_stat.wal_size > 0);
 
     // delete some rows
     let rows = Rows {
@@ -573,18 +573,19 @@ async fn test_region_usage() {
     };
     delete_rows(&engine, region_id, rows).await;
 
-    let region_stat = region.region_usage();
-    assert!(region_stat.wal_usage > 0);
+    let region_stat = region.region_statistic();
+    assert!(region_stat.wal_size > 0);
 
     // flush region
     flush_region(&engine, region_id, None).await;
 
-    let region_stat = region.region_usage();
-    assert_eq!(region_stat.sst_usage, 3010);
+    let region_stat = region.region_statistic();
+    assert_eq!(region_stat.sst_size, 2790);
+    assert_eq!(region_stat.num_rows, 10);
 
     // region total usage
     // Some memtables may share items.
-    assert!(region_stat.disk_usage() >= 4028);
+    assert!(region_stat.estimated_disk_size() >= 4028);
 }
 
 #[tokio::test]

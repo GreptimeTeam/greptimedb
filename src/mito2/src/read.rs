@@ -20,7 +20,9 @@ pub mod last_row;
 pub mod merge;
 pub mod projection;
 pub(crate) mod prune;
+pub(crate) mod range;
 pub(crate) mod scan_region;
+pub(crate) mod scan_util;
 pub(crate) mod seq_scan;
 pub(crate) mod unordered_scan;
 
@@ -56,7 +58,6 @@ use crate::error::{
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::prune::PruneReader;
-use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -490,6 +491,188 @@ impl Batch {
         // Safety: sequences is not null so it actually returns Some.
         self.sequences.get_data(index).unwrap()
     }
+
+    /// Checks the batch is monotonic by timestamps.
+    #[cfg(debug_assertions)]
+    pub(crate) fn check_monotonic(&self) -> Result<(), String> {
+        use std::cmp::Ordering;
+        if self.timestamps_native().is_none() {
+            return Ok(());
+        }
+
+        let timestamps = self.timestamps_native().unwrap();
+        let sequences = self.sequences.as_arrow().values();
+        for (i, window) in timestamps.windows(2).enumerate() {
+            let current = window[0];
+            let next = window[1];
+            let current_sequence = sequences[i];
+            let next_sequence = sequences[i + 1];
+            match current.cmp(&next) {
+                Ordering::Less => {
+                    // The current timestamp is less than the next timestamp.
+                    continue;
+                }
+                Ordering::Equal => {
+                    // The current timestamp is equal to the next timestamp.
+                    if current_sequence < next_sequence {
+                        return Err(format!(
+                            "sequence are not monotonic: ts {} == {} but current sequence {} < {}, index: {}",
+                            current, next, current_sequence, next_sequence, i
+                        ));
+                    }
+                }
+                Ordering::Greater => {
+                    // The current timestamp is greater than the next timestamp.
+                    return Err(format!(
+                        "timestamps are not monotonic: {} > {}, index: {}",
+                        current, next, i
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns Ok if the given batch is behind the current batch.
+    #[cfg(debug_assertions)]
+    pub(crate) fn check_next_batch(&self, other: &Batch) -> Result<(), String> {
+        // Checks the primary key
+        if self.primary_key() < other.primary_key() {
+            return Ok(());
+        }
+        if self.primary_key() > other.primary_key() {
+            return Err(format!(
+                "primary key is not monotonic: {:?} > {:?}",
+                self.primary_key(),
+                other.primary_key()
+            ));
+        }
+        // Checks the timestamp.
+        if self.last_timestamp() < other.first_timestamp() {
+            return Ok(());
+        }
+        if self.last_timestamp() > other.first_timestamp() {
+            return Err(format!(
+                "timestamps are not monotonic: {:?} > {:?}",
+                self.last_timestamp(),
+                other.first_timestamp()
+            ));
+        }
+        // Checks the sequence.
+        if self.last_sequence() >= other.first_sequence() {
+            return Ok(());
+        }
+        Err(format!(
+            "sequences are not monotonic: {:?} < {:?}",
+            self.last_sequence(),
+            other.first_sequence()
+        ))
+    }
+}
+
+/// A struct to check the batch is monotonic.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+pub(crate) struct BatchChecker {
+    last_batch: Option<Batch>,
+    start: Option<Timestamp>,
+    end: Option<Timestamp>,
+}
+
+#[cfg(debug_assertions)]
+impl BatchChecker {
+    /// Attaches the given start timestamp to the checker.
+    pub(crate) fn with_start(mut self, start: Option<Timestamp>) -> Self {
+        self.start = start;
+        self
+    }
+
+    /// Attaches the given end timestamp to the checker.
+    pub(crate) fn with_end(mut self, end: Option<Timestamp>) -> Self {
+        self.end = end;
+        self
+    }
+
+    /// Returns true if the given batch is monotonic and behind
+    /// the last batch.
+    pub(crate) fn check_monotonic(&mut self, batch: &Batch) -> Result<(), String> {
+        batch.check_monotonic()?;
+
+        if let (Some(start), Some(first)) = (self.start, batch.first_timestamp()) {
+            if start > first {
+                return Err(format!(
+                    "batch's first timestamp is before the start timestamp: {:?} > {:?}",
+                    start, first
+                ));
+            }
+        }
+        if let (Some(end), Some(last)) = (self.end, batch.last_timestamp()) {
+            if end <= last {
+                return Err(format!(
+                    "batch's last timestamp is after the end timestamp: {:?} <= {:?}",
+                    end, last
+                ));
+            }
+        }
+
+        // Checks the batch is behind the last batch.
+        // Then Updates the last batch.
+        let res = self
+            .last_batch
+            .as_ref()
+            .map(|last| last.check_next_batch(batch))
+            .unwrap_or(Ok(()));
+        self.last_batch = Some(batch.clone());
+        res
+    }
+
+    /// Formats current batch and last batch for debug.
+    pub(crate) fn format_batch(&self, batch: &Batch) -> String {
+        use std::fmt::Write;
+
+        let mut message = String::new();
+        if let Some(last) = &self.last_batch {
+            write!(
+                message,
+                "last_pk: {:?}, last_ts: {:?}, last_seq: {:?}, ",
+                last.primary_key(),
+                last.last_timestamp(),
+                last.last_sequence()
+            )
+            .unwrap();
+        }
+        write!(
+            message,
+            "batch_pk: {:?}, batch_ts: {:?}, batch_seq: {:?}",
+            batch.primary_key(),
+            batch.timestamps(),
+            batch.sequences()
+        )
+        .unwrap();
+
+        message
+    }
+
+    /// Checks batches from the part range are monotonic. Otherwise, panics.
+    pub(crate) fn ensure_part_range_batch(
+        &mut self,
+        scanner: &str,
+        region_id: store_api::storage::RegionId,
+        partition: usize,
+        part_range: store_api::region_engine::PartitionRange,
+        batch: &Batch,
+    ) {
+        if let Err(e) = self.check_monotonic(batch) {
+            let err_msg = format!(
+                "{}: batch is not sorted, {}, region_id: {}, partition: {}, part_range: {:?}",
+                scanner, e, region_id, partition, part_range,
+            );
+            common_telemetry::error!("{err_msg}, {}", self.format_batch(batch));
+            // Only print the number of row in the panic message.
+            panic!("{err_msg}, batch rows: {}", batch.num_rows());
+        }
+    }
 }
 
 /// Len of timestamp in arrow row format.
@@ -737,7 +920,7 @@ impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
 pub(crate) struct ScannerMetrics {
     /// Duration to prepare the scan task.
     prepare_scan_cost: Duration,
-    /// Duration to build parts.
+    /// Duration to build file ranges.
     build_parts_cost: Duration,
     /// Duration to build the (merge) reader.
     build_reader_cost: Duration,
@@ -753,31 +936,21 @@ pub(crate) struct ScannerMetrics {
     num_batches: usize,
     /// Number of rows returned.
     num_rows: usize,
-    /// Filter related metrics for readers.
-    filter_metrics: ReaderFilterMetrics,
+    /// Number of mem ranges scanned.
+    num_mem_ranges: usize,
+    /// Number of file ranges scanned.
+    num_file_ranges: usize,
 }
 
 impl ScannerMetrics {
-    /// Sets and observes metrics on initializing parts.
-    fn observe_init_part(&mut self, build_parts_cost: Duration, reader_metrics: &ReaderMetrics) {
-        self.build_parts_cost = build_parts_cost;
-
-        // Observes metrics.
+    /// Observes metrics.
+    fn observe_metrics(&self) {
         READ_STAGE_ELAPSED
             .with_label_values(&["prepare_scan"])
             .observe(self.prepare_scan_cost.as_secs_f64());
         READ_STAGE_ELAPSED
             .with_label_values(&["build_parts"])
             .observe(self.build_parts_cost.as_secs_f64());
-
-        // We only call this once so we overwrite it directly.
-        self.filter_metrics = reader_metrics.filter_metrics;
-        // Observes filter metrics.
-        self.filter_metrics.observe();
-    }
-
-    /// Observes metrics on scanner finish.
-    fn observe_metrics_on_finish(&self) {
         READ_STAGE_ELAPSED
             .with_label_values(&["build_reader"])
             .observe(self.build_reader_cost.as_secs_f64());
@@ -795,6 +968,21 @@ impl ScannerMetrics {
             .observe(self.total_cost.as_secs_f64());
         READ_ROWS_RETURN.observe(self.num_rows as f64);
         READ_BATCHES_RETURN.observe(self.num_batches as f64);
+    }
+
+    /// Merges metrics from another [ScannerMetrics].
+    fn merge_from(&mut self, other: &ScannerMetrics) {
+        self.prepare_scan_cost += other.prepare_scan_cost;
+        self.build_parts_cost += other.build_parts_cost;
+        self.build_reader_cost += other.build_reader_cost;
+        self.scan_cost += other.scan_cost;
+        self.convert_cost += other.convert_cost;
+        self.yield_cost += other.yield_cost;
+        self.total_cost += other.total_cost;
+        self.num_batches += other.num_batches;
+        self.num_rows += other.num_rows;
+        self.num_mem_ranges += other.num_mem_ranges;
+        self.num_file_ranges += other.num_file_ranges;
     }
 }
 

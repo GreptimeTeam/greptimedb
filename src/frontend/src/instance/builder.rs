@@ -33,6 +33,7 @@ use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
+use query::stats::StatementStatistics;
 use query::QueryEngineFactory;
 use servers::server::ServerHandlers;
 use snafu::OptionExt;
@@ -55,6 +56,7 @@ pub struct FrontendBuilder {
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
     heartbeat_task: Option<HeartbeatTask>,
+    stats: StatementStatistics,
 }
 
 impl FrontendBuilder {
@@ -65,6 +67,7 @@ impl FrontendBuilder {
         catalog_manager: CatalogManagerRef,
         node_manager: NodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
+        stats: StatementStatistics,
     ) -> Self {
         Self {
             options,
@@ -76,6 +79,7 @@ impl FrontendBuilder {
             plugins: None,
             procedure_executor,
             heartbeat_task: None,
+            stats,
         }
     }
 
@@ -181,6 +185,7 @@ impl FrontendBuilder {
             local_cache_invalidator,
             inserter.clone(),
             table_route_cache,
+            self.stats,
         ));
 
         let pipeline_operator = Arc::new(PipelineOperator::new(

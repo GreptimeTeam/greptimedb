@@ -37,7 +37,7 @@ use common_query::Output;
 use common_telemetry::{debug, info, tracing};
 use common_time::Timezone;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::RawSchema;
+use datatypes::schema::{RawSchema, Schema};
 use datatypes::value::Value;
 use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
@@ -69,11 +69,11 @@ use table::TableRef;
 use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    CreateLogicalTablesSnafu, CreateTableInfoSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu,
-    ExtractTableNamesSnafu, FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu,
-    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result,
-    SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu, DeserializePartitionSnafu,
+    EmptyDdlExprSnafu, ExtractTableNamesSnafu, FlowNotFoundSnafu, InvalidPartitionRuleSnafu,
+    InvalidPartitionSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu,
+    ParseSqlValueSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
+    SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
     UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_factory;
@@ -229,7 +229,7 @@ impl StatementExecutor {
         ensure!(
             NAME_PATTERN_REG.is_match(&create_table.table_name),
             InvalidTableNameSnafu {
-                table_name: create_table.table_name.clone(),
+                table_name: &create_table.table_name,
             }
         );
 
@@ -391,7 +391,7 @@ impl StatementExecutor {
         let logical_plan = match &*create_view.query {
             Statement::Query(query) => {
                 self.plan(
-                    QueryStatement::Sql(Statement::Query(query.clone())),
+                    &QueryStatement::Sql(Statement::Query(query.clone())),
                     ctx.clone(),
                 )
                 .await?
@@ -406,9 +406,12 @@ impl StatementExecutor {
 
         // Save the columns in plan, it may changed when the schemas of tables in plan
         // are altered.
-        let plan_columns: Vec<_> = logical_plan
+        let schema: Schema = logical_plan
             .schema()
-            .context(error::GetSchemaSnafu)?
+            .clone()
+            .try_into()
+            .context(ConvertSchemaSnafu)?;
+        let plan_columns: Vec<_> = schema
             .column_schemas()
             .iter()
             .map(|c| c.name.clone())
@@ -434,9 +437,8 @@ impl StatementExecutor {
 
         // Extract the table names from the original plan
         // and rewrite them as fully qualified names.
-        let (table_names, plan) =
-            extract_and_rewrite_full_table_names(logical_plan.unwrap_df_plan(), ctx.clone())
-                .context(ExtractTableNamesSnafu)?;
+        let (table_names, plan) = extract_and_rewrite_full_table_names(logical_plan, ctx.clone())
+            .context(ExtractTableNamesSnafu)?;
 
         let table_names = table_names.into_iter().map(|t| t.into()).collect();
 
@@ -1514,6 +1516,12 @@ mod test {
         assert!(!NAME_PATTERN_REG.is_match("/adaf"));
         assert!(!NAME_PATTERN_REG.is_match("🈲"));
         assert!(NAME_PATTERN_REG.is_match("hello"));
+        assert!(NAME_PATTERN_REG.is_match("test@"));
+        assert!(!NAME_PATTERN_REG.is_match("@test"));
+        assert!(NAME_PATTERN_REG.is_match("test#"));
+        assert!(!NAME_PATTERN_REG.is_match("#test"));
+        assert!(!NAME_PATTERN_REG.is_match("@"));
+        assert!(!NAME_PATTERN_REG.is_match("#"));
     }
 
     #[tokio::test]

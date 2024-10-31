@@ -133,13 +133,6 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to get schema from logical plan"))]
-    GetSchema {
-        #[snafu(implicit)]
-        location: Location,
-        source: query::error::Error,
-    },
-
     #[snafu(display("Column datatype error"))]
     ColumnDataType {
         #[snafu(implicit)]
@@ -182,6 +175,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to convert datafusion schema"))]
+    ConvertSchema {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to convert expr to struct"))]
@@ -795,6 +795,7 @@ impl ErrorExt for Error {
             | Error::PrepareFileTable { .. }
             | Error::InferFileTableSchema { .. }
             | Error::SchemaIncompatible { .. }
+            | Error::ConvertSchema { .. }
             | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. }
             | Error::InvalidViewName { .. }
@@ -872,7 +873,6 @@ impl ErrorExt for Error {
             | Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
 
             Error::ExecuteStatement { source, .. }
-            | Error::GetSchema { source, .. }
             | Error::ExtractTableNames { source, .. }
             | Error::PlanStatement { source, .. }
             | Error::ParseQuery { source, .. }

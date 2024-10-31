@@ -145,7 +145,7 @@ enum PyValue {
 }
 
 impl PyValue {
-    /// compare if results is just as expect, not using PartialEq because it is not transtive .e.g. [1,2,3] == len(3) == [4,5,6]
+    /// compare if results is just as expect, not using PartialEq because it is not transitive .e.g. [1,2,3] == len(3) == [4,5,6]
     fn just_as_expect(&self, other: &Self) -> bool {
         match (self, other) {
             (PyValue::FloatVec(a), PyValue::FloatVec(b)) => a
@@ -345,7 +345,7 @@ fn run_builtin_fn_testcases() {
                     match case.expect{
                         Ok(v) => {
                             error!("\nError:\n{err_res}");
-                            panic!("Expect Ok: {v:?}, found Error");
+                            panic!("Expect Ok: {v:?}, found Error in case {}", case.script);
                         },
                         Err(err) => {
                             if !err_res.contains(&err){

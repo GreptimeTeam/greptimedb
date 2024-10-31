@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
+use common_meta::datanode::REGION_STATISTIC_KEY;
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
@@ -124,7 +126,9 @@ impl HeartbeatTask {
                     let mut follower_region_lease_count = 0;
                     for lease in &lease.regions {
                         match lease.role() {
-                            RegionRole::Leader => leader_region_lease_count += 1,
+                            RegionRole::Leader | RegionRole::DowngradingLeader => {
+                                leader_region_lease_count += 1
+                            }
                             RegionRole::Follower => follower_region_lease_count += 1,
                         }
                     }
@@ -320,16 +324,25 @@ impl HeartbeatTask {
         region_server
             .reportable_regions()
             .into_iter()
-            .map(|stat| RegionStat {
-                region_id: stat.region_id.as_u64(),
-                engine: stat.engine,
-                role: RegionRole::from(stat.role).into(),
-                // TODO(weny): w/rcus
-                rcus: 0,
-                wcus: 0,
-                approximate_bytes: region_server.region_disk_usage(stat.region_id).unwrap_or(0),
-                // TODO(weny): add extensions
-                extensions: Default::default(),
+            .map(|stat| {
+                let region_stat = region_server
+                    .region_statistic(stat.region_id)
+                    .unwrap_or_default();
+                let mut extensions = HashMap::new();
+                if let Some(serialized) = region_stat.serialize_to_vec() {
+                    extensions.insert(REGION_STATISTIC_KEY.to_string(), serialized);
+                }
+
+                RegionStat {
+                    region_id: stat.region_id.as_u64(),
+                    engine: stat.engine,
+                    role: RegionRole::from(stat.role).into(),
+                    // TODO(weny): w/rcus
+                    rcus: 0,
+                    wcus: 0,
+                    approximate_bytes: region_stat.estimated_disk_size() as i64,
+                    extensions,
+                }
             })
             .collect()
     }

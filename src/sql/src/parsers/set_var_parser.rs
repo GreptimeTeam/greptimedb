@@ -22,7 +22,7 @@ use crate::statements::set_variables::SetVariables;
 use crate::statements::statement::Statement;
 
 /// SET variables statement parser implementation
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_set_variables(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
         let spstatement = self.parser.parse_set().context(error::SyntaxSnafu)?;

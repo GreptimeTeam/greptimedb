@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// All table names in `information_schema`.
+//! All table names in `information_schema`.
 
 pub const TABLES: &str = "tables";
 pub const COLUMNS: &str = "columns";
@@ -45,3 +45,5 @@ pub const TABLE_CONSTRAINTS: &str = "table_constraints";
 pub const CLUSTER_INFO: &str = "cluster_info";
 pub const VIEWS: &str = "views";
 pub const FLOWS: &str = "flows";
+pub const PROCEDURE_INFO: &str = "procedure_info";
+pub const REGION_STATISTICS: &str = "region_statistics";

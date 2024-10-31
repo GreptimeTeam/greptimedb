@@ -259,7 +259,6 @@ mod tests {
 
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
-    use common_config::Mode;
     use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -268,6 +267,8 @@ mod tests {
     use datafusion::catalog::CatalogProviderList;
     use datafusion::logical_expr::builder::LogicalTableSource;
     use datafusion::logical_expr::{col, lit, LogicalPlan, LogicalPlanBuilder};
+
+    use crate::information_schema::NoopInformationExtension;
 
     struct MockDecoder;
     impl MockDecoder {
@@ -323,10 +324,10 @@ mod tests {
         );
 
         let catalog_manager = KvBackendCatalogManager::new(
-            Mode::Standalone,
-            None,
+            Arc::new(NoopInformationExtension),
             backend.clone(),
             layered_cache_registry,
+            None,
         );
         let table_metadata_manager = TableMetadataManager::new(backend);
         let mut view_info = common_meta::key::test_utils::new_test_table_info(1024, vec![]);

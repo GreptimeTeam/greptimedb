@@ -18,7 +18,7 @@ runs:
         --set replicaCount=${{ inputs.etcd-replicas }} \
         --set resources.requests.cpu=50m \
         --set resources.requests.memory=128Mi \
-        --set resources.limits.cpu=1000m \
+        --set resources.limits.cpu=1500m \
         --set resources.limits.memory=2Gi \
         --set auth.rbac.create=false \
         --set auth.rbac.token.enabled=false \

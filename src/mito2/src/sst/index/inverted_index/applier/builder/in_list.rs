@@ -20,7 +20,7 @@ use index::inverted_index::search::predicate::{InListPredicate, Predicate};
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> InvertedIndexApplierBuilder<'a> {
+impl InvertedIndexApplierBuilder<'_> {
     /// Collects an in list expression in the form of `column IN (lit, lit, ...)`.
     pub(crate) fn collect_inlist(&mut self, inlist: &InList) -> Result<()> {
         if inlist.negated {
@@ -29,7 +29,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         let Some(column_name) = Self::column_name(&inlist.expr) else {
             return Ok(());
         };
-        let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
+        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
             return Ok(());
         };
 
@@ -71,7 +71,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -104,7 +104,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -129,7 +129,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -140,7 +140,15 @@ mod tests {
         };
 
         builder.collect_inlist(&in_list).unwrap();
-        assert!(builder.output.is_empty());
+
+        let predicates = builder.output.get(&3).unwrap();
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(
+            predicates[0],
+            Predicate::InList(InListPredicate {
+                list: HashSet::from_iter([encoded_string("foo"), encoded_string("bar")])
+            })
+        );
     }
 
     #[test]
@@ -154,7 +162,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -181,7 +189,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 

@@ -169,11 +169,11 @@ impl MetricEngineInner {
     ) -> Result<Vec<usize>> {
         // project on logical columns
         let all_logical_columns = self
-            .load_logical_columns(physical_region_id, logical_region_id)
+            .load_logical_column_names(physical_region_id, logical_region_id)
             .await?;
         let projected_logical_names = origin_projection
             .iter()
-            .map(|i| all_logical_columns[*i].column_schema.name.clone())
+            .map(|i| all_logical_columns[*i].clone())
             .collect::<Vec<_>>();
 
         // generate physical projection
@@ -200,10 +200,8 @@ impl MetricEngineInner {
         logical_region_id: RegionId,
     ) -> Result<Vec<usize>> {
         let logical_columns = self
-            .load_logical_columns(physical_region_id, logical_region_id)
-            .await?
-            .into_iter()
-            .map(|col| col.column_schema.name);
+            .load_logical_column_names(physical_region_id, logical_region_id)
+            .await?;
         let mut projection = Vec::with_capacity(logical_columns.len());
         let data_region_id = utils::to_data_region_id(physical_region_id);
         let physical_metadata = self

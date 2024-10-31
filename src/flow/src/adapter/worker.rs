@@ -27,7 +27,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use crate::adapter::FlowId;
 use crate::compute::{Context, DataflowState, ErrCollector};
 use crate::error::{Error, FlowAlreadyExistSnafu, InternalSnafu, UnexpectedSnafu};
-use crate::expr::GlobalId;
+use crate::expr::{Batch, GlobalId};
 use crate::plan::TypedPlan;
 use crate::repr::{self, DiffRow};
 
@@ -89,6 +89,8 @@ impl<'subgraph> ActiveDataflowState<'subgraph> {
             err_collector: self.err_collector.clone(),
             input_collection: Default::default(),
             local_scope: Default::default(),
+            input_collection_batch: Default::default(),
+            local_scope_batch: Default::default(),
         }
     }
 
@@ -156,13 +158,13 @@ impl WorkerHandle {
     ///
     /// the returned error is unrecoverable, and the worker should be shutdown/rebooted
     pub async fn run_available(&self, now: repr::Timestamp, blocking: bool) -> Result<(), Error> {
-        common_telemetry::debug!("Running available with blocking={}", blocking);
+        common_telemetry::trace!("Running available with blocking={}", blocking);
         if blocking {
             let resp = self
                 .itc_client
                 .call_with_resp(Request::RunAvail { now, blocking })
                 .await?;
-            common_telemetry::debug!("Running available with response={:?}", resp);
+            common_telemetry::trace!("Running available with response={:?}", resp);
             Ok(())
         } else {
             self.itc_client
@@ -225,9 +227,9 @@ impl<'s> Worker<'s> {
         flow_id: FlowId,
         plan: TypedPlan,
         sink_id: GlobalId,
-        sink_sender: mpsc::UnboundedSender<DiffRow>,
+        sink_sender: mpsc::UnboundedSender<Batch>,
         source_ids: &[GlobalId],
-        src_recvs: Vec<broadcast::Receiver<DiffRow>>,
+        src_recvs: Vec<broadcast::Receiver<Batch>>,
         // TODO(discord9): set expire duration for all arrangement and compare to sys timestamp instead
         expire_after: Option<repr::Duration>,
         create_if_not_exists: bool,
@@ -249,12 +251,12 @@ impl<'s> Worker<'s> {
         {
             let mut ctx = cur_task_state.new_ctx(sink_id);
             for (source_id, src_recv) in source_ids.iter().zip(src_recvs) {
-                let bundle = ctx.render_source(src_recv)?;
-                ctx.insert_global(*source_id, bundle);
+                let bundle = ctx.render_source_batch(src_recv)?;
+                ctx.insert_global_batch(*source_id, bundle);
             }
 
-            let rendered = ctx.render_plan(plan)?;
-            ctx.render_unbounded_sink(rendered, sink_sender);
+            let rendered = ctx.render_plan_batch(plan)?;
+            ctx.render_unbounded_sink_batch(rendered, sink_sender);
         }
         self.task_states.insert(flow_id, cur_task_state);
         Ok(Some(flow_id))
@@ -370,9 +372,9 @@ pub enum Request {
         flow_id: FlowId,
         plan: TypedPlan,
         sink_id: GlobalId,
-        sink_sender: mpsc::UnboundedSender<DiffRow>,
+        sink_sender: mpsc::UnboundedSender<Batch>,
         source_ids: Vec<GlobalId>,
-        src_recvs: Vec<broadcast::Receiver<DiffRow>>,
+        src_recvs: Vec<broadcast::Receiver<Batch>>,
         expire_after: Option<repr::Duration>,
         create_if_not_exists: bool,
         err_collector: ErrCollector,
@@ -472,7 +474,7 @@ mod test {
     use super::*;
     use crate::expr::Id;
     use crate::plan::Plan;
-    use crate::repr::{RelationType, Row};
+    use crate::repr::RelationType;
 
     #[test]
     fn drop_handle() {
@@ -497,8 +499,8 @@ mod test {
         });
         let handle = rx.await.unwrap();
         let src_ids = vec![GlobalId::User(1)];
-        let (tx, rx) = broadcast::channel::<DiffRow>(1024);
-        let (sink_tx, mut sink_rx) = mpsc::unbounded_channel::<DiffRow>();
+        let (tx, rx) = broadcast::channel::<Batch>(1024);
+        let (sink_tx, mut sink_rx) = mpsc::unbounded_channel::<Batch>();
         let (flow_id, plan) = (
             1,
             TypedPlan {
@@ -523,9 +525,9 @@ mod test {
             handle.create_flow(create_reqs).await.unwrap(),
             Some(flow_id)
         );
-        tx.send((Row::empty(), 0, 0)).unwrap();
+        tx.send(Batch::empty()).unwrap();
         handle.run_available(0, true).await.unwrap();
-        assert_eq!(sink_rx.recv().await.unwrap().0, Row::empty());
+        assert_eq!(sink_rx.recv().await.unwrap(), Batch::empty());
         drop(handle);
         worker_thread_handle.join().unwrap();
     }

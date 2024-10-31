@@ -17,8 +17,10 @@ use std::sync::Arc;
 
 use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{
-    CreateAccumulatorSnafu, DowncastVectorSnafu, FromScalarValueSnafu, Result,
+    CreateAccumulatorSnafu, DowncastVectorSnafu, FromScalarValueSnafu, InvalidInputStateSnafu,
+    Result,
 };
+use common_query::logical_plan::accumulator::AggrFuncTypeStore;
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datatypes::prelude::*;

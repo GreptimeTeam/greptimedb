@@ -24,7 +24,7 @@ use hydroflow::scheduled::SubgraphId;
 use itertools::Itertools;
 use tokio::sync::Mutex;
 
-use crate::expr::{EvalError, ScalarExpr};
+use crate::expr::{Batch, EvalError, ScalarExpr};
 use crate::repr::DiffRow;
 use crate::utils::ArrangeHandler;
 
@@ -121,6 +121,38 @@ pub struct CollectionBundle<T: 'static = DiffRow> {
     /// contain a `Value` which have `bytes` variant
     #[allow(clippy::mutable_key_type)]
     pub arranged: BTreeMap<Vec<ScalarExpr>, Arranged>,
+}
+
+pub trait GenericBundle {
+    fn is_batch(&self) -> bool;
+
+    fn try_as_batch(&self) -> Option<&CollectionBundle<Batch>> {
+        None
+    }
+
+    fn try_as_row(&self) -> Option<&CollectionBundle<DiffRow>> {
+        None
+    }
+}
+
+impl GenericBundle for CollectionBundle<Batch> {
+    fn is_batch(&self) -> bool {
+        true
+    }
+
+    fn try_as_batch(&self) -> Option<&CollectionBundle<Batch>> {
+        Some(self)
+    }
+}
+
+impl GenericBundle for CollectionBundle<DiffRow> {
+    fn is_batch(&self) -> bool {
+        false
+    }
+
+    fn try_as_row(&self) -> Option<&CollectionBundle<DiffRow>> {
+        Some(self)
+    }
 }
 
 impl<T: 'static> CollectionBundle<T> {

@@ -23,6 +23,7 @@ use api::v1::meta::{
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
+use snafu::OptionExt;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
@@ -30,7 +31,7 @@ use tonic::{Request, Response, Streaming};
 
 use crate::error;
 use crate::error::Result;
-use crate::handler::{HeartbeatHandlerGroup, Pusher};
+use crate::handler::{HeartbeatHandlerGroup, Pusher, PusherId};
 use crate::metasrv::{Context, Metasrv};
 use crate::metrics::METRIC_META_HEARTBEAT_RECV;
 use crate::service::{GrpcResult, GrpcStream};
@@ -45,10 +46,13 @@ impl heartbeat_server::Heartbeat for Metasrv {
     ) -> GrpcResult<Self::HeartbeatStream> {
         let mut in_stream = req.into_inner();
         let (tx, rx) = mpsc::channel(128);
-        let handler_group = self.handler_group().clone();
+        let handler_group = self.handler_group().context(error::UnexpectedSnafu {
+            violated: "expected heartbeat handlers",
+        })?;
+
         let ctx = self.new_ctx();
         let _handle = common_runtime::spawn_global(async move {
-            let mut pusher_key = None;
+            let mut pusher_id = None;
             while let Some(msg) = in_stream.next().await {
                 let mut is_not_leader = false;
                 match msg {
@@ -63,11 +67,11 @@ impl heartbeat_server::Heartbeat for Metasrv {
                             break;
                         };
 
-                        if pusher_key.is_none() {
-                            pusher_key = register_pusher(&handler_group, header, tx.clone()).await;
+                        if pusher_id.is_none() {
+                            pusher_id = register_pusher(&handler_group, header, tx.clone()).await;
                         }
-                        if let Some(k) = &pusher_key {
-                            METRIC_META_HEARTBEAT_RECV.with_label_values(&[k]);
+                        if let Some(k) = &pusher_id {
+                            METRIC_META_HEARTBEAT_RECV.with_label_values(&[&k.to_string()]);
                         } else {
                             METRIC_META_HEARTBEAT_RECV.with_label_values(&["none"]);
                         }
@@ -107,13 +111,10 @@ impl heartbeat_server::Heartbeat for Metasrv {
                 }
             }
 
-            info!(
-                "Heartbeat stream closed: {:?}",
-                pusher_key.as_ref().unwrap_or(&"unknown".to_string())
-            );
+            info!("Heartbeat stream closed: {pusher_id:?}");
 
-            if let Some(key) = pusher_key {
-                let _ = handler_group.deregister(&key).await;
+            if let Some(pusher_id) = pusher_id {
+                let _ = handler_group.deregister_push(pusher_id).await;
             }
         });
 
@@ -172,13 +173,13 @@ async fn register_pusher(
     handler_group: &HeartbeatHandlerGroup,
     header: &RequestHeader,
     sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
-) -> Option<String> {
-    let role = header.role() as i32;
-    let node_id = get_node_id(header);
-    let key = format!("{}-{}", role, node_id);
+) -> Option<PusherId> {
+    let role = header.role();
+    let id = get_node_id(header);
+    let pusher_id = PusherId::new(role, id);
     let pusher = Pusher::new(sender, header);
-    handler_group.register(&key, pusher).await;
-    Some(key)
+    handler_group.register_pusher(pusher_id, pusher).await;
+    Some(pusher_id)
 }
 
 #[cfg(test)]

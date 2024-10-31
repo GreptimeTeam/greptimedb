@@ -20,6 +20,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
+use crate::datanode::RegionStat;
 use crate::error::{
     DecodeJsonSnafu, EncodeJsonSnafu, Error, FromUtf8Snafu, InvalidNodeInfoKeySnafu,
     InvalidRoleSnafu, ParseNumSnafu, Result,
@@ -47,10 +48,14 @@ pub trait ClusterInfo {
         role: Option<Role>,
     ) -> std::result::Result<Vec<NodeInfo>, Self::Error>;
 
+    /// List all region stats in the cluster.
+    async fn list_region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error>;
+
     // TODO(jeremy): Other info, like region status, etc.
 }
 
 /// The key of [NodeInfo] in the storage. The format is `__meta_cluster_node_info-{cluster_id}-{role}-{node_id}`.
+///
 /// This key cannot be used to describe the `Metasrv` because the `Metasrv` does not have
 /// a `cluster_id`, it serves multiple clusters.
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]

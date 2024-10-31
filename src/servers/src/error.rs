@@ -36,6 +36,15 @@ use crate::http::error_result::status_code_to_http_status;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to bind address: {}", addr))]
+    AddressBind {
+        addr: SocketAddr,
+        #[snafu(source)]
+        error: hyper::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Arrow error"))]
     Arrow {
         #[snafu(source)]
@@ -398,13 +407,6 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to get param types"))]
-    GetPreparedStmtParams {
-        source: query::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("{}", reason))]
     UnexpectedResult {
         reason: String,
@@ -431,9 +433,7 @@ pub enum Error {
 
     #[cfg(feature = "pprof")]
     #[snafu(display("Failed to dump pprof data"))]
-    DumpPprof {
-        source: crate::http::pprof::nix::Error,
-    },
+    DumpPprof { source: common_pprof::error::Error },
 
     #[cfg(not(windows))]
     #[snafu(display("Failed to update jemalloc metrics"))]
@@ -448,13 +448,6 @@ pub enum Error {
     DataFrame {
         #[snafu(source)]
         error: datafusion::error::DataFusionError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to replace params with values in prepared statement"))]
-    ReplacePreparedStmtParams {
-        source: query::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -547,6 +540,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("OpenTelemetry log error"))]
+    OpenTelemetryLog {
+        source: pipeline::etl_error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Unsupported json data type for tag: {} {}", key, ty))]
+    UnsupportedJsonDataTypeForTag {
+        key: String,
+        ty: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -567,9 +574,9 @@ impl ErrorExt for Error {
             | Arrow { .. }
             | FileWatch { .. } => StatusCode::Internal,
 
-            AlreadyStarted { .. } | InvalidPromRemoteReadQueryResult { .. } => {
-                StatusCode::IllegalState
-            }
+            AddressBind { .. }
+            | AlreadyStarted { .. }
+            | InvalidPromRemoteReadQueryResult { .. } => StatusCode::IllegalState,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 
@@ -611,7 +618,9 @@ impl ErrorExt for Error {
             | MysqlValueConversion { .. }
             | ParseJson { .. }
             | UnsupportedContentType { .. }
-            | TimestampOverflow { .. } => StatusCode::InvalidArguments,
+            | TimestampOverflow { .. }
+            | OpenTelemetryLog { .. }
+            | UnsupportedJsonDataTypeForTag { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
@@ -635,9 +644,7 @@ impl ErrorExt for Error {
 
             InvalidUtf8Value { .. } => StatusCode::InvalidArguments,
 
-            ReplacePreparedStmtParams { source, .. }
-            | GetPreparedStmtParams { source, .. }
-            | ParsePromQL { source, .. } => source.status_code(),
+            ParsePromQL { source, .. } => source.status_code(),
             Other { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,

@@ -14,10 +14,10 @@
 
 use std::collections::HashMap;
 
+use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
 use common_meta::peer::Peer;
 use itertools::{Itertools, MinMaxResult};
 
-use crate::key::{DatanodeStatKey, DatanodeStatValue};
 use crate::selector::weighted_choose::WeightedItem;
 
 /// The [`WeightCompute`] trait is used to compute the weight array by heartbeats.
@@ -95,13 +95,12 @@ impl WeightCompute for RegionNumsBasedWeightCompute {
 mod tests {
     use std::collections::HashMap;
 
+    use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat, Stat};
     use common_meta::peer::Peer;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
     use super::{RegionNumsBasedWeightCompute, WeightCompute};
-    use crate::handler::node_stat::{RegionStat, Stat};
-    use crate::key::{DatanodeStatKey, DatanodeStatValue};
 
     #[test]
     fn test_weight_compute() {
@@ -199,7 +198,11 @@ mod tests {
                 approximate_bytes: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
-                extensions: Default::default(),
+                num_rows: 0,
+                memtable_size: 0,
+                manifest_size: 0,
+                sst_size: 0,
+                index_size: 0,
             }],
             ..Default::default()
         }
@@ -216,7 +219,11 @@ mod tests {
                 approximate_bytes: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
-                extensions: Default::default(),
+                num_rows: 0,
+                memtable_size: 0,
+                manifest_size: 0,
+                sst_size: 0,
+                index_size: 0,
             }],
             ..Default::default()
         }
@@ -233,7 +240,11 @@ mod tests {
                 approximate_bytes: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
-                extensions: Default::default(),
+                num_rows: 0,
+                memtable_size: 0,
+                manifest_size: 0,
+                sst_size: 0,
+                index_size: 0,
             }],
             ..Default::default()
         }

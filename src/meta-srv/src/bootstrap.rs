@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use api::v1::meta::cluster_server::ClusterServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
-use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
@@ -48,8 +47,6 @@ use crate::election::etcd::EtcdElection;
 #[cfg(feature = "pg_kvbackend")]
 use crate::error::InvalidArgumentsSnafu;
 use crate::error::{InitExportMetricsTaskSnafu, TomlFormatSnafu};
-use crate::lock::etcd::EtcdLock;
-use crate::lock::memory::MemLock;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectorRef};
 use crate::selector::lease_based::LeaseBasedSelector;
@@ -59,9 +56,8 @@ use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::{error, Result};
 
-#[derive(Clone)]
 pub struct MetasrvInstance {
-    metasrv: Metasrv,
+    metasrv: Arc<Metasrv>,
 
     httpsrv: Arc<HttpServer>,
 
@@ -86,8 +82,9 @@ impl MetasrvInstance {
                 .with_greptime_config_options(opts.to_toml().context(TomlFormatSnafu)?)
                 .build(),
         );
+        let metasrv = Arc::new(metasrv);
         // put metasrv into plugins for later use
-        plugins.insert::<Arc<Metasrv>>(Arc::new(metasrv.clone()));
+        plugins.insert::<Arc<Metasrv>>(metasrv.clone());
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(InitExportMetricsTaskSnafu)?;
         Ok(MetasrvInstance {
@@ -151,6 +148,10 @@ impl MetasrvInstance {
     pub fn plugins(&self) -> Plugins {
         self.plugins.clone()
     }
+
+    pub fn get_inner(&self) -> &Metasrv {
+        &self.metasrv
+    }
 }
 
 pub async fn bootstrap_metasrv_with_router(
@@ -177,14 +178,13 @@ pub async fn bootstrap_metasrv_with_router(
     Ok(())
 }
 
-pub fn router(metasrv: Metasrv) -> Router {
+pub fn router(metasrv: Arc<Metasrv>) -> Router {
     tonic::transport::Server::builder()
         .accept_http1(true) // for admin services
-        .add_service(HeartbeatServer::new(metasrv.clone()))
-        .add_service(StoreServer::new(metasrv.clone()))
-        .add_service(ClusterServer::new(metasrv.clone()))
-        .add_service(LockServer::new(metasrv.clone()))
-        .add_service(ProcedureServiceServer::new(metasrv.clone()))
+        .add_service(HeartbeatServer::from_arc(metasrv.clone()))
+        .add_service(StoreServer::from_arc(metasrv.clone()))
+        .add_service(ClusterServer::from_arc(metasrv.clone()))
+        .add_service(ProcedureServiceServer::from_arc(metasrv.clone()))
         .add_service(admin::make_admin_service(metasrv))
 }
 
@@ -193,13 +193,9 @@ pub async fn metasrv_builder(
     plugins: Plugins,
     kv_backend: Option<KvBackendRef>,
 ) -> Result<MetasrvBuilder> {
-    let (kv_backend, election, lock) = match (kv_backend, &opts.backend) {
-        (Some(kv_backend), _) => (kv_backend, None, Some(Arc::new(MemLock::default()) as _)),
-        (None, BackendImpl::MemoryStore) => (
-            Arc::new(MemoryKvBackend::new()) as _,
-            None,
-            Some(Arc::new(MemLock::default()) as _),
-        ),
+    let (kv_backend, election) = match (kv_backend, &opts.backend) {
+        (Some(kv_backend), _) => (kv_backend, None),
+        (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
             let etcd_client = create_etcd_client(opts).await?;
             let kv_backend = {
@@ -224,18 +220,13 @@ pub async fn metasrv_builder(
                     )
                     .await?,
                 ),
-                Some(EtcdLock::with_etcd_client(
-                    etcd_client,
-                    opts.store_key_prefix.clone(),
-                )?),
             )
         }
         #[cfg(feature = "pg_kvbackend")]
         (None, BackendImpl::PostgresStore) => {
             let pg_client = create_postgres_client(opts).await?;
             let kv_backend = PgStore::with_pg_client(pg_client).await.unwrap();
-            // TODO: implement locking and leader election for pg backend.
-            (kv_backend, None, None)
+            (kv_backend, None)
         }
     };
 
@@ -253,7 +244,6 @@ pub async fn metasrv_builder(
         .in_memory(in_memory)
         .selector(selector)
         .election(election)
-        .lock(lock)
         .plugins(plugins))
 }
 

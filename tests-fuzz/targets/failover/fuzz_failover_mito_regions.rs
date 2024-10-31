@@ -323,7 +323,11 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     for (table_ctx, expected_rows) in table_ctxs.iter().zip(affected_rows) {
         let sql = format!("select count(1) as count from {}", table_ctx.name);
         let values = count_values(&ctx.greptime, &sql).await?;
-        assert_eq!(values.count as u64, expected_rows);
+        assert_eq!(
+            values.count as u64, expected_rows,
+            "Expected rows: {}, got: {}, table: {}",
+            expected_rows, values.count, table_ctx.name
+        );
     }
 
     for table_ctx in table_ctxs {

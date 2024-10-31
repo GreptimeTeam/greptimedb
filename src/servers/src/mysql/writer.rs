@@ -226,7 +226,11 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Timestamp(v) => row_writer.write_col(
                         v.to_chrono_datetime_with_timezone(Some(&query_context.timezone())),
                     )?,
-                    Value::Interval(v) => row_writer.write_col(v.to_iso8601_string())?,
+                    Value::IntervalYearMonth(v) => row_writer.write_col(v.to_iso8601_string())?,
+                    Value::IntervalDayTime(v) => row_writer.write_col(v.to_iso8601_string())?,
+                    Value::IntervalMonthDayNano(v) => {
+                        row_writer.write_col(v.to_iso8601_string())?
+                    }
                     Value::Duration(v) => row_writer.write_col(v.to_std_duration())?,
                     Value::List(_) => {
                         return Err(Error::Internal {
@@ -328,7 +332,7 @@ pub fn create_mysql_column_def(schema: &SchemaRef) -> Result<Vec<Column>> {
 fn mysql_error_kind(status_code: &StatusCode) -> ErrorKind {
     match status_code {
         StatusCode::Success => ErrorKind::ER_YES,
-        StatusCode::Unknown => ErrorKind::ER_UNKNOWN_ERROR,
+        StatusCode::Unknown | StatusCode::External => ErrorKind::ER_UNKNOWN_ERROR,
         StatusCode::Unsupported => ErrorKind::ER_NOT_SUPPORTED_YET,
         StatusCode::Cancelled => ErrorKind::ER_QUERY_INTERRUPTED,
         StatusCode::RuntimeResourcesExhausted => ErrorKind::ER_OUT_OF_RESOURCES,

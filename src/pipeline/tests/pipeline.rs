@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::value::ValueData;
 use api::v1::Rows;
 use common_telemetry::tracing::info;
 use greptime_proto::v1::value::ValueData::{
@@ -463,6 +464,57 @@ transform:
             );
         }
         info!("\n");
+    }
+}
+
+#[test]
+fn test_json_type() {
+    let input_value_str = r#"
+{
+    "product_object": {"hello":"world"},
+    "product_array": ["hello", "world"]
+}
+"#;
+    let input_value = serde_json::from_str::<serde_json::Value>(input_value_str).unwrap();
+
+    let pipeline_yaml = r#"
+processors:
+
+transform:
+    - fields:
+        - product_object
+        - product_array
+      type: json
+"#;
+
+    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+
+    let mut status = pipeline.init_intermediate_state();
+    pipeline.prepare(input_value, &mut status).unwrap();
+    let row = pipeline.exec_mut(&mut status).unwrap();
+    let r = row
+        .values
+        .into_iter()
+        .map(|v| v.value_data.unwrap())
+        .collect::<Vec<_>>();
+
+    let product_object = r[0].clone();
+    let product_array = r[1].clone();
+    match product_object {
+        ValueData::BinaryValue(data) => {
+            let jsonb = jsonb::from_slice(&data).unwrap().to_string();
+            assert_eq!(r#"{"hello":"world"}"#, jsonb);
+        }
+        _ => panic!("unexpected value"),
+    }
+
+    match product_array {
+        ValueData::BinaryValue(data) => {
+            let jsonb = jsonb::from_slice(&data).unwrap().to_string();
+            assert_eq!(r#"["hello","world"]"#, jsonb);
+        }
+        _ => panic!("unexpected value"),
     }
 }
 

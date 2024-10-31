@@ -114,17 +114,17 @@ impl PredicatesIndexApplier {
             .partition_in_place(|(_, ps)| ps.iter().any(|p| matches!(p, Predicate::InList(_))));
         let mut iter = predicates.into_iter();
         for _ in 0..in_list_index {
-            let (tag_name, predicates) = iter.next().unwrap();
+            let (column_name, predicates) = iter.next().unwrap();
             let fst_applier = Box::new(KeysFstApplier::try_from(predicates)?) as _;
-            fst_appliers.push((tag_name, fst_applier));
+            fst_appliers.push((column_name, fst_applier));
         }
 
-        for (tag_name, predicates) in iter {
+        for (column_name, predicates) in iter {
             if predicates.is_empty() {
                 continue;
             }
             let fst_applier = Box::new(IntersectionFstApplier::try_from(predicates)?) as _;
-            fst_appliers.push((tag_name, fst_applier));
+            fst_appliers.push((column_name, fst_applier));
         }
 
         Ok(PredicatesIndexApplier { fst_appliers })
@@ -134,7 +134,7 @@ impl PredicatesIndexApplier {
     fn bitmap_full_range(metadata: &InvertedIndexMetas) -> BitVec {
         let total_count = metadata.total_row_count;
         let segment_count = metadata.segment_row_count;
-        let len = (total_count + segment_count - 1) / segment_count;
+        let len = total_count.div_ceil(segment_count);
         BitVec::repeat(true, len as _)
     }
 }

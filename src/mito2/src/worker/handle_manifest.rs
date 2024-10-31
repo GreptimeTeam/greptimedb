@@ -27,7 +27,7 @@ use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
-use crate::region::{MitoRegionRef, RegionState};
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
     TruncateResult, WorkerRequest,
@@ -84,7 +84,7 @@ impl<S> RegionWorkerLoop<S> {
         };
 
         if !region.is_writable() {
-            if region.state() == RegionState::Editing {
+            if region.state() == RegionRoleState::Leader(RegionLeaderState::Editing) {
                 self.region_edit_queues
                     .entry(region_id)
                     .or_insert_with(|| RegionEditQueue::new(region_id))
@@ -159,7 +159,7 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Sets the region as writable.
-        region.switch_state_to_writable(RegionState::Editing);
+        region.switch_state_to_writable(RegionLeaderState::Editing);
 
         let _ = edit_result.sender.send(edit_result.result);
 
@@ -199,8 +199,9 @@ impl<S> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
 
             let result = manifest_ctx
-                .update_manifest(RegionState::Truncating, action_list)
-                .await;
+                .update_manifest(RegionLeaderState::Truncating, action_list)
+                .await
+                .map(|_| ());
 
             // Sends the result back to the request sender.
             let truncate_result = TruncateResult {
@@ -241,8 +242,9 @@ impl<S> RegionWorkerLoop<S> {
 
             let result = region
                 .manifest_ctx
-                .update_manifest(RegionState::Altering, action_list)
-                .await;
+                .update_manifest(RegionLeaderState::Altering, action_list)
+                .await
+                .map(|_| ());
             let notify = WorkerRequest::Background {
                 region_id: region.region_id,
                 notify: BackgroundNotify::RegionChange(RegionChangeResult {
@@ -291,7 +293,7 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Sets the region as writable.
-        region.switch_state_to_writable(RegionState::Altering);
+        region.switch_state_to_writable(RegionLeaderState::Altering);
 
         change_result.sender.send(change_result.result.map(|_| 0));
     }
@@ -338,6 +340,7 @@ async fn edit_region(
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
     region
         .manifest_ctx
-        .update_manifest(RegionState::Editing, action_list)
+        .update_manifest(RegionLeaderState::Editing, action_list)
         .await
+        .map(|_| ())
 }

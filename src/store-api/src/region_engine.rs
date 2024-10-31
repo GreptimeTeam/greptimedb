@@ -36,9 +36,32 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{RegionOpenRequest, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
 
-/// The result of setting readonly for the region.
+/// The settable region role state.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum SettableRegionRoleState {
+    Follower,
+    DowngradingLeader,
+}
+
+impl From<SettableRegionRoleState> for RegionRole {
+    fn from(value: SettableRegionRoleState) -> Self {
+        match value {
+            SettableRegionRoleState::Follower => RegionRole::Follower,
+            SettableRegionRoleState::DowngradingLeader => RegionRole::DowngradingLeader,
+        }
+    }
+}
+
+/// The request to set region role state.
 #[derive(Debug, PartialEq, Eq)]
-pub enum SetReadonlyResponse {
+pub struct SetRegionRoleStateRequest {
+    region_id: RegionId,
+    region_role_state: SettableRegionRoleState,
+}
+
+/// The response of setting region role state.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SetRegionRoleStateResponse {
     Success {
         /// Returns `last_entry_id` of the region if available(e.g., It's not available in file engine).
         last_entry_id: Option<entry::Id>,
@@ -46,8 +69,8 @@ pub enum SetReadonlyResponse {
     NotFound,
 }
 
-impl SetReadonlyResponse {
-    /// Returns a [SetReadonlyResponse::Success] with the `last_entry_id`.
+impl SetRegionRoleStateResponse {
+    /// Returns a [SetRegionRoleStateResponse::Success] with the `last_entry_id`.
     pub fn success(last_entry_id: Option<entry::Id>) -> Self {
         Self::Success { last_entry_id }
     }
@@ -58,6 +81,7 @@ pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
 }
+
 impl GrantedRegion {
     pub fn new(region_id: RegionId, region_role: RegionRole) -> Self {
         Self {
@@ -85,12 +109,18 @@ impl From<PbGrantedRegion> for GrantedRegion {
     }
 }
 
+/// The role of the region.
+/// TODO(weny): rename it to `RegionRoleState`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegionRole {
     // Readonly region(mito2)
     Follower,
     // Writable region(mito2), Readonly region(file).
     Leader,
+    // Leader is downgrading to follower.
+    //
+    // This state is used to prevent new write requests.
+    DowngradingLeader,
 }
 
 impl Display for RegionRole {
@@ -98,6 +128,7 @@ impl Display for RegionRole {
         match self {
             RegionRole::Follower => write!(f, "Follower"),
             RegionRole::Leader => write!(f, "Leader"),
+            RegionRole::DowngradingLeader => write!(f, "Leader(Downgrading)"),
         }
     }
 }
@@ -113,6 +144,7 @@ impl From<RegionRole> for PbRegionRole {
         match value {
             RegionRole::Follower => PbRegionRole::Follower,
             RegionRole::Leader => PbRegionRole::Leader,
+            RegionRole::DowngradingLeader => PbRegionRole::DowngradingLeader,
         }
     }
 }
@@ -122,6 +154,7 @@ impl From<PbRegionRole> for RegionRole {
         match value {
             PbRegionRole::Leader => RegionRole::Leader,
             PbRegionRole::Follower => RegionRole::Follower,
+            PbRegionRole::DowngradingLeader => RegionRole::DowngradingLeader,
         }
     }
 }
@@ -147,7 +180,7 @@ impl ScannerPartitioning {
 pub struct PartitionRange {
     /// Start time of time index column. Inclusive.
     pub start: Timestamp,
-    /// End time of time index column. Inclusive.
+    /// End time of time index column. Exclusive.
     pub end: Timestamp,
     /// Number of rows in this range. Is used to balance ranges between partitions.
     pub num_rows: usize,
@@ -170,6 +203,9 @@ pub struct ScannerProperties {
     /// Total rows that **may** return by scanner. This field is only read iff
     /// [ScannerProperties::append_mode] is true.
     total_rows: usize,
+
+    /// Whether to yield an empty batch to distinguish partition ranges.
+    pub distinguish_partition_range: bool,
 }
 
 impl ScannerProperties {
@@ -197,6 +233,7 @@ impl ScannerProperties {
             partitions,
             append_mode,
             total_rows,
+            distinguish_partition_range: false,
         }
     }
 
@@ -211,9 +248,14 @@ impl ScannerProperties {
     pub fn total_rows(&self) -> usize {
         self.total_rows
     }
+
+    pub fn distinguish_partition_range(&self) -> bool {
+        self.distinguish_partition_range
+    }
 }
 
 /// A scanner that provides a way to scan the region concurrently.
+///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
 /// You can use this trait to implement an [`ExecutionPlan`](datafusion_physical_plan::ExecutionPlan).
 pub trait RegionScanner: Debug + DisplayAs + Send {
@@ -223,10 +265,17 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Returns the schema of the record batches.
     fn schema(&self) -> SchemaRef;
 
+    /// Returns the metadata of the region.
+    fn metadata(&self) -> RegionMetadataRef;
+
     /// Prepares the scanner with the given partition ranges.
     ///
     /// This method is for the planner to adjust the scanner's behavior based on the partition ranges.
-    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError>;
+    fn prepare(
+        &mut self,
+        ranges: Vec<Vec<PartitionRange>>,
+        distinguish_partition_range: bool,
+    ) -> Result<(), BoxedError>;
 
     /// Scans the partition and returns a stream of record batches.
     ///
@@ -241,6 +290,48 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 pub type RegionScannerRef = Box<dyn RegionScanner>;
 
 pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
+
+/// Represents the statistics of a region.
+#[derive(Debug, Deserialize, Serialize, Default)]
+pub struct RegionStatistic {
+    /// The number of rows
+    #[serde(default)]
+    pub num_rows: u64,
+    /// The size of memtable in bytes.
+    pub memtable_size: u64,
+    /// The size of WAL in bytes.
+    pub wal_size: u64,
+    /// The size of manifest in bytes.
+    pub manifest_size: u64,
+    /// The size of SST data files in bytes.
+    pub sst_size: u64,
+    /// The size of SST index files in bytes.
+    #[serde(default)]
+    pub index_size: u64,
+}
+
+impl RegionStatistic {
+    /// Deserializes the region statistic to a byte array.
+    ///
+    /// Returns None if the deserialization fails.
+    pub fn deserialize_from_slice(value: &[u8]) -> Option<RegionStatistic> {
+        serde_json::from_slice(value).ok()
+    }
+
+    /// Serializes the region statistic to a byte array.
+    ///
+    /// Returns None if the serialization fails.
+    pub fn serialize_to_vec(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec(self).ok()
+    }
+}
+
+impl RegionStatistic {
+    /// Returns the estimated disk size of the region.
+    pub fn estimated_disk_size(&self) -> u64 {
+        self.wal_size + self.sst_size + self.manifest_size + self.index_size
+    }
+}
 
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
@@ -289,26 +380,27 @@ pub trait RegionEngine: Send + Sync {
     /// Retrieves region's metadata.
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError>;
 
-    /// Retrieves region's disk usage.
-    fn region_disk_usage(&self, region_id: RegionId) -> Option<i64>;
+    /// Retrieves region's statistic.
+    fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic>;
 
     /// Stops the engine
     async fn stop(&self) -> Result<(), BoxedError>;
 
-    /// Sets writable mode for a region.
+    /// Sets [RegionRole] for a region.
     ///
     /// The engine checks whether the region is writable before writing to the region. Setting
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError>;
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
 
-    /// Sets readonly for a region gracefully.
+    /// Sets region role state gracefully.
     ///
     /// After the call returns, the engine ensures no more write operations will succeed in the region.
-    async fn set_readonly_gracefully(
+    async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
-    ) -> Result<SetReadonlyResponse, BoxedError>;
+        region_role_state: SettableRegionRoleState,
+    ) -> Result<SetRegionRoleStateResponse, BoxedError>;
 
     /// Indicates region role.
     ///
@@ -325,11 +417,16 @@ pub struct SinglePartitionScanner {
     stream: Mutex<Option<SendableRecordBatchStream>>,
     schema: SchemaRef,
     properties: ScannerProperties,
+    metadata: RegionMetadataRef,
 }
 
 impl SinglePartitionScanner {
-    /// Creates a new [SinglePartitionScanner] with the given stream.
-    pub fn new(stream: SendableRecordBatchStream, append_mode: bool) -> Self {
+    /// Creates a new [SinglePartitionScanner] with the given stream and metadata.
+    pub fn new(
+        stream: SendableRecordBatchStream,
+        append_mode: bool,
+        metadata: RegionMetadataRef,
+    ) -> Self {
         let schema = stream.schema();
         Self {
             stream: Mutex::new(Some(stream)),
@@ -337,6 +434,7 @@ impl SinglePartitionScanner {
             properties: ScannerProperties::default()
                 .with_parallelism(1)
                 .with_append_mode(append_mode),
+            metadata,
         }
     }
 }
@@ -356,8 +454,13 @@ impl RegionScanner for SinglePartitionScanner {
         self.schema.clone()
     }
 
-    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+    fn prepare(
+        &mut self,
+        ranges: Vec<Vec<PartitionRange>>,
+        distinguish_partition_range: bool,
+    ) -> Result<(), BoxedError> {
         self.properties.partitions = ranges;
+        self.properties.distinguish_partition_range = distinguish_partition_range;
         Ok(())
     }
 
@@ -373,6 +476,10 @@ impl RegionScanner for SinglePartitionScanner {
 
     fn has_predicate(&self) -> bool {
         false
+    }
+
+    fn metadata(&self) -> RegionMetadataRef {
+        self.metadata.clone()
     }
 }
 

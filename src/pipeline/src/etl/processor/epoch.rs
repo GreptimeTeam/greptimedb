@@ -13,7 +13,12 @@
 // limitations under the License.
 
 use ahash::HashSet;
+use snafu::{OptionExt, ResultExt};
 
+use crate::etl::error::{
+    EpochInvalidResolutionSnafu, Error, FailedToParseIntSnafu, KeyMustBeStringSnafu,
+    ProcessorMissingFieldSnafu, ProcessorUnsupportedValueSnafu, Result,
+};
 use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
@@ -39,15 +44,15 @@ enum Resolution {
 }
 
 impl TryFrom<&str> for Resolution {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
+    fn try_from(s: &str) -> Result<Self> {
         match s {
             SECOND_RESOLUTION | SEC_RESOLUTION | S_RESOLUTION => Ok(Resolution::Second),
             MILLISECOND_RESOLUTION | MILLI_RESOLUTION | MS_RESOLUTION => Ok(Resolution::Milli),
             MICROSECOND_RESOLUTION | MICRO_RESOLUTION | US_RESOLUTION => Ok(Resolution::Micro),
             NANOSECOND_RESOLUTION | NANO_RESOLUTION | NS_RESOLUTION => Ok(Resolution::Nano),
-            _ => Err(format!("invalid resolution: {s}")),
+            _ => EpochInvalidResolutionSnafu { resolution: s }.fail(),
         }
     }
 }
@@ -71,13 +76,13 @@ impl ProcessorBuilder for EpochProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
         self.build(intermediate_keys).map(ProcessorKind::Epoch)
     }
 }
 
 impl EpochProcessorBuilder {
-    pub fn build(self, intermediate_keys: &[String]) -> Result<EpochProcessor, String> {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<EpochProcessor> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
             let input = OneInputOneOutputField::build(
@@ -112,11 +117,11 @@ pub struct EpochProcessor {
 }
 
 impl EpochProcessor {
-    fn parse(&self, val: &Value) -> Result<Timestamp, String> {
+    fn parse(&self, val: &Value) -> Result<Timestamp> {
         let t: i64 = match val {
             Value::String(s) => s
                 .parse::<i64>()
-                .map_err(|e| format!("Failed to parse {} to number: {}", s, e))?,
+                .context(FailedToParseIntSnafu { value: s })?,
             Value::Int16(i) => *i as i64,
             Value::Int32(i) => *i as i64,
             Value::Int64(i) => *i,
@@ -135,9 +140,11 @@ impl EpochProcessor {
             },
 
             _ => {
-                return Err(format!(
-                    "{PROCESSOR_EPOCH} processor: unsupported value {val}"
-                ))
+                return ProcessorUnsupportedValueSnafu {
+                    processor: PROCESSOR_EPOCH,
+                    val: val.to_string(),
+                }
+                .fail();
             }
         };
 
@@ -151,9 +158,9 @@ impl EpochProcessor {
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessorBuilder {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
+    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut fields = Fields::default();
         let mut resolution = Resolution::default();
         let mut ignore_missing = false;
@@ -161,7 +168,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessorBuilder {
         for (k, v) in hash {
             let key = k
                 .as_str()
-                .ok_or(format!("key must be a string, but got {k:?}"))?;
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
 
             match key {
                 FIELD_NAME => {
@@ -200,17 +207,17 @@ impl Processor for EpochProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
-                        return Err(format!(
-                            "{} processor: missing field: {}",
-                            self.kind(),
-                            field.input_name()
-                        ));
+                        return ProcessorMissingFieldSnafu {
+                            processor: self.kind(),
+                            field: field.input_name(),
+                        }
+                        .fail();
                     }
                 }
                 Some(v) => {

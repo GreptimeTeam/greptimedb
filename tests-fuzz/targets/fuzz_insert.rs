@@ -14,6 +14,7 @@
 
 #![no_main]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::info;
@@ -83,6 +84,11 @@ fn generate_create_expr<R: Rng + 'static>(
     input: FuzzInput,
     rng: &mut R,
 ) -> Result<CreateTableExpr> {
+    let mut with_clause = HashMap::new();
+    if rng.gen_bool(0.5) {
+        with_clause.insert("append_mode".to_string(), "true".to_string());
+    }
+
     let create_table_generator = CreateTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,
@@ -90,6 +96,7 @@ fn generate_create_expr<R: Rng + 'static>(
         )))
         .columns(input.columns)
         .engine("mito")
+        .with_clause(with_clause)
         .ts_column_type_generator(Box::new(MySQLTsColumnTypeGenerator))
         .build()
         .unwrap();

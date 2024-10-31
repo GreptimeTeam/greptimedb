@@ -123,3 +123,30 @@ DROP TABLE test;
 
 Affected Rows: 0
 
+CREATE TABLE test (`Field_I` DOUBLE, `Ts_J` TIMESTAMP TIME INDEX, `Tag_K` STRING PRIMARY KEY);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
+
+Affected Rows: 3
+
+TQL EVAL (0, 10, '5s') test{__field__="Field_I"};
+
++---------+-------+---------------------+
+| Field_I | Tag_K | Ts_J                |
++---------+-------+---------------------+
+| 2.0     | a     | 1970-01-01T00:00:05 |
+| 2.0     | a     | 1970-01-01T00:00:10 |
+| 1.0     | b     | 1970-01-01T00:00:05 |
+| 1.0     | b     | 1970-01-01T00:00:10 |
++---------+-------+---------------------+
+
+TQL EVAL (0, 10, '5s') test{__field__="field_i"};
+
+Error: 1004(InvalidArguments), Cannot find column field_i
+
+drop table test;
+
+Affected Rows: 0
+

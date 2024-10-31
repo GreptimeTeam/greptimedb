@@ -23,6 +23,7 @@ use cache::{build_fundamental_cache_registry, with_default_composite_cache_regis
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use client::client_manager::NodeClients;
 use client::Client;
+use cmd::DistributedInformationExtension;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -34,6 +35,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::DatanodeId;
+use common_runtime::runtime::BuilderBuild;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
@@ -48,6 +50,7 @@ use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
+use query::stats::StatementStatistics;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::heartbeat_options::HeartbeatOptions;
@@ -70,7 +73,7 @@ pub struct GreptimeDbCluster {
 
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
     pub kv_backend: KvBackendRef,
-    pub metasrv: Metasrv,
+    pub metasrv: Arc<Metasrv>,
     pub frontend: Arc<FeInstance>,
 }
 
@@ -365,11 +368,13 @@ impl GreptimeDbClusterBuilder {
             .build(),
         );
 
+        let information_extension =
+            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
         let catalog_manager = KvBackendCatalogManager::new(
-            Mode::Distributed,
-            Some(meta_client.clone()),
+            information_extension,
             cached_meta_backend.clone(),
             cache_registry.clone(),
+            None,
         );
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
@@ -392,6 +397,7 @@ impl GreptimeDbClusterBuilder {
             catalog_manager,
             datanode_clients,
             meta_client,
+            StatementStatistics::default(),
         )
         .with_local_cache_invalidator(cache_registry)
         .with_heartbeat_task(heartbeat_task)

@@ -24,18 +24,18 @@ use crate::inverted_index::error::{
 use crate::inverted_index::format::FOOTER_PAYLOAD_SIZE_SIZE;
 
 /// InvertedIndeFooterReader is for reading the footer section of the blob.
-pub struct InvertedIndeFooterReader<'a, R> {
-    source: &'a mut R,
+pub struct InvertedIndeFooterReader<R> {
+    source: R,
     blob_size: u64,
 }
 
-impl<'a, R> InvertedIndeFooterReader<'a, R> {
-    pub fn new(source: &'a mut R, blob_size: u64) -> Self {
+impl<R> InvertedIndeFooterReader<R> {
+    pub fn new(source: R, blob_size: u64) -> Self {
         Self { source, blob_size }
     }
 }
 
-impl<'a, R: RangeReader> InvertedIndeFooterReader<'a, R> {
+impl<R: RangeReader> InvertedIndeFooterReader<R> {
     pub async fn metadata(&mut self) -> Result<InvertedIndexMetas> {
         let payload_size = self.read_payload_size().await?;
         let metas = self.read_payload(payload_size).await?;
@@ -113,6 +113,7 @@ impl<'a, R: RangeReader> InvertedIndeFooterReader<'a, R> {
 
 #[cfg(test)]
 mod tests {
+    use common_base::range_read::RangeReaderAdapter;
     use futures::io::Cursor;
     use prost::Message;
 
@@ -142,8 +143,8 @@ mod tests {
 
         let payload_buf = create_test_payload(meta);
         let blob_size = payload_buf.len() as u64;
-        let mut cursor = Cursor::new(payload_buf);
-        let mut reader = InvertedIndeFooterReader::new(&mut cursor, blob_size);
+        let cursor = RangeReaderAdapter(Cursor::new(payload_buf));
+        let mut reader = InvertedIndeFooterReader::new(cursor, blob_size);
 
         let payload_size = reader.read_payload_size().await.unwrap();
         let metas = reader.read_payload(payload_size).await.unwrap();
@@ -163,8 +164,8 @@ mod tests {
         let mut payload_buf = create_test_payload(meta);
         payload_buf.push(0xff); // Add an extra byte to corrupt the footer
         let blob_size = payload_buf.len() as u64;
-        let mut cursor = Cursor::new(payload_buf);
-        let mut reader = InvertedIndeFooterReader::new(&mut cursor, blob_size);
+        let cursor = RangeReaderAdapter(Cursor::new(payload_buf));
+        let mut reader = InvertedIndeFooterReader::new(cursor, blob_size);
 
         let payload_size_result = reader.read_payload_size().await;
         assert!(payload_size_result.is_err());
@@ -181,8 +182,8 @@ mod tests {
 
         let payload_buf = create_test_payload(meta);
         let blob_size = payload_buf.len() as u64;
-        let mut cursor = Cursor::new(payload_buf);
-        let mut reader = InvertedIndeFooterReader::new(&mut cursor, blob_size);
+        let cursor = RangeReaderAdapter(Cursor::new(payload_buf));
+        let mut reader = InvertedIndeFooterReader::new(cursor, blob_size);
 
         let payload_size = reader.read_payload_size().await.unwrap();
         let payload_result = reader.read_payload(payload_size).await;

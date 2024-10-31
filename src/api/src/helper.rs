@@ -17,10 +17,11 @@ use std::sync::Arc;
 use common_base::BitVec;
 use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECISION};
 use common_decimal::Decimal128;
-use common_time::interval::IntervalUnit;
 use common_time::time::Time;
 use common_time::timestamp::TimeUnit;
-use common_time::{Date, DateTime, Interval, Timestamp};
+use common_time::{
+    Date, DateTime, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp,
+};
 use datatypes::prelude::{ConcreteDataType, ValueRef};
 use datatypes::scalars::ScalarVector;
 use datatypes::types::{
@@ -115,6 +116,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                     ConcreteDataType::binary_datatype()
                 }
             }
+            ColumnDataType::Json => ConcreteDataType::json_datatype(),
             ColumnDataType::String => ConcreteDataType::string_datatype(),
             ColumnDataType::Date => ConcreteDataType::date_datatype(),
             ColumnDataType::Datetime => ConcreteDataType::datetime_datatype(),
@@ -416,6 +418,10 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             decimal128_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
+        ColumnDataType::Json => Values {
+            string_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
     }
 }
 
@@ -456,13 +462,11 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
             TimeUnit::Microsecond => values.time_microsecond_values.push(val.value()),
             TimeUnit::Nanosecond => values.time_nanosecond_values.push(val.value()),
         },
-        Value::Interval(val) => match val.unit() {
-            IntervalUnit::YearMonth => values.interval_year_month_values.push(val.to_i32()),
-            IntervalUnit::DayTime => values.interval_day_time_values.push(val.to_i64()),
-            IntervalUnit::MonthDayNano => values
-                .interval_month_day_nano_values
-                .push(convert_i128_to_interval(val.to_i128())),
-        },
+        Value::IntervalYearMonth(val) => values.interval_year_month_values.push(val.to_i32()),
+        Value::IntervalDayTime(val) => values.interval_day_time_values.push(val.to_i64()),
+        Value::IntervalMonthDayNano(val) => values
+            .interval_month_day_nano_values
+            .push(convert_month_day_nano_to_pb(val)),
         Value::Decimal128(val) => values.decimal128_values.push(convert_to_pb_decimal128(val)),
         Value::List(_) | Value::Duration(_) => unreachable!(),
     });
@@ -507,14 +511,12 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
     }
 }
 
-/// Converts an i128 value to google protobuf type [IntervalMonthDayNano].
-pub fn convert_i128_to_interval(v: i128) -> v1::IntervalMonthDayNano {
-    let interval = Interval::from_i128(v);
-    let (months, days, nanoseconds) = interval.to_month_day_nano();
+/// Converts an interval to google protobuf type [IntervalMonthDayNano].
+pub fn convert_month_day_nano_to_pb(v: IntervalMonthDayNano) -> v1::IntervalMonthDayNano {
     v1::IntervalMonthDayNano {
-        months,
-        days,
-        nanoseconds,
+        months: v.months,
+        days: v.days,
+        nanoseconds: v.nanoseconds,
     }
 }
 
@@ -562,11 +564,15 @@ pub fn pb_value_to_value_ref<'a>(
         ValueData::TimeMillisecondValue(t) => ValueRef::Time(Time::new_millisecond(*t)),
         ValueData::TimeMicrosecondValue(t) => ValueRef::Time(Time::new_microsecond(*t)),
         ValueData::TimeNanosecondValue(t) => ValueRef::Time(Time::new_nanosecond(*t)),
-        ValueData::IntervalYearMonthValue(v) => ValueRef::Interval(Interval::from_i32(*v)),
-        ValueData::IntervalDayTimeValue(v) => ValueRef::Interval(Interval::from_i64(*v)),
+        ValueData::IntervalYearMonthValue(v) => {
+            ValueRef::IntervalYearMonth(IntervalYearMonth::from_i32(*v))
+        }
+        ValueData::IntervalDayTimeValue(v) => {
+            ValueRef::IntervalDayTime(IntervalDayTime::from_i64(*v))
+        }
         ValueData::IntervalMonthDayNanoValue(v) => {
-            let interval = Interval::from_month_day_nano(v.months, v.days, v.nanoseconds);
-            ValueRef::Interval(interval)
+            let interval = IntervalMonthDayNano::new(v.months, v.days, v.nanoseconds);
+            ValueRef::IntervalMonthDayNano(interval)
         }
         ValueData::Decimal128Value(v) => {
             // get precision and scale from datatype_extension
@@ -657,7 +663,7 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
             IntervalType::MonthDayNano(_) => {
                 Arc::new(IntervalMonthDayNanoVector::from_iter_values(
                     values.interval_month_day_nano_values.iter().map(|x| {
-                        Interval::from_month_day_nano(x.months, x.days, x.nanoseconds).to_i128()
+                        IntervalMonthDayNano::new(x.months, x.days, x.nanoseconds).to_i128()
                     }),
                 ))
             }
@@ -802,18 +808,18 @@ pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<
         ConcreteDataType::Interval(IntervalType::YearMonth(_)) => values
             .interval_year_month_values
             .into_iter()
-            .map(|v| Value::Interval(Interval::from_i32(v)))
+            .map(|v| Value::IntervalYearMonth(IntervalYearMonth::from_i32(v)))
             .collect(),
         ConcreteDataType::Interval(IntervalType::DayTime(_)) => values
             .interval_day_time_values
             .into_iter()
-            .map(|v| Value::Interval(Interval::from_i64(v)))
+            .map(|v| Value::IntervalDayTime(IntervalDayTime::from_i64(v)))
             .collect(),
         ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => values
             .interval_month_day_nano_values
             .into_iter()
             .map(|v| {
-                Value::Interval(Interval::from_month_day_nano(
+                Value::IntervalMonthDayNano(IntervalMonthDayNano::new(
                     v.months,
                     v.days,
                     v.nanoseconds,
@@ -941,18 +947,16 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
                 value_data: Some(ValueData::TimeNanosecondValue(v.value())),
             },
         },
-        Value::Interval(v) => match v.unit() {
-            IntervalUnit::YearMonth => v1::Value {
-                value_data: Some(ValueData::IntervalYearMonthValue(v.to_i32())),
-            },
-            IntervalUnit::DayTime => v1::Value {
-                value_data: Some(ValueData::IntervalDayTimeValue(v.to_i64())),
-            },
-            IntervalUnit::MonthDayNano => v1::Value {
-                value_data: Some(ValueData::IntervalMonthDayNanoValue(
-                    convert_i128_to_interval(v.to_i128()),
-                )),
-            },
+        Value::IntervalYearMonth(v) => v1::Value {
+            value_data: Some(ValueData::IntervalYearMonthValue(v.to_i32())),
+        },
+        Value::IntervalDayTime(v) => v1::Value {
+            value_data: Some(ValueData::IntervalDayTimeValue(v.to_i64())),
+        },
+        Value::IntervalMonthDayNano(v) => v1::Value {
+            value_data: Some(ValueData::IntervalMonthDayNanoValue(
+                convert_month_day_nano_to_pb(v),
+            )),
         },
         Value::Decimal128(v) => v1::Value {
             value_data: Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
@@ -1044,13 +1048,11 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 TimeUnit::Microsecond => ValueData::TimeMicrosecondValue(v.value()),
                 TimeUnit::Nanosecond => ValueData::TimeNanosecondValue(v.value()),
             }),
-            Value::Interval(v) => Some(match v.unit() {
-                IntervalUnit::YearMonth => ValueData::IntervalYearMonthValue(v.to_i32()),
-                IntervalUnit::DayTime => ValueData::IntervalDayTimeValue(v.to_i64()),
-                IntervalUnit::MonthDayNano => {
-                    ValueData::IntervalMonthDayNanoValue(convert_i128_to_interval(v.to_i128()))
-                }
-            }),
+            Value::IntervalYearMonth(v) => Some(ValueData::IntervalYearMonthValue(v.to_i32())),
+            Value::IntervalDayTime(v) => Some(ValueData::IntervalDayTimeValue(v.to_i64())),
+            Value::IntervalMonthDayNano(v) => Some(ValueData::IntervalMonthDayNanoValue(
+                convert_month_day_nano_to_pb(v),
+            )),
             Value::Decimal128(v) => Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
             Value::List(_) | Value::Duration(_) => unreachable!(),
         },
@@ -1061,6 +1063,7 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
 mod tests {
     use std::sync::Arc;
 
+    use common_time::interval::IntervalUnit;
     use datatypes::types::{
         Int32Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
         TimeMillisecondType, TimeSecondType, TimestampMillisecondType, TimestampSecondType,
@@ -1506,11 +1509,11 @@ mod tests {
 
     #[test]
     fn test_convert_i128_to_interval() {
-        let i128_val = 3000;
-        let interval = convert_i128_to_interval(i128_val);
+        let i128_val = 3;
+        let interval = convert_month_day_nano_to_pb(IntervalMonthDayNano::from_i128(i128_val));
         assert_eq!(interval.months, 0);
         assert_eq!(interval.days, 0);
-        assert_eq!(interval.nanoseconds, 3000);
+        assert_eq!(interval.nanoseconds, 3);
     }
 
     #[test]
@@ -1590,9 +1593,9 @@ mod tests {
             },
         );
         let expect = vec![
-            Value::Interval(Interval::from_year_month(1_i32)),
-            Value::Interval(Interval::from_year_month(2_i32)),
-            Value::Interval(Interval::from_year_month(3_i32)),
+            Value::IntervalYearMonth(IntervalYearMonth::new(1_i32)),
+            Value::IntervalYearMonth(IntervalYearMonth::new(2_i32)),
+            Value::IntervalYearMonth(IntervalYearMonth::new(3_i32)),
         ];
         assert_eq!(expect, actual);
 
@@ -1605,9 +1608,9 @@ mod tests {
             },
         );
         let expect = vec![
-            Value::Interval(Interval::from_i64(1_i64)),
-            Value::Interval(Interval::from_i64(2_i64)),
-            Value::Interval(Interval::from_i64(3_i64)),
+            Value::IntervalDayTime(IntervalDayTime::from_i64(1_i64)),
+            Value::IntervalDayTime(IntervalDayTime::from_i64(2_i64)),
+            Value::IntervalDayTime(IntervalDayTime::from_i64(3_i64)),
         ];
         assert_eq!(expect, actual);
 
@@ -1636,9 +1639,9 @@ mod tests {
             },
         );
         let expect = vec![
-            Value::Interval(Interval::from_month_day_nano(1, 2, 3)),
-            Value::Interval(Interval::from_month_day_nano(5, 6, 7)),
-            Value::Interval(Interval::from_month_day_nano(9, 10, 11)),
+            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 2, 3)),
+            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(5, 6, 7)),
+            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(9, 10, 11)),
         ];
         assert_eq!(expect, actual);
     }

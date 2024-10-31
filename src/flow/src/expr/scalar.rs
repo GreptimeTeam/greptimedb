@@ -16,17 +16,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use arrow::array::{make_array, ArrayData, ArrayRef};
 use common_error::ext::BoxedError;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
-use datatypes::vectors::{BooleanVector, Helper, NullVector, Vector, VectorRef};
+use datatypes::vectors::{BooleanVector, Helper, VectorRef};
+use hydroflow::lattices::cc_traits::Iter;
+use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
 use crate::expr::error::{
-    DataTypeSnafu, EvalError, InternalSnafu, InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
+    ArrowSnafu, DataTypeSnafu, EvalError, InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::expr::{Batch, DfScalarFunction};
@@ -222,6 +225,8 @@ impl ScalarExpr {
         }
     }
 
+    /// NOTE: this if then eval impl assume all given expr are pure, and will not change the state of the world
+    /// since it will evaluate both then and else branch and filter the result
     fn eval_if_then(
         batch: &Batch,
         cond: &ScalarExpr,
@@ -240,130 +245,69 @@ impl ScalarExpr {
             })?
             .as_boolean_array();
 
-        let mut then_input_batch = None;
-        let mut else_input_batch = None;
-        let mut null_input_batch = None;
+        let indices = bool_conds
+            .into_iter()
+            .enumerate()
+            .map(|(idx, b)| {
+                (
+                    match b {
+                        Some(true) => 0,  // then branch vector
+                        Some(false) => 1, // else branch vector
+                        None => 2,        // null vector
+                    },
+                    idx,
+                )
+            })
+            .collect_vec();
 
-        // instructions for how to reassembly result vector,
-        // iterate over (type of vec, offset, length) and append to resulting vec
-        let mut assembly_idx = vec![];
+        let then_input_vec = then.eval_batch(batch)?;
+        let else_input_vec = els.eval_batch(batch)?;
 
-        // append batch, returning appended batch's slice in (offset, length)
-        fn append_batch(
-            batch: &mut Option<Batch>,
-            to_be_append: Batch,
-        ) -> Result<(usize, usize), EvalError> {
-            let len = to_be_append.row_count();
-            if let Some(batch) = batch {
-                let offset = batch.row_count();
-                batch.append_batch(to_be_append)?;
-                Ok((offset, len))
-            } else {
-                *batch = Some(to_be_append);
-                Ok((0, len))
+        ensure!(
+            then_input_vec.data_type() == else_input_vec.data_type(),
+            TypeMismatchSnafu {
+                expected: then_input_vec.data_type(),
+                actual: else_input_vec.data_type(),
             }
+        );
+
+        ensure!(
+            then_input_vec.len() == else_input_vec.len() && then_input_vec.len() == batch.row_count(),
+            InvalidArgumentSnafu {
+                reason: format!(
+                    "then and else branch must have the same length(found {} and {}) which equals input batch's row count(which is {})",
+                    then_input_vec.len(),
+                    else_input_vec.len(),
+                    batch.row_count()
+                )
+            }
+        );
+
+        fn new_nulls(dt: &arrow_schema::DataType, len: usize) -> ArrayRef {
+            let data = ArrayData::new_null(dt, len);
+            make_array(data)
         }
 
-        let mut prev_cond: Option<Option<bool>> = None;
-        let mut prev_start_idx: Option<usize> = None;
-        // first put different conds' vector into different batches
-        for (idx, cond) in bool_conds.iter().enumerate() {
-            // if belong to same slice and not last one continue
-            if prev_cond == Some(cond) {
-                continue;
-            } else if let Some(prev_cond_idx) = prev_start_idx {
-                let prev_cond = prev_cond.unwrap();
+        let null_input_vec = new_nulls(
+            &then_input_vec.data_type().as_arrow_type(),
+            batch.row_count(),
+        );
 
-                // put a slice to corresponding batch
-                let slice_offset = prev_cond_idx;
-                let slice_length = idx - prev_cond_idx;
-                let to_be_append = batch.slice(slice_offset, slice_length)?;
+        let interleave_values = vec![
+            then_input_vec.to_arrow_array(),
+            else_input_vec.to_arrow_array(),
+            null_input_vec,
+        ];
+        let int_ref: Vec<_> = interleave_values.iter().map(|x| x.as_ref()).collect();
 
-                let to_put_back = match prev_cond {
-                    Some(true) => (
-                        Some(true),
-                        append_batch(&mut then_input_batch, to_be_append)?,
-                    ),
-                    Some(false) => (
-                        Some(false),
-                        append_batch(&mut else_input_batch, to_be_append)?,
-                    ),
-                    None => (None, append_batch(&mut null_input_batch, to_be_append)?),
-                };
-                assembly_idx.push(to_put_back);
-            }
-            prev_cond = Some(cond);
-            prev_start_idx = Some(idx);
-        }
-
-        // deal with empty and last slice case
-        if let Some(slice_offset) = prev_start_idx {
-            let prev_cond = prev_cond.unwrap();
-            let slice_length = bool_conds.len() - slice_offset;
-            let to_be_append = batch.slice(slice_offset, slice_length)?;
-            let to_put_back = match prev_cond {
-                Some(true) => (
-                    Some(true),
-                    append_batch(&mut then_input_batch, to_be_append)?,
-                ),
-                Some(false) => (
-                    Some(false),
-                    append_batch(&mut else_input_batch, to_be_append)?,
-                ),
-                None => (None, append_batch(&mut null_input_batch, to_be_append)?),
-            };
-            assembly_idx.push(to_put_back);
-        }
-
-        let then_output_vec = then_input_batch
-            .map(|batch| then.eval_batch(&batch))
-            .transpose()?;
-        let else_output_vec = else_input_batch
-            .map(|batch| els.eval_batch(&batch))
-            .transpose()?;
-        let null_output_vec = null_input_batch
-            .map(|null| NullVector::new(null.row_count()).slice(0, null.row_count()));
-
-        let dt = then_output_vec
-            .as_ref()
-            .map(|v| v.data_type())
-            .or(else_output_vec.as_ref().map(|v| v.data_type()))
-            .unwrap_or(ConcreteDataType::null_datatype());
-        let mut builder = dt.create_mutable_vector(conds.len());
-        for (cond, (offset, length)) in assembly_idx {
-            let slice = match cond {
-                Some(true) => then_output_vec.as_ref(),
-                Some(false) => else_output_vec.as_ref(),
-                None => null_output_vec.as_ref(),
-            }
-            .context(InternalSnafu {
-                reason: "Expect corresponding output vector to exist",
+        let interleave_res_arr =
+            arrow::compute::interleave(&int_ref, &indices).context(ArrowSnafu {
+                context: "Failed to interleave output arrays",
             })?;
-            // TODO(discord9): seems `extend_slice_of` doesn't support NullVector or ConstantVector
-            // consider adding it maybe?
-            if slice.data_type().is_null() {
-                builder.push_nulls(length);
-            } else if slice.is_const() {
-                let arr = slice.slice(offset, length).to_arrow_array();
-                let vector = Helper::try_into_vector(arr).context(DataTypeSnafu {
-                    msg: "Failed to convert arrow array to vector",
-                })?;
-                builder
-                    .extend_slice_of(vector.as_ref(), 0, vector.len())
-                    .context(DataTypeSnafu {
-                        msg: "Failed to build result vector for if-then expression",
-                    })?;
-            } else {
-                builder
-                    .extend_slice_of(slice.as_ref(), offset, length)
-                    .context(DataTypeSnafu {
-                        msg: "Failed to build result vector for if-then expression",
-                    })?;
-            }
-        }
-        let result_vec = builder.to_vector();
-
-        Ok(result_vec)
+        let res_vec = Helper::try_into_vector(interleave_res_arr).context(DataTypeSnafu {
+            msg: "Failed to convert arrow array to vector",
+        })?;
+        Ok(res_vec)
     }
 
     /// Eval this expression with the given values.
@@ -685,7 +629,7 @@ impl ScalarExpr {
 
 #[cfg(test)]
 mod test {
-    use datatypes::vectors::Int32Vector;
+    use datatypes::vectors::{Int32Vector, Vector};
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -781,7 +725,7 @@ mod test {
     }
 
     #[test]
-    fn test_eval_batch() {
+    fn test_eval_batch_if_then() {
         // TODO(discord9): add more tests
         {
             let expr = ScalarExpr::If {
@@ -840,7 +784,7 @@ mod test {
             let vectors = vec![Int32Vector::from(raw).slice(0, raw_len)];
 
             let batch = Batch::try_new(vectors, raw_len).unwrap();
-            let expected = NullVector::new(raw_len).slice(0, raw_len);
+            let expected = Int32Vector::from(vec![]).slice(0, raw_len);
             assert_eq!(expr.eval_batch(&batch).unwrap(), expected);
         }
     }

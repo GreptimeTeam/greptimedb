@@ -60,21 +60,46 @@ pub trait RangeReader: Send + Unpin {
     }
 }
 
-/// Implement `RangeReader` for a type that implements `AsyncRead + AsyncSeek`.
+#[async_trait]
+impl<R: RangeReader + Send + Unpin> RangeReader for &mut R {
+    async fn metadata(&mut self) -> io::Result<Metadata> {
+        (*self).metadata().await
+    }
+    async fn read(&mut self, range: Range<u64>) -> io::Result<Bytes> {
+        (*self).read(range).await
+    }
+    async fn read_into(
+        &mut self,
+        range: Range<u64>,
+        buf: &mut (impl BufMut + Send),
+    ) -> io::Result<()> {
+        (*self).read_into(range, buf).await
+    }
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+        (*self).read_vec(ranges).await
+    }
+}
+
+/// `RangeReaderAdapter` bridges `RangeReader` and `AsyncRead + AsyncSeek`.
+pub struct RangeReaderAdapter<R>(pub R);
+
+/// Implements `RangeReader` for a type that implements `AsyncRead + AsyncSeek`.
 ///
 /// TODO(zhongzc): It's a temporary solution for porting the codebase from `AsyncRead + AsyncSeek` to `RangeReader`.
 /// Until the codebase is fully ported to `RangeReader`, remove this implementation.
 #[async_trait]
-impl<R: futures::AsyncRead + futures::AsyncSeek + Send + Unpin> RangeReader for R {
+impl<R: futures::AsyncRead + futures::AsyncSeek + Send + Unpin> RangeReader
+    for RangeReaderAdapter<R>
+{
     async fn metadata(&mut self) -> io::Result<Metadata> {
-        let content_length = self.seek(io::SeekFrom::End(0)).await?;
+        let content_length = self.0.seek(io::SeekFrom::End(0)).await?;
         Ok(Metadata { content_length })
     }
 
     async fn read(&mut self, range: Range<u64>) -> io::Result<Bytes> {
         let mut buf = vec![0; (range.end - range.start) as usize];
-        self.seek(io::SeekFrom::Start(range.start)).await?;
-        self.read_exact(&mut buf).await?;
+        self.0.seek(io::SeekFrom::Start(range.start)).await?;
+        self.0.read_exact(&mut buf).await?;
         Ok(Bytes::from(buf))
     }
 }

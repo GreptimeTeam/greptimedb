@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
 use common_meta::key::TableMetadataManager;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::find_leaders;
@@ -23,7 +24,7 @@ use snafu::ResultExt;
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
-use crate::key::{DatanodeLeaseKey, DatanodeStatKey, DatanodeStatValue, LeaseValue};
+use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::lease;
 use crate::metasrv::SelectorContext;
 use crate::selector::common::choose_peers;
@@ -162,7 +163,9 @@ async fn get_leader_peer_ids(
 mod tests {
     use std::collections::HashMap;
 
-    use crate::key::{DatanodeLeaseKey, DatanodeStatKey, DatanodeStatValue, LeaseValue};
+    use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
+
+    use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::selector::load_based::filter_out_expired_datanode;
 
     #[test]

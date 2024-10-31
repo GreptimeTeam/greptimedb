@@ -133,18 +133,17 @@ use self::flow::flow_name::FlowNameValue;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
-use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::key::node_address::NodeAddressValue;
 use crate::key::table_route::TableRouteKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
+use crate::rpc::router::{region_distribution, LeaderState, RegionRoute};
 use crate::rpc::store::BatchDeleteRequest;
 use crate::DatanodeId;
 
-pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.]*";
+pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
 pub const MAINTENANCE_KEY: &str = "__maintenance";
 
 const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
@@ -593,8 +592,6 @@ impl TableMetadataManager {
         table_info.meta.region_numbers = region_numbers;
         let table_id = table_info.ident.table_id;
         let engine = table_info.meta.engine.clone();
-        let region_storage_path =
-            region_storage_path(&table_info.catalog_name, &table_info.schema_name);
 
         // Creates table name.
         let table_name = TableNameKey::new(
@@ -606,7 +603,7 @@ impl TableMetadataManager {
             .table_name_manager()
             .build_create_txn(&table_name, table_id)?;
 
-        let region_options = (&table_info.meta.options).into();
+        let region_options = table_info.to_region_options();
         // Creates table info.
         let table_info_value = TableInfoValue::new(table_info);
         let (create_table_info_txn, on_create_table_info_failure) = self
@@ -625,6 +622,7 @@ impl TableMetadataManager {
         ]);
 
         if let TableRouteValue::Physical(x) = &table_route_value {
+            let region_storage_path = table_info_value.region_storage_path();
             let create_datanode_table_txn = self.datanode_table_manager().build_create_txn(
                 table_id,
                 &engine,
@@ -926,13 +924,15 @@ impl TableMetadataManager {
     }
 
     /// Updates table info and returns an error if different metadata exists.
+    /// And cascade-ly update all redundant table options for each region
+    /// if region_distribution is present.
     pub async fn update_table_info(
         &self,
         current_table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
+        region_distribution: Option<RegionDistribution>,
         new_table_info: RawTableInfo,
     ) -> Result<()> {
         let table_id = current_table_info_value.table_info.ident.table_id;
-
         let new_table_info_value = current_table_info_value.update(new_table_info);
 
         // Updates table info.
@@ -940,8 +940,19 @@ impl TableMetadataManager {
             .table_info_manager()
             .build_update_txn(table_id, current_table_info_value, &new_table_info_value)?;
 
-        let mut r = self.kv_backend.txn(update_table_info_txn).await?;
+        let txn = if let Some(region_distribution) = region_distribution {
+            // region options induced from table info.
+            let new_region_options = new_table_info_value.table_info.to_region_options();
+            let update_datanode_table_options_txn = self
+                .datanode_table_manager
+                .build_update_table_options_txn(table_id, region_distribution, new_region_options)
+                .await?;
+            Txn::merge_all([update_table_info_txn, update_datanode_table_options_txn])
+        } else {
+            update_table_info_txn
+        };
 
+        let mut r = self.kv_backend.txn(txn).await?;
         // Checks whether metadata was already updated.
         if !r.succeeded {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
@@ -1126,14 +1137,14 @@ impl TableMetadataManager {
         next_region_route_status: F,
     ) -> Result<()>
     where
-        F: Fn(&RegionRoute) -> Option<Option<RegionStatus>>,
+        F: Fn(&RegionRoute) -> Option<Option<LeaderState>>,
     {
         let mut new_region_routes = current_table_route_value.region_routes()?.clone();
 
         let mut updated = 0;
         for route in &mut new_region_routes {
-            if let Some(status) = next_region_route_status(route) {
-                if route.set_leader_status(status) {
+            if let Some(state) = next_region_route_status(route) {
+                if route.set_leader_state(state) {
                     updated += 1;
                 }
             }
@@ -1280,7 +1291,7 @@ mod tests {
     use crate::key::{DeserializedValueWithBytes, TableMetadataManager, ViewInfoValue};
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
-    use crate::rpc::router::{region_distribution, Region, RegionRoute, RegionStatus};
+    use crate::rpc::router::{region_distribution, LeaderState, Region, RegionRoute};
 
     #[test]
     fn test_deserialized_value_with_bytes() {
@@ -1324,7 +1335,7 @@ mod tests {
             },
             leader_peer: Some(Peer::new(datanode, "a2")),
             follower_peers: vec![],
-            leader_status: None,
+            leader_state: None,
             leader_down_since: None,
         }
     }
@@ -1669,12 +1680,12 @@ mod tests {
             DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
         // should be ok.
         table_metadata_manager
-            .update_table_info(&current_table_info_value, new_table_info.clone())
+            .update_table_info(&current_table_info_value, None, new_table_info.clone())
             .await
             .unwrap();
         // if table info was updated, it should be ok.
         table_metadata_manager
-            .update_table_info(&current_table_info_value, new_table_info.clone())
+            .update_table_info(&current_table_info_value, None, new_table_info.clone())
             .await
             .unwrap();
 
@@ -1696,7 +1707,7 @@ mod tests {
         // if the current_table_info_value is wrong, it should return an error.
         // The ABA problem.
         assert!(table_metadata_manager
-            .update_table_info(&wrong_table_info_value, new_table_info)
+            .update_table_info(&wrong_table_info_value, None, new_table_info)
             .await
             .is_err())
     }
@@ -1715,7 +1726,7 @@ mod tests {
                     attrs: BTreeMap::new(),
                 },
                 leader_peer: Some(Peer::new(datanode, "a2")),
-                leader_status: Some(RegionStatus::Downgraded),
+                leader_state: Some(LeaderState::Downgrading),
                 follower_peers: vec![],
                 leader_down_since: Some(current_time_millis()),
             },
@@ -1727,7 +1738,7 @@ mod tests {
                     attrs: BTreeMap::new(),
                 },
                 leader_peer: Some(Peer::new(datanode, "a1")),
-                leader_status: None,
+                leader_state: None,
                 follower_peers: vec![],
                 leader_down_since: None,
             },
@@ -1750,10 +1761,10 @@ mod tests {
 
         table_metadata_manager
             .update_leader_region_status(table_id, &current_table_route_value, |region_route| {
-                if region_route.leader_status.is_some() {
+                if region_route.leader_state.is_some() {
                     None
                 } else {
-                    Some(Some(RegionStatus::Downgraded))
+                    Some(Some(LeaderState::Downgrading))
                 }
             })
             .await
@@ -1768,8 +1779,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            updated_route_value.region_routes().unwrap()[0].leader_status,
-            Some(RegionStatus::Downgraded)
+            updated_route_value.region_routes().unwrap()[0].leader_state,
+            Some(LeaderState::Downgrading)
         );
 
         assert!(updated_route_value.region_routes().unwrap()[0]
@@ -1777,8 +1788,8 @@ mod tests {
             .is_some());
 
         assert_eq!(
-            updated_route_value.region_routes().unwrap()[1].leader_status,
-            Some(RegionStatus::Downgraded)
+            updated_route_value.region_routes().unwrap()[1].leader_state,
+            Some(LeaderState::Downgrading)
         );
         assert!(updated_route_value.region_routes().unwrap()[1]
             .leader_down_since
@@ -1943,21 +1954,21 @@ mod tests {
                         region: Region::new_test(RegionId::new(table_id, 1)),
                         leader_peer: Some(Peer::empty(1)),
                         follower_peers: vec![Peer::empty(5)],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 2)),
                         leader_peer: Some(Peer::empty(2)),
                         follower_peers: vec![Peer::empty(4)],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 3)),
                         leader_peer: Some(Peer::empty(3)),
                         follower_peers: vec![],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                 ]),
@@ -1996,21 +2007,21 @@ mod tests {
                         region: Region::new_test(RegionId::new(table_id, 1)),
                         leader_peer: Some(Peer::empty(1)),
                         follower_peers: vec![Peer::empty(5)],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 2)),
                         leader_peer: Some(Peer::empty(2)),
                         follower_peers: vec![Peer::empty(4)],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 3)),
                         leader_peer: Some(Peer::empty(3)),
                         follower_peers: vec![],
-                        leader_status: None,
+                        leader_state: None,
                         leader_down_since: None,
                     },
                 ]),

@@ -30,6 +30,7 @@ use store_api::storage::RegionId;
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
+use crate::metrics::{METRIC_META_REGION_MIGRATION_DATANODES, METRIC_META_REGION_MIGRATION_FAIL};
 use crate::procedure::region_migration::{
     DefaultContextFactory, PersistentContext, RegionMigrationProcedure,
 };
@@ -44,7 +45,7 @@ pub struct RegionMigrationManager {
 }
 
 #[derive(Default, Clone)]
-pub(crate) struct RegionMigrationProcedureTracker {
+pub struct RegionMigrationProcedureTracker {
     running_procedures: Arc<RwLock<HashMap<RegionId, RegionMigrationProcedureTask>>>,
 }
 
@@ -104,7 +105,7 @@ pub struct RegionMigrationProcedureTask {
     pub(crate) region_id: RegionId,
     pub(crate) from_peer: Peer,
     pub(crate) to_peer: Peer,
-    pub(crate) replay_timeout: Duration,
+    pub(crate) timeout: Duration,
 }
 
 impl RegionMigrationProcedureTask {
@@ -113,14 +114,14 @@ impl RegionMigrationProcedureTask {
         region_id: RegionId,
         from_peer: Peer,
         to_peer: Peer,
-        replay_timeout: Duration,
+        timeout: Duration,
     ) -> Self {
         Self {
             cluster_id,
             region_id,
             from_peer,
             to_peer,
-            replay_timeout,
+            timeout,
         }
     }
 }
@@ -149,7 +150,7 @@ impl RegionMigrationManager {
     }
 
     /// Returns the [`RegionMigrationProcedureTracker`].
-    pub(crate) fn tracker(&self) -> &RegionMigrationProcedureTracker {
+    pub fn tracker(&self) -> &RegionMigrationProcedureTracker {
         &self.tracker
     }
 
@@ -246,7 +247,7 @@ impl RegionMigrationManager {
         region_route: &RegionRoute,
         task: &RegionMigrationProcedureTask,
     ) -> Result<bool> {
-        if region_route.is_leader_downgraded() {
+        if region_route.is_leader_downgrading() {
             return Ok(false);
         }
 
@@ -323,12 +324,18 @@ impl RegionMigrationManager {
             schema_name,
             ..
         } = table_info.table_name();
+        METRIC_META_REGION_MIGRATION_DATANODES
+            .with_label_values(&["src", &task.from_peer.id.to_string()])
+            .inc();
+        METRIC_META_REGION_MIGRATION_DATANODES
+            .with_label_values(&["desc", &task.to_peer.id.to_string()])
+            .inc();
         let RegionMigrationProcedureTask {
             cluster_id,
             region_id,
             from_peer,
             to_peer,
-            replay_timeout,
+            timeout,
         } = task.clone();
         let procedure = RegionMigrationProcedure::new(
             PersistentContext {
@@ -338,7 +345,7 @@ impl RegionMigrationManager {
                 region_id,
                 from_peer,
                 to_peer,
-                replay_timeout,
+                timeout,
             },
             self.context_factory.clone(),
             Some(guard),
@@ -358,6 +365,7 @@ impl RegionMigrationManager {
 
             if let Err(e) = watcher::wait(watcher).await {
                 error!(e; "Failed to wait region migration procedure {procedure_id} for {task}");
+                METRIC_META_REGION_MIGRATION_FAIL.inc();
                 return;
             }
 
@@ -390,7 +398,7 @@ mod test {
             region_id,
             from_peer: Peer::empty(2),
             to_peer: Peer::empty(1),
-            replay_timeout: Duration::from_millis(1000),
+            timeout: Duration::from_millis(1000),
         };
         // Inserts one
         manager
@@ -415,7 +423,7 @@ mod test {
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(1),
-            replay_timeout: Duration::from_millis(1000),
+            timeout: Duration::from_millis(1000),
         };
 
         let err = manager.submit_procedure(task).await.unwrap_err();
@@ -433,7 +441,7 @@ mod test {
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
-            replay_timeout: Duration::from_millis(1000),
+            timeout: Duration::from_millis(1000),
         };
 
         let err = manager.submit_procedure(task).await.unwrap_err();
@@ -451,7 +459,7 @@ mod test {
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
-            replay_timeout: Duration::from_millis(1000),
+            timeout: Duration::from_millis(1000),
         };
 
         let table_info = new_test_table_info(1024, vec![1]).into();
@@ -479,7 +487,7 @@ mod test {
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
-            replay_timeout: Duration::from_millis(1000),
+            timeout: Duration::from_millis(1000),
         };
 
         let table_info = new_test_table_info(1024, vec![1]).into();
@@ -511,7 +519,7 @@ mod test {
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
-            replay_timeout: Duration::from_millis(1000),
+            timeout: Duration::from_millis(1000),
         };
 
         let table_info = new_test_table_info(1024, vec![1]).into();
@@ -538,7 +546,7 @@ mod test {
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
-            replay_timeout: Duration::from_millis(1000),
+            timeout: Duration::from_millis(1000),
         };
 
         let err = manager

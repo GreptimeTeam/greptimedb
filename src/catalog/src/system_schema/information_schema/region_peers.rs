@@ -224,8 +224,8 @@ impl InformationSchemaRegionPeersBuilder {
             let region_id = RegionId::new(table_id, route.region.id.region_number()).as_u64();
             let peer_id = route.leader_peer.clone().map(|p| p.id);
             let peer_addr = route.leader_peer.clone().map(|p| p.addr);
-            let status = if let Some(status) = route.leader_status {
-                Some(status.as_ref().to_string())
+            let state = if let Some(state) = route.leader_state {
+                Some(state.as_ref().to_string())
             } else {
                 // Alive by default
                 Some("ALIVE".to_string())
@@ -242,7 +242,7 @@ impl InformationSchemaRegionPeersBuilder {
             self.peer_ids.push(peer_id);
             self.peer_addrs.push(peer_addr.as_deref());
             self.is_leaders.push(Some("Yes"));
-            self.statuses.push(status.as_deref());
+            self.statuses.push(state.as_deref());
             self.down_seconds
                 .push(route.leader_down_millis().map(|m| m / 1000));
         }

@@ -15,6 +15,7 @@
 use std::cmp::Ordering;
 
 use api::v1::meta::{HeartbeatRequest, Role};
+use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, Stat};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::node_address::{NodeAddressKey, NodeAddressValue};
 use common_meta::key::{MetadataKey, MetadataValue};
@@ -25,9 +26,7 @@ use dashmap::DashMap;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
-use crate::handler::node_stat::Stat;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
-use crate::key::{DatanodeStatKey, DatanodeStatValue};
 use crate::metasrv::Context;
 
 const MAX_CACHED_STATS_PER_KEY: usize = 10;
@@ -138,7 +137,8 @@ impl HeartbeatHandler for CollectStatsHandler {
         let value: Vec<u8> = DatanodeStatValue {
             stats: epoch_stats.drain_all(),
         }
-        .try_into()?;
+        .try_into()
+        .context(error::InvalidDatanodeStatFormatSnafu {})?;
         let put = PutRequest {
             key,
             value,
@@ -198,6 +198,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_meta::cache_invalidator::DummyCacheInvalidator;
+    use common_meta::datanode::DatanodeStatKey;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::SequenceBuilder;
@@ -205,7 +206,6 @@ mod tests {
     use super::*;
     use crate::cluster::MetaPeerClientBuilder;
     use crate::handler::{HeartbeatMailbox, Pushers};
-    use crate::key::DatanodeStatKey;
     use crate::service::store::cached_kv::LeaderCachedKvBackend;
 
     #[tokio::test]

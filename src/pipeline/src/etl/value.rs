@@ -16,10 +16,20 @@ pub mod array;
 pub mod map;
 pub mod time;
 
-use ahash::{HashMap, HashMapExt};
+use std::collections::BTreeMap;
+
 pub use array::Array;
+use jsonb::{Number as JsonbNumber, Object as JsonbObject, Value as JsonbValue};
 pub use map::Map;
+use snafu::{OptionExt, ResultExt};
 pub use time::Timestamp;
+
+use super::error::{
+    ValueDefaultValueUnsupportedSnafu, ValueInvalidResolutionSnafu, ValueParseBooleanSnafu,
+    ValueParseFloatSnafu, ValueParseIntSnafu, ValueParseTypeSnafu, ValueUnsupportedNumberTypeSnafu,
+    ValueUnsupportedYamlTypeSnafu, ValueYamlKeyMustBeStringSnafu,
+};
+use crate::etl::error::{Error, Result};
 
 /// Value can be used as type
 /// acts as value: the enclosed value is the actual value
@@ -49,6 +59,7 @@ pub enum Value {
 
     Timestamp(Timestamp),
 
+    /// We only consider object and array to be json types.
     Array(Array),
     Map(Map),
 }
@@ -58,7 +69,7 @@ impl Value {
         matches!(self, Value::Null)
     }
 
-    pub fn parse_str_type(t: &str) -> Result<Self, String> {
+    pub fn parse_str_type(t: &str) -> Result<Self> {
         let mut parts = t.splitn(2, ',');
         let head = parts.next().unwrap_or_default();
         let tail = parts.next().map(|s| s.trim().to_string());
@@ -93,76 +104,81 @@ impl Value {
                     time::SECOND_RESOLUTION | time::SEC_RESOLUTION | time::S_RESOLUTION => {
                         Ok(Value::Timestamp(Timestamp::Second(0)))
                     }
-                    _ => Err(format!(
-                        "invalid resolution: '{resolution}'. Available resolutions: {}",
-                        time::VALID_RESOLUTIONS.join(",")
-                    )),
+                    _ => ValueInvalidResolutionSnafu {
+                        resolution,
+                        valid_resolution: time::VALID_RESOLUTIONS.join(","),
+                    }
+                    .fail(),
                 },
                 _ => Ok(Value::Timestamp(Timestamp::Nanosecond(0))),
             },
 
-            "array" => Ok(Value::Array(Array::default())),
-            "map" => Ok(Value::Map(Map::default())),
+            // We only consider object and array to be json types. and use Map to represent json
+            // TODO(qtang): Needs to be defined with better semantics
+            "json" => Ok(Value::Map(Map::default())),
 
-            _ => Err(format!("failed to parse type: '{t}'")),
+            _ => ValueParseTypeSnafu { t }.fail(),
         }
     }
 
     /// only support string, bool, number, null
-    pub fn parse_str_value(&self, v: &str) -> Result<Self, String> {
+    pub fn parse_str_value(&self, v: &str) -> Result<Self> {
         match self {
             Value::Int8(_) => v
                 .parse::<i8>()
                 .map(Value::Int8)
-                .map_err(|e| format!("failed to parse int8: {}", e)),
+                .context(ValueParseIntSnafu { ty: "int8", v }),
             Value::Int16(_) => v
                 .parse::<i16>()
                 .map(Value::Int16)
-                .map_err(|e| format!("failed to parse int16: {}", e)),
+                .context(ValueParseIntSnafu { ty: "int16", v }),
             Value::Int32(_) => v
                 .parse::<i32>()
                 .map(Value::Int32)
-                .map_err(|e| format!("failed to parse int32: {}", e)),
+                .context(ValueParseIntSnafu { ty: "int32", v }),
             Value::Int64(_) => v
                 .parse::<i64>()
                 .map(Value::Int64)
-                .map_err(|e| format!("failed to parse int64: {}", e)),
+                .context(ValueParseIntSnafu { ty: "int64", v }),
 
             Value::Uint8(_) => v
                 .parse::<u8>()
                 .map(Value::Uint8)
-                .map_err(|e| format!("failed to parse uint8: {}", e)),
+                .context(ValueParseIntSnafu { ty: "uint8", v }),
             Value::Uint16(_) => v
                 .parse::<u16>()
                 .map(Value::Uint16)
-                .map_err(|e| format!("failed to parse uint16: {}", e)),
+                .context(ValueParseIntSnafu { ty: "uint16", v }),
             Value::Uint32(_) => v
                 .parse::<u32>()
                 .map(Value::Uint32)
-                .map_err(|e| format!("failed to parse uint32: {}", e)),
+                .context(ValueParseIntSnafu { ty: "uint32", v }),
             Value::Uint64(_) => v
                 .parse::<u64>()
                 .map(Value::Uint64)
-                .map_err(|e| format!("failed to parse uint64: {}", e)),
+                .context(ValueParseIntSnafu { ty: "uint64", v }),
 
             Value::Float32(_) => v
                 .parse::<f32>()
                 .map(Value::Float32)
-                .map_err(|e| format!("failed to parse float32: {}", e)),
+                .context(ValueParseFloatSnafu { ty: "float32", v }),
             Value::Float64(_) => v
                 .parse::<f64>()
                 .map(Value::Float64)
-                .map_err(|e| format!("failed to parse float64: {}", e)),
+                .context(ValueParseFloatSnafu { ty: "float64", v }),
 
             Value::Boolean(_) => v
                 .parse::<bool>()
                 .map(Value::Boolean)
-                .map_err(|e| format!("failed to parse bool: {}", e)),
+                .context(ValueParseBooleanSnafu { ty: "boolean", v }),
             Value::String(_) => Ok(Value::String(v.to_string())),
 
             Value::Null => Ok(Value::Null),
 
-            _ => Err(format!("default value not unsupported for type {}", self)),
+            _ => ValueDefaultValueUnsupportedSnafu {
+                value: format!("{:?}", self),
+            }
+            .fail(),
         }
     }
 
@@ -209,8 +225,7 @@ impl Value {
 
             Value::Timestamp(_) => "epoch",
 
-            Value::Array(_) => "array",
-            Value::Map(_) => "map",
+            Value::Array(_) | Value::Map(_) => "json",
 
             Value::Null => "null",
         }
@@ -249,9 +264,9 @@ impl std::fmt::Display for Value {
 }
 
 impl TryFrom<serde_json::Value> for Value {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(v: serde_json::Value) -> Result<Self, Self::Error> {
+    fn try_from(v: serde_json::Value) -> Result<Self> {
         match v {
             serde_json::Value::Null => Ok(Value::Null),
             serde_json::Value::Bool(v) => Ok(Value::Boolean(v)),
@@ -263,7 +278,7 @@ impl TryFrom<serde_json::Value> for Value {
                 } else if let Some(v) = v.as_f64() {
                     Ok(Value::Float64(v))
                 } else {
-                    Err(format!("unsupported number type: {}", v))
+                    ValueUnsupportedNumberTypeSnafu { value: v }.fail()
                 }
             }
             serde_json::Value::String(v) => Ok(Value::String(v)),
@@ -275,7 +290,7 @@ impl TryFrom<serde_json::Value> for Value {
                 Ok(Value::Array(Array { values }))
             }
             serde_json::Value::Object(v) => {
-                let mut values = HashMap::with_capacity(v.len());
+                let mut values = BTreeMap::new();
                 for (k, v) in v {
                     values.insert(k, Value::try_from(v)?);
                 }
@@ -286,20 +301,17 @@ impl TryFrom<serde_json::Value> for Value {
 }
 
 impl TryFrom<&yaml_rust::Yaml> for Value {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(v: &yaml_rust::Yaml) -> Result<Self, Self::Error> {
+    fn try_from(v: &yaml_rust::Yaml) -> Result<Self> {
         match v {
             yaml_rust::Yaml::Null => Ok(Value::Null),
             yaml_rust::Yaml::Boolean(v) => Ok(Value::Boolean(*v)),
             yaml_rust::Yaml::Integer(v) => Ok(Value::Int64(*v)),
-            yaml_rust::Yaml::Real(v) => {
-                if let Ok(v) = v.parse() {
-                    Ok(Value::Float64(v))
-                } else {
-                    Err(format!("failed to parse float64: {}", v))
-                }
-            }
+            yaml_rust::Yaml::Real(v) => match v.parse::<f64>() {
+                Ok(v) => Ok(Value::Float64(v)),
+                Err(e) => Err(e).context(ValueParseFloatSnafu { ty: "float64", v }),
+            },
             yaml_rust::Yaml::String(v) => Ok(Value::String(v.to_string())),
             yaml_rust::Yaml::Array(arr) => {
                 let mut values = vec![];
@@ -309,16 +321,92 @@ impl TryFrom<&yaml_rust::Yaml> for Value {
                 Ok(Value::Array(Array { values }))
             }
             yaml_rust::Yaml::Hash(v) => {
-                let mut values = HashMap::new();
+                let mut values = BTreeMap::new();
                 for (k, v) in v {
                     let key = k
                         .as_str()
-                        .ok_or(format!("key in Hash must be a string, but got {v:?}"))?;
+                        .with_context(|| ValueYamlKeyMustBeStringSnafu { value: v.clone() })?;
                     values.insert(key.to_string(), Value::try_from(v)?);
                 }
                 Ok(Value::Map(Map { values }))
             }
-            _ => Err(format!("unsupported yaml type: {v:?}")),
+            _ => ValueUnsupportedYamlTypeSnafu { value: v.clone() }.fail(),
+        }
+    }
+}
+
+impl From<&Value> for JsonbValue<'_> {
+    fn from(value: &Value) -> Self {
+        match value {
+            Value::Null => JsonbValue::Null,
+            Value::Boolean(v) => JsonbValue::Bool(*v),
+
+            Value::Int8(v) => JsonbValue::Number(JsonbNumber::Int64(*v as i64)),
+            Value::Int16(v) => JsonbValue::Number(JsonbNumber::Int64(*v as i64)),
+            Value::Int32(v) => JsonbValue::Number(JsonbNumber::Int64(*v as i64)),
+            Value::Int64(v) => JsonbValue::Number(JsonbNumber::Int64(*v)),
+
+            Value::Uint8(v) => JsonbValue::Number(JsonbNumber::UInt64(*v as u64)),
+            Value::Uint16(v) => JsonbValue::Number(JsonbNumber::UInt64(*v as u64)),
+            Value::Uint32(v) => JsonbValue::Number(JsonbNumber::UInt64(*v as u64)),
+            Value::Uint64(v) => JsonbValue::Number(JsonbNumber::UInt64(*v)),
+            Value::Float32(v) => JsonbValue::Number(JsonbNumber::Float64(*v as f64)),
+            Value::Float64(v) => JsonbValue::Number(JsonbNumber::Float64(*v)),
+            Value::String(v) => JsonbValue::String(v.clone().into()),
+            Value::Timestamp(v) => JsonbValue::String(v.to_string().into()),
+            Value::Array(arr) => {
+                let mut vals: Vec<JsonbValue> = Vec::with_capacity(arr.len());
+                for val in arr.iter() {
+                    vals.push(val.into());
+                }
+                JsonbValue::Array(vals)
+            }
+            Value::Map(obj) => {
+                let mut map = JsonbObject::new();
+                for (k, v) in obj.iter() {
+                    let val: JsonbValue = v.into();
+                    map.insert(k.to_string(), val);
+                }
+                JsonbValue::Object(map)
+            }
+        }
+    }
+}
+
+impl From<Value> for JsonbValue<'_> {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Null => JsonbValue::Null,
+            Value::Boolean(v) => JsonbValue::Bool(v),
+
+            Value::Int8(v) => JsonbValue::Number(JsonbNumber::Int64(v as i64)),
+            Value::Int16(v) => JsonbValue::Number(JsonbNumber::Int64(v as i64)),
+            Value::Int32(v) => JsonbValue::Number(JsonbNumber::Int64(v as i64)),
+            Value::Int64(v) => JsonbValue::Number(JsonbNumber::Int64(v)),
+
+            Value::Uint8(v) => JsonbValue::Number(JsonbNumber::UInt64(v as u64)),
+            Value::Uint16(v) => JsonbValue::Number(JsonbNumber::UInt64(v as u64)),
+            Value::Uint32(v) => JsonbValue::Number(JsonbNumber::UInt64(v as u64)),
+            Value::Uint64(v) => JsonbValue::Number(JsonbNumber::UInt64(v)),
+            Value::Float32(v) => JsonbValue::Number(JsonbNumber::Float64(v as f64)),
+            Value::Float64(v) => JsonbValue::Number(JsonbNumber::Float64(v)),
+            Value::String(v) => JsonbValue::String(v.into()),
+            Value::Timestamp(v) => JsonbValue::String(v.to_string().into()),
+            Value::Array(arr) => {
+                let mut vals: Vec<JsonbValue> = Vec::with_capacity(arr.len());
+                for val in arr.into_iter() {
+                    vals.push(val.into());
+                }
+                JsonbValue::Array(vals)
+            }
+            Value::Map(obj) => {
+                let mut map = JsonbObject::new();
+                for (k, v) in obj.into_iter() {
+                    let val: JsonbValue = v.into();
+                    map.insert(k, val);
+                }
+                JsonbValue::Object(map)
+            }
         }
     }
 }

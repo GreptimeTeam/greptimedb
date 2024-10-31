@@ -27,11 +27,16 @@ use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
 use snafu::{ensure, OptionExt};
 use store_api::logstore::provider::Provider;
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
+use store_api::region_engine::{RegionRole, RegionStatistic, SettableRegionRoleState};
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result};
+use crate::error::{
+    FlushableRegionStateSnafu, RegionLeaderStateSnafu, RegionNotFoundSnafu, RegionTruncatedSnafu,
+    Result,
+};
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
@@ -58,11 +63,8 @@ impl RegionUsage {
     }
 }
 
-/// State of the region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegionState {
-    /// The region is opened but is still read-only.
-    ReadOnly,
+pub enum RegionLeaderState {
     /// The region is opened and is writable.
     Writable,
     /// The region is altering.
@@ -73,6 +75,14 @@ pub enum RegionState {
     Truncating,
     /// The region is handling a region edit.
     Editing,
+    /// The region is stepping down.
+    Downgrading,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionRoleState {
+    Leader(RegionLeaderState),
+    Follower,
 }
 
 /// Metadata and runtime status of a region.
@@ -171,100 +181,115 @@ impl MitoRegion {
 
     /// Returns whether the region is writable.
     pub(crate) fn is_writable(&self) -> bool {
-        self.manifest_ctx.state.load() == RegionState::Writable
+        self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable)
+    }
+
+    /// Returns whether the region is flushable.
+    pub(crate) fn is_flushable(&self) -> bool {
+        matches!(
+            self.manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+                | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        )
+    }
+
+    /// Returns whether the region is downgrading.
+    pub(crate) fn is_downgrading(&self) -> bool {
+        matches!(
+            self.manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        )
+    }
+
+    /// Returns whether the region is readonly.
+    pub(crate) fn is_follower(&self) -> bool {
+        self.manifest_ctx.state.load() == RegionRoleState::Follower
     }
 
     /// Returns the state of the region.
-    pub(crate) fn state(&self) -> RegionState {
+    pub(crate) fn state(&self) -> RegionRoleState {
         self.manifest_ctx.state.load()
     }
 
-    /// Sets the writable state.
-    pub(crate) fn set_writable(&self, writable: bool) {
-        if writable {
-            // Only sets the region to writable if it is read only.
-            // This prevents others updating the manifest.
-            match self
-                .manifest_ctx
-                .state
-                .compare_exchange(RegionState::ReadOnly, RegionState::Writable)
-            {
-                Ok(state) => info!(
-                    "Set region {} to writable, previous state: {:?}",
-                    self.region_id, state
-                ),
-                Err(state) => {
-                    if state != RegionState::Writable {
-                        warn!(
-                            "Failed to set region {} to writable, current state: {:?}",
-                            self.region_id, state
-                        )
-                    }
-                }
-            }
-        } else {
-            self.manifest_ctx.state.store(RegionState::ReadOnly);
-        }
+    /// Sets the region role state.
+    pub(crate) fn set_role(&self, next_role: RegionRole) {
+        self.manifest_ctx.set_role(next_role, self.region_id);
     }
 
     /// Sets the altering state.
     /// You should call this method in the worker loop.
     pub(crate) fn set_altering(&self) -> Result<()> {
-        self.compare_exchange_state(RegionState::Writable, RegionState::Altering)
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::Altering),
+        )
     }
 
     /// Sets the dropping state.
     /// You should call this method in the worker loop.
     pub(crate) fn set_dropping(&self) -> Result<()> {
-        self.compare_exchange_state(RegionState::Writable, RegionState::Dropping)
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::Dropping),
+        )
     }
 
     /// Sets the truncating state.
     /// You should call this method in the worker loop.
     pub(crate) fn set_truncating(&self) -> Result<()> {
-        self.compare_exchange_state(RegionState::Writable, RegionState::Truncating)
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::Truncating),
+        )
     }
 
     /// Sets the editing state.
     /// You should call this method in the worker loop.
     pub(crate) fn set_editing(&self) -> Result<()> {
-        self.compare_exchange_state(RegionState::Writable, RegionState::Editing)
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::Editing),
+        )
     }
 
     /// Sets the region to readonly gracefully. This acquires the manifest write lock.
-    pub(crate) async fn set_readonly_gracefully(&self) {
+    pub(crate) async fn set_role_state_gracefully(&self, state: SettableRegionRoleState) {
         let _manager = self.manifest_ctx.manifest_manager.write().await;
         // We acquires the write lock of the manifest manager to ensure that no one is updating the manifest.
         // Then we change the state.
-        self.set_writable(false);
+        self.set_role(state.into());
     }
 
-    /// Switches the region state to `RegionState::Writable` if the current state is `expect`.
+    /// Switches the region state to `RegionRoleState::Leader(RegionLeaderState::Writable)` if the current state is `expect`.
     /// Otherwise, logs an error.
-    pub(crate) fn switch_state_to_writable(&self, expect: RegionState) {
-        if let Err(e) = self.compare_exchange_state(expect, RegionState::Writable) {
+    pub(crate) fn switch_state_to_writable(&self, expect: RegionLeaderState) {
+        if let Err(e) = self
+            .compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Writable))
+        {
             error!(e; "failed to switch region state to writable, expect state is {:?}", expect);
         }
     }
 
-    /// Returns the region usage in bytes.
-    pub(crate) fn region_usage(&self) -> RegionUsage {
-        let region_id = self.region_id;
-
+    /// Returns the region statistic.
+    pub(crate) fn region_statistic(&self) -> RegionStatistic {
         let version = self.version();
         let memtables = &version.memtables;
         let memtable_usage = (memtables.mutable_usage() + memtables.immutables_usage()) as u64;
 
         let sst_usage = version.ssts.sst_usage();
+        let index_usage = version.ssts.index_usage();
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
         let manifest_usage = self.stats.total_manifest_size();
+        let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
 
-        RegionUsage {
-            region_id,
-            wal_usage,
-            sst_usage,
-            manifest_usage,
+        RegionStatistic {
+            num_rows,
+            memtable_size: memtable_usage,
+            wal_size: wal_usage,
+            manifest_size: manifest_usage,
+            sst_size: sst_usage,
+            index_size: index_usage,
         }
     }
 
@@ -276,12 +301,16 @@ impl MitoRegion {
 
     /// Sets the state of the region to given state if the current state equals to
     /// the expected.
-    fn compare_exchange_state(&self, expect: RegionState, state: RegionState) -> Result<()> {
+    fn compare_exchange_state(
+        &self,
+        expect: RegionLeaderState,
+        state: RegionRoleState,
+    ) -> Result<()> {
         self.manifest_ctx
             .state
-            .compare_exchange(expect, state)
+            .compare_exchange(RegionRoleState::Leader(expect), state)
             .map_err(|actual| {
-                RegionStateSnafu {
+                RegionLeaderStateSnafu {
                     region_id: self.region_id,
                     state: actual,
                     expect,
@@ -299,15 +328,23 @@ pub(crate) struct ManifestContext {
     manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
     /// The state of the region. The region checks the state before updating
     /// manifest.
-    state: AtomicCell<RegionState>,
+    state: AtomicCell<RegionRoleState>,
 }
 
 impl ManifestContext {
-    pub(crate) fn new(manager: RegionManifestManager, state: RegionState) -> Self {
+    pub(crate) fn new(manager: RegionManifestManager, state: RegionRoleState) -> Self {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
         }
+    }
+
+    pub(crate) async fn manifest_version(&self) -> ManifestVersion {
+        self.manifest_manager
+            .read()
+            .await
+            .manifest()
+            .manifest_version
     }
 
     pub(crate) async fn has_update(&self) -> Result<bool> {
@@ -317,9 +354,9 @@ impl ManifestContext {
     /// Updates the manifest if current state is `expect_state`.
     pub(crate) async fn update_manifest(
         &self,
-        expect_state: RegionState,
+        expect_state: RegionLeaderState,
         action_list: RegionMetaActionList,
-    ) -> Result<()> {
+    ) -> Result<ManifestVersion> {
         // Acquires the write lock of the manifest manager.
         let mut manager = self.manifest_manager.write().await;
         // Gets current manifest.
@@ -328,8 +365,8 @@ impl ManifestContext {
         // after `set_readonly_gracefully()` is called.
         let current_state = self.state.load();
         ensure!(
-            current_state == expect_state,
-            RegionStateSnafu {
+            current_state == RegionRoleState::Leader(expect_state),
+            RegionLeaderStateSnafu {
                 region_id: manifest.metadata.region_id,
                 state: current_state,
                 expect: expect_state,
@@ -372,18 +409,92 @@ impl ManifestContext {
         }
 
         // Now we can update the manifest.
-        manager.update(action_list).await.inspect_err(
+        let version = manager.update(action_list).await.inspect_err(
             |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
         )?;
 
-        if self.state.load() == RegionState::ReadOnly {
+        if self.state.load() == RegionRoleState::Follower {
             warn!(
-                "Region {} becomes read-only while updating manifest which may cause inconsistency",
+                "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
                 manifest.metadata.region_id
             );
         }
 
-        Ok(())
+        Ok(version)
+    }
+
+    /// Sets the [`RegionRole`].
+    ///
+    /// ```
+    ///     +------------------------------------------+
+    ///     |                      +-----------------+ |
+    ///     |                      |                 | |
+    /// +---+------+       +-------+-----+        +--v-v---+
+    /// | Follower |       | Downgrading |        | Leader |
+    /// +---^-^----+       +-----+-^-----+        +--+-+---+
+    ///     | |                  | |                 | |
+    ///     | +------------------+ +-----------------+ |
+    ///     +------------------------------------------+
+    ///
+    /// Transition:
+    /// - Follower -> Leader
+    /// - Downgrading Leader -> Leader
+    /// - Leader -> Follower
+    /// - Downgrading Leader -> Follower
+    /// - Leader -> Downgrading Leader
+    ///
+    /// ```
+    pub(crate) fn set_role(&self, next_role: RegionRole, region_id: RegionId) {
+        match next_role {
+            RegionRole::Follower => {
+                self.state.store(RegionRoleState::Follower);
+            }
+            RegionRole::Leader => {
+                match self.state.fetch_update(|state| {
+                    if matches!(
+                        state,
+                        RegionRoleState::Follower
+                            | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+                    ) {
+                        Some(RegionRoleState::Leader(RegionLeaderState::Writable))
+                    } else {
+                        None
+                    }
+                }) {
+                    Ok(state) => info!(
+                        "Convert region {} to leader, previous role state: {:?}",
+                        region_id, state
+                    ),
+                    Err(state) => {
+                        if state != RegionRoleState::Leader(RegionLeaderState::Writable) {
+                            warn!(
+                                "Failed to convert region {} to leader, current role state: {:?}",
+                                region_id, state
+                            )
+                        }
+                    }
+                }
+            }
+            RegionRole::DowngradingLeader => {
+                match self.state.compare_exchange(
+                    RegionRoleState::Leader(RegionLeaderState::Writable),
+                    RegionRoleState::Leader(RegionLeaderState::Downgrading),
+                ) {
+                    Ok(state) => info!(
+                        "Convert region {} to downgrading region, previous role state: {:?}",
+                        region_id, state
+                    ),
+                    Err(state) => {
+                        if state != RegionRoleState::Leader(RegionLeaderState::Downgrading) {
+                            warn!(
+                                "Failed to convert region {} to downgrading leader, current role state: {:?}",
+                                region_id, state
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -430,10 +541,10 @@ impl RegionMap {
             .context(RegionNotFoundSnafu { region_id })?;
         ensure!(
             region.is_writable(),
-            RegionStateSnafu {
+            RegionLeaderStateSnafu {
                 region_id,
                 state: region.state(),
-                expect: RegionState::Writable,
+                expect: RegionLeaderState::Writable,
             }
         );
         Ok(region)
@@ -448,6 +559,40 @@ impl RegionMap {
         cb: &mut F,
     ) -> Option<MitoRegionRef> {
         match self.writable_region(region_id) {
+            Ok(region) => Some(region),
+            Err(e) => {
+                cb.on_failure(e);
+                None
+            }
+        }
+    }
+
+    /// Gets flushable region by region id.
+    ///
+    /// Returns error if the region does not exist or is not operable.
+    fn flushable_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        ensure!(
+            region.is_flushable(),
+            FlushableRegionStateSnafu {
+                region_id,
+                state: region.state(),
+            }
+        );
+        Ok(region)
+    }
+
+    /// Gets flushable region by region id.
+    ///
+    /// Calls the callback if the region does not exist or is not operable.
+    pub(crate) fn flushable_region_or<F: OnFailure>(
+        &self,
+        region_id: RegionId,
+        cb: &mut F,
+    ) -> Option<MitoRegionRef> {
+        match self.flushable_region(region_id) {
             Ok(region) => Some(region),
             Err(e) => {
                 cb.on_failure(e);
@@ -544,12 +689,70 @@ impl ManifestStats {
 
 #[cfg(test)]
 mod tests {
-    use crossbeam_utils::atomic::AtomicCell;
+    use std::sync::Arc;
 
-    use crate::region::RegionState;
+    use crossbeam_utils::atomic::AtomicCell;
+    use store_api::region_engine::RegionRole;
+    use store_api::storage::RegionId;
+
+    use crate::region::{RegionLeaderState, RegionRoleState};
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::version_util::VersionControlBuilder;
 
     #[test]
     fn test_region_state_lock_free() {
-        assert!(AtomicCell::<RegionState>::is_lock_free());
+        assert!(AtomicCell::<RegionRoleState>::is_lock_free());
+    }
+
+    #[tokio::test]
+    async fn test_set_region_state() {
+        let env = SchedulerEnv::new().await;
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+
+        let region_id = RegionId::new(1024, 0);
+        // Leader -> Follower
+        manifest_ctx.set_role(RegionRole::Follower, region_id);
+        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+
+        // Follower -> Leader
+        manifest_ctx.set_role(RegionRole::Leader, region_id);
+        assert_eq!(
+            manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+
+        // Leader -> Downgrading Leader
+        manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
+        assert_eq!(
+            manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        );
+
+        // Downgrading Leader -> Follower
+        manifest_ctx.set_role(RegionRole::Follower, region_id);
+        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+
+        // Can't downgrade from follower (Follower -> Downgrading Leader)
+        manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
+        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+
+        // Set region role too Downgrading Leader
+        manifest_ctx.set_role(RegionRole::Leader, region_id);
+        manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
+        assert_eq!(
+            manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        );
+
+        // Downgrading Leader -> Leader
+        manifest_ctx.set_role(RegionRole::Leader, region_id);
+        assert_eq!(
+            manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
     }
 }

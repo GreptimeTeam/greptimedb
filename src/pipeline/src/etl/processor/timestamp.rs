@@ -18,7 +18,14 @@ use ahash::HashSet;
 use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
+use snafu::{OptionExt, ResultExt};
 
+use crate::etl::error::{
+    DateFailedToGetLocalTimezoneSnafu, DateFailedToGetTimestampSnafu, DateInvalidFormatSnafu,
+    DateParseSnafu, DateParseTimezoneSnafu, EpochInvalidResolutionSnafu, Error,
+    KeyMustBeStringSnafu, ProcessorFailedToParseStringSnafu, ProcessorMissingFieldSnafu,
+    ProcessorUnsupportedValueSnafu, Result,
+};
 use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
@@ -69,15 +76,15 @@ enum Resolution {
 }
 
 impl TryFrom<&str> for Resolution {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
+    fn try_from(s: &str) -> Result<Self> {
         match s {
             SECOND_RESOLUTION | SEC_RESOLUTION | S_RESOLUTION => Ok(Resolution::Second),
             MILLISECOND_RESOLUTION | MILLI_RESOLUTION | MS_RESOLUTION => Ok(Resolution::Milli),
             MICROSECOND_RESOLUTION | MICRO_RESOLUTION | US_RESOLUTION => Ok(Resolution::Micro),
             NANOSECOND_RESOLUTION | NANO_RESOLUTION | NS_RESOLUTION => Ok(Resolution::Nano),
-            _ => Err(format!("invalid resolution: {s}")),
+            _ => EpochInvalidResolutionSnafu { resolution: s }.fail(),
         }
     }
 }
@@ -127,13 +134,13 @@ impl ProcessorBuilder for TimestampProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
         self.build(intermediate_keys).map(ProcessorKind::Timestamp)
     }
 }
 
 impl TimestampProcessorBuilder {
-    pub fn build(self, intermediate_keys: &[String]) -> Result<TimestampProcessor, String> {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<TimestampProcessor> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
             let input = OneInputOneOutputField::build(
@@ -169,29 +176,37 @@ pub struct TimestampProcessor {
 
 impl TimestampProcessor {
     /// try to parse val with timezone first, if failed, parse without timezone
-    fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<i64, String> {
+    fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<i64> {
         if let Ok(dt) = DateTime::parse_from_str(val, fmt) {
-            Ok(dt.timestamp_nanos_opt().ok_or("failed to get timestamp")?)
+            Ok(dt
+                .timestamp_nanos_opt()
+                .context(DateFailedToGetTimestampSnafu)?)
         } else {
             let dt = NaiveDateTime::parse_from_str(val, fmt)
-                .map_err(|e| e.to_string())?
+                .context(DateParseSnafu { value: val })?
                 .and_local_timezone(tz)
                 .single()
-                .ok_or("failed to get local timezone")?;
-            Ok(dt.timestamp_nanos_opt().ok_or("failed to get timestamp")?)
+                .context(DateFailedToGetLocalTimezoneSnafu)?;
+            Ok(dt
+                .timestamp_nanos_opt()
+                .context(DateFailedToGetTimestampSnafu)?)
         }
     }
 
-    fn parse_time_str(&self, val: &str) -> Result<i64, String> {
+    fn parse_time_str(&self, val: &str) -> Result<i64> {
         for (fmt, tz) in self.formats.iter() {
             if let Ok(ns) = Self::try_parse(val, fmt, *tz) {
                 return Ok(ns);
             }
         }
-        Err(format!("{} processor: failed to parse {val}", self.kind(),))
+        ProcessorFailedToParseStringSnafu {
+            kind: PROCESSOR_TIMESTAMP,
+            value: val.to_string(),
+        }
+        .fail()
     }
 
-    fn parse(&self, val: &Value) -> Result<Timestamp, String> {
+    fn parse(&self, val: &Value) -> Result<Timestamp> {
         let t: i64 = match val {
             Value::String(s) => {
                 let t = s.parse::<i64>();
@@ -221,9 +236,11 @@ impl TimestampProcessor {
             },
 
             _ => {
-                return Err(format!(
-                    "{PROCESSOR_TIMESTAMP} processor: unsupported value {val}"
-                ))
+                return ProcessorUnsupportedValueSnafu {
+                    processor: PROCESSOR_TIMESTAMP,
+                    val: val.to_string(),
+                }
+                .fail();
             }
         };
 
@@ -236,40 +253,46 @@ impl TimestampProcessor {
     }
 }
 
-fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>, String> {
-    return match yaml.as_vec() {
+fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>> {
+    match yaml.as_vec() {
         Some(formats_yaml) => {
             let mut formats = Vec::with_capacity(formats_yaml.len());
             for v in formats_yaml {
                 let s = yaml_strings(v, FORMATS_NAME)
                     .or(yaml_string(v, FORMATS_NAME).map(|s| vec![s]))?;
                 if s.len() != 1 && s.len() != 2 {
-                    return Err(format!(
-                        "{PROCESSOR_TIMESTAMP} processor: invalid format {s:?}"
-                    ));
+                    return DateInvalidFormatSnafu {
+                        processor: PROCESSOR_TIMESTAMP,
+                        s: format!("{s:?}"),
+                    }
+                    .fail();
                 }
                 let mut iter = s.into_iter();
                 // safety: unwrap is safe here
                 let formatter = iter.next().unwrap();
                 let tz = iter
                     .next()
-                    .map(|tz| tz.parse::<Tz>())
-                    .unwrap_or(Ok(Tz::UTC))
-                    .map_err(|e| e.to_string())?;
+                    .map(|tz| {
+                        tz.parse::<Tz>()
+                            .context(DateParseTimezoneSnafu { value: tz })
+                    })
+                    .unwrap_or(Ok(Tz::UTC))?;
                 formats.push((Arc::new(formatter), tz));
             }
             Ok(formats)
         }
-        None => Err(format!(
-            "{PROCESSOR_TIMESTAMP} processor: invalid format {yaml:?}"
-        )),
-    };
+        None => DateInvalidFormatSnafu {
+            processor: PROCESSOR_TIMESTAMP,
+            s: format!("{yaml:?}"),
+        }
+        .fail(),
+    }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessorBuilder {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
+    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut fields = Fields::default();
         let mut formats = Formats::default();
         let mut resolution = Resolution::default();
@@ -278,7 +301,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessorBuilder {
         for (k, v) in hash {
             let key = k
                 .as_str()
-                .ok_or(format!("key must be a string, but got {k:?}"))?;
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
 
             match key {
                 FIELD_NAME => {
@@ -321,17 +344,17 @@ impl Processor for TimestampProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input().index;
             match val.get(index) {
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
-                        return Err(format!(
-                            "{} processor: missing field: {}",
-                            self.kind(),
-                            &field.input().name
-                        ));
+                        return ProcessorMissingFieldSnafu {
+                            processor: self.kind(),
+                            field: field.input_name(),
+                        }
+                        .fail();
                     }
                 }
                 Some(v) => {

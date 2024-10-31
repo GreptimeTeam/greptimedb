@@ -9,7 +9,7 @@ workspace = true
 
 [features]
 default = ["geo"]
-geo = ["geohash", "h3o"]
+geo = ["geohash", "h3o", "s2"]
 
 [dependencies]
 api.workspace = true
@@ -27,6 +27,7 @@ common-time.workspace = true
 common-version.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true
+derive_more = { version = "1", default-features = false, features = ["display"] }
 geohash = { version = "0.13", optional = true }
 h3o = { version = "0.6", optional = true }
 jsonb.workspace = true
@@ -34,6 +35,7 @@ num = "0.4"
 num-traits = "0.2"
 once_cell.workspace = true
 paste = "1.0"
+s2 = { version = "0.0.12", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true

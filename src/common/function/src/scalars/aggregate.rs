@@ -16,7 +16,6 @@ mod argmax;
 mod argmin;
 mod diff;
 mod mean;
-mod percentile;
 mod polyval;
 mod scipy_stats_norm_cdf;
 mod scipy_stats_norm_pdf;
@@ -28,7 +27,6 @@ pub use argmin::ArgminAccumulatorCreator;
 use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use diff::DiffAccumulatorCreator;
 pub use mean::MeanAccumulatorCreator;
-pub use percentile::PercentileAccumulatorCreator;
 pub use polyval::PolyvalAccumulatorCreator;
 pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
 pub use scipy_stats_norm_pdf::ScipyStatsNormPdfAccumulatorCreator;
@@ -91,8 +89,14 @@ impl AggregateFunctions {
         register_aggr_func!("polyval", 2, PolyvalAccumulatorCreator);
         register_aggr_func!("argmax", 1, ArgmaxAccumulatorCreator);
         register_aggr_func!("argmin", 1, ArgminAccumulatorCreator);
-        register_aggr_func!("percentile", 2, PercentileAccumulatorCreator);
         register_aggr_func!("scipystatsnormcdf", 2, ScipyStatsNormCdfAccumulatorCreator);
         register_aggr_func!("scipystatsnormpdf", 2, ScipyStatsNormPdfAccumulatorCreator);
+
+        #[cfg(feature = "geo")]
+        register_aggr_func!(
+            "json_encode_path",
+            3,
+            super::geo::encoding::JsonPathEncodeFunctionCreator
+        );
     }
 }

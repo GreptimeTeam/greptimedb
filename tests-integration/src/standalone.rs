@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManager;
 use cmd::error::StartFlownodeSnafu;
 use cmd::standalone::StandaloneOptions;
@@ -40,6 +41,7 @@ use flow::FlownodeBuilder;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
+use query::stats::StatementStatistics;
 use servers::Mode;
 use snafu::ResultExt;
 
@@ -145,10 +147,10 @@ impl GreptimeDbStandaloneBuilder {
         );
 
         let catalog_manager = KvBackendCatalogManager::new(
-            Mode::Standalone,
-            None,
+            Arc::new(NoopInformationExtension),
             kv_backend.clone(),
             cache_registry.clone(),
+            Some(procedure_manager.clone()),
         );
 
         let flow_builder = FlownodeBuilder::new(
@@ -214,6 +216,7 @@ impl GreptimeDbStandaloneBuilder {
             catalog_manager.clone(),
             node_manager.clone(),
             ddl_task_executor.clone(),
+            StatementStatistics::default(),
         )
         .with_plugin(plugins)
         .try_build()

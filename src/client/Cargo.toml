@@ -28,7 +28,7 @@ enum_dispatch = "0.3"
 futures-util.workspace = true
 lazy_static.workspace = true
 moka = { workspace = true, features = ["future"] }
-parking_lot = "0.12"
+parking_lot.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 query.workspace = true
@@ -45,7 +45,6 @@ common-grpc-expr.workspace = true
 datanode.workspace = true
 derive-new = "0.5"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies.substrait_proto]
 package = "substrait"

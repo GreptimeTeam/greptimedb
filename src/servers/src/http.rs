@@ -36,6 +36,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
 use datatypes::schema::SchemaRef;
+use datatypes::value::transform_value_ref_to_json_value;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use schemars::JsonSchema;
@@ -52,17 +53,19 @@ use tower_http::trace::TraceLayer;
 use self::authorize::AuthState;
 use self::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
-use crate::error::{AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
+use crate::error::{AddressBindSnafu, AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
 use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
+use crate::http::json_result::JsonResponse;
 use crate::http::prometheus::{
-    build_info_query, format_query, instant_query, label_values_query, labels_query, range_query,
-    series_query,
+    build_info_query, format_query, instant_query, label_values_query, labels_query, parse_query,
+    range_query, series_query,
 };
+use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
@@ -96,6 +99,7 @@ pub mod error_result;
 pub mod greptime_manage_resp;
 pub mod greptime_result_v1;
 pub mod influxdb_result_v1;
+pub mod json_result;
 pub mod table_result;
 
 #[cfg(any(test, feature = "testing"))]
@@ -238,14 +242,18 @@ impl HttpRecordsOutput {
         } else {
             let num_rows = recordbatches.iter().map(|r| r.num_rows()).sum::<usize>();
             let mut rows = Vec::with_capacity(num_rows);
+            let schemas = schema.column_schemas();
             let num_cols = schema.column_schemas().len();
             rows.resize_with(num_rows, || Vec::with_capacity(num_cols));
 
             let mut finished_row_cursor = 0;
             for recordbatch in recordbatches {
-                for col in recordbatch.columns() {
+                for (col_idx, col) in recordbatch.columns().iter().enumerate() {
+                    // safety here: schemas length is equal to the number of columns in the recordbatch
+                    let schema = &schemas[col_idx];
                     for row_idx in 0..recordbatch.num_rows() {
-                        let value = Value::try_from(col.get_ref(row_idx)).context(ToJsonSnafu)?;
+                        let value = transform_value_ref_to_json_value(col.get_ref(row_idx), schema)
+                            .context(ToJsonSnafu)?;
                         rows[row_idx + finished_row_cursor].push(value);
                     }
                 }
@@ -278,6 +286,7 @@ pub enum ResponseFormat {
     #[default]
     GreptimedbV1,
     InfluxdbV1,
+    Json,
 }
 
 impl ResponseFormat {
@@ -288,6 +297,7 @@ impl ResponseFormat {
             "table" => Some(ResponseFormat::Table),
             "greptimedb_v1" => Some(ResponseFormat::GreptimedbV1),
             "influxdb_v1" => Some(ResponseFormat::InfluxdbV1),
+            "json" => Some(ResponseFormat::Json),
             _ => None,
         }
     }
@@ -299,6 +309,7 @@ impl ResponseFormat {
             ResponseFormat::Table => "table",
             ResponseFormat::GreptimedbV1 => "greptimedb_v1",
             ResponseFormat::InfluxdbV1 => "influxdb_v1",
+            ResponseFormat::Json => "json",
         }
     }
 }
@@ -355,6 +366,7 @@ pub enum HttpResponse {
     Error(ErrorResponse),
     GreptimedbV1(GreptimedbV1Response),
     InfluxdbV1(InfluxdbV1Response),
+    Json(JsonResponse),
 }
 
 impl HttpResponse {
@@ -365,6 +377,7 @@ impl HttpResponse {
             HttpResponse::Table(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::GreptimedbV1(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::InfluxdbV1(resp) => resp.with_execution_time(execution_time).into(),
+            HttpResponse::Json(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::Error(resp) => resp.with_execution_time(execution_time).into(),
         }
     }
@@ -374,6 +387,7 @@ impl HttpResponse {
             HttpResponse::Csv(resp) => resp.with_limit(limit).into(),
             HttpResponse::Table(resp) => resp.with_limit(limit).into(),
             HttpResponse::GreptimedbV1(resp) => resp.with_limit(limit).into(),
+            HttpResponse::Json(resp) => resp.with_limit(limit).into(),
             _ => self,
         }
     }
@@ -406,6 +420,7 @@ impl IntoResponse for HttpResponse {
             HttpResponse::Table(resp) => resp.into_response(),
             HttpResponse::GreptimedbV1(resp) => resp.into_response(),
             HttpResponse::InfluxdbV1(resp) => resp.into_response(),
+            HttpResponse::Json(resp) => resp.into_response(),
             HttpResponse::Error(resp) => resp.into_response(),
         }
     }
@@ -448,6 +463,12 @@ impl From<GreptimedbV1Response> for HttpResponse {
 impl From<InfluxdbV1Response> for HttpResponse {
     fn from(value: InfluxdbV1Response) -> Self {
         HttpResponse::InfluxdbV1(value)
+    }
+}
+
+impl From<JsonResponse> for HttpResponse {
+    fn from(value: JsonResponse) -> Self {
+        HttpResponse::Json(value)
     }
 }
 
@@ -596,11 +617,16 @@ impl HttpServerBuilder {
         self,
         handler: LogHandlerRef,
         validator: Option<LogValidatorRef>,
+        ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
     ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/events"),
-                HttpServer::route_log(handler, validator),
+                HttpServer::route_log(LogState {
+                    log_handler: handler,
+                    log_validator: validator,
+                    ingest_interceptor,
+                }),
             ),
             ..self
         }
@@ -709,6 +735,7 @@ impl HttpServer {
                         authorize::check_http_auth,
                     )),
             )
+            // Handlers for debug, we don't expect a timeout.
             .nest(
                 "/debug",
                 Router::new()
@@ -716,19 +743,19 @@ impl HttpServer {
                     .route(
                         "/log_level",
                         routing::get(dyn_log::dyn_log_handler).post(dyn_log::dyn_log_handler),
-                    ),
-            )
-            // Handlers for debug, we don't expect a timeout.
-            .nest(
-                &format!("/{HTTP_API_VERSION}/prof"),
-                Router::new()
-                    .route(
-                        "/cpu",
-                        routing::get(pprof::pprof_handler).post(pprof::pprof_handler),
                     )
-                    .route(
-                        "/mem",
-                        routing::get(mem_prof::mem_prof_handler).post(mem_prof::mem_prof_handler),
+                    .nest(
+                        "/prof",
+                        Router::new()
+                            .route(
+                                "/cpu",
+                                routing::get(pprof::pprof_handler).post(pprof::pprof_handler),
+                            )
+                            .route(
+                                "/mem",
+                                routing::get(mem_prof::mem_prof_handler)
+                                    .post(mem_prof::mem_prof_handler),
+                            ),
                     ),
             )
     }
@@ -739,10 +766,7 @@ impl HttpServer {
             .with_state(metrics_handler)
     }
 
-    fn route_log<S>(
-        log_handler: LogHandlerRef,
-        log_validator: Option<LogValidatorRef>,
-    ) -> Router<S> {
+    fn route_log<S>(log_state: LogState) -> Router<S> {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
             .route(
@@ -759,10 +783,7 @@ impl HttpServer {
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(RequestDecompressionLayer::new()),
             )
-            .with_state(LogState {
-                log_handler,
-                log_validator,
-            })
+            .with_state(log_state)
     }
 
     fn route_sql<S>(api_state: ApiState) -> ApiRouter<S> {
@@ -798,6 +819,7 @@ impl HttpServer {
             .route("/query_range", routing::post(range_query).get(range_query))
             .route("/labels", routing::post(labels_query).get(labels_query))
             .route("/series", routing::post(series_query).get(series_query))
+            .route("/parse_query", routing::post(parse_query).get(parse_query))
             .route(
                 "/label/:label_name/values",
                 routing::get(label_values_query),
@@ -866,6 +888,12 @@ impl HttpServer {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
+            .route("/v1/logs", routing::post(otlp::logs))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_error))
+                    .layer(RequestDecompressionLayer::new()),
+            )
             .with_state(otlp_handler)
     }
 
@@ -906,7 +934,8 @@ impl Server for HttpServer {
                 app = configurator.config_http(app);
             }
             let app = self.build(app);
-            let server = axum::Server::bind(&listening)
+            let server = axum::Server::try_bind(&listening)
+                .with_context(|_| AddressBindSnafu { addr: listening })?
                 .tcp_nodelay(true)
                 // Enable TCP keepalive to close the dangling established connections.
                 // It's configured to let the keepalive probes first send after the connection sits
@@ -964,11 +993,11 @@ mod test {
     use axum::routing::get;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
+    use datafusion_expr::LogicalPlan;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
     use query::parser::PromQuery;
-    use query::plan::LogicalPlan;
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
@@ -1126,16 +1155,18 @@ mod test {
             ResponseFormat::Csv,
             ResponseFormat::Table,
             ResponseFormat::Arrow,
+            ResponseFormat::Json,
         ] {
             let recordbatches =
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
             let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
             let json_resp = match format {
-                ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
+                ResponseFormat::Arrow => ArrowResponse::from_output(outputs, None).await,
                 ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
                 ResponseFormat::Table => TableResponse::from_output(outputs).await,
                 ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
                 ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, None).await,
+                ResponseFormat::Json => JsonResponse::from_output(outputs).await,
             };
 
             match json_resp {
@@ -1205,6 +1236,21 @@ mod test {
                     assert_eq!(rb.num_columns(), 2);
                     assert_eq!(rb.num_rows(), 4);
                 }
+
+                HttpResponse::Json(resp) => {
+                    let output = &resp.output()[0];
+                    if let GreptimeQueryOutput::Records(r) = output {
+                        assert_eq!(r.num_rows(), 4);
+                        assert_eq!(r.num_cols(), 2);
+                        assert_eq!(r.schema.column_schemas[0].name, "numbers");
+                        assert_eq!(r.schema.column_schemas[0].data_type, "UInt32");
+                        assert_eq!(r.rows[0][0], serde_json::Value::from(1));
+                        assert_eq!(r.rows[0][1], serde_json::Value::Null);
+                    } else {
+                        panic!("invalid output type");
+                    }
+                }
+
                 HttpResponse::Error(err) => unreachable!("{err:?}"),
             }
         }

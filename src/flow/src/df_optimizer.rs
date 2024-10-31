@@ -41,7 +41,6 @@ use datafusion_expr::{
     BinaryExpr, Expr, Operator, Projection, ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
 use query::parser::QueryLanguageParser;
-use query::plan::LogicalPlan;
 use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
 use snafu::ResultExt;
@@ -107,11 +106,10 @@ pub async fn sql_to_flow_plan(
         .context(ExternalSnafu)?;
     let plan = engine
         .planner()
-        .plan(stmt, query_ctx)
+        .plan(&stmt, query_ctx)
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-    let LogicalPlan::DfPlan(plan) = plan;
 
     let opted_plan = apply_df_optimizer(plan).await?;
 
@@ -275,7 +273,7 @@ impl<'a> ExpandAvgRewriter<'a> {
     }
 }
 
-impl<'a> TreeNodeRewriter for ExpandAvgRewriter<'a> {
+impl TreeNodeRewriter for ExpandAvgRewriter<'_> {
     type Node = Expr;
 
     fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>, DataFusionError> {

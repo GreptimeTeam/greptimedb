@@ -15,8 +15,14 @@
 use std::collections::BTreeMap;
 
 use ahash::HashSet;
+use snafu::{OptionExt, ResultExt};
 use urlencoding::decode;
 
+use crate::etl::error::{
+    CmcdMissingKeySnafu, CmcdMissingValueSnafu, Error, FailedToParseFloatKeySnafu,
+    FailedToParseIntKeySnafu, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
+    ProcessorMissingFieldSnafu, Result,
+};
 use crate::etl::field::{Field, Fields, InputFieldInfo, OneInputMultiOutputField};
 use crate::etl::find_key_index;
 use crate::etl::processor::{
@@ -82,7 +88,7 @@ impl CmcdProcessorBuilder {
     pub(super) fn build_cmcd_outputs(
         field: &Field,
         intermediate_keys: &[String],
-    ) -> Result<(BTreeMap<String, usize>, Vec<CmcdOutputInfo>), String> {
+    ) -> Result<(BTreeMap<String, usize>, Vec<CmcdOutputInfo>)> {
         let mut output_index = BTreeMap::new();
         let mut cmcd_field_outputs = Vec::with_capacity(CMCD_KEYS.len());
         for cmcd in CMCD_KEYS {
@@ -119,7 +125,7 @@ impl CmcdProcessorBuilder {
     }
 
     /// build CmcdProcessor from CmcdProcessorBuilder
-    pub fn build(self, intermediate_keys: &[String]) -> Result<CmcdProcessor, String> {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<CmcdProcessor> {
         let mut real_fields = vec![];
         let mut cmcd_outputs = Vec::with_capacity(CMCD_KEYS.len());
         for field in self.fields.into_iter() {
@@ -151,7 +157,7 @@ impl ProcessorBuilder for CmcdProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
         self.build(intermediate_keys).map(ProcessorKind::Cmcd)
     }
 }
@@ -170,7 +176,7 @@ pub(super) struct CmcdOutputInfo {
     /// index in intermediate_keys
     index: usize,
     /// function to resolve value
-    f: fn(&str, &str, Option<&str>) -> Result<Value, String>,
+    f: fn(&str, &str, Option<&str>) -> Result<Value>,
 }
 
 impl CmcdOutputInfo {
@@ -178,7 +184,7 @@ impl CmcdOutputInfo {
         final_key: String,
         key: &'static str,
         index: usize,
-        f: fn(&str, &str, Option<&str>) -> Result<Value, String>,
+        f: fn(&str, &str, Option<&str>) -> Result<Value>,
     ) -> Self {
         Self {
             final_key,
@@ -201,28 +207,28 @@ impl Default for CmcdOutputInfo {
 }
 
 /// function to resolve CMCD_KEY_BS | CMCD_KEY_SU
-fn bs_su(_: &str, _: &str, _: Option<&str>) -> Result<Value, String> {
+fn bs_su(_: &str, _: &str, _: Option<&str>) -> Result<Value> {
     Ok(Value::Boolean(true))
 }
 
 /// function to resolve CMCD_KEY_BR | CMCD_KEY_BL | CMCD_KEY_D | CMCD_KEY_DL | CMCD_KEY_MTP | CMCD_KEY_RTP | CMCD_KEY_TB
-fn br_tb(s: &str, k: &str, v: Option<&str>) -> Result<Value, String> {
-    let v = v.ok_or(format!("{k} missing value in {s}"))?;
+fn br_tb(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
+    let v = v.context(CmcdMissingValueSnafu { k, s })?;
     let val: i64 = v
         .parse()
-        .map_err(|_| format!("failed to parse {v} as i64"))?;
+        .context(FailedToParseIntKeySnafu { key: k, value: v })?;
     Ok(Value::Int64(val))
 }
 
 /// function to resolve CMCD_KEY_CID | CMCD_KEY_NRR | CMCD_KEY_OT | CMCD_KEY_SF | CMCD_KEY_SID | CMCD_KEY_V
-fn cid_v(s: &str, k: &str, v: Option<&str>) -> Result<Value, String> {
-    let v = v.ok_or(format!("{k} missing value in {s}"))?;
+fn cid_v(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
+    let v = v.context(CmcdMissingValueSnafu { k, s })?;
     Ok(Value::String(v.to_string()))
 }
 
 /// function to resolve CMCD_KEY_NOR
-fn nor(s: &str, k: &str, v: Option<&str>) -> Result<Value, String> {
-    let v = v.ok_or(format!("{k} missing value in {s}"))?;
+fn nor(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
+    let v = v.context(CmcdMissingValueSnafu { k, s })?;
     let val = match decode(v) {
         Ok(val) => val.to_string(),
         Err(_) => v.to_string(),
@@ -231,11 +237,11 @@ fn nor(s: &str, k: &str, v: Option<&str>) -> Result<Value, String> {
 }
 
 /// function to resolve CMCD_KEY_PR
-fn pr(s: &str, k: &str, v: Option<&str>) -> Result<Value, String> {
-    let v = v.ok_or(format!("{k} missing value in {s}"))?;
+fn pr(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
+    let v = v.context(CmcdMissingValueSnafu { k, s })?;
     let val: f64 = v
         .parse()
-        .map_err(|_| format!("failed to parse {v} as f64"))?;
+        .context(FailedToParseFloatKeySnafu { key: k, value: v })?;
     Ok(Value::Float64(val))
 }
 
@@ -287,12 +293,12 @@ impl CmcdProcessor {
         format!("{}_{}", prefix, key)
     }
 
-    fn parse(&self, field_index: usize, s: &str) -> Result<Vec<(usize, Value)>, String> {
+    fn parse(&self, field_index: usize, s: &str) -> Result<Vec<(usize, Value)>> {
         let parts = s.split(',');
         let mut result = Vec::new();
         for part in parts {
             let mut kv = part.split('=');
-            let k = kv.next().ok_or(format!("{part} missing key in {s}"))?;
+            let k = kv.next().context(CmcdMissingKeySnafu { part, s })?;
             let v = kv.next();
 
             for cmcd_key in self.cmcd_outputs[field_index].iter() {
@@ -308,16 +314,16 @@ impl CmcdProcessor {
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for CmcdProcessorBuilder {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
+    fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut fields = Fields::default();
         let mut ignore_missing = false;
 
         for (k, v) in value.iter() {
             let key = k
                 .as_str()
-                .ok_or(format!("key must be a string, but got {k:?}"))?;
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
             match key {
                 FIELD_NAME => {
                     fields = Fields::one(yaml_new_field(v, FIELD_NAME)?);
@@ -362,7 +368,7 @@ impl Processor for CmcdProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
         for (field_index, field) in self.fields.iter().enumerate() {
             let field_value_index = field.input_index();
             match val.get(field_value_index) {
@@ -374,18 +380,19 @@ impl Processor for CmcdProcessor {
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
-                        return Err(format!(
-                            "{} processor: missing field: {}",
-                            self.kind(),
-                            field.input_name()
-                        ));
+                        return ProcessorMissingFieldSnafu {
+                            processor: self.kind().to_string(),
+                            field: field.input_name().to_string(),
+                        }
+                        .fail();
                     }
                 }
                 Some(v) => {
-                    return Err(format!(
-                        "{} processor: expect string value, but got {v:?}",
-                        self.kind()
-                    ));
+                    return ProcessorExpectStringSnafu {
+                        processor: self.kind().to_string(),
+                        v: v.clone(),
+                    }
+                    .fail();
                 }
             }
         }
@@ -395,7 +402,8 @@ impl Processor for CmcdProcessor {
 
 #[cfg(test)]
 mod tests {
-    use ahash::HashMap;
+    use std::collections::BTreeMap;
+
     use urlencoding::decode;
 
     use super::{CmcdProcessorBuilder, CMCD_KEYS};
@@ -556,14 +564,14 @@ mod tests {
             let values = vec
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
-                .collect::<HashMap<String, Value>>();
+                .collect::<BTreeMap<String, Value>>();
             let expected = Map { values };
 
             let actual = processor.parse(0, &decoded).unwrap();
             let actual = actual
                 .into_iter()
                 .map(|(index, value)| (intermediate_keys[index].clone(), value))
-                .collect::<HashMap<String, Value>>();
+                .collect::<BTreeMap<String, Value>>();
             let actual = Map { values: actual };
             assert_eq!(actual, expected);
         }

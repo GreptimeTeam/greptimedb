@@ -36,7 +36,7 @@ use crate::metrics::{FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH
 use crate::read::Source;
 use crate::region::options::IndexOptions;
 use crate::region::version::{VersionControlData, VersionControlRef};
-use crate::region::{ManifestContextRef, RegionState};
+use crate::region::{ManifestContextRef, RegionLeaderState};
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderDdlRequest,
     SenderWriteRequest, WorkerRequest,
@@ -195,6 +195,8 @@ pub enum FlushReason {
     Alter,
     /// Flush periodically.
     Periodically,
+    /// Flush memtable during downgrading state.
+    Downgrading,
 }
 
 impl FlushReason {
@@ -407,11 +409,23 @@ impl RegionFlushTask {
         info!("Applying {edit:?} to region {}", self.region_id);
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+
+        let expected_state = if matches!(self.reason, FlushReason::Downgrading) {
+            RegionLeaderState::Downgrading
+        } else {
+            RegionLeaderState::Writable
+        };
         // We will leak files if the manifest update fails, but we ignore them for simplicity. We can
         // add a cleanup job to remove them later.
-        self.manifest_ctx
-            .update_manifest(RegionState::Writable, action_list)
+        let version = self
+            .manifest_ctx
+            .update_manifest(expected_state, action_list)
             .await?;
+        info!(
+            "Successfully update manifest version to {version}, region: {}, reason: {}",
+            self.region_id,
+            self.reason.as_str()
+        );
 
         Ok(edit)
     }

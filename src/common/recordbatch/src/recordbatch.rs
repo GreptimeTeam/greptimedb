@@ -17,6 +17,7 @@ use std::slice;
 use std::sync::Arc;
 
 use datafusion::arrow::util::pretty::pretty_format_batches;
+use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
 use datatypes::vectors::{Helper, VectorRef};
@@ -58,13 +59,18 @@ impl RecordBatch {
     }
 
     /// Create an empty [`RecordBatch`] from `schema`.
-    pub fn new_empty(schema: SchemaRef) -> Result<RecordBatch> {
+    pub fn new_empty(schema: SchemaRef) -> RecordBatch {
         let df_record_batch = DfRecordBatch::new_empty(schema.arrow_schema().clone());
-        Ok(RecordBatch {
+        let columns = schema
+            .column_schemas()
+            .iter()
+            .map(|col| col.data_type.create_mutable_vector(0).to_vector())
+            .collect();
+        RecordBatch {
             schema,
-            columns: vec![],
+            columns,
             df_record_batch,
-        })
+        }
     }
 
     pub fn try_project(&self, indices: &[usize]) -> Result<Self> {
@@ -220,7 +226,7 @@ pub struct RecordBatchRowIterator<'a> {
 }
 
 impl<'a> RecordBatchRowIterator<'a> {
-    fn new(record_batch: &'a RecordBatch) -> RecordBatchRowIterator {
+    fn new(record_batch: &'a RecordBatch) -> RecordBatchRowIterator<'a> {
         RecordBatchRowIterator {
             record_batch,
             rows: record_batch.df_record_batch.num_rows(),
@@ -230,7 +236,7 @@ impl<'a> RecordBatchRowIterator<'a> {
     }
 }
 
-impl<'a> Iterator for RecordBatchRowIterator<'a> {
+impl Iterator for RecordBatchRowIterator<'_> {
     type Item = Vec<Value>;
 
     fn next(&mut self) -> Option<Self::Item> {

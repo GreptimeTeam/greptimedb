@@ -76,7 +76,7 @@ impl Session {
             // catalog is not allowed for update in query context so we use
             // string here
             .current_catalog(self.catalog.read().unwrap().clone())
-            .mutable_inner(self.mutable_inner.clone())
+            .mutable_session_data(self.mutable_inner.clone())
             .sql_dialect(self.conn_info.channel.dialect())
             .configuration_parameter(self.configuration_variables.clone())
             .channel(self.conn_info.channel)

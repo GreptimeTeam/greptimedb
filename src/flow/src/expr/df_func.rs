@@ -92,12 +92,8 @@ impl DfScalarFunction {
 
         let len = rb.num_rows();
 
-        let res = self.fn_impl.evaluate(&rb).map_err(|err| {
-            EvalDatafusionSnafu {
-                raw: err,
-                context: "Failed to evaluate datafusion scalar function",
-            }
-            .build()
+        let res = self.fn_impl.evaluate(&rb).context(EvalDatafusionSnafu {
+            context: "Failed to evaluate datafusion scalar function",
         })?;
         let res = common_query::columnar_value::ColumnarValue::try_from(&res)
             .map_err(BoxedError::new)
@@ -157,12 +153,8 @@ impl DfScalarFunction {
             .into_error(err)
         })?;
 
-        let res = self.fn_impl.evaluate(&rb).map_err(|err| {
-            EvalDatafusionSnafu {
-                raw: err,
-                context: "Failed to evaluate datafusion scalar function",
-            }
-            .build()
+        let res = self.fn_impl.evaluate(&rb).context(EvalDatafusionSnafu {
+            context: "Failed to evaluate datafusion scalar function",
         })?;
         let res = common_query::columnar_value::ColumnarValue::try_from(&res)
             .map_err(BoxedError::new)
@@ -179,14 +171,29 @@ impl DfScalarFunction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RawDfScalarFn {
-    /// The raw bytes encoded datafusion scalar function
+    /// The raw bytes encoded datafusion scalar function,
+    /// due to substrait have too many layers of nested struct and `ScalarFunction` 's derive is different
+    /// for simplicity's sake
+    /// so we store bytes instead of `ScalarFunction` here
+    /// but in unit test we will still compare decoded struct(using `f_decoded` field in Debug impl)
     pub(crate) f: bytes::BytesMut,
     /// The input schema of the function
     pub(crate) input_schema: RelationDesc,
     /// Extension contains mapping from function reference to function name
     pub(crate) extensions: FunctionExtensions,
+}
+
+impl std::fmt::Debug for RawDfScalarFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawDfScalarFn")
+            .field("f", &self.f)
+            .field("f_decoded", &ScalarFunction::decode(&mut self.f.as_ref()))
+            .field("df_schema", &self.input_schema)
+            .field("extensions", &self.extensions)
+            .finish()
+    }
 }
 
 impl RawDfScalarFn {

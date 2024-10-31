@@ -23,7 +23,7 @@ use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
 use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use common_meta::node_manager::Flownode;
-use common_telemetry::debug;
+use common_telemetry::{debug, trace};
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -189,7 +189,7 @@ impl Flownode for FlowWorkerManager {
                     })
                     .try_collect()?;
                 if !fetch_order.iter().enumerate().all(|(i, &v)| i == v) {
-                    debug!("Reordering columns: {:?}", fetch_order)
+                    trace!("Reordering columns: {:?}", fetch_order)
                 }
                 fetch_order
             };

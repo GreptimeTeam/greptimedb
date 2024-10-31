@@ -21,8 +21,8 @@ use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
+use datafusion_expr::LogicalPlan;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
-use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
@@ -70,7 +70,7 @@ impl SqlQueryHandler for DummyInstance {
         let plan = self
             .query_engine
             .planner()
-            .plan(stmt, query_ctx.clone())
+            .plan(&stmt, query_ctx.clone())
             .await
             .unwrap();
         let output = self.query_engine.execute(plan, query_ctx).await.unwrap();
@@ -98,7 +98,7 @@ impl SqlQueryHandler for DummyInstance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
+                .plan(&QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .unwrap();
             let schema = self.query_engine.describe(plan, query_ctx).await.unwrap();

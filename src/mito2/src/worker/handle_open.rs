@@ -22,6 +22,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
+use table::requests::STORAGE_KEY;
 
 use crate::error::{
     ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionNotFoundSnafu, Result,
@@ -38,7 +39,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         request: &RegionOpenRequest,
     ) -> Result<()> {
-        let object_store = if let Some(storage_name) = request.options.get("storage") {
+        let object_store = if let Some(storage_name) = request.options.get(STORAGE_KEY) {
             self.object_store_manager
                 .find(storage_name)
                 .context(ObjectStoreNotFoundSnafu {

@@ -15,10 +15,10 @@
 //! Node context, prone to change with every incoming requests
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::debug;
+use common_telemetry::trace;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
@@ -27,9 +27,9 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use crate::adapter::{FlowId, TableName, TableSource};
 use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
-use crate::expr::GlobalId;
+use crate::expr::{Batch, GlobalId};
 use crate::metrics::METRIC_FLOW_INPUT_BUF_SIZE;
-use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP, SEND_BUF_CAP};
+use crate::repr::{DiffRow, RelationDesc, BATCH_SIZE, BROADCAST_CAP, SEND_BUF_CAP};
 
 /// A context that holds the information of the dataflow
 #[derive(Default, Debug)]
@@ -47,13 +47,8 @@ pub struct FlownodeContext {
     ///
     /// and send it back to the client, since we are mocking the sink table as a client, we should use table name as the key
     /// note that the sink receiver should only have one, and we are using broadcast as mpsc channel here
-    pub sink_receiver: BTreeMap<
-        TableName,
-        (
-            mpsc::UnboundedSender<DiffRow>,
-            mpsc::UnboundedReceiver<DiffRow>,
-        ),
-    >,
+    pub sink_receiver:
+        BTreeMap<TableName, (mpsc::UnboundedSender<Batch>, mpsc::UnboundedReceiver<Batch>)>,
     /// the schema of the table, query from metasrv or inferred from TypedPlan
     pub schema: HashMap<GlobalId, RelationDesc>,
     /// All the tables that have been registered in the worker
@@ -61,25 +56,27 @@ pub struct FlownodeContext {
     pub query_context: Option<Arc<QueryContext>>,
 }
 
-/// a simple broadcast sender with backpressure and unbound capacity
+/// a simple broadcast sender with backpressure, bounded capacity and blocking on send when send buf is full
+/// note that it wouldn't evict old data, so it's possible to block forever if the receiver is slow
 ///
 /// receiver still use tokio broadcast channel, since only sender side need to know
 /// backpressure and adjust dataflow running duration to avoid blocking
 #[derive(Debug)]
 pub struct SourceSender {
     // TODO(discord9): make it all Vec<DiffRow>?
-    sender: broadcast::Sender<DiffRow>,
-    send_buf_tx: mpsc::Sender<Vec<DiffRow>>,
-    send_buf_rx: RwLock<mpsc::Receiver<Vec<DiffRow>>>,
+    sender: broadcast::Sender<Batch>,
+    send_buf_tx: mpsc::Sender<Batch>,
+    send_buf_rx: RwLock<mpsc::Receiver<Batch>>,
     send_buf_row_cnt: AtomicUsize,
 }
 
 impl Default for SourceSender {
     fn default() -> Self {
+        // TODO(discord9): the capacity is arbitrary, we can adjust it later, might also want to limit the max number of rows in send buf
         let (send_buf_tx, send_buf_rx) = mpsc::channel(SEND_BUF_CAP);
         Self {
             // TODO(discord9): found a better way then increase this to prevent lagging and hence missing input data
-            sender: broadcast::Sender::new(BROADCAST_CAP * 2),
+            sender: broadcast::Sender::new(SEND_BUF_CAP),
             send_buf_tx,
             send_buf_rx: RwLock::new(send_buf_rx),
             send_buf_row_cnt: AtomicUsize::new(0),
@@ -90,7 +87,7 @@ impl Default for SourceSender {
 impl SourceSender {
     /// max number of iterations to try flush send buf
     const MAX_ITERATIONS: usize = 16;
-    pub fn get_receiver(&self) -> broadcast::Receiver<DiffRow> {
+    pub fn get_receiver(&self) -> broadcast::Receiver<Batch> {
         self.sender.subscribe()
     }
 
@@ -106,30 +103,27 @@ impl SourceSender {
                 break;
             }
             // TODO(discord9): send rows instead so it's just moving a point
-            if let Some(rows) = send_buf.recv().await {
-                let len = rows.len();
-                self.send_buf_row_cnt
-                    .fetch_sub(len, std::sync::atomic::Ordering::SeqCst);
-                for row in rows {
-                    self.sender
-                        .send(row)
-                        .map_err(|err| {
-                            InternalSnafu {
-                                reason: format!("Failed to send row, error = {:?}", err),
-                            }
-                            .build()
-                        })
-                        .with_context(|_| EvalSnafu)?;
-                    row_cnt += 1;
-                }
+            if let Some(batch) = send_buf.recv().await {
+                let len = batch.row_count();
+                self.send_buf_row_cnt.fetch_sub(len, Ordering::SeqCst);
+                row_cnt += len;
+                self.sender
+                    .send(batch)
+                    .map_err(|err| {
+                        InternalSnafu {
+                            reason: format!("Failed to send row, error = {:?}", err),
+                        }
+                        .build()
+                    })
+                    .with_context(|_| EvalSnafu)?;
             }
         }
         if row_cnt > 0 {
-            debug!("Send {} rows", row_cnt);
+            trace!("Source Flushed {} rows", row_cnt);
             METRIC_FLOW_INPUT_BUF_SIZE.sub(row_cnt as _);
-            debug!(
-                "Remaining Send buf.len() = {}",
-                self.send_buf_rx.read().await.len()
+            trace!(
+                "Remaining Source Send buf.len() = {}",
+                METRIC_FLOW_INPUT_BUF_SIZE.get()
             );
         }
 
@@ -138,12 +132,23 @@ impl SourceSender {
 
     /// return number of rows it actual send(including what's in the buffer)
     pub async fn send_rows(&self, rows: Vec<DiffRow>) -> Result<usize, Error> {
-        self.send_buf_tx.send(rows).await.map_err(|e| {
+        METRIC_FLOW_INPUT_BUF_SIZE.add(rows.len() as _);
+        while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 {
+            tokio::task::yield_now().await;
+        }
+        // row count metrics is approx so relaxed order is ok
+        self.send_buf_row_cnt
+            .fetch_add(rows.len(), Ordering::SeqCst);
+        let batch = Batch::try_from_rows(rows.into_iter().map(|(row, _, _)| row).collect())
+            .context(EvalSnafu)?;
+        common_telemetry::trace!("Send one batch to worker with {} rows", batch.row_count());
+        self.send_buf_tx.send(batch).await.map_err(|e| {
             crate::error::InternalSnafu {
                 reason: format!("Failed to send row, error = {:?}", e),
             }
             .build()
         })?;
+
         Ok(0)
     }
 }
@@ -159,8 +164,6 @@ impl FlownodeContext {
             .with_context(|| TableNotFoundSnafu {
                 name: table_id.to_string(),
             })?;
-
-        debug!("FlownodeContext::send: trying to send {} rows", rows.len());
         sender.send_rows(rows).await
     }
 
@@ -173,16 +176,6 @@ impl FlownodeContext {
             sender.try_flush().await.inspect(|x| sum += x)?;
         }
         Ok(sum)
-    }
-
-    /// Return the sum number of rows in all send buf
-    /// TODO(discord9): remove this since we can't get correct row cnt anyway
-    pub async fn get_send_buf_size(&self) -> usize {
-        let mut sum = 0;
-        for sender in self.source_sender.values() {
-            sum += sender.send_buf_rx.read().await.len();
-        }
-        sum
     }
 }
 
@@ -230,7 +223,7 @@ impl FlownodeContext {
     pub fn add_sink_receiver(&mut self, table_name: TableName) {
         self.sink_receiver
             .entry(table_name)
-            .or_insert_with(mpsc::unbounded_channel::<DiffRow>);
+            .or_insert_with(mpsc::unbounded_channel);
     }
 
     pub fn get_source_by_global_id(&self, id: &GlobalId) -> Result<&SourceSender, Error> {
@@ -254,7 +247,7 @@ impl FlownodeContext {
     pub fn get_sink_by_global_id(
         &self,
         id: &GlobalId,
-    ) -> Result<mpsc::UnboundedSender<DiffRow>, Error> {
+    ) -> Result<mpsc::UnboundedSender<Batch>, Error> {
         let table_name = self
             .table_repr
             .get_by_global_id(id)

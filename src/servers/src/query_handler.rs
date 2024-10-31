@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //! All query handler traits for various request protocols, like SQL or GRPC.
+//!
 //! Instance that wishes to support certain request protocol, just implement the corresponding
 //! trait, the Server will handle codec for you.
 //!
@@ -33,9 +34,10 @@ use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_query::Output;
 use headers::HeaderValue;
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion};
+use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
 use serde_json::Value;
 use session::context::QueryContextRef;
 
@@ -105,7 +107,7 @@ pub trait PromStoreProtocolHandler {
 }
 
 #[async_trait]
-pub trait OpenTelemetryProtocolHandler {
+pub trait OpenTelemetryProtocolHandler: LogHandler {
     /// Handling opentelemetry metrics request
     async fn metrics(
         &self,
@@ -119,9 +121,18 @@ pub trait OpenTelemetryProtocolHandler {
         request: ExportTraceServiceRequest,
         ctx: QueryContextRef,
     ) -> Result<Output>;
+
+    async fn logs(
+        &self,
+        request: ExportLogsServiceRequest,
+        pipeline: PipelineWay,
+        table_name: String,
+        ctx: QueryContextRef,
+    ) -> Result<Output>;
 }
 
 /// LogHandler is responsible for handling log related requests.
+///
 /// It should be able to insert logs and manage pipelines.
 /// The pipeline is a series of transformations that can be applied to logs.
 /// The pipeline is stored in the database and can be retrieved by name.

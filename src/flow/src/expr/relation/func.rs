@@ -21,14 +21,14 @@ use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
-use snafu::{ensure, IntoError, OptionExt};
+use snafu::{IntoError, OptionExt};
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::error::{DatafusionSnafu, Error, InvalidQuerySnafu};
 use crate::expr::error::EvalError;
 use crate::expr::relation::accum::{Accum, Accumulator};
 use crate::expr::signature::{GenericFn, Signature};
-use crate::expr::InvalidArgumentSnafu;
+use crate::expr::VectorDiff;
 use crate::repr::Diff;
 
 /// Aggregate functions that can be applied to a group of rows.
@@ -158,72 +158,6 @@ impl AggregateFunc {
 
         let res = accum.eval(self)?;
         Ok((res, accum.into_state()))
-    }
-}
-
-struct VectorDiff {
-    vector: VectorRef,
-    diff: Option<VectorRef>,
-}
-
-impl VectorDiff {
-    fn len(&self) -> usize {
-        self.vector.len()
-    }
-
-    fn try_new(vector: VectorRef, diff: Option<VectorRef>) -> Result<Self, EvalError> {
-        ensure!(
-            diff.as_ref()
-                .map_or(true, |diff| diff.len() == vector.len()),
-            InvalidArgumentSnafu {
-                reason: "Length of vector and diff should be the same"
-            }
-        );
-        Ok(Self { vector, diff })
-    }
-}
-
-impl IntoIterator for VectorDiff {
-    type Item = (Value, Diff);
-    type IntoIter = VectorDiffIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        VectorDiffIter {
-            vector: self.vector,
-            diff: self.diff,
-            idx: 0,
-        }
-    }
-}
-
-struct VectorDiffIter {
-    vector: VectorRef,
-    diff: Option<VectorRef>,
-    idx: usize,
-}
-
-impl std::iter::Iterator for VectorDiffIter {
-    type Item = (Value, Diff);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.idx >= self.vector.len() {
-            return None;
-        }
-        let value = self.vector.get(self.idx);
-        // +1 means insert, -1 means delete, and default to +1 insert when diff is not provided
-        let diff = if let Some(diff) = self.diff.as_ref() {
-            if let Ok(diff_at) = diff.get(self.idx).try_into() {
-                diff_at
-            } else {
-                common_telemetry::warn!("Invalid diff value at index {}", self.idx);
-                return None;
-            }
-        } else {
-            1
-        };
-
-        self.idx += 1;
-        Some((value, diff))
     }
 }
 

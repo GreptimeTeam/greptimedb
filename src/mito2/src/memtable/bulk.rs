@@ -14,6 +14,7 @@
 
 //! Memtable implementation for bulk load
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use store_api::metadata::RegionMetadataRef;
@@ -67,7 +68,7 @@ impl Memtable for BulkMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
-    ) -> Vec<MemtableRange> {
+    ) -> BTreeMap<usize, MemtableRange> {
         todo!()
     }
 

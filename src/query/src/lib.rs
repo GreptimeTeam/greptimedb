@@ -14,8 +14,8 @@
 
 #![feature(let_chains)]
 #![feature(int_roundings)]
-#![feature(option_get_or_insert_default)]
 #![feature(trait_upcasting)]
+#![feature(try_blocks)]
 
 mod analyze;
 pub mod dataframe;
@@ -27,6 +27,7 @@ pub mod executor;
 pub mod metrics;
 mod optimizer;
 pub mod parser;
+mod part_sort;
 pub mod physical_wrapper;
 pub mod plan;
 pub mod planner;
@@ -35,7 +36,11 @@ pub mod query_engine;
 mod range_select;
 pub mod region_query;
 pub mod sql;
+pub mod stats;
+pub(crate) mod window_sort;
 
+#[cfg(test)]
+pub(crate) mod test_util;
 #[cfg(test)]
 mod tests;
 

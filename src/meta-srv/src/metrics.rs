@@ -45,7 +45,20 @@ lazy_static! {
     /// Meta kv cache miss counter.
     pub static ref METRIC_META_KV_CACHE_MISS: IntCounterVec =
         register_int_counter_vec!("greptime_meta_kv_cache_miss", "meta kv cache miss", &["op"]).unwrap();
-    //  Heartbeat received by metasrv.
+    ///  Heartbeat received by metasrv.
     pub static ref METRIC_META_HEARTBEAT_RECV: IntCounterVec =
         register_int_counter_vec!("greptime_meta_heartbeat_recv", "heartbeats received by metasrv", &["pusher_key"]).unwrap();
+    /// The migration execute histogram.
+    pub static ref METRIC_META_REGION_MIGRATION_EXECUTE: HistogramVec =
+        register_histogram_vec!("greptime_meta_region_migration_execute", "meta region migration execute", &["state"]).unwrap();
+    /// The migration error counter.
+    pub static ref METRIC_META_REGION_MIGRATION_ERROR: IntCounterVec =
+        register_int_counter_vec!("greptime_meta_region_migration_error", "meta region migration abort", &["state", "error_type"]).unwrap();
+    /// The migration datanode counter.
+    pub static ref METRIC_META_REGION_MIGRATION_DATANODES: IntCounterVec =
+        register_int_counter_vec!("greptime_meta_region_migration_stat", "meta region migration stat", &["datanode_type", "datanode_id"]).unwrap();
+    /// The migration fail counter.
+    pub static ref METRIC_META_REGION_MIGRATION_FAIL: IntCounter =
+        register_int_counter!("greptime_meta_region_migration_fail", "meta region migration fail").unwrap();
+
 }

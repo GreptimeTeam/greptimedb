@@ -22,6 +22,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::warn;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
@@ -49,6 +50,7 @@ pub struct RegionScanExec {
     properties: PlanProperties,
     append_mode: bool,
     total_rows: usize,
+    is_partition_set: bool,
 }
 
 impl RegionScanExec {
@@ -77,13 +79,8 @@ impl RegionScanExec {
             properties,
             append_mode,
             total_rows,
+            is_partition_set: false,
         }
-    }
-
-    /// Set the expected output ordering for the plan.
-    pub fn with_output_ordering(mut self, output_ordering: Vec<PhysicalSortExpr>) -> Self {
-        self.output_ordering = Some(output_ordering);
-        self
     }
 
     /// Get the partition ranges of the scanner. This method will collapse the ranges into
@@ -101,18 +98,33 @@ impl RegionScanExec {
         ranges
     }
 
+    /// Similar to [`Self::get_partition_ranges`] but don't collapse the ranges.
+    pub fn get_uncollapsed_partition_ranges(&self) -> Vec<Vec<PartitionRange>> {
+        let scanner = self.scanner.lock().unwrap();
+        scanner.properties().partitions.clone()
+    }
+
+    pub fn is_partition_set(&self) -> bool {
+        self.is_partition_set
+    }
+
     /// Update the partition ranges of underlying scanner.
     pub fn with_new_partitions(
         &self,
         partitions: Vec<Vec<PartitionRange>>,
     ) -> Result<Self, BoxedError> {
+        if self.is_partition_set {
+            warn!("Setting partition ranges more than once for RegionScanExec");
+        }
+
         let num_partitions = partitions.len();
         let mut properties = self.properties.clone();
         properties.partitioning = Partitioning::UnknownPartitioning(num_partitions);
 
         {
             let mut scanner = self.scanner.lock().unwrap();
-            scanner.prepare(partitions)?;
+            let distinguish_partition_range = scanner.properties().distinguish_partition_range();
+            scanner.prepare(partitions, distinguish_partition_range)?;
         }
 
         Ok(Self {
@@ -123,7 +135,34 @@ impl RegionScanExec {
             properties,
             append_mode: self.append_mode,
             total_rows: self.total_rows,
+            is_partition_set: true,
         })
+    }
+
+    pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {
+        let mut scanner = self.scanner.lock().unwrap();
+        let partition_ranges = scanner.properties().partitions.clone();
+        // set distinguish_partition_range won't fail
+        let _ = scanner.prepare(partition_ranges, distinguish_partition_range);
+    }
+
+    pub fn time_index(&self) -> Option<String> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .schema()
+            .timestamp_column()
+            .map(|x| x.name.clone())
+    }
+
+    pub fn tag_columns(&self) -> Vec<String> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .metadata()
+            .primary_key_columns()
+            .map(|col| col.column_schema.name.clone())
+            .collect()
     }
 }
 
@@ -272,33 +311,45 @@ impl DfRecordBatchStream for StreamWithMetricWrapper {
 mod test {
     use std::sync::Arc;
 
+    use api::v1::SemanticType;
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datafusion::prelude::SessionContext;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-    use datatypes::vectors::Int32Vector;
+    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector};
     use futures::TryStreamExt;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::region_engine::SinglePartitionScanner;
+    use store_api::storage::RegionId;
 
     use super::*;
 
     #[tokio::test]
     async fn test_simple_table_scan() {
         let ctx = SessionContext::new();
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "a",
-            ConcreteDataType::int32_datatype(),
-            false,
-        )]));
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new(
+                "b",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
 
         let batch1 = RecordBatch::new(
             schema.clone(),
-            vec![Arc::new(Int32Vector::from_slice([1, 2])) as _],
+            vec![
+                Arc::new(Int32Vector::from_slice([1, 2])) as _,
+                Arc::new(TimestampMillisecondVector::from_slice([1000, 2000])) as _,
+            ],
         )
         .unwrap();
         let batch2 = RecordBatch::new(
             schema.clone(),
-            vec![Arc::new(Int32Vector::from_slice([3, 4, 5])) as _],
+            vec![
+                Arc::new(Int32Vector::from_slice([3, 4, 5])) as _,
+                Arc::new(TimestampMillisecondVector::from_slice([3000, 4000, 5000])) as _,
+            ],
         )
         .unwrap();
 
@@ -306,7 +357,26 @@ mod test {
             RecordBatches::try_new(schema.clone(), vec![batch1.clone(), batch2.clone()]).unwrap();
         let stream = recordbatches.as_stream();
 
-        let scanner = Box::new(SinglePartitionScanner::new(stream, false));
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5678));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "b",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![1]);
+        let region_metadata = Arc::new(builder.build().unwrap());
+
+        let scanner = Box::new(SinglePartitionScanner::new(stream, false, region_metadata));
         let plan = RegionScanExec::new(scanner);
         let actual: SchemaRef = Arc::new(
             plan.properties

@@ -17,13 +17,10 @@ use std::time::Duration;
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::INFORMATION_SCHEMA_CLUSTER_INFO_TABLE_ID;
-use common_config::Mode;
 use common_error::ext::BoxedError;
-use common_meta::cluster::{ClusterInfo, NodeInfo, NodeStatus};
-use common_meta::peer::Peer;
+use common_meta::cluster::NodeInfo;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
-use common_telemetry::warn;
 use common_time::timestamp::Timestamp;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
@@ -40,7 +37,7 @@ use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
 use super::CLUSTER_INFO;
-use crate::error::{CreateRecordBatchSnafu, InternalSnafu, ListNodesSnafu, Result};
+use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::system_schema::information_schema::{InformationTable, Predicates};
 use crate::system_schema::utils;
 use crate::CatalogManager;
@@ -70,7 +67,6 @@ const INIT_CAPACITY: usize = 42;
 pub(super) struct InformationSchemaClusterInfo {
     schema: SchemaRef,
     catalog_manager: Weak<dyn CatalogManager>,
-    start_time_ms: u64,
 }
 
 impl InformationSchemaClusterInfo {
@@ -78,7 +74,6 @@ impl InformationSchemaClusterInfo {
         Self {
             schema: Self::schema(),
             catalog_manager,
-            start_time_ms: common_time::util::current_time_millis() as u64,
         }
     }
 
@@ -100,11 +95,7 @@ impl InformationSchemaClusterInfo {
     }
 
     fn builder(&self) -> InformationSchemaClusterInfoBuilder {
-        InformationSchemaClusterInfoBuilder::new(
-            self.schema.clone(),
-            self.catalog_manager.clone(),
-            self.start_time_ms,
-        )
+        InformationSchemaClusterInfoBuilder::new(self.schema.clone(), self.catalog_manager.clone())
     }
 }
 
@@ -144,7 +135,6 @@ impl InformationTable for InformationSchemaClusterInfo {
 
 struct InformationSchemaClusterInfoBuilder {
     schema: SchemaRef,
-    start_time_ms: u64,
     catalog_manager: Weak<dyn CatalogManager>,
 
     peer_ids: Int64VectorBuilder,
@@ -158,11 +148,7 @@ struct InformationSchemaClusterInfoBuilder {
 }
 
 impl InformationSchemaClusterInfoBuilder {
-    fn new(
-        schema: SchemaRef,
-        catalog_manager: Weak<dyn CatalogManager>,
-        start_time_ms: u64,
-    ) -> Self {
+    fn new(schema: SchemaRef, catalog_manager: Weak<dyn CatalogManager>) -> Self {
         Self {
             schema,
             catalog_manager,
@@ -174,56 +160,17 @@ impl InformationSchemaClusterInfoBuilder {
             start_times: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             uptimes: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             active_times: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            start_time_ms,
         }
     }
 
     /// Construct the `information_schema.cluster_info` virtual table
     async fn make_cluster_info(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let predicates = Predicates::from_scan_request(&request);
-        let mode = utils::running_mode(&self.catalog_manager)?.unwrap_or(Mode::Standalone);
-
-        match mode {
-            Mode::Standalone => {
-                let build_info = common_version::build_info();
-
-                self.add_node_info(
-                    &predicates,
-                    NodeInfo {
-                        // For the standalone:
-                        // - id always 0
-                        // - empty string for peer_addr
-                        peer: Peer {
-                            id: 0,
-                            addr: "".to_string(),
-                        },
-                        last_activity_ts: -1,
-                        status: NodeStatus::Standalone,
-                        version: build_info.version.to_string(),
-                        git_commit: build_info.commit_short.to_string(),
-                        // Use `self.start_time_ms` instead.
-                        // It's not precise but enough.
-                        start_time_ms: self.start_time_ms,
-                    },
-                );
-            }
-            Mode::Distributed => {
-                if let Some(meta_client) = utils::meta_client(&self.catalog_manager)? {
-                    let node_infos = meta_client
-                        .list_nodes(None)
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(ListNodesSnafu)?;
-
-                    for node_info in node_infos {
-                        self.add_node_info(&predicates, node_info);
-                    }
-                } else {
-                    warn!("Could not find meta client in distributed mode.");
-                }
-            }
+        let information_extension = utils::information_extension(&self.catalog_manager)?;
+        let node_infos = information_extension.nodes().await?;
+        for node_info in node_infos {
+            self.add_node_info(&predicates, node_info);
         }
-
         self.finish()
     }
 

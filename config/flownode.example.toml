@@ -2,7 +2,7 @@
 mode = "distributed"
 
 ## The flownode identifier and should be unique in the cluster.
-## +toml2docs:none-default
+## @toml2docs:none-default
 node_id = 14
 
 ## The gRPC server options.
@@ -63,7 +63,7 @@ retry_interval = "3s"
 dir = "/tmp/greptimedb/logs"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
-## +toml2docs:none-default
+## @toml2docs:none-default
 level = "info"
 
 ## Enable OTLP tracing.
@@ -78,15 +78,31 @@ append_stdout = true
 ## The log format. Can be `text`/`json`.
 log_format = "text"
 
+## The maximum amount of log files.
+max_log_files = 720
+
 ## The percentage of tracing will be sampled and exported.
 ## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
 ## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
 [logging.tracing_sample_ratio]
 default_ratio = 1.0
 
+## The slow query log options.
+[logging.slow_query]
+## Whether to enable slow query log.
+enable = false
+
+## The threshold of slow query.
+## @toml2docs:none-default
+threshold = "10s"
+
+## The sampling ratio of slow query log. The value should be in the range of (0, 1].
+## @toml2docs:none-default
+sample_ratio = 1.0
+
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
-[tracing]
+#+ [tracing]
 ## The tokio console address.
-## +toml2docs:none-default
-tokio_console_addr = "127.0.0.1"
+## @toml2docs:none-default
+#+ tokio_console_addr = "127.0.0.1"
 

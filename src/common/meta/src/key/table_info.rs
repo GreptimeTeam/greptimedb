@@ -23,6 +23,7 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use super::TABLE_INFO_KEY_PATTERN;
+use crate::ddl::utils::region_storage_path;
 use crate::error::{InvalidMetadataSnafu, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, MetadataKey, MetadataValue, TABLE_INFO_KEY_PREFIX};
@@ -51,7 +52,7 @@ impl Display for TableInfoKey {
     }
 }
 
-impl<'a> MetadataKey<'a, TableInfoKey> for TableInfoKey {
+impl MetadataKey<'_, TableInfoKey> for TableInfoKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
@@ -125,6 +126,11 @@ impl TableInfoValue {
             table_name: self.table_info.name.to_string(),
         }
     }
+
+    /// Builds storage path for all regions in table.
+    pub fn region_storage_path(&self) -> String {
+        region_storage_path(&self.table_info.catalog_name, &self.table_info.schema_name)
+    }
 }
 
 pub type TableInfoManagerRef = Arc<TableInfoManager>;
@@ -132,6 +138,7 @@ pub type TableInfoManagerRef = Arc<TableInfoManager>;
 pub struct TableInfoManager {
     kv_backend: KvBackendRef,
 }
+pub type TableInfoDecodeResult = Result<Option<DeserializedValueWithBytes<TableInfoValue>>>;
 
 impl TableInfoManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
@@ -145,9 +152,7 @@ impl TableInfoManager {
         table_info_value: &TableInfoValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableInfoDecodeResult,
     )> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.to_bytes();
@@ -169,9 +174,7 @@ impl TableInfoManager {
         new_table_info_value: &TableInfoValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableInfoDecodeResult,
     )> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.to_bytes();

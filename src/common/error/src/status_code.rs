@@ -38,6 +38,8 @@ pub enum StatusCode {
     Cancelled = 1005,
     /// Illegal state, can be exposed to users.
     IllegalState = 1006,
+    /// Caused by some error originated from external system.
+    External = 1007,
     // ====== End of common status code ================
 
     // ====== Begin of SQL related status code =========
@@ -162,7 +164,8 @@ impl StatusCode {
             | StatusCode::InvalidAuthHeader
             | StatusCode::AccessDenied
             | StatusCode::PermissionDenied
-            | StatusCode::RequestOutdated => false,
+            | StatusCode::RequestOutdated
+            | StatusCode::External => false,
         }
     }
 
@@ -177,7 +180,9 @@ impl StatusCode {
             | StatusCode::IllegalState
             | StatusCode::EngineExecuteQuery
             | StatusCode::StorageUnavailable
-            | StatusCode::RuntimeResourcesExhausted => true,
+            | StatusCode::RuntimeResourcesExhausted
+            | StatusCode::External => true,
+
             StatusCode::Success
             | StatusCode::Unsupported
             | StatusCode::InvalidArguments
@@ -256,7 +261,7 @@ macro_rules! define_into_tonic_status {
 pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
     match status_code {
         StatusCode::Success => Code::Ok,
-        StatusCode::Unknown => Code::Unknown,
+        StatusCode::Unknown | StatusCode::External => Code::Unknown,
         StatusCode::Unsupported => Code::Unimplemented,
         StatusCode::Unexpected
         | StatusCode::IllegalState

@@ -36,10 +36,16 @@ use itertools::Itertools;
 use join::{JoinProcessor, JoinProcessorBuilder};
 use letter::{LetterProcessor, LetterProcessorBuilder};
 use regex::{RegexProcessor, RegexProcessorBuilder};
+use snafu::{OptionExt, ResultExt};
 use timestamp::{TimestampProcessor, TimestampProcessorBuilder};
 use urlencoding::{UrlEncodingProcessor, UrlEncodingProcessorBuilder};
 
+use super::error::{
+    FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, ProcessorKeyMustBeStringSnafu,
+    ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu, UnsupportedProcessorSnafu,
+};
 use super::field::{Field, Fields};
+use crate::etl::error::{Error, Result};
 use crate::etl::value::Value;
 
 const FIELD_NAME: &str = "field";
@@ -56,7 +62,8 @@ const TARGET_FIELDS_NAME: &str = "target_fields";
 // const ON_FAILURE_NAME: &str = "on_failure";
 // const TAG_NAME: &str = "tag";
 
-/// Processor trait defines the interface for all processors
+/// Processor trait defines the interface for all processors.
+///
 /// A processor is a transformation that can be applied to a field in a document
 /// It can be used to extract, transform, or enrich data
 /// Now Processor only have one input field. In the future, we may support multiple input fields.
@@ -70,7 +77,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
     fn ignore_missing(&self) -> bool;
 
     /// Execute the processor on a vector which be preprocessed by the pipeline
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String>;
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()>;
 }
 
 #[derive(Debug)]
@@ -98,7 +105,7 @@ pub trait ProcessorBuilder: std::fmt::Debug + Send + Sync + 'static {
     /// Get the processor's input keys
     fn input_keys(&self) -> HashSet<&str>;
     /// Build the processor
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String>;
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind>;
 }
 
 #[derive(Debug)]
@@ -171,9 +178,9 @@ impl Processors {
 }
 
 impl TryFrom<&Vec<yaml_rust::Yaml>> for ProcessorBuilderList {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(vec: &Vec<yaml_rust::Yaml>) -> Result<Self, Self::Error> {
+    fn try_from(vec: &Vec<yaml_rust::Yaml>) -> Result<Self> {
         let mut processors_builders = vec![];
         let mut all_output_keys = HashSet::with_capacity(50);
         let mut all_required_keys = HashSet::with_capacity(50);
@@ -226,13 +233,10 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for ProcessorBuilderList {
     }
 }
 
-fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorBuilders, String> {
-    let map = doc.as_hash().ok_or("processor must be a map".to_string())?;
+fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorBuilders> {
+    let map = doc.as_hash().context(ProcessorMustBeMapSnafu)?;
 
-    let key = map
-        .keys()
-        .next()
-        .ok_or("processor must have a string key".to_string())?;
+    let key = map.keys().next().context(ProcessorMustHaveStringKeySnafu)?;
 
     let value = map
         .get(key)
@@ -240,9 +244,7 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorBuilders, String> {
         .as_hash()
         .expect("processor value must be a map");
 
-    let str_key = key
-        .as_str()
-        .ok_or("processor key must be a string".to_string())?;
+    let str_key = key.as_str().context(ProcessorKeyMustBeStringSnafu)?;
 
     let processor = match str_key {
         cmcd::PROCESSOR_CMCD => ProcessorBuilders::Cmcd(CmcdProcessorBuilder::try_from(value)?),
@@ -264,58 +266,72 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorBuilders, String> {
         urlencoding::PROCESSOR_URL_ENCODING => {
             ProcessorBuilders::UrlEncoding(UrlEncodingProcessorBuilder::try_from(value)?)
         }
-        _ => return Err(format!("unsupported {} processor", str_key)),
+        _ => return UnsupportedProcessorSnafu { processor: str_key }.fail(),
     };
 
     Ok(processor)
 }
 
-pub(crate) fn yaml_string(v: &yaml_rust::Yaml, field: &str) -> Result<String, String> {
+pub(crate) fn yaml_string(v: &yaml_rust::Yaml, field: &str) -> Result<String> {
     v.as_str()
         .map(|s| s.to_string())
-        .ok_or(format!("'{field}' must be a string"))
+        .context(FieldMustBeTypeSnafu {
+            field,
+            ty: "string",
+        })
 }
 
-pub(crate) fn yaml_strings(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<String>, String> {
+pub(crate) fn yaml_strings(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<String>> {
     let vec = v
         .as_vec()
-        .ok_or(format!("'{field}' must be a list of strings",))?
+        .context(FieldMustBeTypeSnafu {
+            field,
+            ty: "list of string",
+        })?
         .iter()
         .map(|v| v.as_str().unwrap_or_default().into())
         .collect();
     Ok(vec)
 }
 
-pub(crate) fn yaml_bool(v: &yaml_rust::Yaml, field: &str) -> Result<bool, String> {
-    v.as_bool().ok_or(format!("'{field}' must be a boolean"))
+pub(crate) fn yaml_bool(v: &yaml_rust::Yaml, field: &str) -> Result<bool> {
+    v.as_bool().context(FieldMustBeTypeSnafu {
+        field,
+        ty: "boolean",
+    })
 }
 
-pub(crate) fn yaml_parse_string<T>(v: &yaml_rust::Yaml, field: &str) -> Result<T, String>
+pub(crate) fn yaml_parse_string<T>(v: &yaml_rust::Yaml, field: &str) -> Result<T>
 where
     T: std::str::FromStr,
-    T::Err: ToString,
+    T::Err: std::error::Error + Send + Sync + 'static,
 {
     yaml_string(v, field)?
         .parse::<T>()
-        .map_err(|e| e.to_string())
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        .context(FailedParseFieldFromStringSnafu { field })
 }
 
-pub(crate) fn yaml_parse_strings<T>(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<T>, String>
+pub(crate) fn yaml_parse_strings<T>(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<T>>
 where
     T: std::str::FromStr,
-    T::Err: ToString,
+    T::Err: std::error::Error + Send + Sync + 'static,
 {
     yaml_strings(v, field).and_then(|v| {
         v.into_iter()
-            .map(|s| s.parse::<T>().map_err(|e| e.to_string()))
+            .map(|s| {
+                s.parse::<T>()
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+                    .context(FailedParseFieldFromStringSnafu { field })
+            })
             .collect()
     })
 }
 
-pub(crate) fn yaml_new_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields, String> {
+pub(crate) fn yaml_new_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields> {
     yaml_parse_strings(v, field).map(Fields::new)
 }
 
-pub(crate) fn yaml_new_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field, String> {
+pub(crate) fn yaml_new_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field> {
     yaml_parse_string(v, field)
 }

@@ -57,6 +57,11 @@ pub trait UserProvider: Send + Sync {
         self.authorize(catalog, schema, &user_info).await?;
         Ok(user_info)
     }
+
+    /// Returns whether this user provider implementation is backed by an external system.
+    fn external(&self) -> bool {
+        false
+    }
 }
 
 fn load_credential_from_file(filepath: &str) -> Result<Option<HashMap<String, Vec<u8>>>> {

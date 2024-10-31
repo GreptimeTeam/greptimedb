@@ -245,7 +245,7 @@ impl LogicalTableRouteValue {
     }
 }
 
-impl<'a> MetadataKey<'a, TableRouteKey> for TableRouteKey {
+impl MetadataKey<'_, TableRouteKey> for TableRouteKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
@@ -472,6 +472,8 @@ pub struct TableRouteStorage {
     kv_backend: KvBackendRef,
 }
 
+pub type TableRouteValueDecodeResult = Result<Option<DeserializedValueWithBytes<TableRouteValue>>>;
+
 impl TableRouteStorage {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
@@ -485,9 +487,7 @@ impl TableRouteStorage {
         table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.to_bytes();
@@ -510,9 +510,7 @@ impl TableRouteStorage {
         new_table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.to_bytes();
@@ -744,6 +742,7 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::{KvBackend, TxnService};
     use crate::peer::Peer;
+    use crate::rpc::router::Region;
     use crate::rpc::store::PutRequest;
 
     #[test]
@@ -751,11 +750,43 @@ mod tests {
         let old_raw_v = r#"{"region_routes":[{"region":{"id":1,"name":"r1","partition":null,"attrs":{}},"leader_peer":{"id":2,"addr":"a2"},"follower_peers":[]},{"region":{"id":1,"name":"r1","partition":null,"attrs":{}},"leader_peer":{"id":2,"addr":"a2"},"follower_peers":[]}],"version":0}"#;
         let v = TableRouteValue::try_from_raw_value(old_raw_v.as_bytes()).unwrap();
 
-        let new_raw_v = format!("{:?}", v);
-        assert_eq!(
-            new_raw_v,
-            r#"Physical(PhysicalTableRouteValue { region_routes: [RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None, leader_down_since: None }, RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None, leader_down_since: None }], version: 0 })"#
-        );
+        let expected_table_route = TableRouteValue::Physical(PhysicalTableRouteValue {
+            region_routes: vec![
+                RegionRoute {
+                    region: Region {
+                        id: RegionId::new(0, 1),
+                        name: "r1".to_string(),
+                        partition: None,
+                        attrs: Default::default(),
+                    },
+                    leader_peer: Some(Peer {
+                        id: 2,
+                        addr: "a2".to_string(),
+                    }),
+                    follower_peers: vec![],
+                    leader_state: None,
+                    leader_down_since: None,
+                },
+                RegionRoute {
+                    region: Region {
+                        id: RegionId::new(0, 1),
+                        name: "r1".to_string(),
+                        partition: None,
+                        attrs: Default::default(),
+                    },
+                    leader_peer: Some(Peer {
+                        id: 2,
+                        addr: "a2".to_string(),
+                    }),
+                    follower_peers: vec![],
+                    leader_state: None,
+                    leader_down_since: None,
+                },
+            ],
+            version: 0,
+        });
+
+        assert_eq!(v, expected_table_route);
     }
 
     #[test]

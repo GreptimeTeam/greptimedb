@@ -32,14 +32,16 @@ pub enum Error {
 
     #[snafu(display("Failed to insert pipeline to pipelines table"))]
     InsertPipeline {
+        #[snafu(source)]
         source: operator::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Failed to parse pipeline: {}", reason))]
+    #[snafu(display("Failed to parse pipeline"))]
     CompilePipeline {
-        reason: String,
+        #[snafu(source)]
+        source: crate::etl::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -56,6 +58,7 @@ pub enum Error {
     CollectRecords {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
         source: common_recordbatch::error::Error,
     },
 
@@ -76,6 +79,7 @@ pub enum Error {
 
     #[snafu(display("Failed to execute internal statement"))]
     ExecuteInternalStatement {
+        #[snafu(source)]
         source: query::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -83,6 +87,7 @@ pub enum Error {
 
     #[snafu(display("Failed to create dataframe"))]
     DataFrame {
+        #[snafu(source)]
         source: query::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -90,6 +95,7 @@ pub enum Error {
 
     #[snafu(display("General catalog error"))]
     Catalog {
+        #[snafu(source)]
         source: catalog::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -97,14 +103,16 @@ pub enum Error {
 
     #[snafu(display("Failed to create table"))]
     CreateTable {
+        #[snafu(source)]
         source: operator::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Failed to execute pipeline, reason: {}", reason))]
+    #[snafu(display("Failed to execute pipeline"))]
     PipelineTransform {
-        reason: String,
+        #[snafu(source)]
+        source: crate::etl::error::Error,
         #[snafu(implicit)]
         location: Location,
     },

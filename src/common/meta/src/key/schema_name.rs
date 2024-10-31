@@ -41,7 +41,7 @@ pub struct SchemaNameKey<'a> {
     pub schema: &'a str,
 }
 
-impl<'a> Default for SchemaNameKey<'a> {
+impl Default for SchemaNameKey<'_> {
     fn default() -> Self {
         Self {
             catalog: DEFAULT_CATALOG_NAME,
@@ -230,7 +230,8 @@ impl SchemaManager {
             req,
             DEFAULT_PAGE_SIZE,
             Arc::new(schema_decoder),
-        );
+        )
+        .into_stream();
 
         Box::pin(stream)
     }

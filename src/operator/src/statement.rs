@@ -42,11 +42,12 @@ use common_query::Output;
 use common_telemetry::tracing;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
+use datafusion_expr::LogicalPlan;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
-use query::plan::LogicalPlan;
+use query::stats::StatementStatistics;
 use query::QueryEngineRef;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
@@ -80,11 +81,13 @@ pub struct StatementExecutor {
     partition_manager: PartitionRuleManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
+    stats: StatementStatistics,
 }
 
 pub type StatementExecutorRef = Arc<StatementExecutor>;
 
 impl StatementExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
@@ -93,6 +96,7 @@ impl StatementExecutor {
         cache_invalidator: CacheInvalidatorRef,
         inserter: InserterRef,
         table_route_cache: TableRouteCacheRef,
+        stats: StatementStatistics,
     ) -> Self {
         Self {
             catalog_manager,
@@ -104,6 +108,7 @@ impl StatementExecutor {
             partition_manager: Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache)),
             cache_invalidator,
             inserter,
+            stats,
         }
     }
 
@@ -113,6 +118,7 @@ impl StatementExecutor {
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        let _slow_query_timer = self.stats.start_slow_query_timer(stmt.clone());
         match stmt {
             QueryStatement::Sql(stmt) => self.execute_sql(stmt, query_ctx).await,
             QueryStatement::Promql(_) => self.plan_exec(stmt, query_ctx).await,
@@ -338,10 +344,18 @@ impl StatementExecutor {
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             _ => {
-                return NotSupportedSnafu {
-                    feat: format!("Unsupported set variable {}", var_name),
+                // for postgres, we give unknown SET statements a warning with
+                //  success, this is prevent the SET call becoming a blocker
+                //  of connection establishment
+                //
+                if query_ctx.channel() == Channel::Postgres {
+                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
+                } else {
+                    return NotSupportedSnafu {
+                        feat: format!("Unsupported set variable {}", var_name),
+                    }
+                    .fail();
                 }
-                .fail()
             }
         }
         Ok(Output::new_with_affected_rows(0))
@@ -349,7 +363,7 @@ impl StatementExecutor {
 
     pub async fn plan(
         &self,
-        stmt: QueryStatement,
+        stmt: &QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
         self.query_engine
@@ -357,6 +371,14 @@ impl StatementExecutor {
             .plan(stmt, query_ctx)
             .await
             .context(PlanStatementSnafu)
+    }
+
+    /// Execute [`LogicalPlan`] directly.
+    pub async fn exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
+        self.query_engine
+            .execute(plan, query_ctx)
+            .await
+            .context(ExecLogicalPlanSnafu)
     }
 
     pub fn optimize_logical_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
@@ -368,11 +390,8 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     async fn plan_exec(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Output> {
-        let plan = self.plan(stmt, query_ctx.clone()).await?;
-        self.query_engine
-            .execute(plan, query_ctx)
-            .await
-            .context(ExecLogicalPlanSnafu)
+        let plan = self.plan(&stmt, query_ctx.clone()).await?;
+        self.exec_plan(plan, query_ctx).await
     }
 
     async fn get_table(&self, table_ref: &TableReference<'_>) -> Result<TableRef> {

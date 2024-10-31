@@ -33,7 +33,6 @@ use datafusion_common::TableReference;
 use datafusion_expr::LogicalPlanBuilder;
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{StringVector, Vector};
-use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use servers::query_handler::grpc::GrpcQueryHandlerRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -224,7 +223,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
 
         let output = self
             .query_engine
-            .execute(LogicalPlan::DfPlan(plan), query_ctx(&table_info))
+            .execute(plan, query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
         let stream = match output.data {
@@ -279,7 +278,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
             .context(BuildDfLogicalPlanSnafu)?;
 
         let output = query_engine
-            .execute(LogicalPlan::DfPlan(plan), query_ctx(&table_info))
+            .execute(plan, query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
         let stream = match output.data {

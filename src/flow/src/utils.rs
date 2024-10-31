@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::sync::Arc;
 
-use common_telemetry::debug;
+use common_telemetry::trace;
 use smallvec::{smallvec, SmallVec};
 use tokio::sync::RwLock;
 
@@ -235,9 +235,11 @@ impl Arrangement {
             if let Some(s) = &mut self.expire_state {
                 if let Some(expired_by) = s.get_expire_duration_and_update_event_ts(now, &key)? {
                     max_expired_by = max_expired_by.max(Some(expired_by));
-                    debug!(
+                    trace!(
                         "Expired key: {:?}, expired by: {:?} with time being now={}",
-                        key, expired_by, now
+                        key,
+                        expired_by,
+                        now
                     );
                     continue;
                 }

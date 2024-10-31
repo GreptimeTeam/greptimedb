@@ -20,9 +20,22 @@ linger = "5ms"
 type = 'File'
 data_home = '{data_home}'
 
-[grpc_options]
-addr = '127.0.0.1:4001'
+[grpc]
+addr = '127.0.0.1:29401'
 runtime_size = 8
+
+[mysql]
+enable = true
+addr = "127.0.0.1:29402"
+runtime_size = 2
+
+[mysql.tls]
+mode = "disable"
+
+[postgres]
+enable = true
+addr = "127.0.0.1:29403"
+runtime_size = 2
 
 [procedure]
 max_retry_times = 3

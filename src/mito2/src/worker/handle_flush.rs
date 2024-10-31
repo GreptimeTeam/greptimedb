@@ -36,16 +36,18 @@ impl<S> RegionWorkerLoop<S> {
         request: RegionFlushRequest,
         mut sender: OptionOutputTx,
     ) {
-        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
+        let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
             return;
         };
 
-        let mut task = self.new_flush_task(
-            &region,
-            FlushReason::Manual,
-            request.row_group_size,
-            self.config.clone(),
-        );
+        let reason = if region.is_downgrading() {
+            FlushReason::Downgrading
+        } else {
+            FlushReason::Manual
+        };
+
+        let mut task =
+            self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
         task.push_sender(sender);
         if let Err(e) =
             self.flush_scheduler

@@ -40,6 +40,7 @@ common-wal.workspace = true
 datanode = { workspace = true }
 datatypes.workspace = true
 dotenv.workspace = true
+flate2 = "1.0"
 flow.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
@@ -59,6 +60,7 @@ rstest_reuse.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
 session.workspace = true
+similar-asserts.workspace = true
 snafu.workspace = true
 sql.workspace = true
 sqlx = { version = "0.6", features = [

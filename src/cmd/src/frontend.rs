@@ -36,8 +36,8 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
+use query::stats::StatementStatistics;
 use servers::tls::{TlsMode, TlsOption};
-use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -46,7 +46,7 @@ use crate::error::{
     Result, StartFrontendSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App};
+use crate::{log_versions, App, DistributedInformationExtension};
 
 type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
 
@@ -266,9 +266,10 @@ impl StartCommand {
         info!("Frontend start command: {:#?}", self);
         info!("Frontend options: {:#?}", opts);
 
+        let plugin_opts = opts.plugins;
         let opts = opts.component;
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &opts)
+        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
             .await
             .context(StartFrontendSnafu)?;
 
@@ -315,11 +316,13 @@ impl StartCommand {
             .build(),
         );
 
+        let information_extension =
+            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
         let catalog_manager = KvBackendCatalogManager::new(
-            Mode::Distributed,
-            Some(meta_client.clone()),
+            information_extension,
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
+            None,
         );
 
         let executor = HandlerGroupExecutor::new(vec![
@@ -340,6 +343,8 @@ impl StartCommand {
         // Some queries are expected to take long time.
         let channel_config = ChannelConfig {
             timeout: None,
+            tcp_nodelay: opts.datanode.client.tcp_nodelay,
+            connect_timeout: Some(opts.datanode.client.connect_timeout),
             ..Default::default()
         };
         let client = NodeClients::new(channel_config);
@@ -351,6 +356,7 @@ impl StartCommand {
             catalog_manager,
             Arc::new(client),
             meta_client,
+            StatementStatistics::new(opts.logging.slow_query.clone()),
         )
         .with_plugin(plugins.clone())
         .with_local_cache_invalidator(layered_cache_registry)
@@ -469,7 +475,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
             .await
             .unwrap();
 

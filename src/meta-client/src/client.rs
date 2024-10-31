@@ -15,24 +15,23 @@
 mod ask_leader;
 mod heartbeat;
 mod load_balance;
-mod lock;
 mod procedure;
 
 mod cluster;
 mod store;
 mod util;
 
-use api::v1::meta::Role;
+use api::v1::meta::{ProcedureDetailResponse, Role};
 use cluster::Client as ClusterClient;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cluster::{
     ClusterInfo, MetasrvStatus, NodeInfo, NodeInfoKey, NodeStatus, Role as ClusterRole,
 };
+use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
-use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
 use common_meta::rpc::procedure::{
     MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
 };
@@ -44,7 +43,6 @@ use common_meta::rpc::store::{
 use common_meta::ClusterId;
 use common_telemetry::info;
 use heartbeat::Client as HeartbeatClient;
-use lock::Client as LockClient;
 use procedure::Client as ProcedureClient;
 use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
@@ -66,7 +64,6 @@ pub struct MetaClientBuilder {
     role: Role,
     enable_heartbeat: bool,
     enable_store: bool,
-    enable_lock: bool,
     enable_procedure: bool,
     enable_access_cluster_info: bool,
     channel_manager: Option<ChannelManager>,
@@ -118,13 +115,6 @@ impl MetaClientBuilder {
     pub fn enable_store(self) -> Self {
         Self {
             enable_store: true,
-            ..self
-        }
-    }
-
-    pub fn enable_lock(self) -> Self {
-        Self {
-            enable_lock: true,
             ..self
         }
     }
@@ -187,10 +177,6 @@ impl MetaClientBuilder {
             client.store = Some(StoreClient::new(self.id, self.role, mgr.clone()));
         }
 
-        if self.enable_lock {
-            client.lock = Some(LockClient::new(self.id, self.role, mgr.clone()));
-        }
-
         if self.enable_procedure {
             let mgr = self.ddl_channel_manager.unwrap_or(mgr.clone());
             client.procedure = Some(ProcedureClient::new(
@@ -220,7 +206,6 @@ pub struct MetaClient {
     channel_manager: ChannelManager,
     heartbeat: Option<HeartbeatClient>,
     store: Option<StoreClient>,
-    lock: Option<LockClient>,
     procedure: Option<ProcedureClient>,
     cluster: Option<ClusterClient>,
 }
@@ -255,6 +240,16 @@ impl ProcedureExecutor for MetaClient {
         pid: &str,
     ) -> MetaResult<ProcedureStateResponse> {
         self.query_procedure_state(pid)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
+    async fn list_procedures(&self, _ctx: &ExecutorContext) -> MetaResult<ProcedureDetailResponse> {
+        self.procedure_client()
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?
+            .list_procedures()
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -317,6 +312,28 @@ impl ClusterInfo for MetaClient {
 
         Ok(nodes)
     }
+
+    async fn list_region_stats(&self) -> Result<Vec<RegionStat>> {
+        let cluster_client = self.cluster_client()?;
+        let range_prefix = DatanodeStatKey::key_prefix_with_cluster_id(self.id.0);
+        let req = RangeRequest::new().with_prefix(range_prefix);
+        let mut datanode_stats = cluster_client
+            .range(req)
+            .await?
+            .kvs
+            .into_iter()
+            .map(|kv| DatanodeStatValue::try_from(kv.value).context(ConvertMetaRequestSnafu))
+            .collect::<Result<Vec<_>>>()?;
+        let region_stats = datanode_stats
+            .iter_mut()
+            .flat_map(|datanode_stat| {
+                let last = datanode_stat.stats.pop();
+                last.map(|stat| stat.region_stats).unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+
+        Ok(region_stats)
+    }
 }
 
 impl MetaClient {
@@ -349,10 +366,6 @@ impl MetaClient {
         if let Some(client) = &mut self.store {
             client.start(urls.clone()).await?;
             info!("Store client started");
-        }
-        if let Some(client) = &mut self.lock {
-            client.start(urls.clone()).await?;
-            info!("Lock client started");
         }
         if let Some(client) = &mut self.procedure {
             client.start(urls.clone()).await?;
@@ -449,15 +462,6 @@ impl MetaClient {
             .context(ConvertMetaResponseSnafu)
     }
 
-    pub async fn lock(&self, req: LockRequest) -> Result<LockResponse> {
-        self.lock_client()?.lock(req.into()).await.map(Into::into)
-    }
-
-    pub async fn unlock(&self, req: UnlockRequest) -> Result<()> {
-        let _ = self.lock_client()?.unlock(req.into()).await?;
-        Ok(())
-    }
-
     /// Query the procedure state by its id.
     pub async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse> {
         self.procedure_client()?.query_procedure_state(pid).await
@@ -473,7 +477,7 @@ impl MetaClient {
                 request.region_id,
                 request.from_peer,
                 request.to_peer,
-                request.replay_timeout,
+                request.timeout,
             )
             .await
     }
@@ -502,12 +506,6 @@ impl MetaClient {
     pub fn store_client(&self) -> Result<StoreClient> {
         self.store.clone().context(NotStartedSnafu {
             name: "store_client",
-        })
-    }
-
-    pub fn lock_client(&self) -> Result<LockClient> {
-        self.lock.clone().context(NotStartedSnafu {
-            name: "lock_client",
         })
     }
 

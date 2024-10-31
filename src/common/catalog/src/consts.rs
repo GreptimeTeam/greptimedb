@@ -98,14 +98,20 @@ pub const INFORMATION_SCHEMA_CLUSTER_INFO_TABLE_ID: u32 = 31;
 pub const INFORMATION_SCHEMA_VIEW_TABLE_ID: u32 = 32;
 /// id for information_schema.FLOWS
 pub const INFORMATION_SCHEMA_FLOW_TABLE_ID: u32 = 33;
-/// ----- End of information_schema tables -----
+/// id for information_schema.procedure_info
+pub const INFORMATION_SCHEMA_PROCEDURE_INFO_TABLE_ID: u32 = 34;
+/// id for information_schema.region_statistics
+pub const INFORMATION_SCHEMA_REGION_STATISTICS_TABLE_ID: u32 = 35;
+
+// ----- End of information_schema tables -----
 
 /// ----- Begin of pg_catalog tables -----
 pub const PG_CATALOG_PG_CLASS_TABLE_ID: u32 = 256;
 pub const PG_CATALOG_PG_TYPE_TABLE_ID: u32 = 257;
 pub const PG_CATALOG_PG_NAMESPACE_TABLE_ID: u32 = 258;
 
-/// ----- End of pg_catalog tables -----
+// ----- End of pg_catalog tables -----
+
 pub const MITO_ENGINE: &str = "mito";
 pub const MITO2_ENGINE: &str = "mito2";
 pub const METRIC_ENGINE: &str = "metric";

@@ -19,13 +19,13 @@ use index::inverted_index::search::predicate::{Predicate, RegexMatchPredicate};
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> InvertedIndexApplierBuilder<'a> {
+impl InvertedIndexApplierBuilder<'_> {
     /// Collects a regex match expression in the form of `column ~ pattern`.
     pub(crate) fn collect_regex_match(&mut self, column: &DfExpr, pattern: &DfExpr) -> Result<()> {
         let Some(column_name) = Self::column_name(column) else {
             return Ok(());
         };
-        let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
+        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
             return Ok(());
         };
         if !data_type.is_string() {
@@ -65,7 +65,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -94,7 +94,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -102,7 +102,14 @@ mod tests {
             .collect_regex_match(&field_column(), &string_lit("abc"))
             .unwrap();
 
-        assert!(builder.output.is_empty());
+        let predicates = builder.output.get(&3).unwrap();
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(
+            predicates[0],
+            Predicate::RegexMatch(RegexMatchPredicate {
+                pattern: "abc".to_string()
+            })
+        );
     }
 
     #[test]
@@ -116,7 +123,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -138,7 +145,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 

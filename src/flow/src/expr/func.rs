@@ -16,19 +16,18 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use arrow::array::{ArrayRef, BooleanArray};
 use common_error::ext::BoxedError;
 use common_time::timestamp::TimeUnit;
-use common_time::{DateTime, Timestamp};
+use common_time::Timestamp;
 use datafusion_expr::Operator;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::types::cast;
 use datatypes::value::Value;
-use datatypes::vectors::{
-    BooleanVector, DateTimeVector, Helper, TimestampMillisecondVector, VectorRef,
-};
+use datatypes::vectors::{BooleanVector, Helper, TimestampMillisecondVector, VectorRef};
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -52,8 +51,8 @@ pub enum UnmaterializableFunc {
     CurrentSchema,
     TumbleWindow {
         ts: Box<TypedExpr>,
-        window_size: common_time::Interval,
-        start_time: Option<DateTime>,
+        window_size: Duration,
+        start_time: Option<Timestamp>,
     },
 }
 
@@ -63,7 +62,8 @@ impl UnmaterializableFunc {
         match self {
             Self::Now => Signature {
                 input: smallvec![],
-                output: ConcreteDataType::datetime_datatype(),
+                // TODO(yingwen): Maybe return timestamp.
+                output: ConcreteDataType::timestamp_millisecond_datatype(),
                 generic_fn: GenericFn::Now,
             },
             Self::CurrentSchema => Signature {
@@ -110,12 +110,12 @@ pub enum UnaryFunc {
     StepTimestamp,
     Cast(ConcreteDataType),
     TumbleWindowFloor {
-        window_size: common_time::Interval,
-        start_time: Option<DateTime>,
+        window_size: Duration,
+        start_time: Option<Timestamp>,
     },
     TumbleWindowCeiling {
-        window_size: common_time::Interval,
-        start_time: Option<DateTime>,
+        window_size: Duration,
+        start_time: Option<Timestamp>,
     },
 }
 
@@ -139,8 +139,8 @@ impl UnaryFunc {
                 },
             },
             Self::StepTimestamp => Signature {
-                input: smallvec![ConcreteDataType::datetime_datatype()],
-                output: ConcreteDataType::datetime_datatype(),
+                input: smallvec![ConcreteDataType::timestamp_millisecond_datatype()],
+                output: ConcreteDataType::timestamp_millisecond_datatype(),
                 generic_fn: GenericFn::StepTimestamp,
             },
             Self::Cast(to) => Signature {
@@ -238,19 +238,19 @@ impl UnaryFunc {
                 }
             }
             Self::StepTimestamp => {
-                let datetime_array = get_datetime_array(&arg_col)?;
-                let date_array_ref = datetime_array
+                let timestamp_array = get_timestamp_array(&arg_col)?;
+                let timestamp_array_ref = timestamp_array
                     .as_any()
-                    .downcast_ref::<arrow::array::Date64Array>()
+                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
                     .context({
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::boolean_datatype(),
-                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                            actual: ConcreteDataType::from_arrow_type(timestamp_array.data_type()),
                         }
                     })?;
 
-                let ret = arrow::compute::unary(date_array_ref, |arr| arr + 1);
-                let ret = DateTimeVector::from(ret);
+                let ret = arrow::compute::unary(timestamp_array_ref, |arr| arr + 1);
+                let ret = TimestampMillisecondVector::from(ret);
                 Ok(Arc::new(ret))
             }
             Self::Cast(to) => {
@@ -266,19 +266,19 @@ impl UnaryFunc {
                 window_size,
                 start_time,
             } => {
-                let datetime_array = get_datetime_array(&arg_col)?;
-                let date_array_ref = datetime_array
+                let timestamp_array = get_timestamp_array(&arg_col)?;
+                let date_array_ref = timestamp_array
                     .as_any()
-                    .downcast_ref::<arrow::array::Date64Array>()
+                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
                     .context({
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::boolean_datatype(),
-                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                            actual: ConcreteDataType::from_arrow_type(timestamp_array.data_type()),
                         }
                     })?;
 
-                let start_time = start_time.map(|t| t.val());
-                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+                let start_time = start_time.map(|t| t.value());
+                let window_size = window_size.as_millis() as repr::Duration;
 
                 let ret = arrow::compute::unary(date_array_ref, |ts| {
                     get_window_start(ts, window_size, start_time)
@@ -291,19 +291,19 @@ impl UnaryFunc {
                 window_size,
                 start_time,
             } => {
-                let datetime_array = get_datetime_array(&arg_col)?;
-                let date_array_ref = datetime_array
+                let timestamp_array = get_timestamp_array(&arg_col)?;
+                let date_array_ref = timestamp_array
                     .as_any()
-                    .downcast_ref::<arrow::array::Date64Array>()
+                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
                     .context({
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::boolean_datatype(),
-                            actual: ConcreteDataType::from_arrow_type(datetime_array.data_type()),
+                            actual: ConcreteDataType::from_arrow_type(timestamp_array.data_type()),
                         }
                     })?;
 
-                let start_time = start_time.map(|t| t.val());
-                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+                let start_time = start_time.map(|t| t.value());
+                let window_size = window_size.as_millis() as repr::Duration;
 
                 let ret = arrow::compute::unary(date_array_ref, |ts| {
                     get_window_start(ts, window_size, start_time) + window_size
@@ -330,19 +330,20 @@ impl UnaryFunc {
                     })?;
                     if let Some(window_size) = window_size_untyped.as_string() {
                         // cast as interval
-                        cast(
+                        let interval = cast(
                             Value::from(window_size),
-                            &ConcreteDataType::interval_month_day_nano_datatype(),
+                            &ConcreteDataType::interval_day_time_datatype(),
                         )
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?
-                        .as_interval()
+                        .as_interval_day_time()
                         .context(UnexpectedSnafu {
                             reason: "Expect window size arg to be interval after successful cast"
                                 .to_string(),
-                        })?
-                    } else if let Some(interval) = window_size_untyped.as_interval() {
-                        interval
+                        })?;
+                        Duration::from_millis(interval.as_millis() as u64)
+                    } else if let Some(interval) = window_size_untyped.as_interval_day_time() {
+                        Duration::from_millis(interval.as_millis() as u64)
                     } else {
                         InvalidQuerySnafu {
                                 reason: format!(
@@ -357,16 +358,19 @@ impl UnaryFunc {
                 let start_time = match args.get(2) {
                     Some(start_time) => {
                         if let Some(value) = start_time.expr.as_literal() {
-                            // cast as DateTime
-                            let ret = cast(value, &ConcreteDataType::datetime_datatype())
-                                .map_err(BoxedError::new)
-                                .context(ExternalSnafu)?
-                                .as_datetime()
-                                .context(UnexpectedSnafu {
-                                    reason:
-                                        "Expect start time arg to be datetime after successful cast"
-                                            .to_string(),
-                                })?;
+                            // cast as timestamp
+                            let ret = cast(
+                                value,
+                                &ConcreteDataType::timestamp_millisecond_datatype(),
+                            )
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)?
+                            .as_timestamp()
+                            .context(UnexpectedSnafu {
+                                reason:
+                                    "Expect start time arg to be timestamp after successful cast"
+                                        .to_string(),
+                            })?;
                             Some(ret)
                         } else {
                             UnexpectedSnafu {
@@ -446,15 +450,15 @@ impl UnaryFunc {
             }
             Self::StepTimestamp => {
                 let ty = arg.data_type();
-                if let Value::DateTime(datetime) = arg {
-                    let datetime = DateTime::from(datetime.val() + 1);
-                    Ok(Value::from(datetime))
+                if let Value::Timestamp(timestamp) = arg {
+                    let timestamp = Timestamp::new_millisecond(timestamp.value() + 1);
+                    Ok(Value::from(timestamp))
                 } else if let Ok(v) = value_to_internal_ts(arg) {
-                    let datetime = DateTime::from(v + 1);
-                    Ok(Value::from(datetime))
+                    let timestamp = Timestamp::new_millisecond(v + 1);
+                    Ok(Value::from(timestamp))
                 } else {
                     TypeMismatchSnafu {
-                        expected: ConcreteDataType::datetime_datatype(),
+                        expected: ConcreteDataType::timestamp_millisecond_datatype(),
                         actual: ty,
                     }
                     .fail()?
@@ -474,8 +478,8 @@ impl UnaryFunc {
                 start_time,
             } => {
                 let ts = get_ts_as_millisecond(arg)?;
-                let start_time = start_time.map(|t| t.val());
-                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+                let start_time = start_time.map(|t| t.value());
+                let window_size = window_size.as_millis() as repr::Duration;
                 let window_start = get_window_start(ts, window_size, start_time);
 
                 let ret = Timestamp::new_millisecond(window_start);
@@ -486,8 +490,8 @@ impl UnaryFunc {
                 start_time,
             } => {
                 let ts = get_ts_as_millisecond(arg)?;
-                let start_time = start_time.map(|t| t.val());
-                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+                let start_time = start_time.map(|t| t.value());
+                let window_size = window_size.as_millis() as repr::Duration;
                 let window_start = get_window_start(ts, window_size, start_time);
 
                 let window_end = window_start + window_size;
@@ -498,21 +502,22 @@ impl UnaryFunc {
     }
 }
 
-fn get_datetime_array(vector: &VectorRef) -> Result<arrow::array::ArrayRef, EvalError> {
+fn get_timestamp_array(vector: &VectorRef) -> Result<arrow::array::ArrayRef, EvalError> {
     let arrow_array = vector.to_arrow_array();
-    let datetime_array =
-        if *arrow_array.data_type() == ConcreteDataType::datetime_datatype().as_arrow_type() {
-            arrow_array
-        } else {
-            arrow::compute::cast(
-                &arrow_array,
-                &ConcreteDataType::datetime_datatype().as_arrow_type(),
-            )
-            .context(ArrowSnafu {
-                context: "Trying to cast to datetime in StepTimestamp",
-            })?
-        };
-    Ok(datetime_array)
+    let timestamp_array = if *arrow_array.data_type()
+        == ConcreteDataType::timestamp_millisecond_datatype().as_arrow_type()
+    {
+        arrow_array
+    } else {
+        arrow::compute::cast(
+            &arrow_array,
+            &ConcreteDataType::timestamp_millisecond_datatype().as_arrow_type(),
+        )
+        .context(ArrowSnafu {
+            context: "Trying to cast to timestamp in StepTimestamp",
+        })?
+    };
+    Ok(timestamp_array)
 }
 
 fn get_window_start(
@@ -967,7 +972,7 @@ impl BinaryFunc {
             | Self::DivUInt32
             | Self::DivUInt64
             | Self::DivFloat32
-            | Self::DivFloat64 => arrow::compute::kernels::numeric::mul(&left, &right)
+            | Self::DivFloat64 => arrow::compute::kernels::numeric::div(&left, &right)
                 .context(ArrowSnafu { context: "div" })?,
 
             Self::ModInt16
@@ -1280,119 +1285,195 @@ where
     Ok(Value::from(left % right))
 }
 
-#[test]
-fn test_num_ops() {
-    let left = Value::from(10);
-    let right = Value::from(3);
-    let res = add::<i32>(left.clone(), right.clone()).unwrap();
-    assert_eq!(res, Value::from(13));
-    let res = sub::<i32>(left.clone(), right.clone()).unwrap();
-    assert_eq!(res, Value::from(7));
-    let res = mul::<i32>(left.clone(), right.clone()).unwrap();
-    assert_eq!(res, Value::from(30));
-    let res = div::<i32>(left.clone(), right.clone()).unwrap();
-    assert_eq!(res, Value::from(3));
-    let res = rem::<i32>(left, right).unwrap();
-    assert_eq!(res, Value::from(1));
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
 
-    let values = vec![Value::from(true), Value::from(false)];
-    let exprs = vec![ScalarExpr::Column(0), ScalarExpr::Column(1)];
-    let res = and(&values, &exprs).unwrap();
-    assert_eq!(res, Value::from(false));
-    let res = or(&values, &exprs).unwrap();
-    assert_eq!(res, Value::from(true));
-}
+    use datatypes::vectors::Vector;
+    use pretty_assertions::assert_eq;
 
-/// test if the binary function specialization works
-/// whether from direct type or from the expression that is literal
-#[test]
-fn test_binary_func_spec() {
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
-            &[
-                Some(ConcreteDataType::int32_datatype()),
-                Some(ConcreteDataType::int32_datatype())
-            ]
-        )
-        .unwrap(),
-        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
-    );
+    use super::*;
 
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
-            &[Some(ConcreteDataType::int32_datatype()), None]
-        )
-        .unwrap(),
-        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
-    );
+    #[test]
+    fn test_tumble_batch() {
+        let timestamp_vector = TimestampMillisecondVector::from_vec(vec![1, 2, 10, 13, 14, 20, 25]);
+        let tumble_start = UnaryFunc::TumbleWindowFloor {
+            window_size: Duration::from_millis(10),
+            start_time: None,
+        };
+        let tumble_end = UnaryFunc::TumbleWindowCeiling {
+            window_size: Duration::from_millis(10),
+            start_time: None,
+        };
 
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
-            &[Some(ConcreteDataType::int32_datatype()), None]
-        )
-        .unwrap(),
-        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
-    );
+        let len = timestamp_vector.len();
+        let batch = Batch::try_new(vec![Arc::new(timestamp_vector)], len).unwrap();
+        let arg = ScalarExpr::Column(0);
 
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
-            &[Some(ConcreteDataType::int32_datatype()), None]
-        )
-        .unwrap(),
-        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
-    );
+        let start = tumble_start.eval_batch(&batch, &arg).unwrap();
+        let end = tumble_end.eval_batch(&batch, &arg).unwrap();
+        assert_eq!(
+            start.to_arrow_array().as_ref(),
+            TimestampMillisecondVector::from_vec(vec![0, 0, 10, 10, 10, 20, 20])
+                .to_arrow_array()
+                .as_ref()
+        );
 
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[
-                ScalarExpr::Literal(Value::from(1i32), ConcreteDataType::int32_datatype()),
-                ScalarExpr::Column(0)
-            ],
-            &[None, None]
-        )
-        .unwrap(),
-        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
-    );
+        assert_eq!(
+            end.to_arrow_array().as_ref(),
+            TimestampMillisecondVector::from_vec(vec![10, 10, 20, 20, 20, 30, 30])
+                .to_arrow_array()
+                .as_ref()
+        );
 
-    // this testcase make sure the specialization can find actual type from expression and fill in signature
-    assert_eq!(
-        BinaryFunc::from_str_expr_and_type(
-            "equal",
-            &[
-                ScalarExpr::Literal(Value::from(1i32), ConcreteDataType::int32_datatype()),
-                ScalarExpr::Column(0)
-            ],
-            &[None, None]
-        )
-        .unwrap(),
-        (
-            BinaryFunc::Eq,
-            Signature {
-                input: smallvec![
-                    ConcreteDataType::int32_datatype(),
-                    ConcreteDataType::int32_datatype()
+        let ts_ms_vector = TimestampMillisecondVector::from_vec(vec![1, 2, 10, 13, 14, 20, 25]);
+        let batch = Batch::try_new(vec![Arc::new(ts_ms_vector)], len).unwrap();
+
+        let start = tumble_start.eval_batch(&batch, &arg).unwrap();
+        let end = tumble_end.eval_batch(&batch, &arg).unwrap();
+
+        assert_eq!(
+            start.to_arrow_array().as_ref(),
+            TimestampMillisecondVector::from_vec(vec![0, 0, 10, 10, 10, 20, 20])
+                .to_arrow_array()
+                .as_ref()
+        );
+
+        assert_eq!(
+            end.to_arrow_array().as_ref(),
+            TimestampMillisecondVector::from_vec(vec![10, 10, 20, 20, 20, 30, 30])
+                .to_arrow_array()
+                .as_ref()
+        );
+    }
+
+    #[test]
+    fn test_num_ops() {
+        let left = Value::from(10);
+        let right = Value::from(3);
+        let res = add::<i32>(left.clone(), right.clone()).unwrap();
+        assert_eq!(res, Value::from(13));
+        let res = sub::<i32>(left.clone(), right.clone()).unwrap();
+        assert_eq!(res, Value::from(7));
+        let res = mul::<i32>(left.clone(), right.clone()).unwrap();
+        assert_eq!(res, Value::from(30));
+        let res = div::<i32>(left.clone(), right.clone()).unwrap();
+        assert_eq!(res, Value::from(3));
+        let res = rem::<i32>(left, right).unwrap();
+        assert_eq!(res, Value::from(1));
+
+        let values = vec![Value::from(true), Value::from(false)];
+        let exprs = vec![ScalarExpr::Column(0), ScalarExpr::Column(1)];
+        let res = and(&values, &exprs).unwrap();
+        assert_eq!(res, Value::from(false));
+        let res = or(&values, &exprs).unwrap();
+        assert_eq!(res, Value::from(true));
+    }
+
+    /// test if the binary function specialization works
+    /// whether from direct type or from the expression that is literal
+    #[test]
+    fn test_binary_func_spec() {
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+                &[
+                    Some(ConcreteDataType::int32_datatype()),
+                    Some(ConcreteDataType::int32_datatype())
+                ]
+            )
+            .unwrap(),
+            (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
+        );
+
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+                &[Some(ConcreteDataType::int32_datatype()), None]
+            )
+            .unwrap(),
+            (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
+        );
+
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+                &[Some(ConcreteDataType::int32_datatype()), None]
+            )
+            .unwrap(),
+            (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
+        );
+
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+                &[Some(ConcreteDataType::int32_datatype()), None]
+            )
+            .unwrap(),
+            (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
+        );
+
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[
+                    ScalarExpr::Literal(Value::from(1i32), ConcreteDataType::int32_datatype()),
+                    ScalarExpr::Column(0)
                 ],
-                output: ConcreteDataType::boolean_datatype(),
-                generic_fn: GenericFn::Eq
-            }
-        )
-    );
+                &[None, None]
+            )
+            .unwrap(),
+            (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
+        );
 
-    matches!(
-        BinaryFunc::from_str_expr_and_type(
-            "add",
-            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
-            &[None, None]
-        ),
-        Err(Error::InvalidQuery { .. })
-    );
+        // this testcase make sure the specialization can find actual type from expression and fill in signature
+        assert_eq!(
+            BinaryFunc::from_str_expr_and_type(
+                "equal",
+                &[
+                    ScalarExpr::Literal(Value::from(1i32), ConcreteDataType::int32_datatype()),
+                    ScalarExpr::Column(0)
+                ],
+                &[None, None]
+            )
+            .unwrap(),
+            (
+                BinaryFunc::Eq,
+                Signature {
+                    input: smallvec![
+                        ConcreteDataType::int32_datatype(),
+                        ConcreteDataType::int32_datatype()
+                    ],
+                    output: ConcreteDataType::boolean_datatype(),
+                    generic_fn: GenericFn::Eq
+                }
+            )
+        );
+
+        matches!(
+            BinaryFunc::from_str_expr_and_type(
+                "add",
+                &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+                &[None, None]
+            ),
+            Err(Error::InvalidQuery { .. })
+        );
+    }
+
+    #[test]
+    fn test_cast_int() {
+        let interval = cast(
+            Value::from("1 second"),
+            &ConcreteDataType::interval_day_time_datatype(),
+        )
+        .unwrap();
+        assert_eq!(
+            interval,
+            Value::from(common_time::IntervalDayTime::new(0, 1000))
+        );
+    }
 }

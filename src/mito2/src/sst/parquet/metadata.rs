@@ -35,7 +35,11 @@ pub(crate) struct MetadataLoader<'a> {
 
 impl<'a> MetadataLoader<'a> {
     /// Create a new parquet metadata loader.
-    pub fn new(object_store: ObjectStore, file_path: &'a str, file_size: u64) -> MetadataLoader {
+    pub fn new(
+        object_store: ObjectStore,
+        file_path: &'a str,
+        file_size: u64,
+    ) -> MetadataLoader<'a> {
         Self {
             object_store,
             file_path,
