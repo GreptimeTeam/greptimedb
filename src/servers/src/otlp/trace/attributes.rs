@@ -121,9 +121,9 @@ impl From<&[KeyValue]> for Attributes {
     }
 }
 
-impl Into<jsonb::Value<'_>> for Attributes {
-    fn into(self) -> jsonb::Value<'static> {
-        key_value_to_jsonb(self.0)
+impl From<Attributes> for jsonb::Value<'static> {
+    fn from(attrs: Attributes) -> jsonb::Value<'static> {
+        key_value_to_jsonb(attrs.0)
     }
 }
 

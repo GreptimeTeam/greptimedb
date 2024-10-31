@@ -1594,18 +1594,18 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // select traces data
-    let expected = r#"[["b5e5fb572cf0a3335dd194a14145fef5","3364d2da58c9fd2b","","{\"service.name\":\"telemetrygen\"}","telemetrygen","","{}","","lets-go","SPAN_KIND_CLIENT","STATUS_CODE_UNSET","","{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-server\"}","[]","[]",1726631197820927000,1726631197821050000,0.123,1726631197820927000],["b5e5fb572cf0a3335dd194a14145fef5","74c82efa6f628e80","3364d2da58c9fd2b","{\"service.name\":\"telemetrygen\"}","telemetrygen","","{}","","okey-dokey-0","SPAN_KIND_SERVER","STATUS_CODE_UNSET","","{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-client\"}","[]","[]",1726631197820927000,1726631197821050000,0.123,1726631197820927000]]"#;
+    let expected = r#"[["b5e5fb572cf0a3335dd194a14145fef5","3364d2da58c9fd2b","",{"service.name":"telemetrygen"},{},{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","","","lets-go","SPAN_KIND_CLIENT","STATUS_CODE_UNSET","",1726631197820927000,1726631197821050000,0.123,1726631197820927000],["b5e5fb572cf0a3335dd194a14145fef5","74c82efa6f628e80","3364d2da58c9fd2b",{"service.name":"telemetrygen"},{},{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","","","okey-dokey-0","SPAN_KIND_SERVER","STATUS_CODE_UNSET","",1726631197820927000,1726631197821050000,0.123,1726631197820927000]]"#;
     validate_data(
         "otlp_traces",
         &client,
-        "select * from traces_preview_v01;",
+        "select * from opentelemetry_traces;",
         expected,
     )
     .await;
 
     // drop table
     let res = client
-        .get("/v1/sql?sql=drop table traces_preview_v01;")
+        .get("/v1/sql?sql=drop table opentelemetry_traces;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -1618,7 +1618,7 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     validate_data(
         "otlp_traces_with_gzip",
         &client,
-        "select * from traces_preview_v01;",
+        "select * from opentelemetry_traces;",
         expected,
     )
     .await;

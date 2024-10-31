@@ -34,6 +34,8 @@ use crate::error::{
     IncompatibleSchemaSnafu, OpenTelemetryLogSnafu, Result, UnsupportedJsonDataTypeForTagSnafu,
 };
 
+pub const LOG_TABLE_NAME: &str = "opentelemetry_logs";
+
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
 ///
 /// See

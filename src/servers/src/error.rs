@@ -527,6 +527,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Missing table name"))]
+    MissingTableName {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid table name"))]
+    InvalidTableName {
+        #[snafu(source)]
+        error: tonic::metadata::errors::ToStrError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to initialize a watcher for file {}", path))]
     FileWatch {
         path: String,
@@ -620,7 +634,9 @@ impl ErrorExt for Error {
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }
             | OpenTelemetryLog { .. }
-            | UnsupportedJsonDataTypeForTag { .. } => StatusCode::InvalidArguments,
+            | UnsupportedJsonDataTypeForTag { .. }
+            | MissingTableName { .. }
+            | InvalidTableName { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),

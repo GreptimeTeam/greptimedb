@@ -23,7 +23,7 @@ use crate::error::Result;
 use crate::row_writer::{self, MultiTableData, TableData};
 
 const APPROXIMATE_COLUMN_COUNT: usize = 24;
-pub const TRACE_TABLE_NAME: &str = "traces_preview_v01";
+pub const TRACE_TABLE_NAME: &str = "opentelemetry_traces";
 
 pub mod attributes;
 pub mod span;
@@ -120,6 +120,26 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
                 ValueData::TimestampNanosecondValue(val as i64),
             )
         });
+        row_writer::write_json(
+            writer,
+            "resource_attributes",
+            span.resource_attributes.into(),
+            &mut row,
+        )?;
+        row_writer::write_json(
+            writer,
+            "scope_attributes",
+            span.scope_attributes.into(),
+            &mut row,
+        )?;
+        row_writer::write_json(
+            writer,
+            "span_attributes",
+            span.span_attributes.into(),
+            &mut row,
+        )?;
+        row_writer::write_json(writer, "span_events", span.span_events.into(), &mut row)?;
+        row_writer::write_json(writer, "span_links", span.span_links.into(), &mut row)?;
 
         row_writer::write_fields(writer, str_fields_iter, &mut row)?;
         row_writer::write_fields(writer, time_fields_iter, &mut row)?;

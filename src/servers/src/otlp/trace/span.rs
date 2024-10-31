@@ -73,6 +73,30 @@ impl From<Link> for SpanLink {
     }
 }
 
+impl From<SpanLink> for jsonb::Value<'static> {
+    fn from(value: SpanLink) -> jsonb::Value<'static> {
+        jsonb::Value::Object(
+            vec![
+                (
+                    "trace_id".to_string(),
+                    jsonb::Value::String(value.trace_id.into()),
+                ),
+                (
+                    "span_id".to_string(),
+                    jsonb::Value::String(value.span_id.into()),
+                ),
+                (
+                    "trace_state".to_string(),
+                    jsonb::Value::String(value.trace_state.into()),
+                ),
+                ("attributes".to_string(), value.attributes.into()),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SpanLinks(Vec<SpanLink>);
 
@@ -80,6 +104,12 @@ impl From<Vec<Link>> for SpanLinks {
     fn from(value: Vec<Link>) -> Self {
         let links = value.into_iter().map(SpanLink::from).collect_vec();
         Self(links)
+    }
+}
+
+impl From<SpanLinks> for jsonb::Value<'static> {
+    fn from(value: SpanLinks) -> jsonb::Value<'static> {
+        jsonb::Value::Array(value.0.into_iter().map(Into::into).collect())
     }
 }
 
@@ -116,6 +146,20 @@ impl From<Event> for SpanEvent {
     }
 }
 
+impl From<SpanEvent> for jsonb::Value<'static> {
+    fn from(value: SpanEvent) -> jsonb::Value<'static> {
+        jsonb::Value::Object(
+            vec![
+                ("name".to_string(), jsonb::Value::String(value.name.into())),
+                ("time".to_string(), jsonb::Value::String(value.time.into())),
+                ("attributes".to_string(), value.attributes.into()),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SpanEvents(Vec<SpanEvent>);
 
@@ -123,6 +167,12 @@ impl From<Vec<Event>> for SpanEvents {
     fn from(value: Vec<Event>) -> Self {
         let events = value.into_iter().map(SpanEvent::from).collect_vec();
         Self(events)
+    }
+}
+
+impl From<SpanEvents> for jsonb::Value<'static> {
+    fn from(value: SpanEvents) -> jsonb::Value<'static> {
+        jsonb::Value::Array(value.0.into_iter().map(Into::into).collect())
     }
 }
 
