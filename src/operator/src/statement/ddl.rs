@@ -59,6 +59,7 @@ use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use store_api::mito_engine_options::TTL_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
@@ -238,6 +239,9 @@ impl StatementExecutor {
             &create_table.schema_name,
             &create_table.table_name,
         );
+
+        // fill schema options in create table expr;
+        fill_schema_opts(create_table, &schema_opts);
 
         let (partitions, partition_cols) = parse_partitions(create_table, partitions, &query_ctx)?;
         let mut table_info = create_table_info(create_table, partition_cols, schema_opts)?;
@@ -1221,6 +1225,13 @@ impl StatementExecutor {
             .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
+    }
+}
+
+/// Fills schema-level options to [CreateTableExpr].
+fn fill_schema_opts(expr: &mut CreateTableExpr, schema: &SchemaNameValue) {
+    if let Some(ttl) = schema.human_ttl() {
+        expr.table_options.insert(TTL_KEY.to_string(), ttl);
     }
 }
 

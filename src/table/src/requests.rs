@@ -218,30 +218,6 @@ pub enum AlterKind {
     },
 }
 
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// pub enum ChangeTableOptionRequest {
-//     TTL(Duration),
-// }
-
-// impl TryFrom<&ChangeTableOption> for ChangeTableOptionRequest {
-//     type Error = Error;
-//
-//     fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
-//         let ChangeTableOption { key, value } = value;
-//         if key == TTL_KEY {
-//             let ttl = if value.is_empty() {
-//                 Duration::from_secs(0)
-//             } else {
-//                 humantime::parse_duration(value)
-//                     .map_err(|_| error::InvalidTableOptionValueSnafu { key, value }.build())?
-//             };
-//             Ok(Self::TTL(ttl))
-//         } else {
-//             UnsupportedTableOptionChangeSnafu { key }.fail()
-//         }
-//     }
-// }
-
 #[derive(Debug)]
 pub struct InsertRequest {
     pub catalog_name: String,

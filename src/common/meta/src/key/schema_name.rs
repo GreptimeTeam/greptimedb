@@ -57,6 +57,13 @@ pub struct SchemaNameValue {
     pub ttl: Option<Duration>,
 }
 
+impl SchemaNameValue {
+    /// Returns human-readable format of ttl field.
+    pub fn human_ttl(&self) -> Option<String> {
+        self.ttl.map(|v| humantime::format_duration(v).to_string())
+    }
+}
+
 impl Display for SchemaNameValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(ttl) = self.ttl {
