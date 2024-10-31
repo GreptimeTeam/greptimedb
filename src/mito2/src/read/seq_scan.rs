@@ -355,7 +355,12 @@ fn build_sources(
     sources.reserve(range_meta.row_group_indices.len());
     for index in &range_meta.row_group_indices {
         let stream = if stream_ctx.is_mem_range_index(*index) {
-            let stream = scan_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index);
+            let stream = scan_mem_ranges(
+                stream_ctx.clone(),
+                part_metrics.clone(),
+                *index,
+                range_meta.time_range,
+            );
             Box::pin(stream) as _
         } else {
             let read_type = if compaction {

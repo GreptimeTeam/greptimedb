@@ -124,16 +124,6 @@ impl MemtableBuilder for EmptyMemtableBuilder {
     }
 }
 
-/// Empty iterator builder.
-#[derive(Default)]
-pub(crate) struct EmptyIterBuilder {}
-
-impl IterBuilder for EmptyIterBuilder {
-    fn build(&self) -> Result<BoxedBatchIterator> {
-        Ok(Box::new(std::iter::empty()))
-    }
-}
-
 /// Creates a region metadata to test memtable with default pk.
 ///
 /// The schema is `k0, k1, ts, v0, v1` and pk is `k0, k1`.

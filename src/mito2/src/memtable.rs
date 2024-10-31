@@ -34,8 +34,10 @@ pub use crate::memtable::key_values::KeyValues;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
+use crate::read::prune::PruneTimeIterator;
 use crate::read::Batch;
 use crate::region::options::{MemtableOptions, MergeMode};
+use crate::sst::file::FileTimeRange;
 
 pub mod bulk;
 pub mod key_values;
@@ -355,8 +357,10 @@ impl MemtableRange {
     }
 
     /// Builds an iterator to read the range.
-    pub fn build_iter(&self) -> Result<BoxedBatchIterator> {
-        self.context.builder.build()
+    /// Filters the result by the specific time range.
+    pub fn build_iter(&self, time_range: FileTimeRange) -> Result<BoxedBatchIterator> {
+        let iter = self.context.builder.build()?;
+        Ok(Box::new(PruneTimeIterator::new(iter, time_range)))
     }
 }
 
