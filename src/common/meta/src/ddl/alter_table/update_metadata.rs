@@ -20,7 +20,7 @@ use table::requests::AlterKind;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::error::{self, Result};
 use crate::key::table_info::TableInfoValue;
-use crate::key::DeserializedValueWithBytes;
+use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 
 impl AlterTableProcedure {
     /// Builds new_meta
@@ -51,7 +51,9 @@ impl AlterTableProcedure {
             AlterKind::RenameTable { new_table_name } => {
                 new_info.name = new_table_name.to_string();
             }
-            AlterKind::DropColumns { .. } | AlterKind::ChangeColumnTypes { .. } => {}
+            AlterKind::DropColumns { .. }
+            | AlterKind::ChangeColumnTypes { .. }
+            | AlterKind::ChangeTableOptions { .. } => {}
         }
 
         Ok(new_info)
@@ -75,11 +77,16 @@ impl AlterTableProcedure {
     pub(crate) async fn on_update_metadata_for_alter(
         &self,
         new_table_info: RawTableInfo,
+        region_distribution: RegionDistribution,
         current_table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
     ) -> Result<()> {
         let table_metadata_manager = &self.context.table_metadata_manager;
         table_metadata_manager
-            .update_table_info(current_table_info_value, new_table_info)
+            .update_table_info(
+                current_table_info_value,
+                Some(region_distribution),
+                new_table_info,
+            )
             .await?;
 
         Ok(())

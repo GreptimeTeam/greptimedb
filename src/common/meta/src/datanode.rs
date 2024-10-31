@@ -78,17 +78,21 @@ pub struct RegionStat {
     /// The write capacity units during this period
     pub wcus: i64,
     /// Approximate bytes of this region
-    pub approximate_bytes: i64,
+    pub approximate_bytes: u64,
     /// The engine name.
     pub engine: String,
     /// The region role.
     pub role: RegionRole,
+    /// The number of rows
+    pub num_rows: u64,
     /// The size of the memtable in bytes.
     pub memtable_size: u64,
     /// The size of the manifest in bytes.
     pub manifest_size: u64,
-    /// The size of the SST files in bytes.
+    /// The size of the SST data files in bytes.
     pub sst_size: u64,
+    /// The size of the SST index files in bytes.
+    pub index_size: u64,
 }
 
 impl Stat {
@@ -178,12 +182,14 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             id: RegionId::from_u64(value.region_id),
             rcus: value.rcus,
             wcus: value.wcus,
-            approximate_bytes: value.approximate_bytes,
+            approximate_bytes: value.approximate_bytes as u64,
             engine: value.engine.to_string(),
             role: RegionRole::from(value.role()),
+            num_rows: region_stat.num_rows,
             memtable_size: region_stat.memtable_size,
             manifest_size: region_stat.manifest_size,
             sst_size: region_stat.sst_size,
+            index_size: region_stat.index_size,
         }
     }
 }

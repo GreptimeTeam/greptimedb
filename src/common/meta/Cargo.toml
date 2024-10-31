@@ -60,7 +60,7 @@ table.workspace = true
 tokio.workspace = true
 tokio-postgres = { workspace = true, optional = true }
 tonic.workspace = true
-typetag = "0.2"
+typetag.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

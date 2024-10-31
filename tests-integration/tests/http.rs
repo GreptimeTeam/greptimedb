@@ -660,6 +660,29 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
     assert_eq!(body.status, "success");
 
+    // parse_query
+    let res = client
+        .get("/v1/prometheus/api/v1/parse_query?query=http_requests")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let data = res.text().await;
+    // we don't have deserialization for ast so we keep test simple and compare
+    //  the json output directly.
+    // the correctness should be covered by parser. In this test we only check
+    //  response format.
+    let expected = "{\"status\":\"success\",\"data\":{\"type\":\"vectorSelector\",\"name\":\"http_requests\",\"matchers\":[],\"offset\":0,\"startOrEnd\":null,\"timestamp\":null}}";
+    assert_eq!(expected, data);
+
+    let res = client
+        .get("/v1/prometheus/api/v1/parse_query?query=not http_requests")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let data = res.text().await;
+    let expected = "{\"status\":\"error\",\"data\":{\"resultType\":\"\",\"result\":[]},\"error\":\"invalid promql query\",\"errorType\":\"InvalidArguments\"}";
+    assert_eq!(expected, data);
+
     guard.remove_all().await;
 }
 

@@ -64,6 +64,7 @@ store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 approx_eq = "0.1"

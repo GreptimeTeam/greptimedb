@@ -21,10 +21,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use arrow::array::types::{
-    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-    TimestampSecondType,
-};
 use arrow::array::{Array, ArrayRef, PrimitiveArray};
 use arrow::compute::SortColumn;
 use arrow_schema::{DataType, SchemaRef, SortOptions};
@@ -58,30 +54,57 @@ use crate::error::{QueryExecutionSnafu, Result};
 ///
 /// internally, it call [`streaming_merge`] multiple times to merge multiple sorted "working ranges"
 ///
-/// the input stream must be concated in the order of `PartitionRange` in `ranges`(and each `PartitionRange` is sorted within itself), or else the result will be incorrect
+/// # Invariant Promise on Input Stream
+/// 1. The input stream must be sorted by timestamp and
+/// 2. in the order of `PartitionRange` in `ranges`
+/// 3. Each `PartitionRange` is sorted within itself(ascending or descending) but no need to be sorted across ranges
+/// 4. There can't be any RecordBatch that is cross multiple `PartitionRange` in the input stream
+///
+///  TODO(discord9): fix item 4, but since only use `PartSort` as input, this might not be a problem
+
 #[derive(Debug, Clone)]
 pub struct WindowedSortExec {
     /// Physical sort expressions(that is, sort by timestamp)
     expression: PhysicalSortExpr,
     /// Optional number of rows to fetch. Stops producing rows after this fetch
     fetch: Option<usize>,
-    /// The input ranges indicate input stream will be composed of those ranges in given order
-    ranges: Vec<PartitionRange>,
+    /// The input ranges indicate input stream will be composed of those ranges in given order.
+    ///
+    /// Each partition has one vector of `PartitionRange`.
+    ranges: Vec<Vec<PartitionRange>>,
     /// All available working ranges and their corresponding working set
     ///
-    /// working ranges promise once input stream get a value out of current range, future values will never be in this range
-    all_avail_working_range: Vec<(TimeRange, BTreeSet<usize>)>,
+    /// working ranges promise once input stream get a value out of current range, future values will never
+    /// be in this range. Each partition has one vector of ranges.
+    all_avail_working_range: Vec<Vec<(TimeRange, BTreeSet<usize>)>>,
     input: Arc<dyn ExecutionPlan>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
     properties: PlanProperties,
 }
 
-fn check_partition_range_monotonicity(ranges: &[PartitionRange], descending: bool) -> bool {
-    if descending {
-        ranges.windows(2).all(|w| w[0].end >= w[1].end)
+fn check_partition_range_monotonicity(
+    ranges: &[Vec<PartitionRange>],
+    descending: bool,
+) -> Result<()> {
+    let is_valid = ranges.iter().all(|r| {
+        if descending {
+            r.windows(2).all(|w| w[0].end >= w[1].end)
+        } else {
+            r.windows(2).all(|w| w[0].start <= w[1].start)
+        }
+    });
+
+    if !is_valid {
+        let msg = if descending {
+            "Input `PartitionRange`s's upper bound is not monotonic non-increase"
+        } else {
+            "Input `PartitionRange`s's lower bound is not monotonic non-decrease"
+        };
+        let plain_error = PlainError::new(msg.to_string(), StatusCode::Unexpected);
+        Err(BoxedError::new(plain_error)).context(QueryExecutionSnafu {})
     } else {
-        ranges.windows(2).all(|w| w[0].start <= w[1].start)
+        Ok(())
     }
 }
 
@@ -89,28 +112,28 @@ impl WindowedSortExec {
     pub fn try_new(
         expression: PhysicalSortExpr,
         fetch: Option<usize>,
-        ranges: Vec<PartitionRange>,
+        ranges: Vec<Vec<PartitionRange>>,
         input: Arc<dyn ExecutionPlan>,
     ) -> Result<Self> {
-        if !check_partition_range_monotonicity(&ranges, expression.options.descending) {
-            let msg = if expression.options.descending {
-                "Input `PartitionRange`s's upper bound is not monotonic non-increase"
-            } else {
-                "Input `PartitionRange`s's lower bound is not monotonic non-decrease"
-            };
-            let plain_error = PlainError::new(msg.to_string(), StatusCode::Unexpected);
-            return Err(BoxedError::new(plain_error)).context(QueryExecutionSnafu {});
-        }
+        check_partition_range_monotonicity(&ranges, expression.options.descending)?;
 
         let properties = PlanProperties::new(
-            input.equivalence_properties().clone(),
+            input
+                .equivalence_properties()
+                .clone()
+                .with_reorder(vec![expression.clone()]),
             input.output_partitioning().clone(),
             input.execution_mode(),
         );
 
-        let overlap_counts = split_overlapping_ranges(&ranges);
-        let all_avail_working_range =
-            compute_all_working_ranges(&overlap_counts, expression.options.descending);
+        let mut all_avail_working_range = Vec::with_capacity(ranges.len());
+        for r in &ranges {
+            let overlap_counts = split_overlapping_ranges(r);
+            let working_ranges =
+                compute_all_working_ranges(&overlap_counts, expression.options.descending);
+            all_avail_working_range.push(working_ranges);
+        }
+
         Ok(Self {
             expression,
             fetch,
@@ -123,7 +146,8 @@ impl WindowedSortExec {
     }
 
     /// During receiving partial-sorted RecordBatch, we need to update the working set which is the
-    /// `PartitionRange` we think those RecordBatch belongs to. And when we receive something outside of working set, we can merge results before whenever possible.
+    /// `PartitionRange` we think those RecordBatch belongs to. And when we receive something outside
+    /// of working set, we can merge results before whenever possible.
     pub fn to_stream(
         &self,
         context: Arc<TaskContext>,
@@ -132,7 +156,12 @@ impl WindowedSortExec {
         let input_stream: DfSendableRecordBatchStream =
             self.input.execute(partition, context.clone())?;
 
-        let df_stream = Box::pin(WindowedSortStream::new(context, self, input_stream)) as _;
+        let df_stream = Box::pin(WindowedSortStream::new(
+            context,
+            self,
+            input_stream,
+            partition,
+        )) as _;
 
         Ok(df_stream)
     }
@@ -190,6 +219,15 @@ impl ExecutionPlan for WindowedSortExec {
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metrics.clone_inner())
     }
+
+    /// # Explain
+    ///
+    /// This plan needs to be executed on each partition independently,
+    /// and is expected to run directly on storage engine's output
+    /// distribution / partition.
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        vec![false; self.ranges.len()]
+    }
 }
 
 /// The core logic of merging sort multiple sorted ranges
@@ -215,8 +253,8 @@ pub struct WindowedSortStream {
     working_idx: usize,
     /// input stream assumed reading in order of `PartitionRange`
     input: DfSendableRecordBatchStream,
-    /// Whether the input stream is terminated, if it did, we should poll input again
-    is_input_terminated: bool,
+    /// Whether this stream is terminated. For reasons like limit reached or input stream is done.
+    is_terminated: bool,
     /// Output Schema, which is the same as input schema, since this is a sort plan
     schema: SchemaRef,
     /// Physical sort expressions(that is, sort by timestamp)
@@ -231,8 +269,11 @@ pub struct WindowedSortStream {
     ///
     /// working ranges promise once input stream get a value out of current range, future values will never be in this range
     all_avail_working_range: Vec<(TimeRange, BTreeSet<usize>)>,
+    /// The input partition ranges
+    #[allow(dead_code)] // this is used under #[debug_assertions]
+    ranges: Vec<PartitionRange>,
     /// Execution metrics
-    metrics: ExecutionPlanMetricsSet,
+    metrics: BaselineMetrics,
 }
 
 impl WindowedSortStream {
@@ -240,6 +281,7 @@ impl WindowedSortStream {
         context: Arc<TaskContext>,
         exec: &WindowedSortExec,
         input: DfSendableRecordBatchStream,
+        partition: usize,
     ) -> Self {
         Self {
             memory_pool: context.runtime_env().memory_pool.clone(),
@@ -251,18 +293,79 @@ impl WindowedSortStream {
             working_idx: 0,
             schema: input.schema(),
             input,
-            is_input_terminated: false,
+            is_terminated: false,
             expression: exec.expression.clone(),
             fetch: exec.fetch,
             produced: 0,
             batch_size: context.session_config().batch_size(),
-            all_avail_working_range: exec.all_avail_working_range.clone(),
-            metrics: exec.metrics.clone(),
+            all_avail_working_range: exec.all_avail_working_range[partition].clone(),
+            ranges: exec.ranges[partition].clone(),
+            metrics: BaselineMetrics::new(&exec.metrics, partition),
         }
     }
 }
 
 impl WindowedSortStream {
+    #[cfg(debug_assertions)]
+    fn check_subset_ranges(&self, cur_range: &TimeRange) {
+        let cur_is_subset_to = self
+            .ranges
+            .iter()
+            .filter(|r| cur_range.is_subset(&TimeRange::from(*r)))
+            .collect_vec();
+        if cur_is_subset_to.is_empty() {
+            error!("Current range is not a subset of any PartitionRange");
+            // found in all ranges that are subset of current range
+            let subset_ranges = self
+                .ranges
+                .iter()
+                .filter(|r| TimeRange::from(*r).is_subset(cur_range))
+                .collect_vec();
+            let only_overlap = self
+                .ranges
+                .iter()
+                .filter(|r| {
+                    let r = TimeRange::from(*r);
+                    r.is_overlapping(cur_range) && !r.is_subset(cur_range)
+                })
+                .collect_vec();
+            error!(
+                "Bad input, found {} ranges that are subset of current range, also found {} ranges that only overlap, subset ranges are: {:?}; overlap ranges are: {:?}",
+                subset_ranges.len(),
+                only_overlap.len(),
+                subset_ranges,
+                only_overlap
+            );
+        } else {
+            let only_overlap = self
+                .ranges
+                .iter()
+                .filter(|r| {
+                    let r = TimeRange::from(*r);
+                    r.is_overlapping(cur_range) && !cur_range.is_subset(&r)
+                })
+                .collect_vec();
+            error!(
+                "Found current range to be subset of {} ranges, also found {} ranges that only overlap, of subset ranges are:{:?}; overlap ranges are: {:?}",
+                cur_is_subset_to.len(),
+                only_overlap.len(),
+                cur_is_subset_to,
+                only_overlap
+            );
+        }
+        let all_overlap_working_range = self
+            .all_avail_working_range
+            .iter()
+            .filter(|(range, _)| range.is_overlapping(cur_range))
+            .map(|(range, _)| range)
+            .collect_vec();
+        error!(
+            "Found {} working ranges that overlap with current range: {:?}",
+            all_overlap_working_range.len(),
+            all_overlap_working_range
+        );
+    }
+
     /// Poll the next RecordBatch from the merge-sort's output stream
     fn poll_result_stream(
         &mut self,
@@ -273,6 +376,7 @@ impl WindowedSortStream {
                 Poll::Ready(Some(Ok(batch))) => {
                     let ret = if let Some(remaining) = self.remaining_fetch() {
                         if remaining == 0 {
+                            self.is_terminated = true;
                             None
                         } else if remaining < batch.num_rows() {
                             self.produced += remaining;
@@ -304,6 +408,7 @@ impl WindowedSortStream {
         // if no output stream is available
         Poll::Ready(None)
     }
+
     /// The core logic of merging sort multiple sorted ranges
     ///
     /// We try to maximize the number of sorted runs we can merge in one go, while emit the result as soon as possible.
@@ -314,7 +419,7 @@ impl WindowedSortStream {
         // first check and send out the merge result
         match self.poll_result_stream(cx) {
             Poll::Ready(None) => {
-                if self.is_input_terminated {
+                if self.is_terminated {
                     return Poll::Ready(None);
                 }
             }
@@ -322,7 +427,7 @@ impl WindowedSortStream {
         };
 
         // consume input stream
-        while !self.is_input_terminated {
+        while !self.is_terminated {
             // then we get a new RecordBatch from input stream
             let new_input_rbs = match self.input.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
@@ -333,128 +438,114 @@ impl WindowedSortStream {
                 }
                 Poll::Ready(None) => {
                     // input stream is done, we need to merge sort the remaining working set
-                    self.is_input_terminated = true;
+                    self.is_terminated = true;
                     None
                 }
                 Poll::Pending => return Poll::Pending,
             };
 
+            let Some(SortedRunSet {
+                runs_with_batch,
+                sort_column,
+            }) = new_input_rbs
+            else {
+                // input stream is done, we need to merge sort the remaining working set
+                self.build_sorted_stream()?;
+                self.start_new_merge_sort()?;
+                continue;
+            };
             // The core logic to eargerly merge sort the working set
-            match new_input_rbs {
-                Some(SortedRunSet {
-                    runs_with_batch,
-                    sort_column,
-                }) => {
-                    // compare with last_value to find boundary, then merge runs if needed
 
-                    // iterate over runs_with_batch to merge sort, might create zero or more stream to put to `sort_partition_rbs`
+            // compare with last_value to find boundary, then merge runs if needed
 
-                    let mut last_remaining = None;
-                    let mut run_iter = runs_with_batch.into_iter();
-                    loop {
-                        let (sorted_rb, run_info) = if let Some(r) = last_remaining.take() {
-                            r
-                        } else if let Some(r) = run_iter.next() {
-                            r
-                        } else {
-                            break;
-                        };
-                        if sorted_rb.num_rows() == 0 {
-                            continue;
-                        }
-                        // determine if this batch is in current working range
-                        let cur_range = {
-                            match run_info.get_time_range() {
-                                Some(r) => r,
-                                _ => internal_err!("Found NULL in time index column")?,
-                            }
-                        };
-                        let working_range = if let Some(r) = self.get_working_range() {
-                            r
-                        } else {
-                            internal_err!("No working range found")?
-                        };
-
-                        if sort_column.options.unwrap_or_default().descending {
-                            if cur_range.end > working_range.end {
-                                error!("Invalid range: {:?} > {:?}", cur_range, working_range);
-                                internal_err!("Current batch have data on the right side of working range, something is very wrong")?;
-                            }
-                        } else if cur_range.start < working_range.start {
-                            error!("Invalid range: {:?} < {:?}", cur_range, working_range);
-                            internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
-                        }
-
-                        if cur_range.is_subset(&working_range) {
-                            // data still in range, can't merge sort yet
-                            // see if can concat entire sorted rb, merge sort need to wait
-                            self.try_concat_batch(
-                                sorted_rb.clone(),
-                                &run_info,
-                                sort_column.options,
-                            )?;
-                        } else if let Some(intersection) = cur_range.intersection(&working_range) {
-                            // slice rb by intersection and concat it then merge sort
-                            let cur_sort_column =
-                                sort_column.values.slice(run_info.offset, run_info.len);
-                            let (offset, len) = find_slice_from_range(
-                                &SortColumn {
-                                    values: cur_sort_column.clone(),
-                                    options: sort_column.options,
-                                },
-                                &intersection,
-                            )?;
-
-                            if offset != 0 {
-                                internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
-                            }
-
-                            let sliced_rb = sorted_rb.slice(offset, len);
-
-                            // try to concat the sliced input batch to the current `in_progress` run
-                            self.try_concat_batch(sliced_rb, &run_info, sort_column.options)?;
-                            // since no more sorted data in this range will come in now, build stream now
-                            self.build_sorted_stream()?;
-
-                            // since we are crossing working range, we need to merge sort the working set
-                            self.start_new_merge_sort()?;
-
-                            let (r_offset, r_len) =
-                                (offset + len, sorted_rb.num_rows() - offset - len);
-                            if r_len != 0 {
-                                // we have remaining data in this batch, put it back to input queue
-                                let remaining_rb = sorted_rb.slice(r_offset, r_len);
-                                let new_first_val =
-                                    get_timestamp_from_idx(&cur_sort_column, r_offset)?;
-                                let new_run_info = SucRun {
-                                    offset: run_info.offset + r_offset,
-                                    len: r_len,
-                                    first_val: new_first_val,
-                                    last_val: run_info.last_val,
-                                };
-                                last_remaining = Some((remaining_rb, new_run_info));
-                            }
-                            // deal with remaining batch cross working range problem
-                            // i.e: this example require more slice, and we are currently at point A
-                            // |---1---|       |---3---|
-                            // |-------A--2------------|
-                            //  put the remaining batch back to iter and deal it in next loop
-                        } else {
-                            // no overlap, we can merge sort the working set
-
-                            self.build_sorted_stream()?;
-                            self.start_new_merge_sort()?;
-
-                            // always put it back to input queue until some batch is in working range
-                            last_remaining = Some((sorted_rb, run_info));
-                        }
-                    }
+            // iterate over runs_with_batch to merge sort, might create zero or more stream to put to `sort_partition_rbs`
+            let mut last_remaining = None;
+            let mut run_iter = runs_with_batch.into_iter();
+            loop {
+                let Some((sorted_rb, run_info)) = last_remaining.take().or(run_iter.next()) else {
+                    break;
+                };
+                if sorted_rb.num_rows() == 0 {
+                    continue;
                 }
-                None => {
-                    // input stream is done, we need to merge sort the remaining working set
-                    // and emit the result
+                // determine if this batch is in current working range
+                let Some(cur_range) = run_info.get_time_range() else {
+                    internal_err!("Found NULL in time index column")?
+                };
+                let Some(working_range) = self.get_working_range() else {
+                    internal_err!("No working range found")?
+                };
+
+                // ensure the current batch is in the working range
+                if sort_column.options.unwrap_or_default().descending {
+                    if cur_range.end > working_range.end {
+                        error!("Invalid range: {:?} > {:?}", cur_range, working_range);
+                        #[cfg(debug_assertions)]
+                        self.check_subset_ranges(&cur_range);
+                        internal_err!("Current batch have data on the right side of working range, something is very wrong")?;
+                    }
+                } else if cur_range.start < working_range.start {
+                    error!("Invalid range: {:?} < {:?}", cur_range, working_range);
+                    #[cfg(debug_assertions)]
+                    self.check_subset_ranges(&cur_range);
+                    internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
+                }
+
+                if cur_range.is_subset(&working_range) {
+                    // data still in range, can't merge sort yet
+                    // see if can concat entire sorted rb, merge sort need to wait
+                    self.try_concat_batch(sorted_rb.clone(), &run_info, sort_column.options)?;
+                } else if let Some(intersection) = cur_range.intersection(&working_range) {
+                    // slice rb by intersection and concat it then merge sort
+                    let cur_sort_column = sort_column.values.slice(run_info.offset, run_info.len);
+                    let (offset, len) = find_slice_from_range(
+                        &SortColumn {
+                            values: cur_sort_column.clone(),
+                            options: sort_column.options,
+                        },
+                        &intersection,
+                    )?;
+
+                    if offset != 0 {
+                        internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
+                    }
+
+                    let sliced_rb = sorted_rb.slice(offset, len);
+
+                    // try to concat the sliced input batch to the current `in_progress` run
+                    self.try_concat_batch(sliced_rb, &run_info, sort_column.options)?;
+                    // since no more sorted data in this range will come in now, build stream now
+                    self.build_sorted_stream()?;
+
+                    // since we are crossing working range, we need to merge sort the working set
+                    self.start_new_merge_sort()?;
+
+                    let (r_offset, r_len) = (offset + len, sorted_rb.num_rows() - offset - len);
+                    if r_len != 0 {
+                        // we have remaining data in this batch, put it back to input queue
+                        let remaining_rb = sorted_rb.slice(r_offset, r_len);
+                        let new_first_val = get_timestamp_from_idx(&cur_sort_column, r_offset)?;
+                        let new_run_info = SucRun {
+                            offset: run_info.offset + r_offset,
+                            len: r_len,
+                            first_val: new_first_val,
+                            last_val: run_info.last_val,
+                        };
+                        last_remaining = Some((remaining_rb, new_run_info));
+                    }
+                    // deal with remaining batch cross working range problem
+                    // i.e: this example require more slice, and we are currently at point A
+                    // |---1---|       |---3---|
+                    // |-------A--2------------|
+                    //  put the remaining batch back to iter and deal it in next loop
+                } else {
+                    // no overlap, we can merge sort the working set
+
                     self.build_sorted_stream()?;
                     self.start_new_merge_sort()?;
+
+                    // always put it back to input queue until some batch is in working range
+                    last_remaining = Some((sorted_rb, run_info));
                 }
             }
         }
@@ -540,7 +631,7 @@ impl WindowedSortStream {
             streams,
             self.schema(),
             &[self.expression.clone()],
-            BaselineMetrics::new(&self.metrics, 0),
+            self.metrics.clone(),
             self.batch_size,
             fetch,
             reservation,
@@ -562,10 +653,11 @@ impl Stream for WindowedSortStream {
     type Item = datafusion_common::Result<DfRecordBatch>;
 
     fn poll_next(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
-        self.poll_next_inner(cx)
+        let result = self.as_mut().poll_next_inner(cx);
+        self.metrics.record_poll(result)
     }
 }
 
@@ -624,21 +716,22 @@ fn split_batch_to_sorted_run(
 /// Downcast a temporal array to a specific type
 ///
 /// usage similar to `downcast_primitive!` in `arrow-array` crate
+#[macro_export]
 macro_rules! downcast_ts_array {
     ($data_type:expr => ($m:path $(, $args:tt)*), $($p:pat => $fallback:expr $(,)*)*) =>
     {
         match $data_type {
             arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Second, _) => {
-                $m!(TimestampSecondType $(, $args)*)
+                $m!(arrow::datatypes::TimestampSecondType, arrow_schema::TimeUnit::Second $(, $args)*)
             }
             arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, _) => {
-                $m!(TimestampMillisecondType $(, $args)*)
+                $m!(arrow::datatypes::TimestampMillisecondType, arrow_schema::TimeUnit::Millisecond $(, $args)*)
             }
             arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, _) => {
-                $m!(TimestampMicrosecondType $(, $args)*)
+                $m!(arrow::datatypes::TimestampMicrosecondType, arrow_schema::TimeUnit::Microsecond $(, $args)*)
             }
             arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, _) => {
-                $m!(TimestampNanosecondType $(, $args)*)
+                $m!(arrow::datatypes::TimestampNanosecondType, arrow_schema::TimeUnit::Nanosecond $(, $args)*)
             }
             $($p => $fallback,)*
         }
@@ -711,7 +804,7 @@ fn find_slice_from_range(
 }
 
 macro_rules! array_iter_helper {
-    ($t:ty, $arr:expr) => {{
+    ($t:ty, $unit:expr, $arr:expr) => {{
         let typed = $arr.as_any().downcast_ref::<PrimitiveArray<$t>>().unwrap();
         let iter = typed.iter().enumerate();
         Box::new(iter) as Box<dyn Iterator<Item = (usize, Option<i64>)>>
@@ -993,7 +1086,8 @@ fn compute_all_working_ranges(
         match &mut cur_range_set {
             None => cur_range_set = Some((*range, BTreeSet::from_iter(set.iter().cloned()))),
             Some((working_range, working_set)) => {
-                // if next overlap range have Partition that's is not last one in `working_set`(hence need to be read before merge sorting), and `working_set` have >1 count
+                // if next overlap range have Partition that's is not last one in `working_set`(hence need
+                // to be read before merge sorting), and `working_set` have >1 count
                 // we have to expand current working range to cover it(and add it's `set` to `working_set`)
                 // so that merge sort is possible
                 let need_expand = {
@@ -2410,7 +2504,7 @@ mod test {
             let exec = WindowedSortExec::try_new(
                 self.expression.clone(),
                 self.fetch,
-                ranges,
+                vec![ranges],
                 Arc::new(mock_input),
             )
             .unwrap();
@@ -2439,6 +2533,78 @@ mod test {
                     false,
                 )],
                 vec![],
+                vec![],
+            ),
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                None,
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![
+                    // test one empty
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(2),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(3),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([2]))],
+                    ),
+                ],
+                vec![vec![Arc::new(TimestampMillisecondArray::from_iter_values(
+                    [2],
+                ))]],
+            ),
+            TestStream::new(
+                Column::new("ts", 0),
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                None,
+                vec![Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )],
+                vec![
+                    // test one empty
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(2),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([]))],
+                    ),
+                    (
+                        PartitionRange {
+                            start: Timestamp::new_millisecond(1),
+                            end: Timestamp::new_millisecond(3),
+                            num_rows: 1,
+                            identifier: 0,
+                        },
+                        vec![Arc::new(TimestampMillisecondArray::from_iter_values([]))],
+                    ),
+                ],
                 vec![],
             ),
             TestStream::new(

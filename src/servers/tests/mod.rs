@@ -70,7 +70,7 @@ impl SqlQueryHandler for DummyInstance {
         let plan = self
             .query_engine
             .planner()
-            .plan(stmt, query_ctx.clone())
+            .plan(&stmt, query_ctx.clone())
             .await
             .unwrap();
         let output = self.query_engine.execute(plan, query_ctx).await.unwrap();
@@ -98,7 +98,7 @@ impl SqlQueryHandler for DummyInstance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
+                .plan(&QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .unwrap();
             let schema = self.query_engine.describe(plan, query_ctx).await.unwrap();

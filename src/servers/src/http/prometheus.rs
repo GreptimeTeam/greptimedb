@@ -101,6 +101,9 @@ pub enum PrometheusResponse {
     LabelValues(Vec<String>),
     FormatQuery(String),
     BuildInfo(OwnedBuildInfo),
+    #[schemars(skip)]
+    #[serde(skip_deserializing)]
+    ParseResult(promql_parser::parser::Expr),
 }
 
 impl Default for PrometheusResponse {
@@ -1013,4 +1016,34 @@ pub async fn series_query(
     let mut resp = PrometheusJsonResponse::success(PrometheusResponse::Series(series));
     resp.resp_metrics = merge_map;
     resp
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ParseQuery {
+    query: Option<String>,
+    db: Option<String>,
+}
+
+#[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "parse_query")
+)]
+pub async fn parse_query(
+    State(_handler): State<PrometheusHandlerRef>,
+    Query(params): Query<ParseQuery>,
+    Extension(_query_ctx): Extension<QueryContext>,
+    Form(form_params): Form<ParseQuery>,
+) -> PrometheusJsonResponse {
+    if let Some(query) = params.query.or(form_params.query) {
+        match promql_parser::parser::parse(&query) {
+            Ok(ast) => PrometheusJsonResponse::success(PrometheusResponse::ParseResult(ast)),
+            Err(err) => {
+                let msg = err.to_string();
+                PrometheusJsonResponse::error(StatusCode::InvalidArguments, msg)
+            }
+        }
+    } else {
+        PrometheusJsonResponse::error(StatusCode::InvalidArguments, "query is required")
+    }
 }

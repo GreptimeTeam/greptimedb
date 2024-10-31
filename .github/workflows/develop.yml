@@ -436,7 +436,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       matrix:
-        target: ["fuzz_migrate_mito_regions", "fuzz_failover_mito_regions", "fuzz_failover_metric_regions"]
+        target: ["fuzz_migrate_mito_regions", "fuzz_migrate_metric_regions", "fuzz_failover_mito_regions", "fuzz_failover_metric_regions"]
         mode:
           - name: "Remote WAL"
             minio: true
@@ -444,6 +444,12 @@ jobs:
             values: "with-remote-wal.yaml"
         include:
           - target: "fuzz_migrate_mito_regions"
+            mode:
+              name: "Local WAL"
+              minio: true
+              kafka: false
+              values: "with-minio.yaml"
+          - target: "fuzz_migrate_metric_regions"
             mode:
               name: "Local WAL"
               minio: true
@@ -688,7 +694,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: Install PyArrow Package
-        run: pip install pyarrow
+        run: pip install pyarrow numpy
       - name: Setup etcd server
         working-directory: tests-integration/fixtures/etcd
         run: docker compose -f docker-compose-standalone.yml up -d --wait

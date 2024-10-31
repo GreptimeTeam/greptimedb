@@ -1,0 +1,88 @@
+CREATE TABLE ato(i INTEGER, j TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+ALTER TABLE ato SET 'ttl'='1d';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE ato;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
+|       |   "i" INT NULL,                    |
+|       |   "j" TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX ("j")                 |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=mito                        |
+|       | WITH(                              |
+|       |   ttl = '1day'                     |
+|       | )                                  |
++-------+------------------------------------+
+
+ALTER TABLE ato SET 'ttl'='2d';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE ato;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
+|       |   "i" INT NULL,                    |
+|       |   "j" TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX ("j")                 |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=mito                        |
+|       | WITH(                              |
+|       |   ttl = '2days'                    |
+|       | )                                  |
++-------+------------------------------------+
+
+ALTER TABLE ato SET 'ttl'=NULL;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE ato;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
+|       |   "i" INT NULL,                    |
+|       |   "j" TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX ("j")                 |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=mito                        |
+|       |                                    |
++-------+------------------------------------+
+
+ALTER TABLE ato SET 'ttl'='0d';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE ato;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
+|       |   "i" INT NULL,                    |
+|       |   "j" TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX ("j")                 |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=mito                        |
+|       |                                    |
++-------+------------------------------------+
+
+DROP TABLE ato;
+
+Affected Rows: 0
+

@@ -62,8 +62,8 @@ use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, i
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::json_result::JsonResponse;
 use crate::http::prometheus::{
-    build_info_query, format_query, instant_query, label_values_query, labels_query, range_query,
-    series_query,
+    build_info_query, format_query, instant_query, label_values_query, labels_query, parse_query,
+    range_query, series_query,
 };
 use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
@@ -819,6 +819,7 @@ impl HttpServer {
             .route("/query_range", routing::post(range_query).get(range_query))
             .route("/labels", routing::post(labels_query).get(labels_query))
             .route("/series", routing::post(series_query).get(series_query))
+            .route("/parse_query", routing::post(parse_query).get(parse_query))
             .route(
                 "/label/:label_name/values",
                 routing::get(label_values_query),

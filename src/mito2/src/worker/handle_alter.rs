@@ -19,7 +19,7 @@ use std::sync::Arc;
 use common_telemetry::{debug, info};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
-use store_api::region_request::RegionAlterRequest;
+use store_api::region_request::{AlterKind, ChangeOption, RegionAlterRequest};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -27,6 +27,8 @@ use crate::error::{
 };
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
+use crate::region::version::VersionRef;
+use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 
@@ -45,6 +47,13 @@ impl<S> RegionWorkerLoop<S> {
 
         // Get the version before alter.
         let version = region.version();
+
+        // fast path for memory state changes like options.
+        if let AlterKind::ChangeRegionOptions { options } = request.kind {
+            self.handle_alter_region_options(region, version, options, sender);
+            return;
+        }
+
         if version.metadata.schema_version != request.schema_version {
             // This is possible if we retry the request.
             debug!(
@@ -67,6 +76,7 @@ impl<S> RegionWorkerLoop<S> {
             sender.send(Err(e).context(InvalidRegionRequestSnafu));
             return;
         }
+
         // Checks whether we need to alter the region.
         if !request.need_alter(&version.metadata) {
             debug!(
@@ -111,7 +121,17 @@ impl<S> RegionWorkerLoop<S> {
             version.metadata.schema_version,
             region.metadata().schema_version
         );
+        self.handle_alter_region_metadata(region, version, request, sender);
+    }
 
+    /// Handles region metadata changes.
+    fn handle_alter_region_metadata(
+        &mut self,
+        region: MitoRegionRef,
+        version: VersionRef,
+        request: RegionAlterRequest,
+        sender: OptionOutputTx,
+    ) {
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -120,10 +140,37 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
         // Persist the metadata to region's manifest.
-        let change = RegionChange {
-            metadata: new_meta.clone(),
-        };
+        let change = RegionChange { metadata: new_meta };
         self.handle_manifest_region_change(region, change, sender)
+    }
+
+    /// Handles requests that changes region options, like TTL. It only affects memory state
+    /// since changes are persisted in the `DatanodeTableValue` in metasrv.
+    fn handle_alter_region_options(
+        &mut self,
+        region: MitoRegionRef,
+        version: VersionRef,
+        options: Vec<ChangeOption>,
+        sender: OptionOutputTx,
+    ) {
+        let mut current_options = version.options.clone();
+        for option in options {
+            match option {
+                ChangeOption::TTL(new_ttl) => {
+                    info!(
+                        "Update region ttl: {}, previous: {:?} new: {:?}",
+                        region.region_id, current_options.ttl, new_ttl
+                    );
+                    if new_ttl.is_zero() {
+                        current_options.ttl = None;
+                    } else {
+                        current_options.ttl = Some(new_ttl);
+                    }
+                }
+            }
+        }
+        region.version_control.alter_options(current_options);
+        sender.send(Ok(0));
     }
 }
 

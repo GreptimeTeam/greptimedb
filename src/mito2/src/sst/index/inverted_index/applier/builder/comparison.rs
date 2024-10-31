@@ -114,7 +114,7 @@ impl InvertedIndexApplierBuilder<'_> {
         let Some(lit) = Self::nonnull_lit(literal) else {
             return Ok(());
         };
-        let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
+        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
             return Ok(());
         };
 
@@ -234,7 +234,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -263,7 +263,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -283,14 +283,28 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
         builder
             .collect_comparison_expr(&field_column(), &Operator::Lt, &string_lit("abc"))
             .unwrap();
-        assert!(builder.output.is_empty());
+
+        let predicates = builder.output.get(&3).unwrap();
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(
+            predicates[0],
+            Predicate::Range(RangePredicate {
+                range: Range {
+                    lower: None,
+                    upper: Some(Bound {
+                        inclusive: false,
+                        value: encoded_string("abc"),
+                    }),
+                }
+            })
+        );
     }
 
     #[test]
@@ -304,7 +318,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
