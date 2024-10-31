@@ -5523,8 +5523,8 @@ dependencies = [
 
 [[package]]
 name = "jsonb"
-version = "0.4.1"
-source = "git+https://github.com/databendlabs/jsonb.git?rev=46ad50fc71cf75afbf98eec455f7892a6387c1fc#46ad50fc71cf75afbf98eec455f7892a6387c1fc"
+version = "0.4.3"
+source = "git+https://github.com/CookiePieWw/jsonb.git?branch=fix_panic#ed2d4f8575419ed434a4ae09dee18ca900915d9c"
 dependencies = [
  "byteorder",
  "fast-float",
