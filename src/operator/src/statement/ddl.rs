@@ -1230,7 +1230,9 @@ impl StatementExecutor {
 
 /// Fills schema-level options to [CreateTableExpr].
 fn fill_schema_opts(expr: &mut CreateTableExpr, schema: &SchemaNameValue) {
-    if let Some(ttl) = schema.human_ttl() {
+    if !expr.table_options.contains_key(TTL_KEY)
+        && let Some(ttl) = schema.human_ttl()
+    {
         expr.table_options.insert(TTL_KEY.to_string(), ttl);
     }
 }
