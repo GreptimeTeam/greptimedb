@@ -265,6 +265,9 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Returns the schema of the record batches.
     fn schema(&self) -> SchemaRef;
 
+    /// Returns the metadata of the region.
+    fn metadata(&self) -> RegionMetadataRef;
+
     /// Prepares the scanner with the given partition ranges.
     ///
     /// This method is for the planner to adjust the scanner's behavior based on the partition ranges.
@@ -414,11 +417,16 @@ pub struct SinglePartitionScanner {
     stream: Mutex<Option<SendableRecordBatchStream>>,
     schema: SchemaRef,
     properties: ScannerProperties,
+    metadata: RegionMetadataRef,
 }
 
 impl SinglePartitionScanner {
-    /// Creates a new [SinglePartitionScanner] with the given stream.
-    pub fn new(stream: SendableRecordBatchStream, append_mode: bool) -> Self {
+    /// Creates a new [SinglePartitionScanner] with the given stream and metadata.
+    pub fn new(
+        stream: SendableRecordBatchStream,
+        append_mode: bool,
+        metadata: RegionMetadataRef,
+    ) -> Self {
         let schema = stream.schema();
         Self {
             stream: Mutex::new(Some(stream)),
@@ -426,6 +434,7 @@ impl SinglePartitionScanner {
             properties: ScannerProperties::default()
                 .with_parallelism(1)
                 .with_append_mode(append_mode),
+            metadata,
         }
     }
 }
@@ -467,6 +476,10 @@ impl RegionScanner for SinglePartitionScanner {
 
     fn has_predicate(&self) -> bool {
         false
+    }
+
+    fn metadata(&self) -> RegionMetadataRef {
+        self.metadata.clone()
     }
 }
 

@@ -175,6 +175,7 @@ struct PartSortStream {
     input_complete: bool,
     schema: SchemaRef,
     partition_ranges: Vec<PartitionRange>,
+    #[allow(dead_code)] // this is used under #[debug_assertions]
     partition: usize,
     cur_part_idx: usize,
     metrics: BaselineMetrics,
