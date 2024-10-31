@@ -58,6 +58,7 @@ impl GeoFunctions {
 
         // h3 measurement
         registry.register(Arc::new(h3::H3CellDistanceSphereKm));
+        registry.register(Arc::new(h3::H3CellDistanceEuclideanDegree));
 
         // s2
         registry.register(Arc::new(s2::S2LatLngToCell));

@@ -1072,6 +1072,62 @@ impl Function for H3CellDistanceSphereKm {
     }
 }
 
+/// Get Euclidean distance of two cell centroid
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3CellDistanceEuclideanDegree;
+
+impl H3CellDistanceEuclideanDegree {
+    fn distance(centroid_this: LatLng, centroid_that: LatLng) -> f64 {
+        ((centroid_this.lat() - centroid_that.lat()).powi(2)
+            + (centroid_this.lng() - centroid_that.lng()).powi(2))
+        .sqrt()
+    }
+}
+
+impl Function for H3CellDistanceEuclideanDegree {
+    fn name(&self) -> &str {
+        "h3_distance_degree"
+    }
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::float64_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        signature_of_double_cells()
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure_columns_n!(columns, 2);
+
+        let cell_this_vec = &columns[0];
+        let cell_that_vec = &columns[1];
+        let size = cell_this_vec.len();
+
+        let mut results = Float64VectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let result = match (
+                cell_from_value(cell_this_vec.get(i))?,
+                cell_from_value(cell_that_vec.get(i))?,
+            ) {
+                (Some(cell_this), Some(cell_that)) => {
+                    let centroid_this = LatLng::from(cell_this);
+                    let centroid_that = LatLng::from(cell_that);
+
+                    let dist = Self::distance(centroid_this, centroid_that);
+                    Some(dist)
+                }
+                _ => None,
+            };
+
+            results.push(result);
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
 fn value_to_resolution(v: Value) -> Result<Resolution> {
     let r = match v {
         Value::Int8(v) => v as u8,
@@ -1300,5 +1356,19 @@ fn cells_from_value(v: Value) -> Result<Vec<CellIndex>> {
                 .collect::<Result<Vec<CellIndex>>>()
         }
         _ => Ok(vec![]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_h3_euclidean_distance() {
+        let point_this = LatLng::new(42.3521, -72.1235).expect("incorrect lat lng");
+        let point_that = LatLng::new(42.45, -72.1260).expect("incorrect lat lng");
+
+        let dist = H3CellDistanceEuclideanDegree::distance(point_this, point_that);
+        assert_eq!(dist, 0.09793191512474639);
     }
 }
