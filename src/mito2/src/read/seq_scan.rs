@@ -27,6 +27,7 @@ use common_telemetry::tracing;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
@@ -321,6 +322,10 @@ impl RegionScanner for SeqScan {
         let predicate = self.stream_ctx.input.predicate();
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
     }
+
+    fn metadata(&self) -> RegionMetadataRef {
+        self.stream_ctx.input.mapper.metadata().clone()
+    }
 }
 
 impl DisplayAs for SeqScan {
@@ -355,7 +360,12 @@ fn build_sources(
     sources.reserve(range_meta.row_group_indices.len());
     for index in &range_meta.row_group_indices {
         let stream = if stream_ctx.is_mem_range_index(*index) {
-            let stream = scan_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index);
+            let stream = scan_mem_ranges(
+                stream_ctx.clone(),
+                part_metrics.clone(),
+                *index,
+                range_meta.time_range,
+            );
             Box::pin(stream) as _
         } else {
             let read_type = if compaction {

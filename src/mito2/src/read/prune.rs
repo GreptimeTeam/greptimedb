@@ -12,9 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::Timestamp;
+use datatypes::scalars::ScalarVectorBuilder;
+use datatypes::vectors::BooleanVectorBuilder;
+
 use crate::error::Result;
+use crate::memtable::BoxedBatchIterator;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::{Batch, BatchReader};
+use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRangeContextRef;
 use crate::sst::parquet::reader::{ReaderMetrics, RowGroupReader};
 
@@ -110,5 +116,216 @@ impl PruneReader {
         } else {
             Ok(None)
         }
+    }
+}
+
+/// An iterator that prunes batches by time range.
+pub(crate) struct PruneTimeIterator {
+    iter: BoxedBatchIterator,
+    time_range: FileTimeRange,
+}
+
+impl PruneTimeIterator {
+    /// Creates a new `PruneTimeIterator` with the given iterator and time range.
+    pub(crate) fn new(iter: BoxedBatchIterator, time_range: FileTimeRange) -> Self {
+        Self { iter, time_range }
+    }
+
+    /// Prune batch by time range.
+    fn prune(&self, mut batch: Batch) -> Result<Batch> {
+        if batch.is_empty() {
+            return Ok(batch);
+        }
+
+        // fast path, the batch is within the time range.
+        // Note that the time range is inclusive.
+        if self.time_range.0 <= batch.first_timestamp().unwrap()
+            && batch.last_timestamp().unwrap() <= self.time_range.1
+        {
+            return Ok(batch);
+        }
+
+        // slow path, prune the batch by time range.
+        // Note that the timestamp precision may be different from the time range.
+        // Safety: We know this is the timestamp type.
+        let unit = batch
+            .timestamps()
+            .data_type()
+            .as_timestamp()
+            .unwrap()
+            .unit();
+        let mut filter_builder = BooleanVectorBuilder::with_capacity(batch.timestamps().len());
+        let timestamps = batch.timestamps_native().unwrap();
+        for ts in timestamps {
+            let ts = Timestamp::new(*ts, unit);
+            if self.time_range.0 <= ts && ts <= self.time_range.1 {
+                filter_builder.push(Some(true));
+            } else {
+                filter_builder.push(Some(false));
+            }
+        }
+        let filter = filter_builder.finish();
+
+        batch.filter(&filter)?;
+        Ok(batch)
+    }
+
+    // Prune and return the next non-empty batch.
+    fn next_non_empty_batch(&mut self) -> Result<Option<Batch>> {
+        while let Some(batch) = self.iter.next() {
+            let batch = batch?;
+            let pruned_batch = self.prune(batch)?;
+            if !pruned_batch.is_empty() {
+                return Ok(Some(pruned_batch));
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl Iterator for PruneTimeIterator {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_non_empty_batch().transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::OpType;
+
+    use super::*;
+    use crate::test_util::new_batch;
+
+    #[test]
+    fn test_prune_time_iter_empty() {
+        let input = [];
+        let iter = input.into_iter().map(Ok);
+        let iter = PruneTimeIterator::new(
+            Box::new(iter),
+            (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            ),
+        );
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        assert!(actual.is_empty());
+    }
+
+    #[test]
+    fn test_prune_time_iter_filter() {
+        let input = [
+            new_batch(
+                b"k1",
+                &[10, 11],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[110, 111],
+            ),
+            new_batch(
+                b"k1",
+                &[15, 16],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[115, 116],
+            ),
+            new_batch(
+                b"k1",
+                &[17, 18],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[117, 118],
+            ),
+        ];
+
+        let iter = input.clone().into_iter().map(Ok);
+        let iter = PruneTimeIterator::new(
+            Box::new(iter),
+            (
+                Timestamp::new_millisecond(10),
+                Timestamp::new_millisecond(15),
+            ),
+        );
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        assert_eq!(
+            actual,
+            [
+                new_batch(
+                    b"k1",
+                    &[10, 11],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Put],
+                    &[110, 111],
+                ),
+                new_batch(b"k1", &[15], &[20], &[OpType::Put], &[115],),
+            ]
+        );
+
+        let iter = input.clone().into_iter().map(Ok);
+        let iter = PruneTimeIterator::new(
+            Box::new(iter),
+            (
+                Timestamp::new_millisecond(11),
+                Timestamp::new_millisecond(20),
+            ),
+        );
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        assert_eq!(
+            actual,
+            [
+                new_batch(b"k1", &[11], &[20], &[OpType::Put], &[111],),
+                new_batch(
+                    b"k1",
+                    &[15, 16],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Put],
+                    &[115, 116],
+                ),
+                new_batch(
+                    b"k1",
+                    &[17, 18],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Put],
+                    &[117, 118],
+                ),
+            ]
+        );
+
+        let iter = input.into_iter().map(Ok);
+        let iter = PruneTimeIterator::new(
+            Box::new(iter),
+            (
+                Timestamp::new_millisecond(10),
+                Timestamp::new_millisecond(18),
+            ),
+        );
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        assert_eq!(
+            actual,
+            [
+                new_batch(
+                    b"k1",
+                    &[10, 11],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Put],
+                    &[110, 111],
+                ),
+                new_batch(
+                    b"k1",
+                    &[15, 16],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Put],
+                    &[115, 116],
+                ),
+                new_batch(
+                    b"k1",
+                    &[17, 18],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Put],
+                    &[117, 118],
+                ),
+            ]
+        );
     }
 }

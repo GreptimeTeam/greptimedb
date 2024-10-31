@@ -270,6 +270,7 @@ pub struct WindowedSortStream {
     /// working ranges promise once input stream get a value out of current range, future values will never be in this range
     all_avail_working_range: Vec<(TimeRange, BTreeSet<usize>)>,
     /// The input partition ranges
+    #[allow(dead_code)] // this is used under #[debug_assertions]
     ranges: Vec<PartitionRange>,
     /// Execution metrics
     metrics: BaselineMetrics,

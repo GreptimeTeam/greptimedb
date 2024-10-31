@@ -17,6 +17,7 @@ use std::sync::Arc;
 use common_telemetry::debug;
 use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DataFusionError, Result};
@@ -48,9 +49,16 @@ impl ParallelizeScan {
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        let mut first_order_expr = None;
+
         let result = plan
             .transform_down(|plan| {
-                if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
+                if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
+                    // save the first order expr
+                    first_order_expr = sort_exec.expr().first().cloned();
+                } else if let Some(region_scan_exec) =
+                    plan.as_any().downcast_ref::<RegionScanExec>()
+                {
                     if region_scan_exec.is_partition_set() {
                         return Ok(Transformed::no(plan));
                     }
@@ -66,10 +74,21 @@ impl ParallelizeScan {
                         "Assign {total_range_num} ranges to {expected_partition_num} partitions"
                     );
 
-                    // sort the ranges in each partition
-                    // TODO(ruihang): smart sort!
-                    for ranges in partition_ranges.iter_mut() {
-                        ranges.sort_by(|a, b| a.start.cmp(&b.start));
+                    // Sort the ranges in each partition based on the order expr
+                    //
+                    // This optimistically assumes that the first order expr is on the time index column
+                    // to skip the validation of the order expr. As it's not harmful if this condition
+                    // is not met.
+                    if let Some(order_expr) = &first_order_expr
+                        && order_expr.options.descending
+                    {
+                        for ranges in partition_ranges.iter_mut() {
+                            ranges.sort_by(|a, b| b.end.cmp(&a.end));
+                        }
+                    } else {
+                        for ranges in partition_ranges.iter_mut() {
+                            ranges.sort_by(|a, b| a.start.cmp(&b.start));
+                        }
                     }
 
                     // update the partition ranges
