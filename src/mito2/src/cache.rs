@@ -80,14 +80,15 @@ impl CacheManager {
         CacheManagerBuilder::default()
     }
 
-    /// Gets cached [ParquetMetaData].
+    /// Gets cached [ParquetMetaData] from in-memory cache first.
+    /// If not found, tries to get it from write cache and fill the in-memory cache.
     pub async fn get_parquet_meta_data(
         &self,
         region_id: RegionId,
         file_id: FileId,
     ) -> Option<Arc<ParquetMetaData>> {
         // Try to get metadata from sst meta cache
-        let metadata = self.get_parquet_meta_data_mem(region_id, file_id);
+        let metadata = self.get_parquet_meta_data_from_mem_cache(region_id, file_id);
         if metadata.is_some() {
             return metadata;
         }
@@ -106,8 +107,9 @@ impl CacheManager {
         None
     }
 
-    /// Gets cached [ParquetMetaData] from memory cache.
-    pub fn get_parquet_meta_data_mem(
+    /// Gets cached [ParquetMetaData] from in-memory cache.
+    /// This method does not perform I/O.
+    pub fn get_parquet_meta_data_from_mem_cache(
         &self,
         region_id: RegionId,
         file_id: FileId,
