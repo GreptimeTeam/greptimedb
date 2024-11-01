@@ -110,7 +110,16 @@ impl PartSortExec {
 
 impl DisplayAs for PartSortExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PartSortExec {}", self.expression)
+        write!(
+            f,
+            "PartSortExec: expr={} num_ranges={}",
+            self.expression,
+            self.partition_ranges.len(),
+        )?;
+        if let Some(limit) = self.limit {
+            write!(f, " limit={}", limit)?;
+        }
+        Ok(())
     }
 }
 
