@@ -23,7 +23,8 @@ use geo::algorithm::contains::Contains;
 use geo::algorithm::intersects::Intersects;
 use geo::algorithm::within::Within;
 
-use super::helpers::{ensure_columns_len, ensure_columns_n, parse_wkt};
+use super::helpers::{ensure_columns_len, ensure_columns_n};
+use super::wkt::parse_wkt;
 use crate::function::{Function, FunctionContext};
 
 /// Test if spatial relationship: contains

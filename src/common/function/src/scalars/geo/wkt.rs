@@ -12,16 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::error::Result;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
+use common_query::error::{self, Result};
 use common_query::prelude::{Signature, TypeSignature};
 use datafusion::logical_expr::Volatility;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{MutableVector, StringVectorBuilder, VectorRef};
 use derive_more::Display;
-use geo_types::Point;
+use geo_types::{Geometry, Point};
 use once_cell::sync::Lazy;
-use wkt::ToWkt;
+use snafu::ResultExt;
+use wkt::{ToWkt, TryFromWkt};
 
 use super::helpers::{ensure_columns_len, ensure_columns_n};
 use crate::function::{Function, FunctionContext};
@@ -83,4 +86,15 @@ impl Function for LatLngToPointWkt {
 
         Ok(results.to_vector())
     }
+}
+
+pub(super) fn parse_wkt(s: &str) -> Result<Geometry> {
+    Geometry::try_from_wkt_str(s)
+        .map_err(|e| {
+            BoxedError::new(PlainError::new(
+                format!("Fail to parse WKT: {}", e),
+                StatusCode::EngineExecuteQuery,
+            ))
+        })
+        .context(error::ExecuteSnafu)
 }

@@ -22,7 +22,8 @@ use derive_more::Display;
 use geo::algorithm::line_measures::metric_spaces::Euclidean;
 use geo::{Centroid, Distance, Haversine};
 
-use super::helpers::{ensure_columns_len, ensure_columns_n, parse_wkt};
+use super::helpers::{ensure_columns_len, ensure_columns_n};
+use super::wkt::parse_wkt;
 use crate::function::{Function, FunctionContext};
 
 /// Return WGS84(SRID: 4326) euclidean distance between two geometry object, in degree

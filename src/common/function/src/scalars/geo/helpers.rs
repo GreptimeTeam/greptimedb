@@ -12,13 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
-use common_query::error::{self, Result};
-use geo_types::geometry::Geometry;
-use snafu::ResultExt;
-use wkt::TryFromWkt;
-
 macro_rules! ensure_columns_len {
     ($columns:ident) => {
         snafu::ensure!(
@@ -80,14 +73,3 @@ macro_rules! ensure_and_coerce {
 }
 
 pub(super) use ensure_and_coerce;
-
-pub(super) fn parse_wkt(s: &str) -> Result<Geometry> {
-    Geometry::try_from_wkt_str(s)
-        .map_err(|e| {
-            BoxedError::new(PlainError::new(
-                format!("Fail to parse WKT: {}", e),
-                StatusCode::EngineExecuteQuery,
-            ))
-        })
-        .context(error::ExecuteSnafu)
-}
