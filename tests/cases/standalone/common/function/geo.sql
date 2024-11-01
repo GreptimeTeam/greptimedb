@@ -48,7 +48,7 @@ FROM (SELECT h3_latlng_to_cell(37.76938, -122.3889, 8::UInt64) AS cell);
 SELECT
     h3_grid_distance(cell1, cell2) AS distance,
     h3_grid_path_cells(cell1, cell2) AS path_cells,
-    h3_distance_sphere_km(cell1, cell2) AS sphere_distance,
+    round(h3_distance_sphere_km(cell1, cell2), 5) AS sphere_distance,
     h3_distance_degree(cell1, cell2) AS euclidean_distance,
 FROM
     (
