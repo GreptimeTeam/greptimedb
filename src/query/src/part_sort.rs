@@ -302,19 +302,12 @@ impl PartSortStream {
                 )
             })?;
 
-        let mut indices = sort_to_indices(&sort_column, opt, None).map_err(|e| {
+        let indices = sort_to_indices(&sort_column, opt, self.limit).map_err(|e| {
             DataFusionError::ArrowError(
                 e,
                 Some(format!("Fail to sort to indices at {}", location!())),
             )
         })?;
-
-        // apply limit if specified
-        if let Some(limit) = self.limit
-            && limit < indices.len()
-        {
-            indices = indices.slice(0, limit);
-        }
 
         self.check_in_range(
             &sort_column,
