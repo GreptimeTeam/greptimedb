@@ -433,7 +433,8 @@ async fn insert_with_hints_and_assert(db: &Database) {
 |       |   \"memory\" DOUBLE NULL,             |
 |       |   \"ts\" TIMESTAMP(3) NOT NULL,       |
 |       |   TIME INDEX (\"ts\"),                |
-|       |   PRIMARY KEY (\"host\")              |
+|       |   PRIMARY KEY (\"host\"),             |
+|       |   INVERTED INDEX (\"host\")           |
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |

@@ -393,7 +393,6 @@ impl ScanRegion {
             .and_then(|c| c.index_cache())
             .cloned();
 
-        // TODO(zhongzc): currently we only index tag columns, need to support field columns.
         let ignore_column_ids = &self
             .version
             .options
@@ -403,10 +402,13 @@ impl ScanRegion {
         let indexed_column_ids = self
             .version
             .metadata
-            .primary_key
+            .column_metadatas
             .iter()
-            .filter(|id| !ignore_column_ids.contains(id))
-            .copied()
+            .filter(|column| {
+                column.column_schema.has_inverted_index()
+                    && !ignore_column_ids.contains(&column.column_id)
+            })
+            .map(|column| column.column_id)
             .collect::<HashSet<_>>();
 
         InvertedIndexApplierBuilder::new(

@@ -213,19 +213,19 @@ impl<'a> IndexerBuilder<'a> {
             segment_row_count = row_group_size;
         }
 
-        // TODO(zhongzc): currently we only index tag columns, need to support field columns.
         let indexed_column_ids = self
             .metadata
-            .primary_key
+            .column_metadatas
             .iter()
-            .filter(|id| {
-                !self
-                    .index_options
-                    .inverted_index
-                    .ignore_column_ids
-                    .contains(id)
+            .filter(|column| {
+                column.column_schema.has_inverted_index()
+                    && !self
+                        .index_options
+                        .inverted_index
+                        .ignore_column_ids
+                        .contains(&column.column_id)
             })
-            .copied()
+            .map(|column| column.column_id)
             .collect::<HashSet<_>>();
 
         let indexer = InvertedIndexer::new(

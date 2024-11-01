@@ -14,9 +14,8 @@
 
 use std::collections::HashSet;
 
-use api::v1::column_def::contains_fulltext;
 use api::v1::{
-    AddColumn, AddColumns, Column, ColumnDataType, ColumnDataTypeExtension, ColumnDef,
+    column_def, AddColumn, AddColumns, Column, ColumnDataType, ColumnDataTypeExtension, ColumnDef,
     ColumnOptions, ColumnSchema, CreateTableExpr, SemanticType,
 };
 use datatypes::schema::Schema;
@@ -107,8 +106,12 @@ pub fn build_create_table_expr(
     } in column_exprs
     {
         let mut is_nullable = true;
+        let mut is_primary_key = false;
         match semantic_type {
-            v if v == SemanticType::Tag as i32 => primary_keys.push(column_name.to_string()),
+            v if v == SemanticType::Tag as i32 => {
+                primary_keys.push(column_name.to_string());
+                is_primary_key = true;
+            }
             v if v == SemanticType::Timestamp as i32 => {
                 ensure!(
                     time_index.is_none(),
@@ -124,11 +127,17 @@ pub fn build_create_table_expr(
             _ => {}
         }
 
+        let mut options = options.clone();
+        if is_primary_key {
+            let opt = options.get_or_insert_with(ColumnOptions::default);
+            column_def::set_inverted_index(opt);
+        }
+
         let column_type =
             ColumnDataType::try_from(datatype).context(UnknownColumnDataTypeSnafu { datatype })?;
 
         ensure!(
-            !contains_fulltext(options) || column_type == ColumnDataType::String,
+            !column_def::contains_fulltext(&options) || column_type == ColumnDataType::String,
             InvalidFulltextColumnTypeSnafu {
                 column_name,
                 column_type,
@@ -143,7 +152,7 @@ pub fn build_create_table_expr(
             semantic_type,
             comment: String::new(),
             datatype_extension: datatype_extension.clone(),
-            options: options.clone(),
+            options,
         };
         column_defs.push(column_def);
     }

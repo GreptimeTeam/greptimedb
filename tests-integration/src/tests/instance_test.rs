@@ -124,7 +124,8 @@ PARTITION ON COLUMNS (n) (
 |       |   "n" INT NULL,                     |
 |       |   "ts" TIMESTAMP(3) NOT NULL,       |
 |       |   TIME INDEX ("ts"),                |
-|       |   PRIMARY KEY ("n")                 |
+|       |   PRIMARY KEY ("n"),                |
+|       |   INVERTED INDEX ("n")              |
 |       | )                                   |
 |       | PARTITION ON COLUMNS ("n") (        |
 |       |   n < 1,                            |

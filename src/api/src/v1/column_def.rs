@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, FulltextOptions, COMMENT_KEY, FULLTEXT_KEY,
+    INVERTED_INDEX_KEY,
 };
 use snafu::ResultExt;
 
@@ -25,6 +26,8 @@ use crate::v1::{ColumnDef, ColumnOptions, SemanticType};
 
 /// Key used to store fulltext options in gRPC column options.
 const FULLTEXT_GRPC_KEY: &str = "fulltext";
+/// Key used to store inverted index options in gRPC column options.
+const INVERTED_INDEX_GRPC_KEY: &str = "inverted_index";
 
 /// Tries to construct a `ColumnSchema` from the given  `ColumnDef`.
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
@@ -49,10 +52,13 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     if !column_def.comment.is_empty() {
         metadata.insert(COMMENT_KEY.to_string(), column_def.comment.clone());
     }
-    if let Some(options) = column_def.options.as_ref()
-        && let Some(fulltext) = options.options.get(FULLTEXT_GRPC_KEY)
-    {
-        metadata.insert(FULLTEXT_KEY.to_string(), fulltext.to_string());
+    if let Some(options) = column_def.options.as_ref() {
+        if let Some(fulltext) = options.options.get(FULLTEXT_GRPC_KEY) {
+            metadata.insert(FULLTEXT_KEY.to_string(), fulltext.clone());
+        }
+        if let Some(inverted_index) = options.options.get(INVERTED_INDEX_GRPC_KEY) {
+            metadata.insert(INVERTED_INDEX_KEY.to_string(), inverted_index.clone());
+        }
     }
 
     ColumnSchema::new(&column_def.name, data_type.into(), column_def.is_nullable)
@@ -70,7 +76,12 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
     if let Some(fulltext) = column_schema.metadata().get(FULLTEXT_KEY) {
         options
             .options
-            .insert(FULLTEXT_GRPC_KEY.to_string(), fulltext.to_string());
+            .insert(FULLTEXT_GRPC_KEY.to_string(), fulltext.clone());
+    }
+    if let Some(inverted_index) = column_schema.metadata().get(INVERTED_INDEX_KEY) {
+        options
+            .options
+            .insert(INVERTED_INDEX_GRPC_KEY.to_string(), inverted_index.clone());
     }
 
     (!options.options.is_empty()).then_some(options)
@@ -91,6 +102,12 @@ pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<Column
     options.options.insert(FULLTEXT_GRPC_KEY.to_string(), v);
 
     Ok((!options.options.is_empty()).then_some(options))
+}
+
+pub fn set_inverted_index(options: &mut ColumnOptions) {
+    options
+        .options
+        .insert(INVERTED_INDEX_GRPC_KEY.to_string(), "true".to_string());
 }
 
 #[cfg(test)]
@@ -115,10 +132,13 @@ mod tests {
             comment: "test_comment".to_string(),
             datatype_extension: None,
             options: Some(ColumnOptions {
-                options: HashMap::from([(
-                    FULLTEXT_GRPC_KEY.to_string(),
-                    "{\"enable\":true}".to_string(),
-                )]),
+                options: HashMap::from([
+                    (
+                        FULLTEXT_GRPC_KEY.to_string(),
+                        "{\"enable\":true}".to_string(),
+                    ),
+                    (INVERTED_INDEX_GRPC_KEY.to_string(), "true".to_string()),
+                ]),
             }),
         };
 
@@ -139,6 +159,7 @@ mod tests {
                 ..Default::default()
             }
         );
+        assert!(schema.has_inverted_index());
     }
 
     #[test]
@@ -153,11 +174,16 @@ mod tests {
                 analyzer: FulltextAnalyzer::English,
                 case_sensitive: false,
             })
-            .unwrap();
+            .unwrap()
+            .with_inverted_index(true);
         let options = options_from_column_schema(&schema).unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),
             "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false}"
+        );
+        assert_eq!(
+            options.options.get(INVERTED_INDEX_GRPC_KEY).unwrap(),
+            "true"
         );
     }
 

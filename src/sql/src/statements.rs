@@ -454,6 +454,7 @@ pub fn has_primary_key_option(column_def: &ColumnDef) -> bool {
 pub fn column_to_schema(
     column: &Column,
     is_time_index: bool,
+    with_inverted_index: bool,
     timezone: Option<&Timezone>,
 ) -> Result<ColumnSchema> {
     let is_nullable = column
@@ -469,6 +470,7 @@ pub fn column_to_schema(
 
     let mut column_schema = ColumnSchema::new(name, data_type, is_nullable)
         .with_time_index(is_time_index)
+        .with_inverted_index(with_inverted_index)
         .with_default_constraint(default_constraint)
         .context(error::InvalidDefaultSnafu {
             column: &column.name().value,
@@ -1337,7 +1339,7 @@ mod tests {
             extensions: ColumnExtensions::default(),
         };
 
-        let column_schema = column_to_schema(&column_def, false, None).unwrap();
+        let column_schema = column_to_schema(&column_def, false, false, None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1347,7 +1349,7 @@ mod tests {
         assert!(column_schema.is_nullable());
         assert!(!column_schema.is_time_index());
 
-        let column_schema = column_to_schema(&column_def, true, None).unwrap();
+        let column_schema = column_to_schema(&column_def, true, false, None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1376,7 +1378,7 @@ mod tests {
             extensions: ColumnExtensions::default(),
         };
 
-        let column_schema = column_to_schema(&column_def, false, None).unwrap();
+        let column_schema = column_to_schema(&column_def, false, false, None).unwrap();
 
         assert_eq!("col2", column_schema.name);
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
@@ -1411,6 +1413,7 @@ mod tests {
         let column_schema = column_to_schema(
             &column,
             false,
+            false,
             Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
         )
         .unwrap();
@@ -1429,7 +1432,7 @@ mod tests {
         );
 
         // without timezone
-        let column_schema = column_to_schema(&column, false, None).unwrap();
+        let column_schema = column_to_schema(&column, false, false, None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1471,7 +1474,7 @@ mod tests {
             },
         };
 
-        let column_schema = column_to_schema(&column, false, None).unwrap();
+        let column_schema = column_to_schema(&column, false, false, None).unwrap();
         assert_eq!("col", column_schema.name);
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
         let fulltext_options = column_schema.fulltext_options().unwrap().unwrap();

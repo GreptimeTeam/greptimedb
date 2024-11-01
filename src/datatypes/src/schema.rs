@@ -28,7 +28,7 @@ use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, R
 use crate::prelude::DataType;
 pub use crate::schema::column_schema::{
     ColumnSchema, FulltextAnalyzer, FulltextOptions, Metadata, COMMENT_KEY, FULLTEXT_KEY,
-    TIME_INDEX_KEY,
+    INVERTED_INDEX_KEY, TIME_INDEX_KEY,
 };
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
