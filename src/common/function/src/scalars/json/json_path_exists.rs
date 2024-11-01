@@ -86,41 +86,43 @@ impl Function for JsonPathExistsFunction {
                     let json = jsons.get_ref(i);
                     let path = paths.get_ref(i);
 
-                    let json = if let Ok(Some(bytes)) = json.as_binary() {
-                        bytes
-                    } else {
-                        // This should never happen.
-                        return InvalidFuncArgsSnafu {
-                            err_msg: format!("Illegal json binary: {:?}", json),
+                    // Get json as bytes.
+                    let json = match json.as_binary() {
+                        Ok(Some(bytes)) => bytes,
+                        _ => {
+                            return InvalidFuncArgsSnafu {
+                                err_msg: format!("Illegal json binary: {:?}", json),
+                            }
+                            .fail();
                         }
-                        .fail();
                     };
 
                     let result = if !path.is_null() {
-                        // Since path is not null, we simply
-                        // unwrap it without checking if it's `Null`.
-                        let path = if let Ok(Some(str)) = path.as_string() {
-                            if let Ok(json_path) = jsonb::jsonpath::parse_json_path(str.as_bytes())
-                            {
-                                json_path
-                            } else {
-                                // Should never happen.
+                        // Get path as str.
+                        let path_str = match path.as_string() {
+                            Ok(Some(str)) => str,
+                            _ => {
                                 return InvalidFuncArgsSnafu {
-                                    err_msg: format!("Illegal json path {:?}", path),
+                                    err_msg: format!("Unable to parse path as string: {:?}", path),
                                 }
                                 .fail();
                             }
-                        } else {
-                            // Should never happen.
-                            return InvalidFuncArgsSnafu {
-                                err_msg: format!("Illegal json path: {:?}", path),
-                            }
-                            .fail();
                         };
 
-                        jsonb::path_exists(json, path).ok()
+                        // Get `JsonPath`.
+                        let json_path = match jsonb::jsonpath::parse_json_path(path_str.as_bytes())
+                        {
+                            Ok(json_path) => json_path,
+                            Err(_) => {
+                                return InvalidFuncArgsSnafu {
+                                    err_msg: format!("Illegal JSON path: {:?}", path),
+                                }
+                                .fail();
+                            }
+                        };
+
+                        jsonb::path_exists(json, json_path).ok()
                     } else {
-                        // Should never reach here since we `match` in advance.
                         None
                     };
 
