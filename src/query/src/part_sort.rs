@@ -47,6 +47,7 @@ use crate::downcast_ts_array;
 pub struct PartSortExec {
     /// Physical sort expressions(that is, sort by timestamp)
     expression: PhysicalSortExpr,
+    limit: Option<usize>,
     input: Arc<dyn ExecutionPlan>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
@@ -57,6 +58,7 @@ pub struct PartSortExec {
 impl PartSortExec {
     pub fn new(
         expression: PhysicalSortExpr,
+        limit: Option<usize>,
         partition_ranges: Vec<Vec<PartitionRange>>,
         input: Arc<dyn ExecutionPlan>,
     ) -> Self {
@@ -69,6 +71,7 @@ impl PartSortExec {
 
         Self {
             expression,
+            limit,
             input,
             metrics,
             partition_ranges,
@@ -95,6 +98,7 @@ impl PartSortExec {
         let df_stream = Box::pin(PartSortStream::new(
             context,
             self,
+            self.limit,
             input_stream,
             self.partition_ranges[partition].clone(),
             partition,
@@ -138,6 +142,7 @@ impl ExecutionPlan for PartSortExec {
         };
         Ok(Arc::new(Self::new(
             self.expression.clone(),
+            self.limit,
             self.partition_ranges.clone(),
             new_input.clone(),
         )))
@@ -170,6 +175,7 @@ struct PartSortStream {
     reservation: MemoryReservation,
     buffer: Vec<DfRecordBatch>,
     expression: PhysicalSortExpr,
+    limit: Option<usize>,
     produced: usize,
     input: DfSendableRecordBatchStream,
     input_complete: bool,
@@ -185,6 +191,7 @@ impl PartSortStream {
     fn new(
         context: Arc<TaskContext>,
         sort: &PartSortExec,
+        limit: Option<usize>,
         input: DfSendableRecordBatchStream,
         partition_ranges: Vec<PartitionRange>,
         partition: usize,
@@ -194,6 +201,7 @@ impl PartSortStream {
                 .register(&context.runtime_env().memory_pool),
             buffer: Vec::new(),
             expression: sort.expression.clone(),
+            limit,
             produced: 0,
             input,
             input_complete: false,
@@ -294,12 +302,19 @@ impl PartSortStream {
                 )
             })?;
 
-        let indices = sort_to_indices(&sort_column, opt, None).map_err(|e| {
+        let mut indices = sort_to_indices(&sort_column, opt, None).map_err(|e| {
             DataFusionError::ArrowError(
                 e,
                 Some(format!("Fail to sort to indices at {}", location!())),
             )
         })?;
+
+        // apply limit if specified
+        if let Some(limit) = self.limit
+            && limit < indices.len()
+        {
+            indices = indices.slice(0, limit);
+        }
 
         self.check_in_range(
             &sort_column,
@@ -674,6 +689,7 @@ mod test {
                 expr: Arc::new(Column::new("ts", 0)),
                 options: opt,
             },
+            None,
             vec![ranges],
             Arc::new(mock_input),
         );
