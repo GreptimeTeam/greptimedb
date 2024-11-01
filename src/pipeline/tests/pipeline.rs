@@ -16,8 +16,8 @@ use api::v1::value::ValueData;
 use api::v1::Rows;
 use common_telemetry::tracing::info;
 use greptime_proto::v1::value::ValueData::{
-    BoolValue, F64Value, StringValue, TimestampNanosecondValue, TimestampSecondValue, U32Value,
-    U64Value, U8Value,
+    BinaryValue, BoolValue, F64Value, StringValue, TimestampNanosecondValue, TimestampSecondValue,
+    U32Value, U64Value, U8Value,
 };
 use greptime_proto::v1::Value as GreptimeValue;
 use pipeline::{parse, Content, GreptimeTransformer, Pipeline};
@@ -516,6 +516,109 @@ transform:
         }
         _ => panic!("unexpected value"),
     }
+}
+
+#[test]
+fn test_json_path() {
+    let input_value_str = r#"
+{
+  "product_object": {
+    "hello": "world"
+  },
+  "product_array": [
+    "hello",
+    "world"
+  ],
+  "complex_object": {
+    "shop": {
+      "orders": [
+        {
+          "id": 1,
+          "active": true
+        },
+        {
+          "id": 2
+        },
+        {
+          "id": 3
+        },
+        {
+          "id": 4,
+          "active": true
+        }
+      ]
+    }
+  }
+}"#;
+    let input_value = serde_json::from_str::<serde_json::Value>(input_value_str).unwrap();
+
+    let pipeline_yaml = r#"
+processors:
+    - json_path:
+        fields:
+            - product_object, object_target
+        json_path: "$.hello"
+        result_index: 0
+    - json_path:
+        fields:
+            - product_array, array_target
+        json_path: "$.[1]"
+        result_index: 0
+    - json_path:
+        fields:
+            - complex_object, complex_target1
+        json_path: "$.shop.orders[?(@.active)].id"
+    - json_path:
+        fields:
+            - complex_target1, complex_target_2
+        json_path: "$.[1]"
+        result_index: 0
+    - json_path:
+        fields:
+            - complex_object, complex_target_3
+        json_path: "$.shop.orders[?(@.active)].id"
+        result_index: 1
+transform:
+    - fields:
+        - object_target
+        - array_target
+      type: string
+    - fields:
+        - complex_target_3
+        - complex_target_2
+      type: uint32
+    - fields:
+        - complex_target1
+      type: json
+"#;
+
+    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+
+    let mut status = pipeline.init_intermediate_state();
+
+    pipeline.prepare(input_value, &mut status).unwrap();
+    let row = pipeline.exec_mut(&mut status).unwrap();
+
+    let r = row
+        .values
+        .into_iter()
+        .map(|v| v.value_data.unwrap())
+        .collect::<Vec<_>>();
+
+    let object_target = r[0].clone();
+    let array_target = r[1].clone();
+    let complex_target3 = r[2].clone();
+    let complex_target2 = r[3].clone();
+    let complex_target1 = r[4].clone();
+
+    assert_eq!(StringValue("world".into()), object_target);
+    assert_eq!(StringValue("world".into()), array_target);
+    assert_eq!(complex_target3, complex_target2);
+    assert_eq!(
+        BinaryValue([128, 0, 0, 2, 32, 0, 0, 2, 32, 0, 0, 2, 64, 1, 64, 4].to_vec()),
+        complex_target1
+    );
 }
 
 #[test]

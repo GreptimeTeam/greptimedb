@@ -20,7 +20,10 @@ use std::collections::BTreeMap;
 
 pub use array::Array;
 use jsonb::{Number as JsonbNumber, Object as JsonbObject, Value as JsonbValue};
+use jsonpath_rust::path::{JsonLike, Path};
+use jsonpath_rust::{jsp_idx, jsp_obj};
 pub use map::Map;
+use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 pub use time::Timestamp;
 
@@ -35,10 +38,11 @@ use crate::etl::error::{Error, Result};
 /// acts as value: the enclosed value is the actual value
 /// acts as type: the enclosed value is the default value
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Value {
     // as value: null
     // as type: no type specified
+    #[default]
     Null,
 
     Int8(i8),
@@ -230,6 +234,36 @@ impl Value {
             Value::Null => "null",
         }
     }
+
+    pub fn get(&self, key: &str) -> Option<&Self> {
+        match self {
+            Value::Map(map) => map.get(key),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Value::Float32(v) => Some(*v as f64),
+            Value::Float64(v) => Some(*v),
+            Value::Uint64(v) => Some(*v as f64),
+            Value::Uint32(v) => Some(*v as f64),
+            Value::Uint16(v) => Some(*v as f64),
+            Value::Uint8(v) => Some(*v as f64),
+            Value::Int64(v) => Some(*v as f64),
+            Value::Int32(v) => Some(*v as f64),
+            Value::Int16(v) => Some(*v as f64),
+            Value::Int8(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Value {
@@ -408,5 +442,354 @@ impl From<Value> for JsonbValue<'_> {
                 JsonbValue::Object(map)
             }
         }
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Value::String(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Value::String(value.to_string())
+    }
+}
+
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Value::Int64(value)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Value::Float64(value)
+    }
+}
+
+impl From<Vec<String>> for Value {
+    fn from(value: Vec<String>) -> Self {
+        Value::Array(Array {
+            values: value.into_iter().map(Value::String).collect(),
+        })
+    }
+}
+
+impl From<Vec<Self>> for Value {
+    fn from(value: Vec<Self>) -> Self {
+        Value::Array(Array { values: value })
+    }
+}
+
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Value::Boolean(value)
+    }
+}
+
+impl JsonLike for Value {
+    fn get(&self, key: &str) -> Option<&Self> {
+        self.get(key)
+    }
+
+    fn itre(&self, pref: String) -> Vec<jsonpath_rust::JsonPathValue<Self>> {
+        let res = match self {
+            Value::Array(elems) => {
+                let mut res = vec![];
+                for (idx, el) in elems.iter().enumerate() {
+                    res.push(jsonpath_rust::JsonPathValue::Slice(
+                        el,
+                        jsonpath_rust::jsp_idx(&pref, idx),
+                    ));
+                }
+                res
+            }
+            Value::Map(elems) => {
+                let mut res = vec![];
+                for (key, el) in elems.iter() {
+                    res.push(jsonpath_rust::JsonPathValue::Slice(
+                        el,
+                        jsonpath_rust::jsp_obj(&pref, key),
+                    ));
+                }
+                res
+            }
+            _ => vec![],
+        };
+        if res.is_empty() {
+            vec![jsonpath_rust::JsonPathValue::NoValue]
+        } else {
+            res
+        }
+    }
+
+    fn array_len(&self) -> jsonpath_rust::JsonPathValue<'static, Self> {
+        match self {
+            Value::Array(elems) => {
+                jsonpath_rust::JsonPathValue::NewValue(Value::Int64(elems.len() as i64))
+            }
+            _ => jsonpath_rust::JsonPathValue::NoValue,
+        }
+    }
+
+    fn init_with_usize(cnt: usize) -> Self {
+        Value::Int64(cnt as i64)
+    }
+
+    fn deep_flatten(&self, pref: String) -> Vec<(&Self, String)> {
+        let mut acc = vec![];
+        match self {
+            Value::Map(elems) => {
+                for (f, v) in elems.iter() {
+                    let pref = jsp_obj(&pref, f);
+                    acc.push((v, pref.clone()));
+                    acc.append(&mut v.deep_flatten(pref));
+                }
+            }
+            Value::Array(elems) => {
+                for (i, v) in elems.iter().enumerate() {
+                    let pref = jsp_idx(&pref, i);
+                    acc.push((v, pref.clone()));
+                    acc.append(&mut v.deep_flatten(pref));
+                }
+            }
+            _ => (),
+        }
+        acc
+    }
+
+    fn deep_path_by_key<'a>(
+        &'a self,
+        key: jsonpath_rust::path::ObjectField<'a, Self>,
+        pref: String,
+    ) -> Vec<(&'a Self, String)> {
+        let mut result: Vec<(&'a Value, String)> = jsonpath_rust::JsonPathValue::vec_as_pair(
+            key.find(jsonpath_rust::JsonPathValue::new_slice(self, pref.clone())),
+        );
+        match self {
+            Value::Map(elems) => {
+                let mut next_levels: Vec<(&'a Value, String)> = elems
+                    .iter()
+                    .flat_map(|(k, v)| v.deep_path_by_key(key.clone(), jsp_obj(&pref, k)))
+                    .collect();
+                result.append(&mut next_levels);
+                result
+            }
+            Value::Array(elems) => {
+                let mut next_levels: Vec<(&'a Value, String)> = elems
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, v)| v.deep_path_by_key(key.clone(), jsp_idx(&pref, i)))
+                    .collect();
+                result.append(&mut next_levels);
+                result
+            }
+            _ => result,
+        }
+    }
+
+    fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::Uint64(v) => Some(*v),
+            Value::Uint32(v) => Some(*v as u64),
+            Value::Uint16(v) => Some(*v as u64),
+            Value::Uint8(v) => Some(*v as u64),
+            Value::Int64(v) if *v >= 0 => Some(*v as u64),
+            Value::Int32(v) if *v >= 0 => Some(*v as u64),
+            Value::Int16(v) if *v >= 0 => Some(*v as u64),
+            Value::Int8(v) if *v >= 0 => Some(*v as u64),
+            Value::Float64(v) if *v >= 0.0 => Some(*v as u64),
+            Value::Float32(v) if *v >= 0.0 => Some(*v as u64),
+            _ => None,
+        }
+    }
+
+    fn is_array(&self) -> bool {
+        matches!(self, Value::Array(_))
+    }
+
+    fn as_array(&self) -> Option<&Vec<Self>> {
+        match self {
+            Value::Array(arr) => Some(&arr.values),
+            _ => None,
+        }
+    }
+
+    fn size(left: Vec<&Self>, right: Vec<&Self>) -> bool {
+        if let Some(v) = right.first() {
+            let sz = match v {
+                Value::Int64(n) => *n as usize,
+                Value::Int32(n) => *n as usize,
+                Value::Int16(n) => *n as usize,
+                Value::Int8(n) => *n as usize,
+
+                Value::Uint64(n) => *n as usize,
+                Value::Uint32(n) => *n as usize,
+                Value::Uint16(n) => *n as usize,
+                Value::Uint8(n) => *n as usize,
+                Value::Float32(n) => *n as usize,
+                Value::Float64(n) => *n as usize,
+                _ => return false,
+            };
+            for el in left.iter() {
+                match el {
+                    Value::String(v) if v.len() == sz => true,
+                    Value::Array(elems) if elems.len() == sz => true,
+                    Value::Map(fields) if fields.len() == sz => true,
+                    _ => return false,
+                };
+            }
+            return true;
+        }
+        false
+    }
+
+    fn sub_set_of(left: Vec<&Self>, right: Vec<&Self>) -> bool {
+        if left.is_empty() {
+            return true;
+        }
+        if right.is_empty() {
+            return false;
+        }
+
+        if let Some(elems) = left.first().and_then(|e| e.as_array()) {
+            if let Some(Value::Array(right_elems)) = right.first() {
+                if right_elems.is_empty() {
+                    return false;
+                }
+
+                for el in elems {
+                    let mut res = false;
+
+                    for r in right_elems.iter() {
+                        if el.eq(r) {
+                            res = true
+                        }
+                    }
+                    if !res {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    fn any_of(left: Vec<&Self>, right: Vec<&Self>) -> bool {
+        if left.is_empty() {
+            return true;
+        }
+        if right.is_empty() {
+            return false;
+        }
+
+        if let Some(Value::Array(elems)) = right.first() {
+            if elems.is_empty() {
+                return false;
+            }
+
+            for el in left.iter() {
+                if let Some(left_elems) = el.as_array() {
+                    for l in left_elems.iter() {
+                        for r in elems.iter() {
+                            if l.eq(r) {
+                                return true;
+                            }
+                        }
+                    }
+                } else {
+                    for r in elems.iter() {
+                        if el.eq(&r) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn regex(left: Vec<&Self>, right: Vec<&Self>) -> bool {
+        if left.is_empty() || right.is_empty() {
+            return false;
+        }
+
+        match right.first() {
+            Some(Value::String(str)) => {
+                if let Ok(regex) = Regex::new(str) {
+                    for el in left.iter() {
+                        if let Some(v) = el.as_str() {
+                            if regex.is_match(v) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn inside(left: Vec<&Self>, right: Vec<&Self>) -> bool {
+        if left.is_empty() {
+            return false;
+        }
+
+        match right.first() {
+            Some(Value::Array(elems)) => {
+                for el in left.iter() {
+                    if elems.contains(el) {
+                        return true;
+                    }
+                }
+                false
+            }
+            Some(Value::Map(elems)) => {
+                for el in left.iter() {
+                    for r in elems.values() {
+                        if el.eq(&r) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn less(left: Vec<&Self>, right: Vec<&Self>) -> bool {
+        if left.len() == 1 && right.len() == 1 {
+            match (left.first(), right.first()) {
+                (Some(l), Some(r)) => l
+                    .as_f64()
+                    .and_then(|v1| r.as_f64().map(|v2| v1 < v2))
+                    .unwrap_or(false),
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    fn eq(left: Vec<&Self>, right: Vec<&Self>) -> bool {
+        if left.len() != right.len() {
+            false
+        } else {
+            left.iter().zip(right).map(|(a, b)| a.eq(&b)).all(|a| a)
+        }
+    }
+
+    fn array(data: Vec<Self>) -> Self {
+        Value::Array(Array { values: data })
+    }
+
+    fn null() -> Self {
+        Value::Null
     }
 }
