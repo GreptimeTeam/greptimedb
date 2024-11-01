@@ -80,5 +80,6 @@ impl GeoFunctions {
         // spatial measure
         registry.register(Arc::new(measure::STDistance));
         registry.register(Arc::new(measure::STDistanceSphere));
+        registry.register(Arc::new(measure::STArea));
     }
 }

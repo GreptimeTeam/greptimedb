@@ -344,19 +344,24 @@ SELECT wkt_point_from_latlng(37.76938, -122.3889) AS point;
 
 SELECT
     st_distance(p1, p2) AS euclidean_dist,
-    st_distance_sphere_m(p1, p2) AS sphere_dist_m
+    st_distance_sphere_m(p1, p2) AS sphere_dist_m,
+    st_distance(p1, polygon1) AS euclidean_dist_pp,
+    st_distance_sphere_m(p1, polygon1) AS sphere_dist_m_pp,
+    st_area(p1) as area_point,
+    st_area(polygon1) as area_polygon,
 FROM
     (
         SELECT
             wkt_point_from_latlng(37.76938, -122.3889) AS p1,
-            wkt_point_from_latlng(38.5216, -121.4247) AS p2
+            wkt_point_from_latlng(38.5216, -121.4247) AS p2,
+            'POLYGON ((-121.491698 38.653343, -121.582353 38.556757, -121.469721 38.449287, -121.315883 38.541721, -121.491698 38.653343))' AS polygon1,
     );
 
-+--------------------+--------------------+
-| euclidean_dist     | sphere_dist_m      |
-+--------------------+--------------------+
-| 1.2229131483470166 | 118766.03647159638 |
-+--------------------+--------------------+
++--------------------+--------------------+--------------------+--------------------+------------+----------------------+
+| euclidean_dist     | sphere_dist_m      | euclidean_dist_pp  | sphere_dist_m_pp   | area_point | area_polygon         |
++--------------------+--------------------+--------------------+--------------------+------------+----------------------+
+| 1.2229131483470166 | 118766.03647159638 | 1.1271559800391486 | 118892.51333199818 | 0.0        | 0.027022178074000106 |
++--------------------+--------------------+--------------------+--------------------+------------+----------------------+
 
 SELECT
     st_contains(polygon1, p1),

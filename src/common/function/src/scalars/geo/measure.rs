@@ -20,7 +20,7 @@ use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{Float64VectorBuilder, MutableVector, VectorRef};
 use derive_more::Display;
 use geo::algorithm::line_measures::metric_spaces::Euclidean;
-use geo::{Centroid, Distance, Haversine};
+use geo::{Area, Centroid, Distance, Haversine};
 
 use super::helpers::{ensure_columns_len, ensure_columns_n};
 use super::wkt::parse_wkt;
@@ -129,6 +129,52 @@ impl Function for STDistanceSphere {
                     }
                 }
                 _ => None,
+            };
+
+            results.push(result);
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
+/// Return area of given geometry object
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct STArea;
+
+impl Function for STArea {
+    fn name(&self) -> &str {
+        "st_area"
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::float64_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::new(
+            TypeSignature::Exact(vec![ConcreteDataType::string_datatype()]),
+            Volatility::Stable,
+        )
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure_columns_n!(columns, 1);
+
+        let wkt_vec = &columns[0];
+
+        let size = wkt_vec.len();
+        let mut results = Float64VectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let wkt = wkt_vec.get(i).as_string();
+
+            let result = if let Some(wkt) = wkt {
+                let geom = parse_wkt(&wkt)?;
+                Some(geom.unsigned_area())
+            } else {
+                None
             };
 
             results.push(result);
