@@ -81,7 +81,6 @@ impl<R: RangeReader> InvertedIndexReader for InvertedIndexBlobReader<R> {
 mod tests {
     use common_base::bit_vec::prelude::*;
     use fst::MapBuilder;
-    use futures::io::Cursor;
     use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
     use prost::Message;
 
@@ -162,7 +161,7 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_reader_metadata() {
         let blob = create_inverted_index_blob();
-        let mut blob_reader = InvertedIndexBlobReader::new(Cursor::new(blob));
+        let mut blob_reader = InvertedIndexBlobReader::new(blob);
 
         let metas = blob_reader.metadata().await.unwrap();
         assert_eq!(metas.metas.len(), 2);
@@ -189,7 +188,7 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_reader_fst() {
         let blob = create_inverted_index_blob();
-        let mut blob_reader = InvertedIndexBlobReader::new(Cursor::new(blob));
+        let mut blob_reader = InvertedIndexBlobReader::new(blob);
 
         let metas = blob_reader.metadata().await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();
@@ -221,7 +220,7 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_reader_bitmap() {
         let blob = create_inverted_index_blob();
-        let mut blob_reader = InvertedIndexBlobReader::new(Cursor::new(blob));
+        let mut blob_reader = InvertedIndexBlobReader::new(blob);
 
         let metas = blob_reader.metadata().await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();

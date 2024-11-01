@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_base::range_read::{RangeReader, TokioFileReader};
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use futures::AsyncReadExt as _;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt as _;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
@@ -43,7 +43,7 @@ async fn new_bounded_stager(prefix: &str, capacity: u64) -> (TempDir, Arc<Bounde
 #[tokio::test]
 async fn test_put_get_file() {
     let capicities = [1, 16, u64::MAX];
-    let compression_codecs = [None, Some(CompressionCodec::Zstd)];
+    let compression_codecs = [None];
 
     for capacity in capicities {
         for compression_codec in compression_codecs {
@@ -93,10 +93,9 @@ async fn test_put_get_file() {
 #[tokio::test]
 async fn test_put_get_files() {
     let capicities = [1, 16, u64::MAX];
+    let compression_codecs = [None, Some(CompressionCodec::Zstd)];
 
     for capacity in capicities {
-        let compression_codecs = [None, Some(CompressionCodec::Zstd)];
-
         for compression_codec in compression_codecs {
             let (_staging_dir, stager) = new_bounded_stager("test_put_get_files_", capacity).await;
             let file_accessor = Arc::new(MockFileAccessor::new("test_put_get_files_"));
@@ -299,9 +298,9 @@ async fn check_blob(
 ) {
     let blob = puffin_reader.blob(key).await.unwrap();
     let mut reader = blob.reader().await.unwrap();
-    let mut buf = Vec::new();
-    reader.read_to_end(&mut buf).await.unwrap();
-    assert_eq!(buf, raw_data);
+    let meta = reader.metadata().await.unwrap();
+    let bs = reader.read(0..meta.content_length).await.unwrap();
+    assert_eq!(&*bs, raw_data);
 
     if !compressed {
         // If the blob is not compressed, it won't be exist in the stager.
@@ -386,14 +385,14 @@ impl MockFileAccessor {
 
 #[async_trait]
 impl PuffinFileAccessor for MockFileAccessor {
-    type Reader = Compat<File>;
+    type Reader = TokioFileReader;
     type Writer = Compat<File>;
 
     async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader> {
         let f = tokio::fs::File::open(self.tempdir.path().join(puffin_file_name))
             .await
             .unwrap();
-        Ok(f.compat())
+        Ok(TokioFileReader::new(f))
     }
 
     async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer> {

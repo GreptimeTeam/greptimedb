@@ -99,7 +99,6 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexBlobWriter<W> {
 
 #[cfg(test)]
 mod tests {
-    use futures::io::Cursor;
     use futures::stream;
 
     use super::*;
@@ -119,8 +118,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cursor = Cursor::new(blob);
-        let mut reader = InvertedIndexBlobReader::new(cursor);
+        let mut reader = InvertedIndexBlobReader::new(blob);
         let metadata = reader.metadata().await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
         assert_eq!(metadata.segment_row_count, 1);
@@ -160,8 +158,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cursor = Cursor::new(blob);
-        let mut reader = InvertedIndexBlobReader::new(cursor);
+        let mut reader = InvertedIndexBlobReader::new(blob);
         let metadata = reader.metadata().await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
         assert_eq!(metadata.segment_row_count, 1);

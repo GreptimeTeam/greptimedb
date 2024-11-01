@@ -19,6 +19,8 @@ paste = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 snafu.workspace = true
 zeroize = { version = "1.6", default-features = false, features = ["alloc"] }
+pin-project.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 toml.workspace = true

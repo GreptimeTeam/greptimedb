@@ -12,19 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::io;
+use std::ops::Range;
 
 use async_compression::futures::bufread::ZstdDecoder;
 use async_trait::async_trait;
-use futures::io::BufReader;
-use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite};
+use bytes::{BufMut, Bytes};
+use common_base::range_read::{AsyncReadAdapter, Metadata, RangeReader};
+use futures::io::{BufReader, Cursor};
+use futures::{AsyncRead, AsyncWrite};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::blob_metadata::{BlobMetadata, CompressionCodec};
 use crate::error::{
     BlobIndexOutOfBoundSnafu, BlobNotFoundSnafu, DeserializeJsonSnafu, FileKeyNotMatchSnafu,
-    ReadSnafu, Result, UnsupportedDecompressionSnafu, WriteSnafu,
+    Result, UnsupportedDecompressionSnafu, WriteSnafu,
 };
 use crate::file_format::reader::{AsyncReader, PuffinFileReader};
 use crate::partial_reader::PartialReader;
@@ -136,7 +138,12 @@ where
         blob_metadata: BlobMetadata,
         mut writer: BoxWriter,
     ) -> Result<u64> {
-        let reader = reader.blob_reader(&blob_metadata)?;
+        let mut reader = reader.blob_reader(&blob_metadata)?;
+        // let m = reader.metadata().await.unwrap();
+        // let buf = reader.read(0..m.content_length).await.unwrap();
+        // let buf = buf.to_vec();
+        // let reader = AsyncReadAdapter::new(buf);
+        let reader = AsyncReadAdapter::new(reader);
         let compression = blob_metadata.compression_codec;
         let size = Self::handle_decompress(reader, &mut writer, compression).await?;
         Ok(size)
@@ -159,10 +166,9 @@ where
             .context(BlobNotFoundSnafu { blob: key })?;
 
         let mut reader = file.blob_reader(blob_metadata)?;
-        let mut buf = vec![];
-        reader.read_to_end(&mut buf).await.context(ReadSnafu)?;
-        let dir_meta: DirMetadata =
-            serde_json::from_slice(buf.as_slice()).context(DeserializeJsonSnafu)?;
+        let meta = reader.metadata().await.unwrap();
+        let buf = reader.read(0..meta.content_length).await.unwrap();
+        let dir_meta: DirMetadata = serde_json::from_slice(&*buf).context(DeserializeJsonSnafu)?;
 
         let mut tasks = vec![];
         for file_meta in dir_meta.files {
@@ -185,8 +191,8 @@ where
             let reader = accessor.reader(&puffin_file_name).await?;
             let writer = writer_provider.writer(&file_meta.relative_path).await?;
             let task = common_runtime::spawn_global(async move {
-                let mut file = PuffinFileReader::new(reader);
-                let reader = file.blob_reader(&blob_meta)?;
+                let reader = PuffinFileReader::new(reader).into_blob_reader(&blob_meta);
+                let reader = AsyncReadAdapter::new(reader);
                 let compression = blob_meta.compression_codec;
                 let size = Self::handle_decompress(reader, writer, compression).await?;
                 Ok(size)
@@ -256,43 +262,45 @@ impl<F: PuffinFileAccessor + Clone> BlobGuard for RandomReadBlob<F> {
 /// `Either` is a type that represents either `A` or `B`.
 ///
 /// Used to:
-/// impl `AsyncRead + AsyncSeek` for `Either<A: AsyncRead + AsyncSeek, B: AsyncRead + AsyncSeek>`,
+/// impl `RangeReader` for `Either<A: RangeReader, B: RangeReader>`,
 /// impl `BlobGuard` for `Either<A: BlobGuard, B: BlobGuard>`.
 pub enum Either<A, B> {
     L(A),
     R(B),
 }
 
-impl<A, B> AsyncRead for Either<A, B>
+#[async_trait]
+impl<A, B> RangeReader for Either<A, B>
 where
-    A: AsyncRead + Unpin,
-    B: AsyncRead + Unpin,
+    A: RangeReader,
+    B: RangeReader,
 {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<std::io::Result<usize>> {
-        match self.get_mut() {
-            Either::L(a) => Pin::new(a).poll_read(cx, buf),
-            Either::R(b) => Pin::new(b).poll_read(cx, buf),
+    async fn metadata(&mut self) -> io::Result<Metadata> {
+        match self {
+            Either::L(a) => a.metadata().await,
+            Either::R(b) => b.metadata().await,
         }
     }
-}
-
-impl<A, B> AsyncSeek for Either<A, B>
-where
-    A: AsyncSeek + Unpin,
-    B: AsyncSeek + Unpin,
-{
-    fn poll_seek(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        pos: std::io::SeekFrom,
-    ) -> Poll<std::io::Result<u64>> {
-        match self.get_mut() {
-            Either::L(a) => Pin::new(a).poll_seek(cx, pos),
-            Either::R(b) => Pin::new(b).poll_seek(cx, pos),
+    async fn read(&mut self, range: Range<u64>) -> io::Result<Bytes> {
+        match self {
+            Either::L(a) => a.read(range).await,
+            Either::R(b) => b.read(range).await,
+        }
+    }
+    async fn read_into(
+        &mut self,
+        range: Range<u64>,
+        buf: &mut (impl BufMut + Send),
+    ) -> io::Result<()> {
+        match self {
+            Either::L(a) => a.read_into(range, buf).await,
+            Either::R(b) => b.read_into(range, buf).await,
+        }
+    }
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+        match self {
+            Either::L(a) => a.read_vec(ranges).await,
+            Either::R(b) => b.read_vec(ranges).await,
         }
     }
 }

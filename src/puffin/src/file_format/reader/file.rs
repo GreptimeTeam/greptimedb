@@ -15,7 +15,7 @@
 use std::io::{self, SeekFrom};
 
 use async_trait::async_trait;
-use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
+use common_base::range_read::RangeReader;
 use snafu::{ensure, ResultExt};
 
 use crate::blob_metadata::BlobMetadata;
@@ -112,7 +112,7 @@ impl<'a, R: io::Read + io::Seek + 'a> SyncReader<'a> for PuffinFileReader<R> {
 }
 
 #[async_trait]
-impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> AsyncReader<'a> for PuffinFileReader<R> {
+impl<'a, R: RangeReader + 'a> AsyncReader<'a> for PuffinFileReader<R> {
     type Reader = PartialReader<&'a mut R>;
 
     async fn metadata(&'a mut self) -> Result<FileMetadata> {
@@ -121,12 +121,8 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> AsyncReader<'a> for Puffi
         }
 
         // check the magic
-        let mut magic = [0; MAGIC_SIZE as usize];
-        self.source
-            .read_exact(&mut magic)
-            .await
-            .context(ReadSnafu)?;
-        ensure!(magic == MAGIC, MagicNotMatchedSnafu);
+        let magic = self.source.read(0..MAGIC_SIZE).await.context(ReadSnafu)?;
+        ensure!(*magic == MAGIC, MagicNotMatchedSnafu);
 
         let file_size = self.get_file_size_async().await?;
 
@@ -155,13 +151,14 @@ impl<R: io::Read + io::Seek> PuffinFileReader<R> {
     }
 }
 
-impl<R: AsyncRead + AsyncSeek + Send + Unpin> PuffinFileReader<R> {
+impl<R: RangeReader> PuffinFileReader<R> {
     async fn get_file_size_async(&mut self) -> Result<u64> {
         let file_size = self
             .source
-            .seek(SeekFrom::End(0))
+            .metadata()
             .await
-            .context(SeekSnafu)?;
+            .context(ReadSnafu)?
+            .content_length;
         Self::validate_file_size(file_size)?;
         Ok(file_size)
     }
