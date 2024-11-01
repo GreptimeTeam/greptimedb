@@ -66,6 +66,8 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
+use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::kv_backend::KvBackendRef;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing;
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
@@ -112,13 +114,15 @@ impl MitoEngine {
         mut config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
+        kv_backend: KvBackendRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
         Ok(MitoEngine {
             inner: Arc::new(
-                EngineInner::new(config, log_store, object_store_manager, plugins).await?,
+                EngineInner::new(config, log_store, object_store_manager, kv_backend, plugins)
+                    .await?,
             ),
         })
     }
@@ -278,13 +282,20 @@ impl EngineInner {
         config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
+        kv_backend: KvBackendRef,
         plugins: Plugins,
     ) -> Result<EngineInner> {
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         Ok(EngineInner {
-            workers: WorkerGroup::start(config.clone(), log_store, object_store_manager, plugins)
-                .await?,
+            workers: WorkerGroup::start(
+                config.clone(),
+                log_store,
+                object_store_manager,
+                kv_backend,
+                plugins,
+            )
+            .await?,
             config,
             wal_raw_entry_reader,
         })
@@ -596,6 +607,7 @@ impl MitoEngine {
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
+        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         Ok(MitoEngine {
@@ -606,6 +618,7 @@ impl MitoEngine {
                     object_store_manager,
                     write_buffer_manager,
                     listener,
+                    kv_backend,
                     time_provider,
                 )
                 .await?,

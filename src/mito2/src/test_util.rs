@@ -35,6 +35,7 @@ use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
+use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_telemetry::warn;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
@@ -262,6 +263,7 @@ impl TestEnv {
         self.log_store = Some(log_store.clone());
         self.object_store_manager = Some(object_store_manager.clone());
         let data_home = self.data_home().display().to_string();
+        let kv_backend = Arc::new(MemoryKvBackend::new());
 
         match log_store {
             LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
@@ -269,6 +271,7 @@ impl TestEnv {
                 config,
                 log_store,
                 object_store_manager,
+                kv_backend,
                 Plugins::new(),
             )
             .await
@@ -278,6 +281,7 @@ impl TestEnv {
                 config,
                 log_store,
                 object_store_manager,
+                kv_backend,
                 Plugins::new(),
             )
             .await
@@ -289,12 +293,14 @@ impl TestEnv {
     pub async fn create_follower_engine(&mut self, config: MitoConfig) -> MitoEngine {
         let object_store_manager = self.object_store_manager.as_ref().unwrap().clone();
         let data_home = self.data_home().display().to_string();
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         match self.log_store.as_ref().unwrap().clone() {
             LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
                 &data_home,
                 config,
                 log_store,
                 object_store_manager,
+                kv_backend,
                 Plugins::new(),
             )
             .await
@@ -304,6 +310,7 @@ impl TestEnv {
                 config,
                 log_store,
                 object_store_manager,
+                kv_backend,
                 Plugins::new(),
             )
             .await
@@ -450,6 +457,7 @@ impl TestEnv {
     /// Reopen the engine.
     pub async fn reopen_engine(&mut self, engine: MitoEngine, config: MitoConfig) -> MitoEngine {
         engine.stop().await.unwrap();
+        let kv_backend = Arc::new(MemoryKvBackend::new());
 
         match self.log_store.as_ref().unwrap().clone() {
             LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
@@ -457,6 +465,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                kv_backend,
                 Plugins::new(),
             )
             .await
@@ -466,6 +475,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                kv_backend,
                 Plugins::new(),
             )
             .await
@@ -475,12 +485,14 @@ impl TestEnv {
 
     /// Open the engine.
     pub async fn open_engine(&mut self, config: MitoConfig) -> MitoEngine {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         match self.log_store.as_ref().unwrap().clone() {
             LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
                 &self.data_home().display().to_string(),
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                kv_backend,
                 Plugins::new(),
             )
             .await
@@ -490,6 +502,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                kv_backend,
                 Plugins::new(),
             )
             .await
@@ -509,12 +522,14 @@ impl TestEnv {
 
         let data_home = self.data_home().display().to_string();
         config.sanitize(&data_home).unwrap();
+        let kv_backend = Arc::new(MemoryKvBackend::new());
 
         match log_store {
             LogStoreImpl::RaftEngine(log_store) => WorkerGroup::start(
                 Arc::new(config),
                 log_store,
                 Arc::new(object_store_manager),
+                kv_backend,
                 Plugins::new(),
             )
             .await
@@ -523,6 +538,7 @@ impl TestEnv {
                 Arc::new(config),
                 log_store,
                 Arc::new(object_store_manager),
+                kv_backend,
                 Plugins::new(),
             )
             .await

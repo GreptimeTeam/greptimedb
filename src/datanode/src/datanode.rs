@@ -23,6 +23,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
+use common_meta::key::schema_name::SchemaManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::wal_options_allocator::prepare_wal_options;
 pub use common_procedure::options::ProcedureConfig;
@@ -207,7 +208,9 @@ impl DatanodeBuilder {
             (Box::new(NoopRegionServerEventListener) as _, None)
         };
 
-        let region_server = self.new_region_server(region_event_listener).await?;
+        let region_server = self
+            .new_region_server(kv_backend.clone(), region_event_listener)
+            .await?;
 
         let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
         let table_values = datanode_table_manager
@@ -312,6 +315,7 @@ impl DatanodeBuilder {
 
     async fn new_region_server(
         &self,
+        kv_backend: KvBackendRef,
         event_listener: RegionServerEventListenerRef,
     ) -> Result<RegionServer> {
         let opts: &DatanodeOptions = &self.opts;
@@ -341,7 +345,8 @@ impl DatanodeBuilder {
 
         let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
         let engines =
-            Self::build_store_engines(opts, object_store_manager, self.plugins.clone()).await?;
+            Self::build_store_engines(opts, object_store_manager, kv_backend, self.plugins.clone())
+                .await?;
         for engine in engines {
             region_server.register_engine(engine);
         }
@@ -355,6 +360,7 @@ impl DatanodeBuilder {
     async fn build_store_engines(
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
+        kv_backend: KvBackendRef,
         plugins: Plugins,
     ) -> Result<Vec<RegionEngineRef>> {
         let mut engines = vec![];
@@ -365,6 +371,7 @@ impl DatanodeBuilder {
                         opts,
                         object_store_manager.clone(),
                         config.clone(),
+                        kv_backend.clone(),
                         plugins.clone(),
                     )
                     .await?;
@@ -390,6 +397,7 @@ impl DatanodeBuilder {
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
         config: MitoConfig,
+        kv_backend: KvBackendRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
         let mito_engine = match &opts.wal {
@@ -399,6 +407,7 @@ impl DatanodeBuilder {
                 Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
                     .await?,
                 object_store_manager,
+                kv_backend,
                 plugins,
             )
             .await
@@ -429,6 +438,7 @@ impl DatanodeBuilder {
                     config,
                     Self::build_kafka_log_store(kafka_config, global_index_collector).await?,
                     object_store_manager,
+                    kv_backend,
                     plugins,
                 )
                 .await

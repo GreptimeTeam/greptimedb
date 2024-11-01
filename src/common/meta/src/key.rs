@@ -88,6 +88,7 @@
 //!            {partition_id}
 
 pub mod catalog_name;
+mod database_metadata_manager;
 pub mod datanode_table;
 pub mod flow;
 pub mod node_address;
@@ -111,6 +112,7 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME,
 };
 use common_telemetry::warn;
+pub use database_metadata_manager::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue};
 use flow::flow_route::FlowRouteValue;
 use flow::table_flow::TableFlowValue;

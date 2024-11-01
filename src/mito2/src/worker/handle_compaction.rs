@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::region::compact_request;
+use common_meta::key::schema_name::SchemaNameKey;
 use common_telemetry::{error, info, warn};
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;

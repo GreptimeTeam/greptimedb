@@ -6556,6 +6556,7 @@ dependencies = [
  "common-error",
  "common-function",
  "common-macro",
+ "common-meta",
  "common-procedure-test",
  "common-query",
  "common-recordbatch",

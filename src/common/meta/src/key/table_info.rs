@@ -134,6 +134,7 @@ impl TableInfoValue {
 }
 
 pub type TableInfoManagerRef = Arc<TableInfoManager>;
+
 #[derive(Clone)]
 pub struct TableInfoManager {
     kv_backend: KvBackendRef,

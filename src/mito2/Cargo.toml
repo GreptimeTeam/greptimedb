@@ -31,6 +31,7 @@ common-telemetry.workspace = true
 common-test-util = { workspace = true, optional = true }
 common-time.workspace = true
 common-wal.workspace = true
+common-meta.workspace = true
 crc32fast = "1"
 crossbeam-utils.workspace = true
 datafusion.workspace = true
