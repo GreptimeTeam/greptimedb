@@ -17,7 +17,10 @@ pub(crate) mod encoding;
 mod geohash;
 mod h3;
 mod helpers;
+mod measure;
+mod relation;
 mod s2;
+mod wkt;
 
 use crate::function_registry::FunctionRegistry;
 
@@ -65,5 +68,17 @@ impl GeoFunctions {
         registry.register(Arc::new(s2::S2CellLevel));
         registry.register(Arc::new(s2::S2CellToToken));
         registry.register(Arc::new(s2::S2CellParent));
+
+        // spatial data type
+        registry.register(Arc::new(wkt::LatLngToPointWkt));
+
+        // spatial relation
+        registry.register(Arc::new(relation::STContains));
+        registry.register(Arc::new(relation::STWithin));
+        registry.register(Arc::new(relation::STIntersects));
+
+        // spatial measure
+        registry.register(Arc::new(measure::STDistance));
+        registry.register(Arc::new(measure::STDistanceSphere));
     }
 }

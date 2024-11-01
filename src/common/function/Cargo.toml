@@ -9,7 +9,7 @@ workspace = true
 
 [features]
 default = ["geo"]
-geo = ["geohash", "h3o", "s2"]
+geo = ["geohash", "h3o", "s2", "wkt", "geo-types", "dep:geo"]
 
 [dependencies]
 api.workspace = true
@@ -29,6 +29,8 @@ datafusion.workspace = true
 datatypes.workspace = true
 derive_more = { version = "1", default-features = false, features = ["display"] }
 geohash = { version = "0.13", optional = true }
+geo-types = { version = "0.7", optional = true }
+geo = { version = "0.29", optional = true }
 h3o = { version = "0.6", optional = true }
 jsonb.workspace = true
 num = "0.4"
@@ -44,6 +46,7 @@ sql.workspace = true
 statrs = "0.16"
 store-api.workspace = true
 table.workspace = true
+wkt = { version = "0.11", optional = true }
 
 [dev-dependencies]
 ron = "0.7"
