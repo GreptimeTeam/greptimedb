@@ -92,11 +92,6 @@ where
     }
 
     fn choose_multiple(&mut self, amount: usize) -> Result<Vec<Item>> {
-        if amount >= self.items.len() {
-            // fast path
-            return Ok(self.items.iter().map(|item| item.item.clone()).collect());
-        }
-
         Ok(self
             .items
             .choose_multiple_weighted(&mut thread_rng(), amount, |item| item.weight as f64)
