@@ -74,7 +74,7 @@ impl Function for LatLngToPointWkt {
             let lng = lng_vec.get(i).as_f64_lossy();
 
             let result = match (lat, lng) {
-                (Some(lat), Some(lng)) => Some(Point::new(lat, lng).wkt_string()),
+                (Some(lat), Some(lng)) => Some(Point::new(lng, lat).wkt_string()),
                 _ => None,
             };
 

@@ -122,3 +122,32 @@ FROM(
         UNION ALL
         SELECT 37.77001 AS lat, -122.3888 AS lon, 1728083372::TimestampSecond AS ts
 );
+
+SELECT wkt_point_from_latlng(37.76938, -122.3889) AS point;
+
+SELECT
+    st_distance(p1, p2) AS euclidean_dist,
+    st_distance_sphere_m(p1, p2) AS sphere_dist_m
+FROM
+    (
+        SELECT
+            wkt_point_from_latlng(37.76938, -122.3889) AS p1,
+            wkt_point_from_latlng(38.5216, -121.4247) AS p2
+    );
+
+
+SELECT
+    st_contains(polygon1, p1),
+    st_contains(polygon2, p1),
+    st_within(p1, polygon1),
+    st_within(p1, polygon2),
+    st_intersects(polygon1, polygon2),
+    st_intersects(polygon1, polygon3),
+FROM
+    (
+        SELECT
+            wkt_point_from_latlng(37.383287, -122.01325) AS p1,
+            'POLYGON ((-122.031661 37.428252, -122.139829 37.387072, -122.135365 37.361971, -122.057759 37.332222, -121.987707 37.328946, -121.943754 37.333041, -121.919373 37.349145, -121.945814 37.376705, -121.975689 37.417345, -121.998696 37.409164, -122.031661 37.428252))' AS polygon1,
+            'POLYGON ((-121.491698 38.653343, -121.582353 38.556757, -121.469721 38.449287, -121.315883 38.541721, -121.491698 38.653343))' AS polygon2,
+            'POLYGON ((-122.089628 37.450332, -122.20535 37.378342, -122.093062 37.36088, -122.044301 37.372886, -122.089628 37.450332))' AS polygon3,
+    );

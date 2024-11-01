@@ -20,8 +20,7 @@ use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{Float64VectorBuilder, MutableVector, VectorRef};
 use derive_more::Display;
 use geo::algorithm::line_measures::metric_spaces::Euclidean;
-use geo::Distance;
-use geo::{Centroid, Haversine};
+use geo::{Centroid, Distance, Haversine};
 
 use super::helpers::{ensure_columns_len, ensure_columns_n, parse_wkt};
 use crate::function::{Function, FunctionContext};
