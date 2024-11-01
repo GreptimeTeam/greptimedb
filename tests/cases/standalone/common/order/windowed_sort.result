@@ -69,7 +69,7 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t LIMIT 5;
 |_|_|_|
 | 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
 |_|_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec REDACTED
+|_|_|_WindowedSortExec: expr=t@1 ASC NULLS LAST num_ranges=2 fetch=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -101,8 +101,8 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t DESC LIMIT 5;
 |_|_|_|
 | 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
 |_|_|_SortPreservingMergeExec: [t@1 DESC] REDACTED
-|_|_|_WindowedSortExec REDACTED
-|_|_|_PartSortExec t@1 DESC REDACTED
+|_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=2 fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@1 DESC num_ranges=2 limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -183,8 +183,8 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 |_|_|_|
 | 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
 |_|_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec REDACTED
-|_|_|_PartSortExec t@2 ASC NULLS LAST REDACTED
+|_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=2 fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=2 limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -216,8 +216,8 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 |_|_|_|
 | 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
 |_|_|_SortPreservingMergeExec: [t@2 DESC] REDACTED
-|_|_|_WindowedSortExec REDACTED
-|_|_|_PartSortExec t@2 DESC REDACTED
+|_|_|_WindowedSortExec: expr=t@2 DESC num_ranges=2 fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@2 DESC num_ranges=2 limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
