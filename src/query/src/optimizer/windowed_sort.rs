@@ -165,7 +165,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
 
         if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
             partition_ranges = Some(region_scan_exec.get_uncollapsed_partition_ranges());
-            time_index = region_scan_exec.time_index();
+            time_index = Some(region_scan_exec.time_index());
             tag_columns = Some(region_scan_exec.tag_columns());
 
             // set distinguish_partition_ranges to true, this is an incorrect workaround
