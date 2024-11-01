@@ -101,6 +101,7 @@ impl WindowedSortPhysicalRule {
                     } else {
                         Arc::new(PartSortExec::new(
                             first_sort_expr.clone(),
+                            sort_exec.fetch(),
                             scanner_info.partition_ranges.clone(),
                             sort_exec.input().clone(),
                         ))

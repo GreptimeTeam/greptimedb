@@ -48,13 +48,12 @@ impl Selector for LeaseBasedSelector {
                     addr: v.node_addr.clone(),
                 },
                 weight: 1,
-                reverse_weight: 1,
             })
             .collect();
 
         // 3. choose peers by weight_array.
-        let weighted_choose = &mut RandomWeightedChoose::default();
-        let selected = choose_peers(weight_array, &opts, weighted_choose)?;
+        let mut weighted_choose = RandomWeightedChoose::new(weight_array);
+        let selected = choose_peers(&opts, &mut weighted_choose)?;
 
         Ok(selected)
     }

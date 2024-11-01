@@ -85,7 +85,6 @@ impl WeightCompute for RegionNumsBasedWeightCompute {
             .map(|(peer, region_num)| WeightedItem {
                 item: peer,
                 weight: (max_weight - region_num + base_weight) as usize,
-                reverse_weight: (region_num - min_weight + base_weight) as usize,
             })
             .collect()
     }
@@ -181,10 +180,6 @@ mod tests {
             },
             4,
         );
-
-        for weight in weight_array.iter() {
-            assert_eq!(weight.reverse_weight, *expected.get(&weight.item).unwrap());
-        }
     }
 
     fn mock_stat_1() -> Stat {
