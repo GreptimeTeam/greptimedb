@@ -1,3 +1,4 @@
+heartbeat_flush_threshold = 1
 [wal]
 {{ if is_raft_engine }}
 provider = "raft_engine"

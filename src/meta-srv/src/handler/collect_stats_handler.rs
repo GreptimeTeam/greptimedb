@@ -29,8 +29,6 @@ use crate::error::{self, Result};
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
-const MAX_CACHED_STATS_PER_KEY: usize = 10;
-
 #[derive(Debug, Default)]
 struct EpochStats {
     stats: Vec<Stat>,
@@ -69,9 +67,27 @@ impl EpochStats {
     }
 }
 
-#[derive(Default)]
+const DEFAULT_HEARTBEAT_FLUSH_THRESHOLD: usize = 3;
+
 pub struct CollectStatsHandler {
     stats_cache: DashMap<DatanodeStatKey, EpochStats>,
+    heartbeat_flush_threshold: usize,
+}
+
+impl Default for CollectStatsHandler {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl CollectStatsHandler {
+    pub fn new(heartbeat_flush_threshold: Option<usize>) -> Self {
+        Self {
+            heartbeat_flush_threshold: heartbeat_flush_threshold
+                .unwrap_or(DEFAULT_HEARTBEAT_FLUSH_THRESHOLD),
+            stats_cache: DashMap::default(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -130,7 +146,7 @@ impl HeartbeatHandler for CollectStatsHandler {
             rewrite_node_address(ctx, last).await;
         }
 
-        if !refresh && epoch_stats.len() < MAX_CACHED_STATS_PER_KEY {
+        if !refresh && epoch_stats.len() < self.heartbeat_flush_threshold {
             return Ok(HandleControl::Continue);
         }
 

@@ -227,7 +227,7 @@ impl MetasrvBuilder {
             ))
         });
         let flow_metadata_allocator = {
-            // for now flownode just use round robin selector
+            // for now flownode just use round-robin selector
             let flow_selector = RoundRobinSelector::new(SelectTarget::Flownode);
             let flow_selector_ctx = selector_ctx.clone();
             let peer_allocator = Arc::new(FlowPeerAllocator::new(
@@ -347,6 +347,7 @@ impl MetasrvBuilder {
                     .with_plugins(plugins.clone())
                     .with_region_failure_handler(region_failover_handler)
                     .with_region_lease_handler(Some(region_lease_handler))
+                    .with_heartbeat_flush_threshold(Some(options.heartbeat_flush_threshold))
                     .add_default_handlers()
             }
         };
