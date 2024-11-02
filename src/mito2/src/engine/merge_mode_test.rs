@@ -15,6 +15,7 @@
 //! Tests for append mode.
 
 use api::v1::Rows;
+use common_meta::key::SchemaMetadataManager;
 use common_recordbatch::RecordBatches;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
@@ -96,7 +97,18 @@ async fn test_merge_mode_compaction() {
             ..Default::default()
         })
         .await;
+    let kv_backend = env.get_kv_backend();
     let region_id = RegionId::new(1, 1);
+
+    SchemaMetadataManager::new(kv_backend)
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
 
     let request = CreateRequestBuilder::new()
         .field_num(2)

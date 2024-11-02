@@ -28,7 +28,8 @@ use std::time::{Duration, Instant};
 
 use api::v1::region::compact_request;
 use common_base::Plugins;
-use common_telemetry::{debug, error, info};
+use common_meta::key::SchemaMetadataManagerRef;
+use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -37,7 +38,7 @@ use datafusion_expr::Expr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 use table::predicate::Predicate;
 use tokio::sync::mpsc::{self, Sender};
 
@@ -82,6 +83,7 @@ pub struct CompactionRequest {
     pub(crate) cache_manager: CacheManagerRef,
     pub(crate) manifest_ctx: ManifestContextRef,
     pub(crate) listener: WorkerListener,
+    pub(crate) schema_metadata_manager: SchemaMetadataManagerRef,
 }
 
 impl CompactionRequest {
@@ -141,6 +143,7 @@ impl CompactionScheduler {
         access_layer: &AccessLayerRef,
         waiter: OptionOutputTx,
         manifest_ctx: &ManifestContextRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> Result<()> {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             // Region is compacting. Add the waiter to pending list.
@@ -158,6 +161,7 @@ impl CompactionScheduler {
             self.cache_manager.clone(),
             manifest_ctx,
             self.listener.clone(),
+            schema_metadata_manager,
         );
         self.region_status.insert(region_id, status);
         let result = self
@@ -173,6 +177,7 @@ impl CompactionScheduler {
         &mut self,
         region_id: RegionId,
         manifest_ctx: &ManifestContextRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
     ) {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
@@ -186,6 +191,7 @@ impl CompactionScheduler {
             self.cache_manager.clone(),
             manifest_ctx,
             self.listener.clone(),
+            schema_metadata_manager,
         );
         // Try to schedule next compaction task for this region.
         if let Err(e) = self
@@ -256,10 +262,23 @@ impl CompactionScheduler {
             cache_manager,
             manifest_ctx,
             listener,
+            schema_metadata_manager,
         } = request;
+
+        let ttl = find_ttl(
+            region_id.table_id(),
+            current_version.options.ttl,
+            &schema_metadata_manager,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            warn!(e; "Failed to get ttl for region: {}", region_id);
+            None
+        });
+
         debug!(
-            "Pick compaction strategy {:?} for region: {}",
-            picker, region_id
+            "Pick compaction strategy {:?} for region: {}, ttl: {:?}",
+            picker, region_id, ttl
         );
 
         let compaction_region = CompactionRegion {
@@ -273,6 +292,7 @@ impl CompactionScheduler {
             access_layer: access_layer.clone(),
             manifest_ctx: manifest_ctx.clone(),
             file_purger: None,
+            ttl,
         };
 
         let picker_output = {
@@ -414,6 +434,23 @@ impl PendingCompaction {
     }
 }
 
+async fn find_ttl(
+    table_id: TableId,
+    table_ttl: Option<Duration>,
+    schema_metadata_manager: &SchemaMetadataManagerRef,
+) -> Result<Option<Duration>> {
+    if let Some(table_ttl) = table_ttl {
+        return Ok(Some(table_ttl));
+    }
+
+    let ttl = schema_metadata_manager
+        .get_schema_options_by_table_id(table_id)
+        .await
+        .expect("Failed to get table ")
+        .and_then(|options| options.ttl);
+    Ok(ttl)
+}
+
 /// Status of running and pending region compaction tasks.
 struct CompactionStatus {
     /// Id of the region.
@@ -471,6 +508,7 @@ impl CompactionStatus {
         cache_manager: CacheManagerRef,
         manifest_ctx: &ManifestContextRef,
         listener: WorkerListener,
+        schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> CompactionRequest {
         let current_version = self.version_control.current().version;
         let start_time = Instant::now();
@@ -484,6 +522,7 @@ impl CompactionStatus {
             cache_manager,
             manifest_ctx: manifest_ctx.clone(),
             listener,
+            schema_metadata_manager,
         };
 
         if let Some(pending) = self.pending_compaction.take() {
@@ -639,6 +678,9 @@ fn get_expired_ssts(
 
 #[cfg(test)]
 mod tests {
+    use common_meta::key::SchemaMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::KvBackendRef;
     use tokio::sync::oneshot;
 
     use super::*;
@@ -651,7 +693,19 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
-
+        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(Arc::new(
+            MemoryKvBackend::new(),
+        )
+            as KvBackendRef));
+        schema_metadata_manager
+            .register_region_table_info(
+                builder.region_id().table_id(),
+                "test_table",
+                "test_catalog",
+                "test_schema",
+                None,
+            )
+            .await;
         // Nothing to compact.
         let version_control = Arc::new(builder.build());
         let (output_tx, output_rx) = oneshot::channel();
@@ -667,6 +721,7 @@ mod tests {
                 &env.access_layer,
                 waiter,
                 &manifest_ctx,
+                schema_metadata_manager.clone(),
             )
             .await
             .unwrap();
@@ -686,6 +741,7 @@ mod tests {
                 &env.access_layer,
                 waiter,
                 &manifest_ctx,
+                schema_metadata_manager,
             )
             .await
             .unwrap();
@@ -703,6 +759,19 @@ mod tests {
         let mut builder = VersionControlBuilder::new();
         let purger = builder.file_purger();
         let region_id = builder.region_id();
+        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(Arc::new(
+            MemoryKvBackend::new(),
+        )
+            as KvBackendRef));
+        schema_metadata_manager
+            .register_region_table_info(
+                builder.region_id().table_id(),
+                "test_table",
+                "test_catalog",
+                "test_schema",
+                None,
+            )
+            .await;
 
         // 5 files to compact.
         let end = 1000 * 1000;
@@ -726,6 +795,7 @@ mod tests {
                 &env.access_layer,
                 OptionOutputTx::none(),
                 &manifest_ctx,
+                schema_metadata_manager.clone(),
             )
             .await
             .unwrap();
@@ -755,6 +825,7 @@ mod tests {
                 &env.access_layer,
                 OptionOutputTx::none(),
                 &manifest_ctx,
+                schema_metadata_manager.clone(),
             )
             .await
             .unwrap();
@@ -769,7 +840,7 @@ mod tests {
 
         // On compaction finished and schedule next compaction.
         scheduler
-            .on_compaction_finished(region_id, &manifest_ctx)
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
             .await;
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(2, job_scheduler.num_jobs());
@@ -789,6 +860,7 @@ mod tests {
                 &env.access_layer,
                 OptionOutputTx::none(),
                 &manifest_ctx,
+                schema_metadata_manager,
             )
             .await
             .unwrap();

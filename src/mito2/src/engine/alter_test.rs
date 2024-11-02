@@ -20,6 +20,7 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Row, Rows, SemanticType};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_meta::key::SchemaMetadataManager;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -74,9 +75,21 @@ async fn test_alter_region() {
 
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
+    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
+
+    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
+    schema_metadata_manager
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
 
     let column_schemas = rows_schema(&request);
     let region_dir = request.region_dir.clone();
@@ -167,9 +180,20 @@ fn build_rows_for_tags(
 async fn test_put_after_alter() {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
-
+    let kv_backend = env.get_kv_backend();
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
+
+    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
+    schema_metadata_manager
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
 
     let mut column_schemas = rows_schema(&request);
     let region_dir = request.region_dir.clone();
@@ -262,9 +286,21 @@ async fn test_alter_region_retry() {
 
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
+    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
+
+    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
+    schema_metadata_manager
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
 
     let column_schemas = rows_schema(&request);
     engine
@@ -316,9 +352,21 @@ async fn test_alter_on_flushing() {
     let engine = env
         .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
         .await;
+    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
+
+    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
+    schema_metadata_manager
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
 
     let column_schemas = rows_schema(&request);
     engine

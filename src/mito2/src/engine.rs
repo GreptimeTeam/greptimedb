@@ -66,7 +66,6 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
-use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing;
@@ -594,6 +593,7 @@ impl RegionEngine for MitoEngine {
 
 // Tests methods.
 #[cfg(any(test, feature = "test"))]
+#[allow(clippy::too_many_arguments)]
 impl MitoEngine {
     /// Returns a new [MitoEngine] for tests.
     pub async fn new_for_test<S: LogStore>(
@@ -604,10 +604,10 @@ impl MitoEngine {
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
         time_provider: crate::time_provider::TimeProviderRef,
+        kv_backend: KvBackendRef,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
-        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         Ok(MitoEngine {

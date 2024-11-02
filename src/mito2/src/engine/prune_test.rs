@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::Rows;
+use common_meta::key::SchemaMetadataManager;
 use common_recordbatch::RecordBatches;
 use datafusion_common::ScalarValue;
 use datafusion_expr::expr::Expr;
@@ -149,8 +150,20 @@ fn time_range_expr(start_sec: i64, end_sec: i64) -> Expr {
 async fn test_prune_memtable() {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
+    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
+
+    SchemaMetadataManager::new(kv_backend)
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().build();
 
     let column_schemas = rows_schema(&request);

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::Rows;
+use common_meta::key::SchemaMetadataManager;
 use object_store::util::join_path;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionDropRequest, RegionRequest};
@@ -38,8 +39,20 @@ async fn test_engine_drop_region() {
     let engine = env
         .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
         .await;
-
+    let kv_backend = env.get_kv_backend();
     let region_id = RegionId::new(1, 1);
+
+    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
+    schema_metadata_manager
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     // It's okay to drop a region doesn't exist.
     engine
         .handle_request(region_id, RegionRequest::Drop(RegionDropRequest {}))
@@ -87,7 +100,12 @@ async fn test_engine_drop_region() {
 #[tokio::test]
 async fn test_engine_drop_region_for_custom_store() {
     common_telemetry::init_default_ut_logging();
-    async fn setup(engine: &MitoEngine, region_id: RegionId, storage_name: &str) {
+    async fn setup(
+        engine: &MitoEngine,
+        schema_metadata_manager: &SchemaMetadataManager,
+        region_id: RegionId,
+        storage_name: &str,
+    ) {
         let request = CreateRequestBuilder::new()
             .insert_option("storage", storage_name)
             .region_dir(storage_name)
@@ -97,6 +115,18 @@ async fn test_engine_drop_region_for_custom_store() {
             .handle_request(region_id, RegionRequest::Create(request))
             .await
             .unwrap();
+
+        let table_id = format!("test_table_{}", region_id.table_id());
+        schema_metadata_manager
+            .register_region_table_info(
+                region_id.table_id(),
+                &table_id,
+                "test_catalog",
+                "test_schema",
+                None,
+            )
+            .await;
+
         let rows = Rows {
             schema: column_schema.clone(),
             rows: build_rows_for_key("a", 0, 2, 0),
@@ -114,12 +144,21 @@ async fn test_engine_drop_region_for_custom_store() {
             &["Gcs"],
         )
         .await;
+    let kv_backend = env.get_kv_backend();
+
+    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
     let object_store_manager = env.get_object_store_manager().unwrap();
 
     let global_region_id = RegionId::new(1, 1);
-    setup(&engine, global_region_id, "default").await;
+    setup(
+        &engine,
+        &schema_metadata_manager,
+        global_region_id,
+        "default",
+    )
+    .await;
     let custom_region_id = RegionId::new(2, 1);
-    setup(&engine, custom_region_id, "Gcs").await;
+    setup(&engine, &schema_metadata_manager, custom_region_id, "Gcs").await;
 
     let global_region = engine.get_region(global_region_id).unwrap();
     let global_region_dir = global_region.access_layer.region_dir().to_string();

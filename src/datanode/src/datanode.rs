@@ -23,7 +23,6 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
-use common_meta::key::schema_name::SchemaManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::wal_options_allocator::prepare_wal_options;
 pub use common_procedure::options::ProcedureConfig;
