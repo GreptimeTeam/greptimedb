@@ -129,7 +129,6 @@ SELECT
     st_distance(p1, p2) AS euclidean_dist,
     st_distance_sphere_m(p1, p2) AS sphere_dist_m,
     st_distance(p1, polygon1) AS euclidean_dist_pp,
-    st_distance_sphere_m(p1, polygon1) AS sphere_dist_m_pp,
     st_area(p1) as area_point,
     st_area(polygon1) as area_polygon,
 FROM
@@ -139,6 +138,9 @@ FROM
             wkt_point_from_latlng(38.5216, -121.4247) AS p2,
             'POLYGON ((-121.491698 38.653343, -121.582353 38.556757, -121.469721 38.449287, -121.315883 38.541721, -121.491698 38.653343))' AS polygon1,
     );
+
+
+SELECT st_distance_sphere_m(wkt_point_from_latlng(37.76938, -122.3889), 'POLYGON ((-121.491698 38.653343, -121.582353 38.556757, -121.469721 38.449287, -121.315883 38.541721, -121.491698 38.653343))');
 
 
 SELECT

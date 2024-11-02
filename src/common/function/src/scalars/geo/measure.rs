@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::error::Result;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
+use common_query::error::{self, Result};
 use common_query::prelude::{Signature, TypeSignature};
 use datafusion::logical_expr::Volatility;
 use datatypes::prelude::ConcreteDataType;
@@ -20,7 +22,9 @@ use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{Float64VectorBuilder, MutableVector, VectorRef};
 use derive_more::Display;
 use geo::algorithm::line_measures::metric_spaces::Euclidean;
-use geo::{Area, Centroid, Distance, Haversine};
+use geo::{Area, Distance, Haversine};
+use geo_types::Geometry;
+use snafu::ResultExt;
 
 use super::helpers::{ensure_columns_len, ensure_columns_n};
 use super::wkt::parse_wkt;
@@ -119,13 +123,19 @@ impl Function for STDistanceSphere {
 
             let result = match (wkt_this, wkt_that) {
                 (Some(wkt_this), Some(wkt_that)) => {
-                    let geom_this = parse_wkt(&wkt_this)?.centroid();
-                    let geom_that = parse_wkt(&wkt_that)?.centroid();
+                    let geom_this = parse_wkt(&wkt_this)?;
+                    let geom_that = parse_wkt(&wkt_that)?;
 
-                    if let (Some(centroid_this), Some(centroid_that)) = (geom_this, geom_that) {
-                        Some(Haversine::distance(centroid_this, centroid_that))
-                    } else {
-                        None
+                    match (geom_this, geom_that) {
+                        (Geometry::Point(this), Geometry::Point(that)) => {
+                            Some(Haversine::distance(this, that))
+                        }
+                        _ => {
+                            Err(BoxedError::new(PlainError::new(
+                                "Great circle distance between non-point objects are not supported for now.".to_string(),
+                                StatusCode::Unsupported,
+                            ))).context(error::ExecuteSnafu)?
+                        }
                     }
                 }
                 _ => None,
