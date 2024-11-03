@@ -34,15 +34,14 @@ use datatypes::vectors::{
 };
 use futures::{StreamExt, TryStreamExt};
 use partition::manager::PartitionInfo;
-use partition::partition::PartitionDef;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::{RegionId, ScanRequest, TableId};
+use store_api::storage::{ScanRequest, TableId};
 use table::metadata::{TableInfo, TableType};
 
 use super::PARTITIONS;
 use crate::error::{
-    CreateRecordBatchSnafu, FindPartitionsSnafu, InternalSnafu, Result,
-    UpgradeWeakCatalogManagerRefSnafu,
+    CreateRecordBatchSnafu, FindPartitionsSnafu, InternalSnafu, PartitionManagerNotFoundSnafu,
+    Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::information_schema::{InformationTable, Predicates};
@@ -236,7 +235,8 @@ impl InformationSchemaPartitionsBuilder {
         let partition_manager = catalog_manager
             .as_any()
             .downcast_ref::<KvBackendCatalogManager>()
-            .map(|catalog_manager| catalog_manager.partition_manager());
+            .map(|catalog_manager| catalog_manager.partition_manager())
+            .context(PartitionManagerNotFoundSnafu)?;
 
         let predicates = Predicates::from_scan_request(&request);
 
@@ -262,27 +262,10 @@ impl InformationSchemaPartitionsBuilder {
                 let table_ids: Vec<TableId> =
                     table_infos.iter().map(|info| info.ident.table_id).collect();
 
-                let mut table_partitions = if let Some(partition_manager) = &partition_manager {
-                    partition_manager
-                        .batch_find_table_partitions(&table_ids)
-                        .await
-                        .context(FindPartitionsSnafu)?
-                } else {
-                    // Current node must be a standalone instance, contains only one partition by default.
-                    // TODO(dennis): change it when we support multi-regions for standalone.
-                    table_ids
-                        .into_iter()
-                        .map(|table_id| {
-                            (
-                                table_id,
-                                vec![PartitionInfo {
-                                    id: RegionId::new(table_id, 0),
-                                    partition: PartitionDef::new(vec![], vec![]),
-                                }],
-                            )
-                        })
-                        .collect()
-                };
+                let mut table_partitions = partition_manager
+                    .batch_find_table_partitions(&table_ids)
+                    .await
+                    .context(FindPartitionsSnafu)?;
 
                 for table_info in table_infos {
                     let partitions = table_partitions
