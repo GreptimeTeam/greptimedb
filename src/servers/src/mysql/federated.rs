@@ -302,7 +302,7 @@ mod test {
         let result = check(query, QueryContext::arc(), session.clone());
         assert!(result.is_none());
 
-        let query = "select versiona";
+        let query = "select version";
         let output = check(query, QueryContext::arc(), session.clone());
         assert!(output.is_none());
 
