@@ -298,6 +298,14 @@ impl MergeScanExec {
     pub fn sub_stage_metrics(&self) -> Vec<RecordBatchMetrics> {
         self.sub_stage_metrics.lock().unwrap().clone()
     }
+
+    pub fn partition_count(&self) -> usize {
+        self.target_partition
+    }
+
+    pub fn region_count(&self) -> usize {
+        self.regions.len()
+    }
 }
 
 impl ExecutionPlan for MergeScanExec {

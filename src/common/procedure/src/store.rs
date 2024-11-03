@@ -297,7 +297,7 @@ struct ParsedKey<'a> {
     key_type: KeyType,
 }
 
-impl<'a> fmt::Display for ParsedKey<'a> {
+impl fmt::Display for ParsedKey<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,

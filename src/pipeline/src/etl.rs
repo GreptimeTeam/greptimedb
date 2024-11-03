@@ -14,6 +14,7 @@
 
 #![allow(dead_code)]
 
+pub mod error;
 pub mod field;
 pub mod processor;
 pub mod transform;
@@ -21,11 +22,15 @@ pub mod value;
 
 use ahash::HashSet;
 use common_telemetry::debug;
-use itertools::{merge, Itertools};
+use error::{IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, YamlLoadSnafu};
+use itertools::Itertools;
 use processor::{Processor, ProcessorBuilder, Processors};
+use snafu::{OptionExt, ResultExt};
 use transform::{TransformBuilders, Transformer, Transforms};
 use value::Value;
 use yaml_rust::YamlLoader;
+
+use crate::etl::error::Result;
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
@@ -37,13 +42,13 @@ pub enum Content {
     Yaml(String),
 }
 
-pub fn parse<T>(input: &Content) -> Result<Pipeline<T>, String>
+pub fn parse<T>(input: &Content) -> Result<Pipeline<T>>
 where
     T: Transformer,
 {
     match input {
         Content::Yaml(str) => {
-            let docs = YamlLoader::load_from_str(str).map_err(|e| e.to_string())?;
+            let docs = YamlLoader::load_from_str(str).context(YamlLoadSnafu)?;
 
             let doc = &docs[0];
 
@@ -91,13 +96,18 @@ where
             debug!("required_keys: {:?}", required_keys);
 
             // intermediate keys are the keys that all processor and transformer required
-            let ordered_intermediate_keys: Vec<String> =
-                merge(processors_required_keys, transforms_required_keys)
-                    .cloned()
-                    .collect::<HashSet<String>>()
-                    .into_iter()
-                    .sorted()
-                    .collect();
+            let ordered_intermediate_keys: Vec<String> = [
+                processors_required_keys,
+                transforms_required_keys,
+                processors_output_keys,
+            ]
+            .iter()
+            .flat_map(|l| l.iter())
+            .collect::<HashSet<&String>>()
+            .into_iter()
+            .sorted()
+            .cloned()
+            .collect_vec();
 
             let mut final_intermediate_keys = Vec::with_capacity(ordered_intermediate_keys.len());
             let mut intermediate_keys_exclude_original =
@@ -119,7 +129,7 @@ where
                 .processor_builders
                 .into_iter()
                 .map(|builder| builder.build(&final_intermediate_keys))
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>>>()?;
             let processors = Processors {
                 processors: processors_kind_list,
                 required_keys: processors_required_keys.clone(),
@@ -131,7 +141,7 @@ where
                 .builders
                 .into_iter()
                 .map(|builder| builder.build(&final_intermediate_keys, &output_keys))
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Result<Vec<_>>>()?;
 
             let transformers = Transforms {
                 transforms: transfor_list,
@@ -192,7 +202,7 @@ impl<T> Pipeline<T>
 where
     T: Transformer,
 {
-    pub fn exec_mut(&self, val: &mut Vec<Value>) -> Result<T::VecOutput, String> {
+    pub fn exec_mut(&self, val: &mut Vec<Value>) -> Result<T::VecOutput> {
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
         }
@@ -200,7 +210,38 @@ where
         self.transformer.transform_mut(val)
     }
 
-    pub fn prepare(&self, val: serde_json::Value, result: &mut [Value]) -> Result<(), String> {
+    pub fn prepare_pipeline_value(&self, val: Value, result: &mut [Value]) -> Result<()> {
+        match val {
+            Value::Map(map) => {
+                let mut search_from = 0;
+                // because of the key in the json map is ordered
+                for (payload_key, payload_value) in map.values.into_iter() {
+                    if search_from >= self.required_keys.len() {
+                        break;
+                    }
+
+                    // because of map key is ordered, required_keys is ordered too
+                    if let Some(pos) = self.required_keys[search_from..]
+                        .iter()
+                        .position(|k| k == &payload_key)
+                    {
+                        result[search_from + pos] = payload_value;
+                        // next search from is always after the current key
+                        search_from += pos;
+                    }
+                }
+            }
+            Value::String(_) => {
+                result[0] = val;
+            }
+            _ => {
+                return PrepareValueMustBeObjectSnafu.fail();
+            }
+        }
+        Ok(())
+    }
+
+    pub fn prepare(&self, val: serde_json::Value, result: &mut [Value]) -> Result<()> {
         match val {
             serde_json::Value::Object(map) => {
                 let mut search_from = 0;
@@ -225,7 +266,7 @@ where
                 result[0] = val.try_into()?;
             }
             _ => {
-                return Err("expect object".to_string());
+                return PrepareValueMustBeObjectSnafu.fail();
             }
         }
         Ok(())
@@ -269,18 +310,41 @@ where
     }
 }
 
-pub(crate) fn find_key_index(
-    intermediate_keys: &[String],
-    key: &str,
-    kind: &str,
-) -> Result<usize, String> {
+pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str) -> Result<usize> {
     intermediate_keys
         .iter()
         .position(|k| k == key)
-        .ok_or(format!(
-            "{} processor.{} not found in intermediate keys",
-            kind, key
-        ))
+        .context(IntermediateKeyIndexSnafu { kind, key })
+}
+
+/// SelectInfo is used to store the selected keys from OpenTelemetry record attrs
+#[derive(Default)]
+pub struct SelectInfo {
+    pub keys: Vec<String>,
+}
+
+/// Try to convert a string to SelectInfo
+/// The string should be a comma-separated list of keys
+/// example: "key1,key2,key3"
+/// The keys will be sorted and deduplicated
+impl From<String> for SelectInfo {
+    fn from(value: String) -> Self {
+        let mut keys: Vec<String> = value.split(',').map(|s| s.to_string()).sorted().collect();
+        keys.dedup();
+
+        SelectInfo { keys }
+    }
+}
+
+impl SelectInfo {
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+}
+
+pub enum PipelineWay {
+    OtlpLog(Box<SelectInfo>),
+    Custom(std::sync::Arc<Pipeline<crate::GreptimeTransformer>>),
 }
 
 #[cfg(test)]

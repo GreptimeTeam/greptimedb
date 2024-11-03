@@ -35,7 +35,6 @@ use either::Either;
 use meta_client::client::MetaClientBuilder;
 use query::datafusion::DatafusionQueryEngine;
 use query::parser::QueryLanguageParser;
-use query::plan::LogicalPlan;
 use query::query_engine::{DefaultSerializer, QueryEngineState};
 use query::QueryEngine;
 use rustyline::error::ReadlineError;
@@ -47,12 +46,12 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use crate::cli::cmd::ReplCommand;
 use crate::cli::helper::RustylineHelper;
 use crate::cli::AttachCommand;
-use crate::error;
 use crate::error::{
     CollectRecordBatchesSnafu, ParseSqlSnafu, PlanStatementSnafu, PrettyPrintRecordBatchesSnafu,
     ReadlineSnafu, ReplCreationSnafu, RequestDatabaseSnafu, Result, StartMetaClientSnafu,
     SubstraitEncodeLogicalPlanSnafu,
 };
+use crate::{error, DistributedInformationExtension};
 
 /// Captures the state of the repl, gathers commands and executes them one by one
 pub struct Repl {
@@ -175,11 +174,11 @@ impl Repl {
 
             let plan = query_engine
                 .planner()
-                .plan(stmt, query_ctx.clone())
+                .plan(&stmt, query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
 
-            let LogicalPlan::DfPlan(plan) = query_engine
+            let plan = query_engine
                 .optimize(&query_engine.engine_context(query_ctx), &plan)
                 .context(PlanStatementSnafu)?;
 
@@ -276,11 +275,12 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         .build(),
     );
 
+    let information_extension = Arc::new(DistributedInformationExtension::new(meta_client.clone()));
     let catalog_manager = KvBackendCatalogManager::new(
-        Mode::Distributed,
-        Some(meta_client.clone()),
+        information_extension,
         cached_meta_backend.clone(),
         layered_cache_registry,
+        None,
     );
     let plugins: Plugins = Default::default();
     let state = Arc::new(QueryEngineState::new(

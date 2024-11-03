@@ -1,9 +1,16 @@
 -- should not able to create pg_catalog
 create database pg_catalog;
 
+-- make sure all the pg_catalog tables are only visible to postgres
+select * from pg_catalog.pg_class;
+select * from pg_catalog.pg_namespace;
+select * from pg_catalog.pg_type;
+
+-- SQLNESS PROTOCOL POSTGRES
 select * from pg_catalog.pg_type order by oid;
 
 -- \d
+-- SQLNESS PROTOCOL POSTGRES
 SELECT n.nspname as "Schema",
   c.relname as "Name",
   CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
@@ -18,7 +25,7 @@ WHERE c.relkind IN ('r','p','v','m','S','f','')
 ORDER BY 1,2;
 
 -- \dt
-
+-- SQLNESS PROTOCOL POSTGRES
 SELECT n.nspname as "Schema",
   c.relname as "Name",
   CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
@@ -33,19 +40,23 @@ WHERE c.relkind IN ('r','p','')
 ORDER BY 1,2;
 
 -- make sure oid of namespace keep stable
+-- SQLNESS PROTOCOL POSTGRES
 SELECT * FROM pg_namespace ORDER BY oid;
 
-create
-database my_db;
+-- SQLNESS PROTOCOL POSTGRES
+create database my_db;
 
+-- SQLNESS PROTOCOL POSTGRES
 use my_db;
 
+-- SQLNESS PROTOCOL POSTGRES
 create table foo
 (
     ts TIMESTAMP TIME INDEX
 );
 
 -- show tables in `my_db`
+-- SQLNESS PROTOCOL POSTGRES
 select relname
 from pg_catalog.pg_class
 where relnamespace = (
@@ -55,6 +66,7 @@ where relnamespace = (
 );
 
 -- \dt
+-- SQLNESS PROTOCOL POSTGRES
 SELECT n.nspname as "Schema",
   c.relname as "Name",
   CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
@@ -69,6 +81,7 @@ WHERE c.relkind IN ('r','p','')
 ORDER BY 1,2;
 
 -- show tables in `my_db`, `public`
+-- SQLNESS PROTOCOL POSTGRES
 select relname
 from pg_catalog.pg_class
 where relnamespace in (
@@ -78,6 +91,7 @@ where relnamespace in (
 )
 order by relname;
 
+-- SQLNESS PROTOCOL POSTGRES
 select relname
 from pg_catalog.pg_class
 where relnamespace in (
@@ -86,6 +100,7 @@ where relnamespace in (
     where nspname like 'my%'
 );
 
+-- SQLNESS PROTOCOL POSTGRES
 select relnamespace, relname, relkind
 from pg_catalog.pg_class
 where relnamespace in (
@@ -97,17 +112,24 @@ where relnamespace in (
 )
 order by relnamespace, relname;
 
+-- SQLNESS PROTOCOL POSTGRES
 use public;
 
+-- SQLNESS PROTOCOL POSTGRES
 drop schema my_db;
 
+-- SQLNESS PROTOCOL POSTGRES
 use pg_catalog;
 
 -- pg_class
+-- SQLNESS PROTOCOL POSTGRES
 desc table pg_class;
 
+-- SQLNESS PROTOCOL POSTGRES
 desc table pg_namespace;
 
+-- SQLNESS PROTOCOL POSTGRES
 drop table my_db.foo;
 
+-- SQLNESS PROTOCOL POSTGRES
 use public;

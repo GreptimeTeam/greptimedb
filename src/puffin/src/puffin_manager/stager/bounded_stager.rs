@@ -22,6 +22,7 @@ use async_walkdir::{Filtering, WalkDir};
 use base64::prelude::BASE64_URL_SAFE;
 use base64::Engine;
 use common_base::range_read::TokioFileReader;
+use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::{info, warn};
 use futures::{FutureExt, StreamExt};
 use moka::future::Cache;

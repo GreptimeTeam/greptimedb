@@ -31,7 +31,7 @@ use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
-use store_api::region_engine::SetReadonlyResponse;
+use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
     AffectedRows, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
     RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushRequest,
@@ -483,11 +483,13 @@ pub(crate) enum WorkerRequest {
     },
 
     /// The internal commands.
-    SetReadonlyGracefully {
+    SetRegionRoleStateGracefully {
         /// Id of the region to send.
         region_id: RegionId,
+        /// The [SettableRegionRoleState].
+        region_role_state: SettableRegionRoleState,
         /// The sender of [SetReadonlyResponse].
-        sender: Sender<SetReadonlyResponse>,
+        sender: Sender<SetRegionRoleStateResponse>,
     },
 
     /// Notify a worker to stop.
@@ -587,11 +589,16 @@ impl WorkerRequest {
 
     pub(crate) fn new_set_readonly_gracefully(
         region_id: RegionId,
-    ) -> (WorkerRequest, Receiver<SetReadonlyResponse>) {
+        region_role_state: SettableRegionRoleState,
+    ) -> (WorkerRequest, Receiver<SetRegionRoleStateResponse>) {
         let (sender, receiver) = oneshot::channel();
 
         (
-            WorkerRequest::SetReadonlyGracefully { region_id, sender },
+            WorkerRequest::SetRegionRoleStateGracefully {
+                region_id,
+                region_role_state,
+                sender,
+            },
             receiver,
         )
     }

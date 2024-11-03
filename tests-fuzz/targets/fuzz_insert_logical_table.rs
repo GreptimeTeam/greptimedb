@@ -79,12 +79,17 @@ impl Arbitrary<'_> for FuzzInput {
 
 fn generate_create_physical_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTableExpr> {
     let physical_table_if_not_exists = rng.gen_bool(0.5);
+    let mut with_clause = HashMap::new();
+    if rng.gen_bool(0.5) {
+        with_clause.insert("append_mode".to_string(), "true".to_string());
+    }
     let create_physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,
             merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
         )))
         .if_not_exists(physical_table_if_not_exists)
+        .with_clause(with_clause)
         .build()
         .unwrap();
     create_physical_table_expr.generate(rng)
@@ -184,6 +189,7 @@ async fn validate_values(
         "SELECT {} FROM {} ORDER BY {}",
         column_list, logical_table_ctx.name, primary_keys_column_list
     );
+    info!("Select SQL: {select_sql}");
     let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
     let mut expected_rows =
         replace_default(&insert_expr.values_list, &logical_table_ctx, insert_expr);
@@ -208,6 +214,8 @@ async fn insert_values<R: Rng + 'static>(
         .execute(sql.as_str())
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
+
+    info!("Insert values, result: {result:?}");
 
     ensure!(
         result.rows_affected() == rows as u64,

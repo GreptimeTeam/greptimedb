@@ -65,7 +65,7 @@ mod tests {
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
-    use common_meta::rpc::router::{Region, RegionRoute, RegionStatus};
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use store_api::storage::RegionId;
 
     use crate::error::Error;
@@ -110,13 +110,13 @@ mod tests {
             RegionRoute {
                 region: Region::new_test(RegionId::new(1024, 1)),
                 leader_peer: Some(from_peer.clone()),
-                leader_status: Some(RegionStatus::Downgraded),
+                leader_state: Some(LeaderState::Downgrading),
                 ..Default::default()
             },
             RegionRoute {
                 region: Region::new_test(RegionId::new(1024, 2)),
                 leader_peer: Some(Peer::empty(4)),
-                leader_status: Some(RegionStatus::Downgraded),
+                leader_state: Some(LeaderState::Downgrading),
                 ..Default::default()
             },
             RegionRoute {
@@ -128,8 +128,8 @@ mod tests {
 
         let expected_region_routes = {
             let mut region_routes = region_routes.clone();
-            region_routes[0].leader_status = None;
-            region_routes[1].leader_status = None;
+            region_routes[0].leader_state = None;
+            region_routes[1].leader_state = None;
             region_routes
         };
 
@@ -207,13 +207,13 @@ mod tests {
             RegionRoute {
                 region: Region::new_test(RegionId::new(1024, 1)),
                 leader_peer: Some(from_peer.clone()),
-                leader_status: Some(RegionStatus::Downgraded),
+                leader_state: Some(LeaderState::Downgrading),
                 ..Default::default()
             },
             RegionRoute {
                 region: Region::new_test(RegionId::new(1024, 2)),
                 leader_peer: Some(Peer::empty(4)),
-                leader_status: Some(RegionStatus::Downgraded),
+                leader_state: Some(LeaderState::Downgrading),
                 ..Default::default()
             },
             RegionRoute {
@@ -225,7 +225,7 @@ mod tests {
 
         let expected_region_routes = {
             let mut region_routes = region_routes.clone();
-            region_routes[0].leader_status = None;
+            region_routes[0].leader_state = None;
             region_routes
         };
 

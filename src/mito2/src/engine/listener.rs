@@ -14,6 +14,7 @@
 
 //! Engine event listener for tests.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,12 +78,18 @@ pub type EventListenerRef = Arc<dyn EventListener>;
 #[derive(Default)]
 pub struct FlushListener {
     notify: Notify,
+    success_count: AtomicUsize,
 }
 
 impl FlushListener {
     /// Wait until one flush job is done.
     pub async fn wait(&self) {
         self.notify.notified().await;
+    }
+
+    /// Returns the success count.
+    pub fn success_count(&self) -> usize {
+        self.success_count.load(Ordering::Relaxed)
     }
 }
 
@@ -91,7 +98,8 @@ impl EventListener for FlushListener {
     fn on_flush_success(&self, region_id: RegionId) {
         info!("Region {} flush successfully", region_id);
 
-        self.notify.notify_one()
+        self.success_count.fetch_add(1, Ordering::Relaxed);
+        self.notify.notify_one();
     }
 }
 

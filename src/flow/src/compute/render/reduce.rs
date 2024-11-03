@@ -34,7 +34,7 @@ use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan, TypedP
 use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, KeyExpiryManager};
 
-impl<'referred, 'df> Context<'referred, 'df> {
+impl Context<'_, '_> {
     const REDUCE_BATCH: &'static str = "reduce_batch";
     /// Like `render_reduce`, but for batch mode, and only barebone implementation
     /// no support for distinct aggregation for now
@@ -560,7 +560,7 @@ fn reduce_batch_subgraph(
                     .get_mut(i)
                     .context(InternalSnafu{
                         reason: format!(
-                            "Output builder should have the same length as the row, expected at most {} but got {}", 
+                            "Output builder should have the same length as the row, expected at most {} but got {}",
                             column_cnt - 1,
                             i
                         )
@@ -1162,7 +1162,9 @@ fn from_val_to_slice_idx(
 #[cfg(test)]
 mod test {
 
-    use common_time::{DateTime, Interval, Timestamp};
+    use std::time::Duration;
+
+    use common_time::Timestamp;
     use datatypes::data_type::{ConcreteDataType, ConcreteDataType as CDT};
     use hydroflow::scheduled::graph::Hydroflow;
 
@@ -1214,8 +1216,8 @@ mod test {
         let expected = TypedPlan {
             schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
-                ColumnType::new(CDT::datetime_datatype(), false), // window start
-                ColumnType::new(CDT::datetime_datatype(), false), // window end
+                ColumnType::new(CDT::timestamp_millisecond_datatype(), false), // window start
+                ColumnType::new(CDT::timestamp_millisecond_datatype(), false), // window end
             ])
             .into_unnamed(),
             // TODO(discord9): mfp indirectly ref to key columns
@@ -1232,7 +1234,10 @@ mod test {
                             .with_types(
                                 RelationType::new(vec![
                                     ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                    ColumnType::new(
+                                        ConcreteDataType::timestamp_millisecond_datatype(),
+                                        false,
+                                    ),
                                 ])
                                 .into_unnamed(),
                             ),
@@ -1242,22 +1247,18 @@ mod test {
                                 .map(vec![
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowFloor {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                1_000_000_000,
-                                            ),
-                                            start_time: Some(DateTime::new(1625097600000)),
+                                            window_size: Duration::from_nanos(1_000_000_000),
+                                            start_time: Some(Timestamp::new_millisecond(
+                                                1625097600000,
+                                            )),
                                         },
                                     ),
                                     ScalarExpr::Column(1).call_unary(
                                         UnaryFunc::TumbleWindowCeiling {
-                                            window_size: Interval::from_month_day_nano(
-                                                0,
-                                                0,
-                                                1_000_000_000,
-                                            ),
-                                            start_time: Some(DateTime::new(1625097600000)),
+                                            window_size: Duration::from_nanos(1_000_000_000),
+                                            start_time: Some(Timestamp::new_millisecond(
+                                                1625097600000,
+                                            )),
                                         },
                                     ),
                                 ])
@@ -1278,9 +1279,9 @@ mod test {
                     }
                     .with_types(
                         RelationType::new(vec![
-                            ColumnType::new(CDT::datetime_datatype(), false), // window start
-                            ColumnType::new(CDT::datetime_datatype(), false), // window end
-                            ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
+                            ColumnType::new(CDT::timestamp_millisecond_datatype(), false), // window start
+                            ColumnType::new(CDT::timestamp_millisecond_datatype(), false), // window end
+                            ColumnType::new(CDT::uint64_datatype(), true), //sum(number)
                         ])
                         .with_key(vec![1])
                         .with_time_index(Some(0))

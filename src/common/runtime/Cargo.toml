@@ -4,21 +4,36 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "common-runtime-bin"
+path = "src/bin.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
 async-trait.workspace = true
+clap.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-telemetry.workspace = true
+futures.workspace = true
 lazy_static.workspace = true
 num_cpus.workspace = true
 once_cell.workspace = true
+parking_lot.workspace = true
 paste.workspace = true
+pin-project.workspace = true
 prometheus.workspace = true
+rand.workspace = true
+ratelimit.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tokio-metrics = "0.3"
 tokio-metrics-collector = { git = "https://github.com/MichaelScofield/tokio-metrics-collector.git", rev = "89d692d5753d28564a7aac73c6ac5aba22243ba0" }

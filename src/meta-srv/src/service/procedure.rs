@@ -18,7 +18,7 @@ use std::time::Duration;
 use api::v1::meta::{
     procedure_service_server, DdlTaskRequest as PbDdlTaskRequest,
     DdlTaskResponse as PbDdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse,
-    ProcedureStateResponse, QueryProcedureRequest,
+    ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse, QueryProcedureRequest,
 };
 use common_meta::ddl::ExecutorContext;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
@@ -111,8 +111,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
             region_id,
             from_peer,
             to_peer,
-            replay_timeout_secs,
-            ..
+            timeout_secs,
         } = request.into_inner();
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
@@ -134,7 +133,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
                 region_id: region_id.into(),
                 from_peer,
                 to_peer,
-                replay_timeout: Duration::from_secs(replay_timeout_secs.into()),
+                timeout: Duration::from_secs(timeout_secs.into()),
             })
             .await?
             .map(procedure::pid_to_pb_pid);
@@ -145,5 +144,21 @@ impl procedure_service_server::ProcedureService for Metasrv {
         };
 
         Ok(Response::new(resp))
+    }
+
+    async fn details(
+        &self,
+        request: Request<ProcedureDetailRequest>,
+    ) -> GrpcResult<ProcedureDetailResponse> {
+        let ProcedureDetailRequest { header } = request.into_inner();
+        let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let metas = self
+            .procedure_manager()
+            .list_procedures()
+            .await
+            .context(error::QueryProcedureSnafu)?;
+        Ok(Response::new(procedure::procedure_details_to_pb_response(
+            metas,
+        )))
     }
 }

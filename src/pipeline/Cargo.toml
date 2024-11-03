@@ -40,6 +40,7 @@ enum_dispatch = "0.3"
 futures.workspace = true
 greptime-proto.workspace = true
 itertools.workspace = true
+jsonb.workspace = true
 lazy_static.workspace = true
 moka = { workspace = true, features = ["sync"] }
 once_cell.workspace = true

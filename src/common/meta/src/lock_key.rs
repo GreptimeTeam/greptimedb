@@ -34,7 +34,7 @@ pub enum CatalogLock<'a> {
     Write(&'a str),
 }
 
-impl<'a> Display for CatalogLock<'a> {
+impl Display for CatalogLock<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let key = match self {
             CatalogLock::Read(s) => s,
@@ -44,7 +44,7 @@ impl<'a> Display for CatalogLock<'a> {
     }
 }
 
-impl<'a> From<CatalogLock<'a>> for StringKey {
+impl From<CatalogLock<'_>> for StringKey {
     fn from(value: CatalogLock) -> Self {
         match value {
             CatalogLock::Write(_) => StringKey::Exclusive(value.to_string()),

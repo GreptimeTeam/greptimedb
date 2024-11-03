@@ -12,47 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod tables;
+use std::sync::Weak;
 
-use std::sync::{Arc, Weak};
-
-use common_config::Mode;
 use common_meta::key::TableMetadataManagerRef;
-use meta_client::client::MetaClient;
 use snafu::OptionExt;
 
-use crate::error::{Result, UpgradeWeakCatalogManagerRefSnafu};
+use crate::error::{GetInformationExtensionSnafu, Result, UpgradeWeakCatalogManagerRefSnafu};
+use crate::information_schema::InformationExtensionRef;
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::CatalogManager;
 
-/// Try to get the server running mode from `[CatalogManager]` weak reference.
-pub fn running_mode(catalog_manager: &Weak<dyn CatalogManager>) -> Result<Option<Mode>> {
+pub mod tables;
+
+/// Try to get the `[InformationExtension]` from `[CatalogManager]` weak reference.
+pub fn information_extension(
+    catalog_manager: &Weak<dyn CatalogManager>,
+) -> Result<InformationExtensionRef> {
     let catalog_manager = catalog_manager
         .upgrade()
         .context(UpgradeWeakCatalogManagerRefSnafu)?;
 
-    Ok(catalog_manager
+    let information_extension = catalog_manager
         .as_any()
         .downcast_ref::<KvBackendCatalogManager>()
-        .map(|manager| manager.running_mode())
-        .copied())
-}
+        .map(|manager| manager.information_extension())
+        .context(GetInformationExtensionSnafu)?;
 
-/// Try to get the `[MetaClient]` from `[CatalogManager]` weak reference.
-pub fn meta_client(catalog_manager: &Weak<dyn CatalogManager>) -> Result<Option<Arc<MetaClient>>> {
-    let catalog_manager = catalog_manager
-        .upgrade()
-        .context(UpgradeWeakCatalogManagerRefSnafu)?;
-
-    let meta_client = match catalog_manager
-        .as_any()
-        .downcast_ref::<KvBackendCatalogManager>()
-    {
-        None => None,
-        Some(manager) => manager.meta_client(),
-    };
-
-    Ok(meta_client)
+    Ok(information_extension)
 }
 
 /// Try to get the `[TableMetadataManagerRef]` from `[CatalogManager]` weak reference.

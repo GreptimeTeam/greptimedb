@@ -23,6 +23,7 @@ use api::v1::meta::{
     RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse, ResponseHeader,
 };
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
 use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef, TxnService};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -37,7 +38,6 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::{match_for_io_error, Result};
-use crate::key::{DatanodeStatKey, DatanodeStatValue};
 use crate::metasrv::ElectionRef;
 
 pub type MetaPeerClientRef = Arc<MetaPeerClient>;
@@ -217,7 +217,11 @@ impl MetaPeerClient {
     pub async fn get_node_cnt(&self) -> Result<i32> {
         let kvs = self.get_dn_key_value(true).await?;
         kvs.into_iter()
-            .map(|kv| kv.key.try_into())
+            .map(|kv| {
+                kv.key
+                    .try_into()
+                    .context(error::InvalidDatanodeStatFormatSnafu {})
+            })
             .collect::<Result<HashSet<DatanodeStatKey>>>()
             .map(|hash_set| hash_set.len() as i32)
     }
@@ -319,7 +323,14 @@ impl MetaPeerClient {
 fn to_stat_kv_map(kvs: Vec<KeyValue>) -> Result<HashMap<DatanodeStatKey, DatanodeStatValue>> {
     let mut map = HashMap::with_capacity(kvs.len());
     for kv in kvs {
-        let _ = map.insert(kv.key.try_into()?, kv.value.try_into()?);
+        let _ = map.insert(
+            kv.key
+                .try_into()
+                .context(error::InvalidDatanodeStatFormatSnafu {})?,
+            kv.value
+                .try_into()
+                .context(error::InvalidDatanodeStatFormatSnafu {})?,
+        );
     }
     Ok(map)
 }
@@ -356,12 +367,11 @@ fn need_retry(error: &error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use api::v1::meta::{Error, ErrorCode, ResponseHeader};
+    use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, Stat};
     use common_meta::rpc::KeyValue;
 
     use super::{check_resp_header, to_stat_kv_map, Context};
     use crate::error;
-    use crate::handler::node_stat::Stat;
-    use crate::key::{DatanodeStatKey, DatanodeStatValue};
 
     #[test]
     fn test_to_stat_kv_map() {

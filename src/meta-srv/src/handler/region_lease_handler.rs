@@ -103,6 +103,7 @@ mod test {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
+    use common_meta::datanode::{RegionStat, Stat};
     use common_meta::distributed_time_constants;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
@@ -110,12 +111,11 @@ mod test {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
-    use common_meta::rpc::router::{Region, RegionRoute, RegionStatus};
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetasrvBuilder;
 
     fn new_test_keeper() -> RegionLeaseKeeper {
@@ -135,7 +135,11 @@ mod test {
             wcus: 0,
             approximate_bytes: 0,
             engine: String::new(),
-            extensions: Default::default(),
+            num_rows: 0,
+            memtable_size: 0,
+            manifest_size: 0,
+            sst_size: 0,
+            index_size: 0,
         }
     }
 
@@ -295,7 +299,7 @@ mod test {
                 region: Region::new_test(region_id),
                 leader_peer: Some(peer.clone()),
                 follower_peers: vec![follower_peer.clone()],
-                leader_status: Some(RegionStatus::Downgraded),
+                leader_state: Some(LeaderState::Downgrading),
                 leader_down_since: Some(1),
             },
             RegionRoute {
@@ -350,7 +354,7 @@ mod test {
         assert_region_lease(
             acc,
             vec![
-                GrantedRegion::new(region_id, RegionRole::Follower),
+                GrantedRegion::new(region_id, RegionRole::DowngradingLeader),
                 GrantedRegion::new(another_region_id, RegionRole::Leader),
             ],
         );

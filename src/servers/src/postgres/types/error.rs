@@ -19,7 +19,7 @@ use strum::{AsRefStr, Display, EnumIter, EnumMessage};
 
 #[derive(Display, Debug, PartialEq)]
 #[allow(dead_code)]
-enum ErrorSeverity {
+pub enum PgErrorSeverity {
     #[strum(serialize = "INFO")]
     Info,
     #[strum(serialize = "DEBUG")]
@@ -335,23 +335,23 @@ pub enum PgErrorCode {
 }
 
 impl PgErrorCode {
-    fn severity(&self) -> ErrorSeverity {
+    fn severity(&self) -> PgErrorSeverity {
         match self {
-            PgErrorCode::Ec00000 => ErrorSeverity::Info,
-            PgErrorCode::Ec01000 => ErrorSeverity::Warning,
+            PgErrorCode::Ec00000 => PgErrorSeverity::Info,
+            PgErrorCode::Ec01000 => PgErrorSeverity::Warning,
 
             PgErrorCode::EcXX000 | PgErrorCode::Ec42P14 | PgErrorCode::Ec22023 => {
-                ErrorSeverity::Error
+                PgErrorSeverity::Error
             }
             PgErrorCode::Ec28000 | PgErrorCode::Ec28P01 | PgErrorCode::Ec3D000 => {
-                ErrorSeverity::Fatal
+                PgErrorSeverity::Fatal
             }
 
-            _ => ErrorSeverity::Error,
+            _ => PgErrorSeverity::Error,
         }
     }
 
-    fn code(&self) -> String {
+    pub(crate) fn code(&self) -> String {
         self.as_ref()[2..].to_string()
     }
 
@@ -374,6 +374,7 @@ impl From<StatusCode> for PgErrorCode {
             StatusCode::Unsupported => PgErrorCode::Ec0A000,
             StatusCode::InvalidArguments => PgErrorCode::Ec22023,
             StatusCode::Cancelled => PgErrorCode::Ec57000,
+            StatusCode::External => PgErrorCode::Ec58000,
 
             StatusCode::Unknown
             | StatusCode::Unexpected
@@ -428,19 +429,19 @@ mod tests {
     use common_error::status_code::StatusCode;
     use strum::{EnumMessage, IntoEnumIterator};
 
-    use super::{ErrorInfo, ErrorSeverity, PgErrorCode};
+    use super::{ErrorInfo, PgErrorCode, PgErrorSeverity};
 
     #[test]
     fn test_error_severity() {
         // test for ErrorSeverity enum
-        assert_eq!("INFO", ErrorSeverity::Info.to_string());
-        assert_eq!("DEBUG", ErrorSeverity::Debug.to_string());
-        assert_eq!("NOTICE", ErrorSeverity::Notice.to_string());
-        assert_eq!("WARNING", ErrorSeverity::Warning.to_string());
+        assert_eq!("INFO", PgErrorSeverity::Info.to_string());
+        assert_eq!("DEBUG", PgErrorSeverity::Debug.to_string());
+        assert_eq!("NOTICE", PgErrorSeverity::Notice.to_string());
+        assert_eq!("WARNING", PgErrorSeverity::Warning.to_string());
 
-        assert_eq!("ERROR", ErrorSeverity::Error.to_string());
-        assert_eq!("FATAL", ErrorSeverity::Fatal.to_string());
-        assert_eq!("PANIC", ErrorSeverity::Panic.to_string());
+        assert_eq!("ERROR", PgErrorSeverity::Error.to_string());
+        assert_eq!("FATAL", PgErrorSeverity::Fatal.to_string());
+        assert_eq!("PANIC", PgErrorSeverity::Panic.to_string());
 
         // test for severity method
         for code in PgErrorCode::iter() {
@@ -448,13 +449,13 @@ mod tests {
             assert_eq!("Ec", &name[0..2]);
 
             if name.starts_with("Ec00") {
-                assert_eq!(ErrorSeverity::Info, code.severity());
+                assert_eq!(PgErrorSeverity::Info, code.severity());
             } else if name.starts_with("Ec01") {
-                assert_eq!(ErrorSeverity::Warning, code.severity());
+                assert_eq!(PgErrorSeverity::Warning, code.severity());
             } else if name.starts_with("Ec28") || name.starts_with("Ec3D") {
-                assert_eq!(ErrorSeverity::Fatal, code.severity());
+                assert_eq!(PgErrorSeverity::Fatal, code.severity());
             } else {
-                assert_eq!(ErrorSeverity::Error, code.severity());
+                assert_eq!(PgErrorSeverity::Error, code.severity());
             }
         }
     }

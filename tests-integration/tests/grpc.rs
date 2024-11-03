@@ -25,6 +25,7 @@ use common_catalog::consts::MITO_ENGINE;
 use common_grpc::channel_manager::ClientTlsOption;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
+use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_runtime::Runtime;
 use common_test_util::find_workspace_path;
 use servers::grpc::builder::GrpcServerBuilder;

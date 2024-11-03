@@ -37,16 +37,21 @@ use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result, UnsupportedContentTypeSnafu,
+    Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result,
+    UnsupportedContentTypeSnafu,
 };
 use crate::http::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
+use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_INGESTION_COUNTER, METRIC_HTTP_LOGS_INGESTION_ELAPSED,
     METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
 };
 use crate::query_handler::LogHandlerRef;
+
+const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
+const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LogIngesterQueryParams {
@@ -113,19 +118,24 @@ pub async fn add_pipeline(
 ) -> Result<GreptimedbManageResponse> {
     let start = Instant::now();
     let handler = state.log_handler;
-    if pipeline_name.is_empty() {
-        return Err(InvalidParameterSnafu {
+    ensure!(
+        !pipeline_name.is_empty(),
+        InvalidParameterSnafu {
             reason: "pipeline_name is required in path",
         }
-        .build());
-    }
-
-    if payload.is_empty() {
-        return Err(InvalidParameterSnafu {
+    );
+    ensure!(
+        !pipeline_name.starts_with(GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX),
+        InvalidParameterSnafu {
+            reason: "pipeline_name cannot start with greptime_",
+        }
+    );
+    ensure!(
+        !payload.is_empty(),
+        InvalidParameterSnafu {
             reason: "pipeline is required in body",
         }
-        .build());
-    }
+    );
 
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
@@ -250,12 +260,12 @@ pub async fn pipeline_dryrun(
 
     let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
 
-    if value.len() > 10 {
-        return Err(InvalidParameterSnafu {
+    ensure!(
+        value.len() <= 10,
+        InvalidParameterSnafu {
             reason: "too many rows for dryrun",
         }
-        .build());
-    }
+    );
 
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
@@ -270,11 +280,11 @@ pub async fn pipeline_dryrun(
     for v in value {
         pipeline
             .prepare(v, &mut intermediate_state)
-            .map_err(|reason| PipelineTransformSnafu { reason }.build())
+            .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
         let r = pipeline
             .exec_mut(&mut intermediate_state)
-            .map_err(|reason| PipelineTransformSnafu { reason }.build())
+            .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
         results.push(r);
         pipeline.reset_intermediate_state(&mut intermediate_state);
@@ -378,6 +388,11 @@ pub async fn log_ingester(
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
 
+    let value = log_state
+        .ingest_interceptor
+        .as_ref()
+        .pre_pipeline(value, query_ctx.clone())?;
+
     ingest_logs_inner(
         handler,
         pipeline_name,
@@ -419,46 +434,53 @@ async fn ingest_logs_inner(
     let db = query_ctx.get_db_string();
     let exec_timer = std::time::Instant::now();
 
-    let pipeline = state
-        .get_pipeline(&pipeline_name, version, query_ctx.clone())
-        .await?;
-
-    let transform_timer = std::time::Instant::now();
-    let mut intermediate_state = pipeline.init_intermediate_state();
-
     let mut results = Vec::with_capacity(pipeline_data.len());
+    let transformed_data: Rows;
+    if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
+        let rows = pipeline::identity_pipeline(pipeline_data)
+            .context(PipelineTransformSnafu)
+            .context(PipelineSnafu)?;
+        transformed_data = rows;
+    } else {
+        let pipeline = state
+            .get_pipeline(&pipeline_name, version, query_ctx.clone())
+            .await?;
 
-    for v in pipeline_data {
-        pipeline
-            .prepare(v, &mut intermediate_state)
-            .map_err(|reason| {
-                METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                    .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                    .observe(transform_timer.elapsed().as_secs_f64());
-                PipelineTransformSnafu { reason }.build()
-            })
-            .context(PipelineSnafu)?;
-        let r = pipeline
-            .exec_mut(&mut intermediate_state)
-            .map_err(|reason| {
-                METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                    .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                    .observe(transform_timer.elapsed().as_secs_f64());
-                PipelineTransformSnafu { reason }.build()
-            })
-            .context(PipelineSnafu)?;
-        results.push(r);
-        pipeline.reset_intermediate_state(&mut intermediate_state);
+        let transform_timer = std::time::Instant::now();
+        let mut intermediate_state = pipeline.init_intermediate_state();
+
+        for v in pipeline_data {
+            pipeline
+                .prepare(v, &mut intermediate_state)
+                .inspect_err(|_| {
+                    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                        .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                        .observe(transform_timer.elapsed().as_secs_f64());
+                })
+                .context(PipelineTransformSnafu)
+                .context(PipelineSnafu)?;
+            let r = pipeline
+                .exec_mut(&mut intermediate_state)
+                .inspect_err(|_| {
+                    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                        .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                        .observe(transform_timer.elapsed().as_secs_f64());
+                })
+                .context(PipelineTransformSnafu)
+                .context(PipelineSnafu)?;
+            results.push(r);
+            pipeline.reset_intermediate_state(&mut intermediate_state);
+        }
+
+        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+            .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
+            .observe(transform_timer.elapsed().as_secs_f64());
+
+        transformed_data = Rows {
+            rows: results,
+            schema: pipeline.schemas().clone(),
+        };
     }
-
-    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-        .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
-        .observe(transform_timer.elapsed().as_secs_f64());
-
-    let transformed_data: Rows = Rows {
-        rows: results,
-        schema: pipeline.schemas().clone(),
-    };
 
     let insert_request = RowInsertRequest {
         rows: Some(transformed_data),
@@ -506,6 +528,7 @@ pub type LogValidatorRef = Arc<dyn LogValidator + 'static>;
 pub struct LogState {
     pub log_handler: LogHandlerRef,
     pub log_validator: Option<LogValidatorRef>,
+    pub ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
 }
 
 #[cfg(test)]

@@ -25,7 +25,7 @@ use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
-use datafusion_common::TableReference;
+use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
@@ -35,8 +35,69 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
+use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::error::{CatalogSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
+
+/// Planner for convert merge sort logical plan to physical plan
+///
+/// it is currently a fallback to sort, and doesn't change the execution plan:
+/// `MergeSort(MergeScan) -> Sort(MergeScan) - to physical plan -> ...`
+/// It should be applied after `DistExtensionPlanner`
+///
+/// (Later when actually impl this merge sort)
+///
+/// We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
+pub struct MergeSortExtensionPlanner {}
+
+#[async_trait]
+impl ExtensionPlanner for MergeSortExtensionPlanner {
+    async fn plan_extension(
+        &self,
+        planner: &dyn PhysicalPlanner,
+        node: &dyn UserDefinedLogicalNode,
+        _logical_inputs: &[&LogicalPlan],
+        physical_inputs: &[Arc<dyn ExecutionPlan>],
+        session_state: &SessionState,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        if let Some(merge_sort) = node.as_any().downcast_ref::<MergeSortLogicalPlan>() {
+            if let LogicalPlan::Extension(ext) = &merge_sort.input.as_ref()
+                && ext
+                    .node
+                    .as_any()
+                    .downcast_ref::<MergeScanLogicalPlan>()
+                    .is_some()
+            {
+                let merge_scan_exec = physical_inputs
+                    .first()
+                    .and_then(|p| p.as_any().downcast_ref::<MergeScanExec>())
+                    .ok_or(DataFusionError::Internal(format!(
+                        "Expect MergeSort's input is a MergeScanExec, found {:?}",
+                        physical_inputs
+                    )))?;
+
+                let partition_cnt = merge_scan_exec.partition_count();
+                let region_cnt = merge_scan_exec.region_count();
+                // if partition >= region, we know that every partition stream of merge scan is ordered
+                // and we only need to do a merge sort, otherwise fallback to quick sort
+                let can_merge_sort = partition_cnt >= region_cnt;
+                if can_merge_sort {
+                    // TODO(discord9): use `SortPreversingMergeExec here`
+                }
+                // for now merge sort only exist in logical plan, and have the same effect as `Sort`
+                // doesn't change the execution plan, this will change in the future
+                let ret = planner
+                    .create_physical_plan(&merge_sort.clone().into_sort(), session_state)
+                    .await?;
+                Ok(Some(ret))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+}
 
 pub struct DistExtensionPlanner {
     catalog_manager: CatalogManagerRef,

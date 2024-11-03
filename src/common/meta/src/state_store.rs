@@ -172,7 +172,8 @@ impl StateStore for KvStateStore {
             req,
             self.max_num_per_range_request.unwrap_or_default(),
             Arc::new(decode_kv),
-        );
+        )
+        .into_stream();
 
         let stream = stream.map(move |r| {
             let path = path.clone();

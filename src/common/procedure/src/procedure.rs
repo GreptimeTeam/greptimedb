@@ -159,6 +159,14 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
         (**self).execute(ctx).await
     }
 
+    async fn rollback(&mut self, ctx: &Context) -> Result<()> {
+        (**self).rollback(ctx).await
+    }
+
+    fn rollback_supported(&self) -> bool {
+        (**self).rollback_supported()
+    }
+
     fn dump(&self) -> Result<String> {
         (**self).dump()
     }
@@ -226,6 +234,11 @@ impl LockKey {
     /// Returns the keys to lock.
     pub fn keys_to_lock(&self) -> impl Iterator<Item = &StringKey> {
         self.0.iter()
+    }
+
+    /// Returns the keys to lock.
+    pub fn get_keys(&self) -> Vec<String> {
+        self.0.iter().map(|key| format!("{:?}", key)).collect()
     }
 }
 
@@ -374,6 +387,18 @@ impl ProcedureState {
             _ => None,
         }
     }
+
+    /// Return the string values of the enum field names.
+    pub fn as_str_name(&self) -> &str {
+        match self {
+            ProcedureState::Running => "Running",
+            ProcedureState::Done { .. } => "Done",
+            ProcedureState::Retrying { .. } => "Retrying",
+            ProcedureState::Failed { .. } => "Failed",
+            ProcedureState::PrepareRollback { .. } => "PrepareRollback",
+            ProcedureState::RollingBack { .. } => "RollingBack",
+        }
+    }
 }
 
 /// The initial procedure state.
@@ -412,10 +437,29 @@ pub trait ProcedureManager: Send + Sync + 'static {
 
     /// Returns a [Watcher] to watch [ProcedureState] of specific procedure.
     fn procedure_watcher(&self, procedure_id: ProcedureId) -> Option<Watcher>;
+
+    /// Returns the details of the procedure.
+    async fn list_procedures(&self) -> Result<Vec<ProcedureInfo>>;
 }
 
 /// Ref-counted pointer to the [ProcedureManager].
 pub type ProcedureManagerRef = Arc<dyn ProcedureManager>;
+
+#[derive(Debug, Clone)]
+pub struct ProcedureInfo {
+    /// Id of this procedure.
+    pub id: ProcedureId,
+    /// Type name of this procedure.
+    pub type_name: String,
+    /// Start execution time of this procedure.
+    pub start_time_ms: i64,
+    /// End execution time of this procedure.
+    pub end_time_ms: i64,
+    /// status of this procedure.
+    pub state: ProcedureState,
+    /// Lock keys of this procedure.
+    pub lock_keys: Vec<String>,
+}
 
 #[cfg(test)]
 mod tests {

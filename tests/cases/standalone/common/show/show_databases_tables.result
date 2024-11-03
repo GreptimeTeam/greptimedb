@@ -45,9 +45,11 @@ SHOW TABLES;
 | optimizer_trace                       |
 | parameters                            |
 | partitions                            |
+| procedure_info                        |
 | profiling                             |
 | referential_constraints               |
 | region_peers                          |
+| region_statistics                     |
 | routines                              |
 | runtime_metrics                       |
 | schema_privileges                     |
@@ -91,9 +93,11 @@ SHOW FULL TABLES;
 | optimizer_trace                       | LOCAL TEMPORARY |
 | parameters                            | LOCAL TEMPORARY |
 | partitions                            | LOCAL TEMPORARY |
+| procedure_info                        | LOCAL TEMPORARY |
 | profiling                             | LOCAL TEMPORARY |
 | referential_constraints               | LOCAL TEMPORARY |
 | region_peers                          | LOCAL TEMPORARY |
+| region_statistics                     | LOCAL TEMPORARY |
 | routines                              | LOCAL TEMPORARY |
 | runtime_metrics                       | LOCAL TEMPORARY |
 | schema_privileges                     | LOCAL TEMPORARY |
@@ -131,9 +135,11 @@ SHOW TABLE STATUS;
 |optimizer_trace||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |parameters||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |partitions||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|procedure_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |profiling||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |referential_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |region_peers||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|region_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |routines||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |runtime_metrics||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |schema_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||

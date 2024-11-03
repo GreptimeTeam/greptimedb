@@ -27,11 +27,11 @@ use crate::function::{Function, FunctionContext};
 
 /// Parses the `String` into `JSONB`.
 #[derive(Clone, Debug, Default)]
-pub struct ToJsonFunction;
+pub struct ParseJsonFunction;
 
-const NAME: &str = "to_json";
+const NAME: &str = "parse_json";
 
-impl Function for ToJsonFunction {
+impl Function for ParseJsonFunction {
     fn name(&self) -> &str {
         NAME
     }
@@ -101,9 +101,9 @@ impl Function for ToJsonFunction {
     }
 }
 
-impl Display for ToJsonFunction {
+impl Display for ParseJsonFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "TO_JSON")
+        write!(f, "PARSE_JSON")
     }
 }
 
@@ -119,17 +119,17 @@ mod tests {
 
     #[test]
     fn test_get_by_path_function() {
-        let to_json = ToJsonFunction;
+        let parse_json = ParseJsonFunction;
 
-        assert_eq!("to_json", to_json.name());
+        assert_eq!("parse_json", parse_json.name());
         assert_eq!(
             ConcreteDataType::json_datatype(),
-            to_json
+            parse_json
                 .return_type(&[ConcreteDataType::json_datatype()])
                 .unwrap()
         );
 
-        assert!(matches!(to_json.signature(),
+        assert!(matches!(parse_json.signature(),
                          Signature {
                              type_signature: TypeSignature::Exact(valid_types),
                              volatility: Volatility::Immutable
@@ -152,13 +152,12 @@ mod tests {
 
         let json_string_vector = StringVector::from_vec(json_strings.to_vec());
         let args: Vec<VectorRef> = vec![Arc::new(json_string_vector)];
-        let vector = to_json.eval(FunctionContext::default(), &args).unwrap();
+        let vector = parse_json.eval(FunctionContext::default(), &args).unwrap();
 
         assert_eq!(3, vector.len());
         for (i, gt) in jsonbs.iter().enumerate() {
             let result = vector.get_ref(i);
             let result = result.as_binary().unwrap().unwrap();
-            // remove whitespaces
             assert_eq!(gt, result);
         }
     }

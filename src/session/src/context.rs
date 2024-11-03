@@ -40,7 +40,9 @@ pub struct QueryContext {
     current_catalog: String,
     // we use Arc<RwLock>> for modifiable fields
     #[builder(default)]
-    mutable_inner: Arc<RwLock<MutableInner>>,
+    mutable_session_data: Arc<RwLock<MutableInner>>,
+    #[builder(default)]
+    mutable_query_context_data: Arc<RwLock<QueryContextMutableFields>>,
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
     extensions: HashMap<String, String>,
@@ -50,6 +52,12 @@ pub struct QueryContext {
     // Track which protocol the query comes from.
     #[builder(default)]
     channel: Channel,
+}
+
+/// This fields hold data that is only valid to current query context
+#[derive(Debug, Builder, Clone, Default)]
+pub struct QueryContextMutableFields {
+    warning: Option<String>,
 }
 
 impl Display for QueryContext {
@@ -65,21 +73,26 @@ impl Display for QueryContext {
 
 impl QueryContextBuilder {
     pub fn current_schema(mut self, schema: String) -> Self {
-        if self.mutable_inner.is_none() {
-            self.mutable_inner = Some(Arc::new(RwLock::new(MutableInner::default())));
+        if self.mutable_session_data.is_none() {
+            self.mutable_session_data = Some(Arc::new(RwLock::new(MutableInner::default())));
         }
 
         // safe for unwrap because previous none check
-        self.mutable_inner.as_mut().unwrap().write().unwrap().schema = schema;
+        self.mutable_session_data
+            .as_mut()
+            .unwrap()
+            .write()
+            .unwrap()
+            .schema = schema;
         self
     }
 
     pub fn timezone(mut self, timezone: Timezone) -> Self {
-        if self.mutable_inner.is_none() {
-            self.mutable_inner = Some(Arc::new(RwLock::new(MutableInner::default())));
+        if self.mutable_session_data.is_none() {
+            self.mutable_session_data = Some(Arc::new(RwLock::new(MutableInner::default())));
         }
 
-        self.mutable_inner
+        self.mutable_session_data
             .as_mut()
             .unwrap()
             .write()
@@ -120,7 +133,7 @@ impl From<QueryContext> for api::v1::QueryContext {
     fn from(
         QueryContext {
             current_catalog,
-            mutable_inner,
+            mutable_session_data: mutable_inner,
             extensions,
             channel,
             ..
@@ -182,11 +195,11 @@ impl QueryContext {
     }
 
     pub fn current_schema(&self) -> String {
-        self.mutable_inner.read().unwrap().schema.clone()
+        self.mutable_session_data.read().unwrap().schema.clone()
     }
 
     pub fn set_current_schema(&self, new_schema: &str) {
-        self.mutable_inner.write().unwrap().schema = new_schema.to_string();
+        self.mutable_session_data.write().unwrap().schema = new_schema.to_string();
     }
 
     pub fn current_catalog(&self) -> &str {
@@ -208,19 +221,19 @@ impl QueryContext {
     }
 
     pub fn timezone(&self) -> Timezone {
-        self.mutable_inner.read().unwrap().timezone.clone()
+        self.mutable_session_data.read().unwrap().timezone.clone()
     }
 
     pub fn set_timezone(&self, timezone: Timezone) {
-        self.mutable_inner.write().unwrap().timezone = timezone;
+        self.mutable_session_data.write().unwrap().timezone = timezone;
     }
 
     pub fn current_user(&self) -> UserInfoRef {
-        self.mutable_inner.read().unwrap().user_info.clone()
+        self.mutable_session_data.read().unwrap().user_info.clone()
     }
 
     pub fn set_current_user(&self, user: UserInfoRef) {
-        self.mutable_inner.write().unwrap().user_info = user;
+        self.mutable_session_data.write().unwrap().user_info = user;
     }
 
     pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
@@ -257,6 +270,18 @@ impl QueryContext {
     pub fn set_channel(&mut self, channel: Channel) {
         self.channel = channel;
     }
+
+    pub fn warning(&self) -> Option<String> {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .warning
+            .clone()
+    }
+
+    pub fn set_warning(&self, msg: String) {
+        self.mutable_query_context_data.write().unwrap().warning = Some(msg);
+    }
 }
 
 impl QueryContextBuilder {
@@ -266,7 +291,8 @@ impl QueryContextBuilder {
             current_catalog: self
                 .current_catalog
                 .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
-            mutable_inner: self.mutable_inner.unwrap_or_default(),
+            mutable_session_data: self.mutable_session_data.unwrap_or_default(),
+            mutable_query_context_data: self.mutable_query_context_data.unwrap_or_default(),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),

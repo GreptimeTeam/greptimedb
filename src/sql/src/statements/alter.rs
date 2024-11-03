@@ -14,14 +14,15 @@
 
 use std::fmt::{Debug, Display};
 
+use api::v1;
 use common_query::AddColumnLocation;
 use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct AlterTable {
-    table_name: ObjectName,
-    alter_operation: AlterTableOperation,
+    pub table_name: ObjectName,
+    pub alter_operation: AlterTableOperation,
 }
 
 impl AlterTable {
@@ -67,6 +68,8 @@ pub enum AlterTableOperation {
         column_name: Ident,
         target_type: DataType,
     },
+    /// `MODIFY <table attrs key> = <table attr value>`
+    ChangeTableOptions { options: Vec<ChangeTableOption> },
     /// `DROP COLUMN <name>`
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
@@ -97,6 +100,27 @@ impl Display for AlterTableOperation {
             } => {
                 write!(f, r#"MODIFY COLUMN {column_name} {target_type}"#)
             }
+            AlterTableOperation::ChangeTableOptions { options } => {
+                for ChangeTableOption { key, value } in options {
+                    write!(f, r#"MODIFY '{key}'='{value}', "#)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ChangeTableOption {
+    pub key: String,
+    pub value: String,
+}
+
+impl From<ChangeTableOption> for v1::ChangeTableOption {
+    fn from(c: ChangeTableOption) -> Self {
+        v1::ChangeTableOption {
+            key: c.key,
+            value: c.value,
         }
     }
 }

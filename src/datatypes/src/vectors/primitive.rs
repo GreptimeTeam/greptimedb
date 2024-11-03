@@ -207,7 +207,7 @@ pub struct PrimitiveIter<'a, T: LogicalPrimitiveType> {
     iter: ArrayIter<&'a PrimitiveArray<T::ArrowPrimitive>>,
 }
 
-impl<'a, T: LogicalPrimitiveType> Iterator for PrimitiveIter<'a, T> {
+impl<T: LogicalPrimitiveType> Iterator for PrimitiveIter<'_, T> {
     type Item = Option<T::Wrapper>;
 
     fn next(&mut self) -> Option<Option<T::Wrapper>> {

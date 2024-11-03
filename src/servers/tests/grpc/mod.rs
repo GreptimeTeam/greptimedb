@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use auth::tests::MockUserProvider;
 use auth::UserProviderRef;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_runtime::runtime::BuilderBuild;
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
 use servers::error::{Result, StartGrpcSnafu, TcpBindSnafu};
 use servers::grpc::flight::FlightCraftWrapper;

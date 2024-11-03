@@ -329,6 +329,7 @@ impl ExecutionPlanVisitor for MetricCollector {
                 level: self.current_level,
                 metrics: vec![],
             });
+            self.current_level += 1;
             return Ok(true);
         };
 
@@ -365,8 +366,7 @@ impl ExecutionPlanVisitor for MetricCollector {
     }
 
     fn post_visit(&mut self, _plan: &dyn ExecutionPlan) -> std::result::Result<bool, Self::Error> {
-        // the last minus will underflow
-        self.current_level = self.current_level.wrapping_sub(1);
+        self.current_level -= 1;
         Ok(true)
     }
 }

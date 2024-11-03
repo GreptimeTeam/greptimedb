@@ -28,7 +28,7 @@ use crate::statements::show::{
 use crate::statements::statement::Statement;
 
 /// SHOW statement parser implementation
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     /// Parses SHOW statements
     /// todo(hl) support `show settings`/`show create`/`show users` etc.
     pub(crate) fn parse_show(&mut self) -> Result<Statement> {

@@ -28,7 +28,7 @@ use crate::plan::TypedPlan;
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
 use crate::utils::ArrangeHandler;
 
-impl<'referred, 'df> Context<'referred, 'df> {
+impl Context<'_, '_> {
     /// Like `render_mfp` but in batch mode
     pub fn render_mfp_batch(
         &mut self,

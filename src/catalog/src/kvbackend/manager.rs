@@ -21,7 +21,6 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
     PG_CATALOG_NAME,
 };
-use common_config::Mode;
 use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, ViewInfoCacheRef};
 use common_meta::key::catalog_name::CatalogNameKey;
@@ -31,9 +30,9 @@ use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
+use common_procedure::ProcedureManagerRef;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
-use meta_client::client::MetaClient;
 use moka::sync::Cache;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use session::context::{Channel, QueryContext};
@@ -42,12 +41,14 @@ use table::dist_table::DistTable;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::table_name::TableName;
 use table::TableRef;
+use tokio::sync::Semaphore;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
 };
-use crate::information_schema::InformationSchemaProvider;
+use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
 use crate::kvbackend::TableCacheRef;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
 use crate::system_schema::SystemSchemaProvider;
@@ -60,27 +61,31 @@ use crate::CatalogManager;
 /// comes from `SystemCatalog`, which is static and read-only.
 #[derive(Clone)]
 pub struct KvBackendCatalogManager {
-    mode: Mode,
-    meta_client: Option<Arc<MetaClient>>,
+    /// Provides the extension methods for the `information_schema` tables
+    information_extension: InformationExtensionRef,
+    /// Manages partition rules.
     partition_manager: PartitionRuleManagerRef,
+    /// Manages table metadata.
     table_metadata_manager: TableMetadataManagerRef,
     /// A sub-CatalogManager that handles system tables
     system_catalog: SystemCatalog,
+    /// Cache registry for all caches.
     cache_registry: LayeredCacheRegistryRef,
+    /// Only available in `Standalone` mode.
+    procedure_manager: Option<ProcedureManagerRef>,
 }
 
 const CATALOG_CACHE_MAX_CAPACITY: u64 = 128;
 
 impl KvBackendCatalogManager {
     pub fn new(
-        mode: Mode,
-        meta_client: Option<Arc<MetaClient>>,
+        information_extension: InformationExtensionRef,
         backend: KvBackendRef,
         cache_registry: LayeredCacheRegistryRef,
+        procedure_manager: Option<ProcedureManagerRef>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
-            mode,
-            meta_client,
+            information_extension,
             partition_manager: Arc::new(PartitionRuleManager::new(
                 backend.clone(),
                 cache_registry
@@ -104,12 +109,8 @@ impl KvBackendCatalogManager {
                 backend,
             },
             cache_registry,
+            procedure_manager,
         })
-    }
-
-    /// Returns the server running mode.
-    pub fn running_mode(&self) -> &Mode {
-        &self.mode
     }
 
     pub fn view_info_cache(&self) -> Result<ViewInfoCacheRef> {
@@ -118,9 +119,9 @@ impl KvBackendCatalogManager {
         })
     }
 
-    /// Returns the `[MetaClient]`.
-    pub fn meta_client(&self) -> Option<Arc<MetaClient>> {
-        self.meta_client.clone()
+    /// Returns the [`InformationExtension`].
+    pub fn information_extension(&self) -> InformationExtensionRef {
+        self.information_extension.clone()
     }
 
     pub fn partition_manager(&self) -> PartitionRuleManagerRef {
@@ -129,6 +130,10 @@ impl KvBackendCatalogManager {
 
     pub fn table_metadata_manager_ref(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
+    }
+
+    pub fn procedure_manager(&self) -> Option<ProcedureManagerRef> {
+        self.procedure_manager.clone()
     }
 }
 
@@ -179,21 +184,18 @@ impl CatalogManager for KvBackendCatalogManager {
         schema: &str,
         query_ctx: Option<&QueryContext>,
     ) -> Result<Vec<String>> {
-        let stream = self
+        let mut tables = self
             .table_metadata_manager
             .table_name_manager()
-            .tables(catalog, schema);
-        let mut tables = stream
+            .tables(catalog, schema)
+            .map_ok(|(table_name, _)| table_name)
             .try_collect::<Vec<_>>()
             .await
             .map_err(BoxedError::new)
-            .context(ListTablesSnafu { catalog, schema })?
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect::<Vec<_>>();
-        tables.extend_from_slice(&self.system_catalog.table_names(schema, query_ctx));
+            .context(ListTablesSnafu { catalog, schema })?;
 
-        Ok(tables.into_iter().collect())
+        tables.extend(self.system_catalog.table_names(schema, query_ctx));
+        Ok(tables)
     }
 
     async fn catalog_exists(&self, catalog: &str) -> Result<bool> {
@@ -303,36 +305,68 @@ impl CatalogManager for KvBackendCatalogManager {
             }
         });
 
-        let table_id_stream = self
-            .table_metadata_manager
-            .table_name_manager()
-            .tables(catalog, schema)
-            .map_ok(|(_, v)| v.table_id());
         const BATCH_SIZE: usize = 128;
-        let user_tables = try_stream!({
+        const CONCURRENCY: usize = 8;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let metadata_manager = self.table_metadata_manager.clone();
+        let catalog = catalog.to_string();
+        let schema = schema.to_string();
+        let semaphore = Arc::new(Semaphore::new(CONCURRENCY));
+
+        common_runtime::spawn_global(async move {
+            let table_id_stream = metadata_manager
+                .table_name_manager()
+                .tables(&catalog, &schema)
+                .map_ok(|(_, v)| v.table_id());
             // Split table ids into chunks
             let mut table_id_chunks = table_id_stream.ready_chunks(BATCH_SIZE);
 
             while let Some(table_ids) = table_id_chunks.next().await {
-                let table_ids = table_ids
+                let table_ids = match table_ids
                     .into_iter()
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(BoxedError::new)
-                    .context(ListTablesSnafu { catalog, schema })?;
+                    .context(ListTablesSnafu {
+                        catalog: &catalog,
+                        schema: &schema,
+                    }) {
+                    Ok(table_ids) => table_ids,
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                };
 
-                let table_info_values = self
-                    .table_metadata_manager
-                    .table_info_manager()
-                    .batch_get(&table_ids)
-                    .await
-                    .context(TableMetadataManagerSnafu)?;
+                let metadata_manager = metadata_manager.clone();
+                let tx = tx.clone();
+                let semaphore = semaphore.clone();
+                common_runtime::spawn_global(async move {
+                    // we don't explicitly close the semaphore so just ignore the potential error.
+                    let _ = semaphore.acquire().await;
+                    let table_info_values = match metadata_manager
+                        .table_info_manager()
+                        .batch_get(&table_ids)
+                        .await
+                        .context(TableMetadataManagerSnafu)
+                    {
+                        Ok(table_info_values) => table_info_values,
+                        Err(e) => {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                    };
 
-                for table_info_value in table_info_values.into_values() {
-                    yield build_table(table_info_value)?;
-                }
+                    for table in table_info_values.into_values().map(build_table) {
+                        if tx.send(table).await.is_err() {
+                            return;
+                        }
+                    }
+                });
             }
         });
 
+        let user_tables = ReceiverStream::new(rx);
         Box::pin(sys_tables.chain(user_tables))
     }
 }

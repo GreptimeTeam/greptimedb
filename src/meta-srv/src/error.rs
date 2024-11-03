@@ -18,7 +18,6 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_meta::DatanodeId;
 use common_runtime::JoinError;
-use rand::distributions::WeightedError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -32,6 +31,21 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to choose items"))]
+    ChooseItems {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: rand::distributions::WeightedError,
+    },
+
+    #[snafu(display("Exceeded deadline, operation: {}", operation))]
+    ExceededDeadline {
+        #[snafu(implicit)]
+        location: Location,
+        operation: String,
+    },
+
     #[snafu(display("The target peer is unavailable temporally: {}", peer_id))]
     PeerUnavailable {
         #[snafu(implicit)]
@@ -278,22 +292,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse stat key from utf8"))]
-    StatKeyFromUtf8 {
-        #[snafu(source)]
-        error: std::string::FromUtf8Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to parse stat value from utf8"))]
-    StatValueFromUtf8 {
-        #[snafu(source)]
-        error: std::string::FromUtf8Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to parse invalid region key from utf8"))]
     InvalidRegionKeyFromUtf8 {
         #[snafu(source)]
@@ -453,30 +451,6 @@ pub enum Error {
     ExceededRetryLimit {
         func_name: String,
         retry_num: usize,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to lock based on etcd"))]
-    Lock {
-        #[snafu(source)]
-        error: etcd_client::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to unlock based on etcd"))]
-    Unlock {
-        #[snafu(source)]
-        error: etcd_client::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to grant lease"))]
-    LeaseGrant {
-        #[snafu(source)]
-        error: etcd_client::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -676,20 +650,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to set weight array"))]
-    WeightArray {
-        #[snafu(source)]
-        error: WeightedError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Weight array is not set"))]
-    NotSetWeightArray {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Unexpected table route type: {}", err_msg))]
     UnexpectedLogicalRouteTable {
         #[snafu(implicit)]
@@ -707,6 +667,13 @@ pub enum Error {
 
     #[snafu(display("Invalid cluster info format"))]
     InvalidClusterInfoFormat {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Invalid datanode stat format"))]
+    InvalidDatanodeStatFormat {
         #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
@@ -732,6 +699,13 @@ pub enum Error {
     ConnectPostgres {
         #[snafu(source)]
         error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Handler not found: {}", name))]
+    HandlerNotFound {
+        name: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -765,9 +739,6 @@ impl ErrorExt for Error {
             | Error::ResponseHeaderNotFound { .. }
             | Error::IsNotLeader { .. }
             | Error::InvalidHttpBody { .. }
-            | Error::Lock { .. }
-            | Error::Unlock { .. }
-            | Error::LeaseGrant { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
             | Error::PusherNotFound { .. }
@@ -781,9 +752,9 @@ impl ErrorExt for Error {
             | Error::NoEnoughAvailableNode { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
-            | Error::WeightArray { .. }
-            | Error::NotSetWeightArray { .. }
-            | Error::PeerUnavailable { .. } => StatusCode::Internal,
+            | Error::PeerUnavailable { .. }
+            | Error::ExceededDeadline { .. }
+            | Error::ChooseItems { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -804,11 +775,10 @@ impl ErrorExt for Error {
             | Error::InitExportMetricsTask { .. }
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
-            | Error::TomlFormat { .. } => StatusCode::InvalidArguments,
+            | Error::TomlFormat { .. }
+            | Error::HandlerNotFound { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
-            | Error::StatKeyFromUtf8 { .. }
-            | Error::StatValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }
             | Error::TableRouteNotFound { .. }
             | Error::TableInfoNotFound { .. }
@@ -822,7 +792,8 @@ impl ErrorExt for Error {
             | Error::MigrationRunning { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
-            | Error::InvalidClusterInfoFormat { source, .. } => source.status_code(),
+            | Error::InvalidClusterInfoFormat { source, .. }
+            | Error::InvalidDatanodeStatFormat { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::SubmitProcedure { source, .. }
             | Error::WaitProcedure { source, .. }

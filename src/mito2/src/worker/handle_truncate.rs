@@ -20,7 +20,7 @@ use store_api::storage::RegionId;
 
 use crate::error::RegionNotFoundSnafu;
 use crate::manifest::action::RegionTruncate;
-use crate::region::RegionState;
+use crate::region::RegionLeaderState;
 use crate::request::{OptionOutputTx, TruncateResult};
 use crate::worker::RegionWorkerLoop;
 
@@ -63,7 +63,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         // We are already in the worker loop so we can set the state first.
-        region.switch_state_to_writable(RegionState::Truncating);
+        region.switch_state_to_writable(RegionLeaderState::Truncating);
 
         match truncate_result.result {
             Ok(()) => {

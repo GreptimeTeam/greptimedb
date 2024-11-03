@@ -21,6 +21,7 @@ use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 
+use crate::dist_plan::merge_sort::{merge_sort_transformer, MergeSortLogicalPlan};
 use crate::dist_plan::MergeScanLogicalPlan;
 
 #[allow(dead_code)]
@@ -68,8 +69,9 @@ impl Categorizer {
                 }
 
                 // sort plan needs to consider column priority
-                // We can implement a merge-sort on partial ordered data
-                Commutativity::Unimplemented
+                // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient
+                // We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
+                Commutativity::ConditionalCommutative(Some(Arc::new(merge_sort_transformer)))
             }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
             LogicalPlan::CrossJoin(_) => Commutativity::NonCommutative,
@@ -118,7 +120,8 @@ impl Categorizer {
                 || name == SeriesNormalize::name()
                 || name == RangeManipulate::name()
                 || name == SeriesDivide::name()
-                || name == MergeScanLogicalPlan::name() =>
+                || name == MergeScanLogicalPlan::name()
+                || name == MergeSortLogicalPlan::name() =>
             {
                 Commutativity::Unimplemented
             }

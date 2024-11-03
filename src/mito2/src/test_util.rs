@@ -52,7 +52,7 @@ use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use rstest_reuse::template;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     RegionCloseRequest, RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest,
     RegionOpenRequest, RegionPutRequest, RegionRequest,
@@ -111,6 +111,12 @@ pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
 #[case::with_kafka(kafka_log_store_factory())]
 #[tokio::test]
 pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFactory>) {}
+
+#[template]
+#[rstest]
+#[case::with_kafka(kafka_log_store_factory())]
+#[tokio::test]
+pub(crate) fn single_kafka_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
 
 #[derive(Clone)]
 pub(crate) struct RaftEngineLogStoreFactory;
@@ -1108,6 +1114,8 @@ pub async fn reopen_region(
         .unwrap();
 
     if writable {
-        engine.set_writable(region_id, true).unwrap();
+        engine
+            .set_region_role(region_id, RegionRole::Leader)
+            .unwrap();
     }
 }

@@ -60,6 +60,7 @@ macro_rules! sql_tests {
                 $service,
 
                 test_mysql_auth,
+                test_mysql_stmts,
                 test_mysql_crud,
                 test_mysql_timezone,
                 test_mysql_async_timestamp,
@@ -69,6 +70,7 @@ macro_rules! sql_tests {
                 test_postgres_bytea,
                 test_postgres_datestyle,
                 test_postgres_parameter_inference,
+                test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
             );
         )*
@@ -132,6 +134,25 @@ pub async fn test_mysql_auth(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_mysql_stmts(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let (addr, mut guard, fe_mysql_server) = setup_mysql_server(store_type, "sql_crud").await;
+
+    let mut conn = MySqlConnection::connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    conn.execute("SET SESSION TRANSACTION READ ONLY")
+        .await
+        .unwrap();
+
+    conn.execute("SET TRANSACTION READ ONLY").await.unwrap();
+
+    let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
+}
+
 pub async fn test_mysql_crud(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
@@ -144,7 +165,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .unwrap();
 
     sqlx::query(
-        "create table demo(i bigint, ts timestamp time index default current_timestamp, d date default null, dt datetime default null, b blob default null)",
+        "create table demo(i bigint, ts timestamp time index default current_timestamp, d date default null, dt datetime default null, b blob default null, j json default null)",
     )
     .execute(&pool)
     .await
@@ -157,18 +178,30 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         let hello = format!("hello{i}");
         let bytes = hello.as_bytes();
-        sqlx::query("insert into demo values(?, ?, ?, ?, ?)")
+        let jsons = serde_json::json!({
+            "code": i,
+            "success": true,
+            "payload": {
+                "features": [
+                    "serde",
+                    "json"
+                ],
+                "homepage": null
+            }
+        });
+        sqlx::query("insert into demo values(?, ?, ?, ?, ?, ?)")
             .bind(i)
             .bind(i)
             .bind(d)
             .bind(dt)
             .bind(bytes)
+            .bind(jsons)
             .execute(&pool)
             .await
             .unwrap();
     }
 
-    let rows = sqlx::query("select i, d, dt, b from demo")
+    let rows = sqlx::query("select i, d, dt, b, j from demo")
         .fetch_all(&pool)
         .await
         .unwrap();
@@ -179,6 +212,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let d: NaiveDate = row.get("d");
         let dt: DateTime<Utc> = row.get("dt");
         let bytes: Vec<u8> = row.get("b");
+        let json: serde_json::Value = row.get("j");
         assert_eq!(ret, i as i64);
         let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         assert_eq!(expected_d, d);
@@ -193,6 +227,18 @@ pub async fn test_mysql_crud(store_type: StorageType) {
             format!("{}", dt.format("%Y-%m-%d %H:%M:%S"))
         );
         assert_eq!(format!("hello{i}"), String::from_utf8_lossy(&bytes));
+        let expected_j = serde_json::json!({
+            "code": i,
+            "success": true,
+            "payload": {
+                "features": [
+                    "serde",
+                    "json"
+                ],
+                "homepage": null
+            }
+        });
+        assert_eq!(json, expected_j);
     }
 
     let rows = sqlx::query("select i from demo where i=?")
@@ -395,7 +441,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         let dt = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
         let bytes = "hello".as_bytes();
         let json = serde_json::json!({
-            "code": 200,
+            "code": i,
             "success": true,
             "payload": {
                 "features": [
@@ -443,7 +489,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         assert_eq!("hello".as_bytes(), bytes);
 
         let expected_j = serde_json::json!({
-            "code": 200,
+            "code": i,
             "success": true,
             "payload": {
                 "features": [
@@ -1109,5 +1155,36 @@ pub async fn test_mysql_prepare_stmt_insert_timestamp(store_type: StorageType) {
     assert_eq!(x.to_string(), "2023-12-19 13:20:01.123 UTC");
 
     let _ = server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_array_types(store_type: StorageType) {
+    let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_inference").await;
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    let rows = client
+        .query(
+            "SELECT arrow_cast(1, 'List(Int8)'), arrow_cast('tom', 'List(Utf8)'), arrow_cast(3.14, 'List(Float32)'), arrow_cast('2023-01-02T12:53:02', 'List(Timestamp(Millisecond, None))')",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(1, rows.len());
+
+    // Shutdown the client.
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }

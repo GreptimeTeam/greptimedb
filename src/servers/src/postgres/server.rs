@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use ::auth::UserProviderRef;
 use async_trait::async_trait;
+use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
@@ -94,14 +95,8 @@ impl PostgresServer {
                         let _handle = io_runtime.spawn(async move {
                             crate::metrics::METRIC_POSTGRES_CONNECTIONS.inc();
                             let pg_handler = Arc::new(handler_maker.make(addr));
-                            let r = process_socket(
-                                io_stream,
-                                tls_acceptor.clone(),
-                                pg_handler.clone(),
-                                pg_handler.clone(),
-                                pg_handler,
-                            )
-                            .await;
+                            let r =
+                                process_socket(io_stream, tls_acceptor.clone(), pg_handler).await;
                             crate::metrics::METRIC_POSTGRES_CONNECTIONS.dec();
                             r
                         });

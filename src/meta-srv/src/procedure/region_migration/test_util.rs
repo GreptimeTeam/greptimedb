@@ -84,7 +84,7 @@ impl MailboxContext {
     ) {
         let pusher_id = channel.pusher_id();
         let pusher = Pusher::new(tx, &RequestHeader::default());
-        let _ = self.pushers.insert(pusher_id, pusher).await;
+        let _ = self.pushers.insert(pusher_id.string_key(), pusher).await;
     }
 
     pub fn mailbox(&self) -> &MailboxRef {
@@ -316,7 +316,7 @@ pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> Persis
         to_peer: Peer::empty(to),
         region_id,
         cluster_id: 0,
-        replay_timeout: Duration::from_millis(1000),
+        timeout: Duration::from_secs(10),
     }
 }
 
@@ -449,7 +449,7 @@ impl ProcedureMigrationTestSuite {
             .find(|route| route.region.id == region_id)
             .unwrap();
 
-        assert!(!region_route.is_leader_downgraded());
+        assert!(!region_route.is_leader_downgrading());
         assert_eq!(
             region_route.leader_peer.as_ref().unwrap().id,
             expected_leader_id

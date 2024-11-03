@@ -43,7 +43,7 @@ impl UpdateMetadata {
             .context(error::RegionRouteNotFoundSnafu { region_id })?;
 
         // Removes downgraded status.
-        region_route.set_leader_status(None);
+        region_route.set_leader_state(None);
 
         let candidate = &ctx.persistent_ctx.to_peer;
         let expected_old_leader = &ctx.persistent_ctx.from_peer;
@@ -106,7 +106,7 @@ impl UpdateMetadata {
 
         if leader_peer.id == candidate_peer_id {
             ensure!(
-                !region_route.is_leader_downgraded(),
+                !region_route.is_leader_downgrading(),
                 error::UnexpectedSnafu {
                     violated: format!("Unexpected intermediate state is found during the update metadata for upgrading region {region_id}"),
                 }
@@ -190,7 +190,7 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
-    use common_meta::rpc::router::{Region, RegionRoute, RegionStatus};
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use common_time::util::current_time_millis;
     use store_api::storage::RegionId;
 
@@ -286,7 +286,7 @@ mod tests {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(Peer::empty(1)),
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
-            leader_status: Some(RegionStatus::Downgraded),
+            leader_state: Some(LeaderState::Downgrading),
             leader_down_since: Some(current_time_millis()),
         }];
 
@@ -298,7 +298,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!new_region_routes[0].is_leader_downgraded());
+        assert!(!new_region_routes[0].is_leader_downgrading());
         assert!(new_region_routes[0].leader_down_since.is_none());
         assert_eq!(new_region_routes[0].follower_peers, vec![Peer::empty(3)]);
         assert_eq!(new_region_routes[0].leader_peer.as_ref().unwrap().id, 2);
@@ -319,13 +319,13 @@ mod tests {
                 region: Region::new_test(RegionId::new(table_id, 1)),
                 leader_peer: Some(Peer::empty(1)),
                 follower_peers: vec![Peer::empty(5), Peer::empty(3)],
-                leader_status: Some(RegionStatus::Downgraded),
+                leader_state: Some(LeaderState::Downgrading),
                 leader_down_since: Some(current_time_millis()),
             },
             RegionRoute {
                 region: Region::new_test(RegionId::new(table_id, 2)),
                 leader_peer: Some(Peer::empty(4)),
-                leader_status: Some(RegionStatus::Downgraded),
+                leader_state: Some(LeaderState::Downgrading),
                 ..Default::default()
             },
         ];
@@ -382,7 +382,7 @@ mod tests {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(leader_peer),
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
-            leader_status: None,
+            leader_state: None,
             leader_down_since: None,
         }];
 
@@ -406,7 +406,7 @@ mod tests {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(candidate_peer),
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
-            leader_status: None,
+            leader_state: None,
             leader_down_since: None,
         }];
 
@@ -430,7 +430,7 @@ mod tests {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(candidate_peer),
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
-            leader_status: Some(RegionStatus::Downgraded),
+            leader_state: Some(LeaderState::Downgrading),
             leader_down_since: None,
         }];
 
@@ -455,7 +455,7 @@ mod tests {
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(table_id, 1)),
             leader_peer: Some(Peer::empty(1)),
-            leader_status: Some(RegionStatus::Downgraded),
+            leader_state: Some(LeaderState::Downgrading),
             ..Default::default()
         }];
 
@@ -485,7 +485,7 @@ mod tests {
         assert!(ctx.volatile_ctx.table_route.is_none());
         assert!(ctx.volatile_ctx.opening_region_guard.is_none());
         assert_eq!(region_routes.len(), 1);
-        assert!(!region_routes[0].is_leader_downgraded());
+        assert!(!region_routes[0].is_leader_downgrading());
         assert!(region_routes[0].follower_peers.is_empty());
         assert_eq!(region_routes[0].leader_peer.as_ref().unwrap().id, 2);
     }

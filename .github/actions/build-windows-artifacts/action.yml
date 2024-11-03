@@ -40,7 +40,7 @@ runs:
 
     - name: Install PyArrow Package
       shell: pwsh
-      run: pip install pyarrow
+      run: pip install pyarrow numpy
 
     - name: Install WSL distribution
       uses: Vampire/setup-wsl@v2

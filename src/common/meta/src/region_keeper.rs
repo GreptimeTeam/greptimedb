@@ -58,7 +58,7 @@ impl MemoryRegionKeeper {
         Default::default()
     }
 
-    /// Returns [OpeningRegionGuard] if Region(`region_id`) on Peer(`datanode_id`) does not exist.
+    /// Returns [OperatingRegionGuard] if Region(`region_id`) on Peer(`datanode_id`) does not exist.
     pub fn register(
         &self,
         datanode_id: DatanodeId,

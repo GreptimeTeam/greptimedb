@@ -157,29 +157,29 @@ pub struct PromPlanner {
 impl PromPlanner {
     pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
-        stmt: EvalStmt,
+        stmt: &EvalStmt,
         session_state: &SessionState,
     ) -> Result<LogicalPlan> {
         let mut planner = Self {
             table_provider,
-            ctx: PromPlannerContext::from_eval_stmt(&stmt),
+            ctx: PromPlannerContext::from_eval_stmt(stmt),
         };
 
-        planner.prom_expr_to_plan(stmt.expr, session_state).await
+        planner.prom_expr_to_plan(&stmt.expr, session_state).await
     }
 
     #[async_recursion]
     pub async fn prom_expr_to_plan(
         &mut self,
-        prom_expr: PromExpr,
+        prom_expr: &PromExpr,
         session_state: &SessionState,
     ) -> Result<LogicalPlan> {
-        let res = match &prom_expr {
+        let res = match prom_expr {
             PromExpr::Aggregate(expr) => self.prom_aggr_expr_to_plan(session_state, expr).await?,
             PromExpr::Unary(expr) => self.prom_unary_expr_to_plan(session_state, expr).await?,
             PromExpr::Binary(expr) => self.prom_binary_expr_to_plan(session_state, expr).await?,
             PromExpr::Paren(ParenExpr { expr }) => {
-                self.prom_expr_to_plan(*expr.clone(), session_state).await?
+                self.prom_expr_to_plan(expr, session_state).await?
             }
             PromExpr::Subquery(SubqueryExpr { .. }) => UnsupportedExprSnafu {
                 name: "Prom Subquery",
@@ -212,7 +212,7 @@ impl PromPlanner {
             modifier,
         } = aggr_expr;
 
-        let input = self.prom_expr_to_plan(*expr.clone(), session_state).await?;
+        let input = self.prom_expr_to_plan(expr, session_state).await?;
 
         // calculate columns to group by
         // Need to append time index column into group by columns
@@ -242,7 +242,7 @@ impl PromPlanner {
     ) -> Result<LogicalPlan> {
         let UnaryExpr { expr } = unary_expr;
         // Unary Expr in PromQL implys the `-` operator
-        let input = self.prom_expr_to_plan(*expr.clone(), session_state).await?;
+        let input = self.prom_expr_to_plan(expr, session_state).await?;
         self.projection_for_each_field_column(input, |col| {
             Ok(DfExpr::Negative(Box::new(DfExpr::Column(col.into()))))
         })
@@ -305,7 +305,7 @@ impl PromPlanner {
             }
             // lhs is a literal, rhs is a column
             (Some(mut expr), None) => {
-                let input = self.prom_expr_to_plan(*rhs.clone(), session_state).await?;
+                let input = self.prom_expr_to_plan(rhs, session_state).await?;
                 // check if the literal is a special time expr
                 if let Some(time_expr) = Self::try_build_special_time_expr(
                     lhs,
@@ -334,7 +334,7 @@ impl PromPlanner {
             }
             // lhs is a column, rhs is a literal
             (None, Some(mut expr)) => {
-                let input = self.prom_expr_to_plan(*lhs.clone(), session_state).await?;
+                let input = self.prom_expr_to_plan(lhs, session_state).await?;
                 // check if the literal is a special time expr
                 if let Some(time_expr) = Self::try_build_special_time_expr(
                     rhs,
@@ -363,14 +363,14 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
-                let left_input = self.prom_expr_to_plan(*lhs.clone(), session_state).await?;
+                let left_input = self.prom_expr_to_plan(lhs, session_state).await?;
                 let left_field_columns = self.ctx.field_columns.clone();
                 let mut left_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
                 let left_context = self.ctx.clone();
 
-                let right_input = self.prom_expr_to_plan(*rhs.clone(), session_state).await?;
+                let right_input = self.prom_expr_to_plan(rhs, session_state).await?;
                 let right_field_columns = self.ctx.field_columns.clone();
                 let mut right_table_ref = self
                     .table_ref()
@@ -589,7 +589,7 @@ impl PromPlanner {
         // transform function arguments
         let args = self.create_function_args(&args.args)?;
         let input = if let Some(prom_expr) = args.input {
-            self.prom_expr_to_plan(prom_expr, session_state).await?
+            self.prom_expr_to_plan(&prom_expr, session_state).await?
         } else {
             self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
             self.ctx.reset_table_name_and_schema();
@@ -628,9 +628,7 @@ impl PromPlanner {
         // let promql_parser::parser::ast::Extension { expr } = ext_expr;
         let expr = &ext_expr.expr;
         let children = expr.children();
-        let plan = self
-            .prom_expr_to_plan(children[0].clone(), session_state)
-            .await?;
+        let plan = self.prom_expr_to_plan(&children[0], session_state).await?;
         // Wrapper for the explanation/analyze of the existing plan
         // https://docs.rs/datafusion-expr/latest/datafusion_expr/logical_plan/builder/struct.LogicalPlanBuilder.html#method.explain
         // if `analyze` is true, runs the actual plan and produces
@@ -805,10 +803,11 @@ impl PromPlanner {
 
             let exprs = result_set
                 .into_iter()
-                .map(|col| DfExpr::Column(col.into()))
+                .map(|col| DfExpr::Column(Column::new_unqualified(col)))
                 .chain(self.create_tag_column_exprs()?)
                 .chain(Some(self.create_time_index_column_expr()?))
                 .collect::<Vec<_>>();
+
             // reuse this variable for simplicity
             table_scan = LogicalPlanBuilder::from(table_scan)
                 .project(exprs)
@@ -1547,7 +1546,7 @@ impl PromPlanner {
             }
         })?;
         let input = args.args[1].as_ref().clone();
-        let input_plan = self.prom_expr_to_plan(input, session_state).await?;
+        let input_plan = self.prom_expr_to_plan(&input, session_state).await?;
 
         if !self.ctx.has_le_tag() {
             return ColumnNotFoundSnafu {
@@ -1632,9 +1631,7 @@ impl PromPlanner {
                 fn_name: SCALAR_FUNCTION
             }
         );
-        let input = self
-            .prom_expr_to_plan(args.args[0].as_ref().clone(), session_state)
-            .await?;
+        let input = self.prom_expr_to_plan(&args.args[0], session_state).await?;
         ensure!(
             self.ctx.field_columns.len() == 1,
             MultiFieldsNotSupportedSnafu {
@@ -2419,7 +2416,7 @@ mod test {
             1,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt, &build_session_state())
+        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
             .await
             .unwrap();
 
@@ -2629,10 +2626,9 @@ mod test {
             2,
         )
         .await;
-        let plan =
-            PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone(), &build_session_state())
-                .await
-                .unwrap();
+        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
         let expected_no_without = String::from(
             "Sort: some_metric.tag_1 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_1, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
@@ -2660,7 +2656,7 @@ mod test {
             2,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt, &build_session_state())
+        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
             .await
             .unwrap();
         let expected_without = String::from(
@@ -2785,7 +2781,7 @@ mod test {
             1,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt, &build_session_state())
+        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
             .await
             .unwrap();
 
@@ -2835,7 +2831,7 @@ mod test {
             1,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt, &build_session_state())
+        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
             .await
             .unwrap();
 
@@ -3079,13 +3075,10 @@ mod test {
                 3,
             )
             .await;
-            let plan = PromPlanner::stmt_to_plan(
-                table_provider,
-                eval_stmt.clone(),
-                &build_session_state(),
-            )
-            .await
-            .unwrap();
+            let plan =
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+                    .await
+                    .unwrap();
             let mut fields = plan.schema().field_names();
             let mut expected = case.1.into_iter().map(String::from).collect::<Vec<_>>();
             fields.sort();
@@ -3107,12 +3100,8 @@ mod test {
                 3,
             )
             .await;
-            let plan = PromPlanner::stmt_to_plan(
-                table_provider,
-                eval_stmt.clone(),
-                &build_session_state(),
-            )
-            .await;
+            let plan =
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state()).await;
             assert!(plan.is_err(), "case: {:?}", case);
         }
     }
@@ -3165,7 +3154,7 @@ mod test {
             .await;
 
             let plan =
-                PromPlanner::stmt_to_plan(table_provider, eval_stmt, &build_session_state()).await;
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state()).await;
             assert!(plan.is_err(), "query: {:?}", query);
         }
     }
@@ -3223,7 +3212,7 @@ mod test {
                 DummyDecoder::arc(),
                 true,
             ),
-            EvalStmt {
+            &EvalStmt {
                 expr: parser::parse("metrics{tag = \"1\"}").unwrap(),
                 start: UNIX_EPOCH,
                 end: UNIX_EPOCH
@@ -3253,7 +3242,7 @@ mod test {
                 DummyDecoder::arc(),
                 true,
             ),
-            EvalStmt {
+            &EvalStmt {
                 expr: parser::parse("avg_over_time(metrics{tag = \"1\"}[5s])").unwrap(),
                 start: UNIX_EPOCH,
                 end: UNIX_EPOCH

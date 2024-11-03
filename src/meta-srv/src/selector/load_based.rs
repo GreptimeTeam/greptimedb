@@ -14,50 +14,44 @@
 
 use std::collections::HashMap;
 
+use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
 use common_meta::key::TableMetadataManager;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::find_leaders;
 use common_telemetry::{debug, info};
-use parking_lot::RwLock;
 use snafu::ResultExt;
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
-use crate::key::{DatanodeLeaseKey, DatanodeStatKey, DatanodeStatValue, LeaseValue};
+use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::lease;
 use crate::metasrv::SelectorContext;
 use crate::selector::common::choose_peers;
 use crate::selector::weight_compute::{RegionNumsBasedWeightCompute, WeightCompute};
-use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedChoose};
+use crate::selector::weighted_choose::RandomWeightedChoose;
 use crate::selector::{Namespace, Selector, SelectorOptions};
 
-pub struct LoadBasedSelector<W, C> {
-    weighted_choose: RwLock<W>,
+pub struct LoadBasedSelector<C> {
     weight_compute: C,
 }
 
-impl<W, C> LoadBasedSelector<W, C> {
-    pub fn new(weighted_choose: W, weight_compute: C) -> Self {
-        Self {
-            weighted_choose: RwLock::new(weighted_choose),
-            weight_compute,
-        }
+impl<C> LoadBasedSelector<C> {
+    pub fn new(weight_compute: C) -> Self {
+        Self { weight_compute }
     }
 }
 
-impl Default for LoadBasedSelector<RandomWeightedChoose<Peer>, RegionNumsBasedWeightCompute> {
+impl Default for LoadBasedSelector<RegionNumsBasedWeightCompute> {
     fn default() -> Self {
         Self {
-            weighted_choose: RwLock::new(RandomWeightedChoose::default()),
             weight_compute: RegionNumsBasedWeightCompute,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl<W, C> Selector for LoadBasedSelector<W, C>
+impl<C> Selector for LoadBasedSelector<C>
 where
-    W: WeightedChoose<Peer>,
     C: WeightCompute<Source = HashMap<DatanodeStatKey, DatanodeStatValue>>,
 {
     type Context = SelectorContext;
@@ -99,8 +93,8 @@ where
         let weight_array = self.weight_compute.compute(&stat_kvs);
 
         // 5. choose peers by weight_array.
-        let mut weighted_choose = self.weighted_choose.write();
-        let selected = choose_peers(weight_array, &opts, &mut *weighted_choose)?;
+        let mut weighted_choose = RandomWeightedChoose::new(weight_array);
+        let selected = choose_peers(&opts, &mut weighted_choose)?;
 
         debug!(
             "LoadBasedSelector select peers: {:?}, namespace: {}, opts: {:?}.",
@@ -162,7 +156,9 @@ async fn get_leader_peer_ids(
 mod tests {
     use std::collections::HashMap;
 
-    use crate::key::{DatanodeLeaseKey, DatanodeStatKey, DatanodeStatValue, LeaseValue};
+    use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
+
+    use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::selector::load_based::filter_out_expired_datanode;
 
     #[test]

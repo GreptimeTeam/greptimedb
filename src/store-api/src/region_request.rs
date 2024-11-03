@@ -14,25 +14,29 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
+use api::v1::region::alter_request::Kind;
 use api::v1::region::{
     alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, Rows, SemanticType};
+use api::v1::{self, ChangeTableOption, Rows, SemanticType};
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
+use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
-    RegionMetadata, Result,
+    ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionOptionChangeRequestSnafu,
+    InvalidRegionRequestSnafu, MetadataError, RegionMetadata, Result,
 };
+use crate::mito_engine_options::TTL_KEY;
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
@@ -389,6 +393,8 @@ pub enum AlterKind {
         /// Columns to change.
         columns: Vec<ChangeColumnType>,
     },
+    /// Change region options.
+    ChangeRegionOptions { options: Vec<ChangeOption> },
 }
 
 impl AlterKind {
@@ -412,6 +418,7 @@ impl AlterKind {
                     col_to_change.validate(metadata)?;
                 }
             }
+            AlterKind::ChangeRegionOptions { .. } => {}
         }
         Ok(())
     }
@@ -429,6 +436,11 @@ impl AlterKind {
             AlterKind::ChangeColumnTypes { columns } => columns
                 .iter()
                 .any(|col_to_change| col_to_change.need_alter(metadata)),
+            AlterKind::ChangeRegionOptions { .. } => {
+                // we need to update region options for `ChangeTableOptions`.
+                // todo: we need to check if ttl has ever changed.
+                true
+            }
         }
     }
 
@@ -473,6 +485,13 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
             }
+            Kind::ChangeTableOptions(change_options) => AlterKind::ChangeRegionOptions {
+                options: change_options
+                    .change_table_options
+                    .iter()
+                    .map(TryFrom::try_from)
+                    .collect::<Result<Vec<_>>>()?,
+            },
         };
 
         Ok(alter_kind)
@@ -639,7 +658,31 @@ impl From<v1::ChangeColumnType> for ChangeColumnType {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub enum ChangeOption {
+    TTL(Duration),
+}
+
+impl TryFrom<&ChangeTableOption> for ChangeOption {
+    type Error = MetadataError;
+
+    fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
+        let ChangeTableOption { key, value } = value;
+        if key == TTL_KEY {
+            let ttl = if value.is_empty() {
+                Duration::from_secs(0)
+            } else {
+                humantime::parse_duration(value)
+                    .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())?
+            };
+            Ok(Self::TTL(ttl))
+        } else {
+            InvalidRegionOptionChangeRequestSnafu { key, value }.fail()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct RegionFlushRequest {
     pub row_group_size: Option<usize>,
 }

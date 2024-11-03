@@ -18,6 +18,7 @@ common-time.workspace = true
 datatypes.workspace = true
 prost.workspace = true
 snafu.workspace = true
+store-api.workspace = true
 table.workspace = true
 
 [dev-dependencies]

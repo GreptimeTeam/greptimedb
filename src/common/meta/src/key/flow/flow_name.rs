@@ -46,6 +46,8 @@ lazy_static! {
 /// The layout: `__flow/name/{catalog_name}/{flow_name}`.
 pub struct FlowNameKey<'a>(FlowScoped<FlowNameKeyInner<'a>>);
 
+pub type FlowNameDecodeResult = Result<Option<DeserializedValueWithBytes<FlowNameValue>>>;
+
 #[allow(dead_code)]
 impl<'a> FlowNameKey<'a> {
     /// Returns the [FlowNameKey]
@@ -104,7 +106,7 @@ impl<'a> MetadataKey<'a, FlowNameKeyInner<'a>> for FlowNameKeyInner<'_> {
         .into_bytes()
     }
 
-    fn from_bytes(bytes: &'a [u8]) -> Result<FlowNameKeyInner> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlowNameKeyInner<'a>> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidMetadataSnafu {
                 err_msg: format!(
@@ -200,7 +202,8 @@ impl FlowNameManager {
             req,
             DEFAULT_PAGE_SIZE,
             Arc::new(flow_name_decoder),
-        );
+        )
+        .into_stream();
 
         Box::pin(stream)
     }
@@ -222,9 +225,7 @@ impl FlowNameManager {
         flow_id: FlowId,
     ) -> Result<(
         Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<FlowNameValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> FlowNameDecodeResult,
     )> {
         let key = FlowNameKey::new(catalog_name, flow_name);
         let raw_key = key.to_bytes();

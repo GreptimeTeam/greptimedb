@@ -89,7 +89,7 @@ impl ErrorExt for Error {
             Error::FileWatch { .. } => StatusCode::InvalidArguments,
             Error::InternalState { .. } => StatusCode::Unexpected,
             Error::Io { .. } => StatusCode::StorageUnavailable,
-            Error::AuthBackend { .. } => StatusCode::Internal,
+            Error::AuthBackend { source, .. } => source.status_code(),
 
             Error::UserNotFound { .. } => StatusCode::UserNotFound,
             Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPasswordType,

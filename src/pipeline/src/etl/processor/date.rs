@@ -18,7 +18,13 @@ use ahash::HashSet;
 use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
+use snafu::{OptionExt, ResultExt};
 
+use crate::etl::error::{
+    DateFailedToGetLocalTimezoneSnafu, DateFailedToGetTimestampSnafu, DateParseSnafu,
+    DateParseTimezoneSnafu, Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
+    ProcessorFailedToParseStringSnafu, ProcessorMissingFieldSnafu, Result,
+};
 use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
@@ -103,13 +109,13 @@ impl ProcessorBuilder for DateProcessorBuilder {
         self.fields.iter().map(|f| f.input_field()).collect()
     }
 
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind, String> {
+    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
         self.build(intermediate_keys).map(ProcessorKind::Date)
     }
 }
 
 impl DateProcessorBuilder {
-    pub fn build(self, intermediate_keys: &[String]) -> Result<DateProcessor, String> {
+    pub fn build(self, intermediate_keys: &[String]) -> Result<DateProcessor> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
             let input = OneInputOneOutputField::build(
@@ -131,9 +137,9 @@ impl DateProcessorBuilder {
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self, Self::Error> {
+    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut fields = Fields::default();
         let mut formats = Formats::default();
         let mut timezone = None;
@@ -143,7 +149,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
         for (k, v) in hash {
             let key = k
                 .as_str()
-                .ok_or(format!("key must be a string, but got {k:?}"))?;
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
 
             match key {
                 FIELD_NAME => {
@@ -205,10 +211,12 @@ pub struct DateProcessor {
 }
 
 impl DateProcessor {
-    fn parse(&self, val: &str) -> Result<Timestamp, String> {
+    fn parse(&self, val: &str) -> Result<Timestamp> {
         let mut tz = Tz::UTC;
         if let Some(timezone) = &self.timezone {
-            tz = timezone.parse::<Tz>().map_err(|e| e.to_string())?;
+            tz = timezone.parse::<Tz>().context(DateParseTimezoneSnafu {
+                value: timezone.as_ref(),
+            })?;
         }
 
         for fmt in self.formats.iter() {
@@ -217,7 +225,11 @@ impl DateProcessor {
             }
         }
 
-        Err(format!("{} processor: failed to parse {val}", self.kind(),))
+        ProcessorFailedToParseStringSnafu {
+            kind: PROCESSOR_DATE.to_string(),
+            value: val.to_string(),
+        }
+        .fail()
     }
 }
 
@@ -230,7 +242,7 @@ impl Processor for DateProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<(), String> {
+    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_index();
             match val.get(index) {
@@ -241,18 +253,19 @@ impl Processor for DateProcessor {
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
-                        return Err(format!(
-                            "{} processor: missing field: {}",
-                            self.kind(),
-                            field.input_name()
-                        ));
+                        return ProcessorMissingFieldSnafu {
+                            processor: self.kind().to_string(),
+                            field: field.input_name().to_string(),
+                        }
+                        .fail();
                     }
                 }
                 Some(v) => {
-                    return Err(format!(
-                        "{} processor: expect string value, but got {v:?}",
-                        self.kind()
-                    ));
+                    return ProcessorExpectStringSnafu {
+                        processor: self.kind().to_string(),
+                        v: v.clone(),
+                    }
+                    .fail();
                 }
             }
         }
@@ -261,16 +274,20 @@ impl Processor for DateProcessor {
 }
 
 /// try to parse val with timezone first, if failed, parse without timezone
-fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<i64, String> {
+fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<i64> {
     if let Ok(dt) = DateTime::parse_from_str(val, fmt) {
-        Ok(dt.timestamp_nanos_opt().ok_or("failed to get timestamp")?)
+        Ok(dt
+            .timestamp_nanos_opt()
+            .context(DateFailedToGetTimestampSnafu)?)
     } else {
         let dt = NaiveDateTime::parse_from_str(val, fmt)
-            .map_err(|e| e.to_string())?
+            .context(DateParseSnafu { value: val })?
             .and_local_timezone(tz)
             .single()
-            .ok_or("failed to get local timezone")?;
-        Ok(dt.timestamp_nanos_opt().ok_or("failed to get timestamp")?)
+            .context(DateFailedToGetLocalTimezoneSnafu)?;
+        Ok(dt
+            .timestamp_nanos_opt()
+            .context(DateFailedToGetTimestampSnafu)?)
     }
 }
 

@@ -414,7 +414,7 @@ impl PyQueryEngine {
                     let ctx = Arc::new(QueryContextBuilder::default().build());
                     let plan = engine
                         .planner()
-                        .plan(stmt, ctx.clone())
+                        .plan(&stmt, ctx.clone())
                         .await
                         .map_err(|e| e.to_string())?;
                     let res = engine

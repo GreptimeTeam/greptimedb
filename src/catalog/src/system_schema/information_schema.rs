@@ -18,7 +18,9 @@ pub mod flows;
 mod information_memory_table;
 pub mod key_column_usage;
 mod partitions;
+mod procedure_info;
 mod region_peers;
+mod region_statistics;
 mod runtime_metrics;
 pub mod schemata;
 mod table_constraints;
@@ -30,7 +32,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
+use common_error::ext::ErrorExt;
+use common_meta::cluster::NodeInfo;
+use common_meta::datanode::RegionStat;
 use common_meta::key::flow::FlowMetadataManager;
+use common_procedure::ProcedureInfo;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
@@ -43,7 +49,7 @@ use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
 use super::{SystemSchemaProviderInner, SystemTable, SystemTableRef};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
 use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
@@ -188,6 +194,16 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.flow_metadata_manager.clone(),
             )) as _),
+            PROCEDURE_INFO => Some(
+                Arc::new(procedure_info::InformationSchemaProcedureInfo::new(
+                    self.catalog_manager.clone(),
+                )) as _,
+            ),
+            REGION_STATISTICS => Some(Arc::new(
+                region_statistics::InformationSchemaRegionStatistics::new(
+                    self.catalog_manager.clone(),
+                ),
+            ) as _),
             _ => None,
         }
     }
@@ -235,6 +251,14 @@ impl InformationSchemaProvider {
                 CLUSTER_INFO.to_string(),
                 self.build_table(CLUSTER_INFO).unwrap(),
             );
+            tables.insert(
+                PROCEDURE_INFO.to_string(),
+                self.build_table(PROCEDURE_INFO).unwrap(),
+            );
+            tables.insert(
+                REGION_STATISTICS.to_string(),
+                self.build_table(REGION_STATISTICS).unwrap(),
+            );
         }
 
         tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
@@ -250,7 +274,6 @@ impl InformationSchemaProvider {
             self.build_table(TABLE_CONSTRAINTS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
-
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
             tables.insert((*name).to_string(), self.build_table(name).expect(name));
@@ -297,5 +320,41 @@ where
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         InformationTable::to_stream(self, request)
+    }
+}
+
+pub type InformationExtensionRef = Arc<dyn InformationExtension<Error = Error> + Send + Sync>;
+
+/// The `InformationExtension` trait provides the extension methods for the `information_schema` tables.
+#[async_trait::async_trait]
+pub trait InformationExtension {
+    type Error: ErrorExt;
+
+    /// Gets the nodes information.
+    async fn nodes(&self) -> std::result::Result<Vec<NodeInfo>, Self::Error>;
+
+    /// Gets the procedures information.
+    async fn procedures(&self) -> std::result::Result<Vec<(String, ProcedureInfo)>, Self::Error>;
+
+    /// Gets the region statistics.
+    async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error>;
+}
+
+pub struct NoopInformationExtension;
+
+#[async_trait::async_trait]
+impl InformationExtension for NoopInformationExtension {
+    type Error = Error;
+
+    async fn nodes(&self) -> std::result::Result<Vec<NodeInfo>, Self::Error> {
+        Ok(vec![])
+    }
+
+    async fn procedures(&self) -> std::result::Result<Vec<(String, ProcedureInfo)>, Self::Error> {
+        Ok(vec![])
+    }
+
+    async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error> {
+        Ok(vec![])
     }
 }

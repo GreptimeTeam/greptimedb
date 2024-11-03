@@ -18,11 +18,13 @@ use std::sync::Arc;
 use auth::UserProviderRef;
 use common_base::Plugins;
 use common_config::{Configurable, Mode};
+use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
 use servers::http::event::LogValidatorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
+use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::postgres::PostgresServer;
@@ -81,8 +83,10 @@ where
             Some(self.instance.clone()),
         );
 
-        builder = builder
-            .with_log_ingest_handler(self.instance.clone(), self.plugins.get::<LogValidatorRef>());
+        let validator = self.plugins.get::<LogValidatorRef>();
+        let ingest_interceptor = self.plugins.get::<LogIngestInterceptorRef<ServerError>>();
+        builder =
+            builder.with_log_ingest_handler(self.instance.clone(), validator, ingest_interceptor);
 
         if let Some(user_provider) = self.plugins.get::<UserProviderRef>() {
             builder = builder.with_user_provider(user_provider);

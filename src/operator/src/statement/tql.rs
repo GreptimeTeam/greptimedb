@@ -16,11 +16,11 @@ use std::collections::HashMap;
 
 use common_query::Output;
 use common_telemetry::tracing;
+use datafusion_expr::LogicalPlan;
 use query::parser::{
     PromQuery, QueryLanguageParser, ANALYZE_NODE_NAME, ANALYZE_VERBOSE_NODE_NAME,
     DEFAULT_LOOKBACK_STRING, EXPLAIN_NODE_NAME, EXPLAIN_VERBOSE_NODE_NAME,
 };
-use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::tql::Tql;
@@ -90,7 +90,7 @@ impl StatementExecutor {
         };
         self.query_engine
             .planner()
-            .plan(stmt, query_ctx.clone())
+            .plan(&stmt, query_ctx.clone())
             .await
             .context(PlanStatementSnafu)
     }

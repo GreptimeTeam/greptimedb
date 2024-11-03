@@ -14,6 +14,8 @@
 
 #![no_main]
 
+use std::collections::HashMap;
+
 use common_telemetry::info;
 use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
@@ -65,6 +67,10 @@ impl Arbitrary<'_> for FuzzInput {
 fn generate_expr(input: FuzzInput) -> Result<CreateTableExpr> {
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
     let if_not_exists = rng.gen_bool(0.5);
+    let mut with_clause = HashMap::new();
+    if rng.gen_bool(0.5) {
+        with_clause.insert("append_mode".to_string(), "true".to_string());
+    }
 
     let create_table_generator = CreateTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
@@ -74,6 +80,7 @@ fn generate_expr(input: FuzzInput) -> Result<CreateTableExpr> {
         .columns(input.columns)
         .engine("mito")
         .if_not_exists(if_not_exists)
+        .with_clause(with_clause)
         .build()
         .unwrap();
     create_table_generator.generate(&mut rng)

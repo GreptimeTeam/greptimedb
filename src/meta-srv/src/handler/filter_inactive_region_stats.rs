@@ -20,6 +20,8 @@ use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
+pub const NAME: &str = "FilterInactiveRegionStatsHandler";
+
 pub struct FilterInactiveRegionStatsHandler;
 
 #[async_trait]

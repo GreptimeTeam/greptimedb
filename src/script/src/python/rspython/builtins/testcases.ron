@@ -989,25 +989,6 @@ argmin(p)"#,
         },
         script: r#"
 from greptime import *
-percentile(x, p)"#,
-        expect: Ok((
-            ty: Float64,
-            value: Float(-0.97)
-        ))
-    ),
-    TestCase(
-        input: {
-            "x": Var(
-                ty: Float64,
-                value: FloatVec([-1.0, 2.0, 3.0])
-            ),
-            "p": Var(
-                ty: Float64,
-                value: FloatVec([0.5, 0.5, 0.5])
-            )
-        },
-        script: r#"
-from greptime import *
 scipy_stats_norm_cdf(x, p)"#,
         expect: Ok((
             ty: Float64,

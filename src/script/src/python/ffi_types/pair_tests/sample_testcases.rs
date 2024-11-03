@@ -722,6 +722,7 @@ import math
 
 @coprocessor(args=[], returns=["value"], backend="pyo3")
 def test_numpy() -> vector[i64]:
+    from greptime import vector
     try:
         import numpy as np
         import pyarrow as pa
@@ -729,7 +730,6 @@ def test_numpy() -> vector[i64]:
         # Python didn't have numpy or pyarrow
         print("Warning: no pyarrow or numpy found in current python", e)
         return vector([0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
-    from greptime import vector
     v = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
     v = pa.array(v)
     v = vector.from_pyarrow(v)

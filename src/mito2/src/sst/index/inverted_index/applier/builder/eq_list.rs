@@ -22,7 +22,7 @@ use index::inverted_index::Bytes;
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> InvertedIndexApplierBuilder<'a> {
+impl InvertedIndexApplierBuilder<'_> {
     /// Collects an eq expression in the form of `column = lit`.
     pub(crate) fn collect_eq(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
         let Some(column_name) = Self::column_name(left).or_else(|| Self::column_name(right)) else {
@@ -31,7 +31,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
             return Ok(());
         };
-        let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
+        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
             return Ok(());
         };
 
@@ -59,7 +59,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
             return Ok(());
         };
-        let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
+        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
             return Ok(());
         };
 
@@ -140,7 +140,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -178,14 +178,22 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
         builder
             .collect_eq(&field_column(), &string_lit("abc"))
             .unwrap();
-        assert!(builder.output.is_empty());
+
+        let predicates = builder.output.get(&3).unwrap();
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(
+            predicates[0],
+            Predicate::InList(InListPredicate {
+                list: HashSet::from_iter([encoded_string("abc")])
+            })
+        );
     }
 
     #[test]
@@ -199,7 +207,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -219,7 +227,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -239,7 +247,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -298,7 +306,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 
@@ -336,7 +344,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 

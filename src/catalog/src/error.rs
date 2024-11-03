@@ -50,8 +50,15 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to list nodes in cluster: {source}"))]
+    #[snafu(display("Failed to list nodes in cluster"))]
     ListNodes {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to region stats in cluster"))]
+    ListRegionStats {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
@@ -80,6 +87,32 @@ pub enum Error {
         error: serde_json::error::Error,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Failed to get information extension client"))]
+    GetInformationExtension {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to list procedures"))]
+    ListProcedures {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Procedure id not found"))]
+    ProcedureIdNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("convert proto data error"))]
+    ConvertProtoData {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
     },
 
     #[snafu(display("Failed to re-compile script due to internal error"))]
@@ -266,7 +299,9 @@ impl ErrorExt for Error {
             | Error::FindRegionRoutes { .. }
             | Error::CacheNotFound { .. }
             | Error::CastManager { .. }
-            | Error::Json { .. } => StatusCode::Unexpected,
+            | Error::Json { .. }
+            | Error::GetInformationExtension { .. }
+            | Error::ProcedureIdNotFound { .. } => StatusCode::Unexpected,
 
             Error::ViewPlanColumnsChanged { .. } => StatusCode::InvalidArguments,
 
@@ -283,7 +318,10 @@ impl ErrorExt for Error {
             | Error::ListNodes { source, .. }
             | Error::ListSchemas { source, .. }
             | Error::ListTables { source, .. }
-            | Error::ListFlows { source, .. } => source.status_code(),
+            | Error::ListFlows { source, .. }
+            | Error::ListProcedures { source, .. }
+            | Error::ListRegionStats { source, .. }
+            | Error::ConvertProtoData { source, .. } => source.status_code(),
 
             Error::CreateTable { source, .. } => source.status_code(),
 

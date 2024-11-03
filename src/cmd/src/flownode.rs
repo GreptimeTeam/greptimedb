@@ -41,7 +41,7 @@ use crate::error::{
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App};
+use crate::{log_versions, App, DistributedInformationExtension};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
@@ -269,11 +269,13 @@ impl StartCommand {
             .build(),
         );
 
+        let information_extension =
+            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
         let catalog_manager = KvBackendCatalogManager::new(
-            opts.mode,
-            Some(meta_client.clone()),
+            information_extension,
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
+            None,
         );
 
         let table_metadata_manager =

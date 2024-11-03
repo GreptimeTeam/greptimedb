@@ -20,7 +20,6 @@ mod regex_match;
 
 use std::collections::{HashMap, HashSet};
 
-use api::v1::SemanticType;
 use common_telemetry::warn;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
@@ -55,8 +54,8 @@ pub(crate) struct InvertedIndexApplierBuilder<'a> {
     /// Metadata of the region, used to get metadata like column type.
     metadata: &'a RegionMetadata,
 
-    /// Column ids to ignore.
-    ignore_column_ids: HashSet<ColumnId>,
+    /// Column ids of the columns that are indexed.
+    indexed_column_ids: HashSet<ColumnId>,
 
     /// Stores predicates during traversal on the Expr tree.
     output: HashMap<ColumnId, Vec<Predicate>>,
@@ -76,7 +75,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         file_cache: Option<FileCacheRef>,
         index_cache: Option<InvertedIndexCacheRef>,
         metadata: &'a RegionMetadata,
-        ignore_column_ids: HashSet<ColumnId>,
+        indexed_column_ids: HashSet<ColumnId>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
         Self {
@@ -84,7 +83,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             object_store,
             file_cache,
             metadata,
-            ignore_column_ids,
+            indexed_column_ids,
             output: HashMap::default(),
             index_cache,
             puffin_manager_factory,
@@ -156,9 +155,9 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         self.output.entry(column_id).or_default().push(predicate);
     }
 
-    /// Helper function to get the column id and the column type of a tag column.
+    /// Helper function to get the column id and the column type of a column.
     /// Returns `None` if the column is not a tag column or if the column is ignored.
-    fn tag_column_id_and_type(
+    fn column_id_and_type(
         &self,
         column_name: &str,
     ) -> Result<Option<(ColumnId, ConcreteDataType)>> {
@@ -169,11 +168,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
                 column: column_name,
             })?;
 
-        if self.ignore_column_ids.contains(&column.column_id) {
-            return Ok(None);
-        }
-
-        if column.semantic_type != SemanticType::Tag {
+        if !self.indexed_column_ids.contains(&column.column_id) {
             return Ok(None);
         }
 
@@ -330,7 +325,7 @@ mod tests {
             None,
             None,
             &metadata,
-            HashSet::default(),
+            HashSet::from_iter([1, 2, 3]),
             facotry,
         );
 

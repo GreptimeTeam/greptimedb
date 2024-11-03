@@ -132,11 +132,22 @@ impl OpenRegion {
 pub struct DowngradeRegion {
     /// The [RegionId].
     pub region_id: RegionId,
+    /// The timeout of waiting for flush the region.
+    ///
+    /// `None` stands for don't flush before downgrading the region.
+    #[serde(default)]
+    pub flush_timeout: Option<Duration>,
+    /// Rejects all write requests after flushing.
+    pub reject_write: bool,
 }
 
 impl Display for DowngradeRegion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "DowngradeRegion(region_id={})", self.region_id)
+        write!(
+            f,
+            "DowngradeRegion(region_id={}, flush_timeout={:?}, rejct_write={})",
+            self.region_id, self.flush_timeout, self.reject_write
+        )
     }
 }
 
@@ -152,7 +163,7 @@ pub struct UpgradeRegion {
     /// `None` stands for no wait,
     /// it's helpful to verify whether the leader region is ready.
     #[serde(with = "humantime_serde")]
-    pub wait_for_replay_timeout: Option<Duration>,
+    pub replay_timeout: Option<Duration>,
     /// The hint for replaying memtable.
     #[serde(default)]
     pub location_id: Option<u64>,

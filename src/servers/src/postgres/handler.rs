@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,8 +21,10 @@ use common_query::{Output, OutputData};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
 use common_telemetry::{debug, error, tracing};
+use datafusion_common::ParamValues;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use futures::{future, stream, Stream, StreamExt};
+use futures::{future, stream, Sink, SinkExt, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
@@ -30,6 +33,7 @@ use pgwire::api::results::{
 use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::messages::PgWireBackendMessage;
 use query::query_engine::DescribeResult;
 use session::context::QueryContextRef;
 use session::Session;
@@ -37,21 +41,23 @@ use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
 use super::types::*;
-use super::{fixtures, PostgresServerHandler};
+use super::{fixtures, PostgresServerHandlerInner};
 use crate::error::Result;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::SqlPlan;
 
 #[async_trait]
-impl SimpleQueryHandler for PostgresServerHandler {
+impl SimpleQueryHandler for PostgresServerHandlerInner {
     #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
     async fn do_query<'a, C>(
         &self,
-        _client: &mut C,
+        client: &mut C,
         query: &'a str,
     ) -> PgWireResult<Vec<Response<'a>>>
     where
-        C: ClientInfo + Unpin + Send + Sync,
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let query_ctx = self.session.new_query_context();
         let db = query_ctx.get_db_string();
@@ -59,8 +65,14 @@ impl SimpleQueryHandler for PostgresServerHandler {
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY, db.as_str()])
             .start_timer();
 
+        if query.is_empty() {
+            // early return if query is empty
+            return Ok(vec![Response::EmptyQuery]);
+        }
+
         if let Some(resps) = fixtures::process(query, query_ctx.clone()) {
-            resps
+            send_warning_opt(client, query_ctx).await?;
+            Ok(resps)
         } else {
             let outputs = self.query_handler.do_query(query, query_ctx.clone()).await;
 
@@ -72,9 +84,32 @@ impl SimpleQueryHandler for PostgresServerHandler {
                 results.push(resp);
             }
 
+            send_warning_opt(client, query_ctx).await?;
             Ok(results)
         }
     }
+}
+
+async fn send_warning_opt<C>(client: &mut C, query_context: QueryContextRef) -> PgWireResult<()>
+where
+    C: Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+    C::Error: Debug,
+    PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+{
+    if let Some(warning) = query_context.warning() {
+        client
+            .feed(PgWireBackendMessage::NoticeResponse(
+                ErrorInfo::new(
+                    PgErrorSeverity::Warning.to_string(),
+                    PgErrorCode::Ec01000.code(),
+                    warning.to_string(),
+                )
+                .into(),
+            ))
+            .await?;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn output_to_query_response<'a>(
@@ -184,6 +219,16 @@ impl QueryParser for DefaultQueryParser {
     async fn parse_sql(&self, sql: &str, _types: &[Type]) -> PgWireResult<Self::Statement> {
         crate::metrics::METRIC_POSTGRES_PREPARED_COUNT.inc();
         let query_ctx = self.session.new_query_context();
+
+        // do not parse if query is empty or matches rules
+        if sql.is_empty() || fixtures::matches(sql) {
+            return Ok(SqlPlan {
+                query: sql.to_owned(),
+                plan: None,
+                schema: None,
+            });
+        }
+
         let mut stmts =
             ParserContext::create_with_dialect(sql, &PostgreSqlDialect {}, ParseOptions::default())
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
@@ -193,6 +238,7 @@ impl QueryParser for DefaultQueryParser {
             ))))
         } else {
             let stmt = stmts.remove(0);
+
             let describe_result = self
                 .query_handler
                 .do_describe(stmt, query_ctx)
@@ -219,7 +265,7 @@ impl QueryParser for DefaultQueryParser {
 }
 
 #[async_trait]
-impl ExtendedQueryHandler for PostgresServerHandler {
+impl ExtendedQueryHandler for PostgresServerHandlerInner {
     type Statement = SqlPlan;
     type QueryParser = DefaultQueryParser;
 
@@ -229,12 +275,14 @@ impl ExtendedQueryHandler for PostgresServerHandler {
 
     async fn do_query<'a, C>(
         &self,
-        _client: &mut C,
+        client: &mut C,
         portal: &'a Portal<Self::Statement>,
         _max_rows: usize,
     ) -> PgWireResult<Response<'a>>
     where
-        C: ClientInfo + Unpin + Send + Sync,
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let query_ctx = self.session.new_query_context();
         let db = query_ctx.get_db_string();
@@ -244,9 +292,23 @@ impl ExtendedQueryHandler for PostgresServerHandler {
 
         let sql_plan = &portal.statement.statement;
 
+        if sql_plan.query.is_empty() {
+            // early return if query is empty
+            return Ok(Response::EmptyQuery);
+        }
+
+        if let Some(mut resps) = fixtures::process(&sql_plan.query, query_ctx.clone()) {
+            send_warning_opt(client, query_ctx).await?;
+            // if the statement matches our predefined rules, return it early
+            return Ok(resps.remove(0));
+        }
+
         let output = if let Some(plan) = &sql_plan.plan {
             let plan = plan
-                .replace_params_with_values(parameters_to_scalar_values(plan, portal)?.as_ref())
+                .clone()
+                .replace_params_with_values(&ParamValues::List(parameters_to_scalar_values(
+                    plan, portal,
+                )?))
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
             self.query_handler
                 .do_exec_plan(plan, query_ctx.clone())
@@ -266,6 +328,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
                 .remove(0)
         };
 
+        send_warning_opt(client, query_ctx.clone()).await?;
         output_to_query_response(query_ctx, output, &portal.result_column_format)
     }
 
@@ -280,8 +343,11 @@ impl ExtendedQueryHandler for PostgresServerHandler {
         let sql_plan = &stmt.statement;
         let (param_types, sql_plan, format) = if let Some(plan) = &sql_plan.plan {
             let param_types = plan
-                .get_param_types()
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                .get_parameter_types()
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+                .into_iter()
+                .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+                .collect();
 
             let types = param_types_to_pg_types(&param_types)
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
@@ -297,6 +363,17 @@ impl ExtendedQueryHandler for PostgresServerHandler {
                 .map(|fields| DescribeStatementResponse::new(param_types, fields))
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))
         } else {
+            if let Some(mut resp) =
+                fixtures::process(&sql_plan.query, self.session.new_query_context())
+            {
+                if let Response::Query(query_response) = resp.remove(0) {
+                    return Ok(DescribeStatementResponse::new(
+                        param_types,
+                        (*query_response.row_schema()).clone(),
+                    ));
+                }
+            }
+
             Ok(DescribeStatementResponse::new(param_types, vec![]))
         }
     }
@@ -317,6 +394,16 @@ impl ExtendedQueryHandler for PostgresServerHandler {
                 .map(DescribePortalResponse::new)
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))
         } else {
+            if let Some(mut resp) =
+                fixtures::process(&sql_plan.query, self.session.new_query_context())
+            {
+                if let Response::Query(query_response) = resp.remove(0) {
+                    return Ok(DescribePortalResponse::new(
+                        (*query_response.row_schema()).clone(),
+                    ));
+                }
+            }
+
             Ok(DescribePortalResponse::new(vec![]))
         }
     }

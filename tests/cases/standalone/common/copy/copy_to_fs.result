@@ -6,15 +6,15 @@ insert into demo(host, cpu, memory, ts) values ('host1', 66.6, 1024, 16552765570
 
 Affected Rows: 2
 
-COPY demo TO '/tmp/export/demo.parquet' WITH (start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
+COPY demo TO '${SQLNESS_HOME}/export/demo.parquet' WITH (start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
 
 Affected Rows: 1
 
-COPY demo TO '/tmp/export/demo.csv' WITH (format='csv', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
+COPY demo TO '${SQLNESS_HOME}/export/demo.csv' WITH (format='csv', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
 
 Affected Rows: 1
 
-COPY demo TO '/tmp/export/demo.json' WITH (format='json', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
+COPY demo TO '${SQLNESS_HOME}/export/demo.json' WITH (format='json', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
 
 Affected Rows: 1
 

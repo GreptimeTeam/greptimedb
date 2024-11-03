@@ -64,7 +64,7 @@ impl<'a, T> RowGroupPruningStats<'a, T> {
     }
 }
 
-impl<'a, T: Borrow<RowGroupMetaData>> PruningStatistics for RowGroupPruningStats<'a, T> {
+impl<T: Borrow<RowGroupMetaData>> PruningStatistics for RowGroupPruningStats<'_, T> {
     fn min_values(&self, column: &Column) -> Option<ArrayRef> {
         let column_id = self.column_id_to_prune(&column.name)?;
         self.read_format.min_values(self.row_groups, column_id)

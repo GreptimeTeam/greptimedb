@@ -17,6 +17,7 @@ pub mod kafka;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use common_wal::config::MetasrvWalConfig;
 use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
 use snafu::ResultExt;
@@ -24,6 +25,7 @@ use store_api::storage::{RegionId, RegionNumber};
 
 use crate::error::{EncodeWalOptionsSnafu, Result};
 use crate::kv_backend::KvBackendRef;
+use crate::leadership_notifier::LeadershipChangeListener;
 use crate::wal_options_allocator::kafka::topic_manager::TopicManager as KafkaTopicManager;
 
 /// Allocates wal options in region granularity.
@@ -91,6 +93,21 @@ impl WalOptionsAllocator {
     /// Returns true if it's the remote WAL.
     pub fn is_remote_wal(&self) -> bool {
         matches!(&self, WalOptionsAllocator::Kafka(_))
+    }
+}
+
+#[async_trait]
+impl LeadershipChangeListener for WalOptionsAllocator {
+    fn name(&self) -> &str {
+        "WalOptionsAllocator"
+    }
+
+    async fn on_leader_start(&self) -> Result<()> {
+        self.start().await
+    }
+
+    async fn on_leader_stop(&self) -> Result<()> {
+        Ok(())
     }
 }
 

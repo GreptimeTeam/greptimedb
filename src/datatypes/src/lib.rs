@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(let_chains)]
+#![feature(assert_matches)]
 
 pub mod arrow_array;
 pub mod data_type;

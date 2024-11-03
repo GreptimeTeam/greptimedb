@@ -37,19 +37,19 @@ INSERT INTO jsons VALUES('[null]', 0),
     }
 }}', 11);
 
-INSERT INTO jsons VALUES(to_json('[null]'), 12),
-(to_json('[true]'), 13),
-(to_json('[false]'), 14),
-(to_json('[0]'), 15),
-(to_json('["foo"]'), 16),
-(to_json('[]'), 17),
-(to_json('{}'), 18),
-(to_json('[0,1]'), 19),
-(to_json('{"foo":"bar"}'), 20),
-(to_json('{"a":null,"foo":"bar"}'), 21),
-(to_json('[-1]'), 22),
-(to_json('[-2147483648]'), 23),
-(to_json('{"entities": {
+INSERT INTO jsons VALUES(parse_json('[null]'), 12),
+(parse_json('[true]'), 13),
+(parse_json('[false]'), 14),
+(parse_json('[0]'), 15),
+(parse_json('["foo"]'), 16),
+(parse_json('[]'), 17),
+(parse_json('{}'), 18),
+(parse_json('[0,1]'), 19),
+(parse_json('{"foo":"bar"}'), 20),
+(parse_json('{"a":null,"foo":"bar"}'), 21),
+(parse_json('[-1]'), 22),
+(parse_json('[-2147483648]'), 23),
+(parse_json('{"entities": {
             "description": {
                 "urls": [
                     {
@@ -79,9 +79,9 @@ SELECT json_to_string(j), t FROM jsons;
 --Insert invalid json strings--
 DELETE FROM jsons;
 
-INSERT INTO jsons VALUES(to_json('{"a":1, "b":2, "c":3'), 4);
+INSERT INTO jsons VALUES(parse_json('{"a":1, "b":2, "c":3'), 4);
 
-INSERT INTO jsons VALUES(to_json('Morning my friends, have a nice day :)'), 5);
+INSERT INTO jsons VALUES(parse_json('Morning my friends, have a nice day :)'), 5);
 
 SELECT json_to_string(j), t FROM jsons;
 

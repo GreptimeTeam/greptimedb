@@ -240,7 +240,11 @@ impl CompactionScheduler {
         request: CompactionRequest,
         options: compact_request::Options,
     ) -> Result<()> {
-        let picker = new_picker(options.clone(), &request.current_version.options.compaction);
+        let picker = new_picker(
+            &options,
+            &request.current_version.options.compaction,
+            request.current_version.options.append_mode,
+        );
         let region_id = request.region_id();
         let CompactionRequest {
             engine_config,
@@ -500,7 +504,7 @@ pub struct CompactionOutput {
     pub inputs: Vec<FileHandle>,
     /// Whether to remove deletion markers.
     pub filter_deleted: bool,
-    /// Compaction output time range.
+    /// Compaction output time range. Only windowed compaction specifies output time range.
     pub output_time_range: Option<TimestampRange>,
 }
 

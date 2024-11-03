@@ -39,7 +39,7 @@ use crate::parsers::error::{EvaluationSnafu, ParserSnafu, TQLError};
 /// - `TQL EVAL <query>`
 /// - `TQL EXPLAIN [VERBOSE] <query>`
 /// - `TQL ANALYZE [VERBOSE] <query>`
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_tql(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
 

@@ -173,7 +173,7 @@ impl<'a, R> InstrumentedAsyncRead<'a, R> {
     }
 }
 
-impl<'a, R: AsyncRead + Unpin + Send> AsyncRead for InstrumentedAsyncRead<'a, R> {
+impl<R: AsyncRead + Unpin + Send> AsyncRead for InstrumentedAsyncRead<'_, R> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -188,7 +188,7 @@ impl<'a, R: AsyncRead + Unpin + Send> AsyncRead for InstrumentedAsyncRead<'a, R>
     }
 }
 
-impl<'a, R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<'a, R> {
+impl<R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<'_, R> {
     fn poll_seek(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -229,7 +229,7 @@ impl<'a, W> InstrumentedAsyncWrite<'a, W> {
     }
 }
 
-impl<'a, W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<'a, W> {
+impl<W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<'_, W> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -324,7 +324,7 @@ impl<'a> CounterGuard<'a> {
     }
 }
 
-impl<'a> Drop for CounterGuard<'a> {
+impl Drop for CounterGuard<'_> {
     fn drop(&mut self) {
         if self.count > 0 {
             self.counter.inc_by(self.count as _);

@@ -178,14 +178,14 @@ pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Erro
             let (days, seconds, microseconds) =
                 (interval.days, interval.seconds, interval.microseconds);
             let millis = microseconds / 1000 + seconds * 1000;
-            let value_interval = common_time::Interval::from_day_time(days, millis);
+            let value_interval = common_time::IntervalDayTime::new(days, millis);
             (
-                Value::Interval(value_interval),
+                Value::IntervalDayTime(value_interval),
                 CDT::interval_day_time_datatype(),
             )
         }
         Some(LiteralType::IntervalYearToMonth(interval)) => (
-            Value::Interval(common_time::Interval::from_year_month(
+            Value::IntervalYearMonth(common_time::IntervalYearMonth::new(
                 interval.years * 12 + interval.months,
             )),
             CDT::interval_year_month_datatype(),
@@ -239,9 +239,9 @@ fn from_substrait_user_defined_type(user_defined: &UserDefined) -> Result<(Value
                     }
                 );
                 let i: i32 = from_bytes(&val.value)?;
-                let value_interval = common_time::Interval::from_year_month(i);
+                let value_interval = common_time::IntervalYearMonth::new(i);
                 (
-                    Value::Interval(value_interval),
+                    Value::IntervalYearMonth(value_interval),
                     CDT::interval_year_month_datatype(),
                 )
             }
@@ -255,12 +255,12 @@ fn from_substrait_user_defined_type(user_defined: &UserDefined) -> Result<(Value
                         )
                     }
                 );
+                // TODO(yingwen): Datafusion may change the representation of the interval type.
                 let i: i128 = from_bytes(&val.value)?;
                 let (months, days, nsecs) = ((i >> 96) as i32, (i >> 64) as i32, i as i64);
-                let value_interval =
-                    common_time::Interval::from_month_day_nano(months, days, nsecs);
+                let value_interval = common_time::IntervalMonthDayNano::new(months, days, nsecs);
                 (
-                    Value::Interval(value_interval),
+                    Value::IntervalMonthDayNano(value_interval),
                     CDT::interval_month_day_nano_datatype(),
                 )
             }
@@ -274,11 +274,12 @@ fn from_substrait_user_defined_type(user_defined: &UserDefined) -> Result<(Value
                         )
                     }
                 );
+                // TODO(yingwen): Datafusion may change the representation of the interval type.
                 let i: i64 = from_bytes(&val.value)?;
                 let (days, millis) = ((i >> 32) as i32, i as i32);
-                let value_interval = common_time::Interval::from_day_time(days, millis);
+                let value_interval = common_time::IntervalDayTime::new(days, millis);
                 (
-                    Value::Interval(value_interval),
+                    Value::IntervalDayTime(value_interval),
                     CDT::interval_day_time_datatype(),
                 )
             }

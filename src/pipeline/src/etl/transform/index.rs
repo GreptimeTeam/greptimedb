@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::etl::error::{Error, Result, UnsupportedIndexTypeSnafu};
+
 const INDEX_TIMESTAMP: &str = "timestamp";
 const INDEX_TIMEINDEX: &str = "time";
 const INDEX_TAG: &str = "tag";
@@ -38,22 +40,22 @@ impl std::fmt::Display for Index {
 }
 
 impl TryFrom<String> for Index {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
+    fn try_from(value: String) -> Result<Self> {
         Index::try_from(value.as_str())
     }
 }
 
 impl TryFrom<&str> for Index {
-    type Error = String;
+    type Error = Error;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn try_from(value: &str) -> Result<Self> {
         match value {
             INDEX_TIMESTAMP | INDEX_TIMEINDEX => Ok(Index::Time),
             INDEX_TAG => Ok(Index::Tag),
             INDEX_FULLTEXT => Ok(Index::Fulltext),
-            _ => Err(format!("unsupported index type: {}", value)),
+            _ => UnsupportedIndexTypeSnafu { value }.fail(),
         }
     }
 }

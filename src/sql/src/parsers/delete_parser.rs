@@ -21,7 +21,7 @@ use crate::statements::delete::Delete;
 use crate::statements::statement::Statement;
 
 /// DELETE statement parser implementation
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_delete(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
         let spstatement = self.parser.parse_delete().context(error::SyntaxSnafu)?;

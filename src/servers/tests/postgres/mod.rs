@@ -19,6 +19,7 @@ use std::time::Duration;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use auth::UserProviderRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_runtime::runtime::BuilderBuild;
 use common_runtime::Builder as RuntimeBuilder;
 use pgwire::api::Type;
 use rand::rngs::StdRng;
@@ -27,6 +28,7 @@ use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Error, SignatureScheme};
 use rustls_pki_types::{CertificateDer, ServerName};
 use servers::error::Result;
+use servers::install_ring_crypto_provider;
 use servers::postgres::PostgresServer;
 use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
@@ -357,6 +359,8 @@ async fn test_extended_query() -> Result<()> {
 
 async fn start_test_server(server_tls: TlsOption) -> Result<u16> {
     common_telemetry::init_default_ut_logging();
+    let _ = install_ring_crypto_provider();
+
     let table = MemTable::default_numbers_table();
     let pg_server = create_postgres_server(table, false, server_tls, None)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();

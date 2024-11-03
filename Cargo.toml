@@ -20,6 +20,7 @@ members = [
     "src/common/mem-prof",
     "src/common/meta",
     "src/common/plugins",
+    "src/common/pprof",
     "src/common/procedure",
     "src/common/procedure-test",
     "src/common/query",
@@ -64,7 +65,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.9.3"
+version = "0.9.5"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -90,7 +91,7 @@ aquamarine = "0.3"
 arrow = { version = "51.0.0", features = ["prettyprint"] }
 arrow-array = { version = "51.0.0", default-features = false, features = ["chrono-tz"] }
 arrow-flight = "51.0"
-arrow-ipc = { version = "51.0.0", default-features = false, features = ["lz4"] }
+arrow-ipc = { version = "51.0.0", default-features = false, features = ["lz4", "zstd"] }
 arrow-schema = { version = "51.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
@@ -99,7 +100,7 @@ base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
 bytemuck = "1.12"
-bytes = { version = "1.5", features = ["serde"] }
+bytes = { version = "1.7", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
@@ -120,13 +121,13 @@ etcd-client = { version = "0.13" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "973f49cde88a582fb65755cc572ebcf6fb93ccf7" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "255f87a3318ace3f88a67f76995a0e14910983f4" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
-jsonb = { git = "https://github.com/CookiePieWw/jsonb.git", rev = "d0166c130fce903bf6c58643417a3173a6172d31", default-features = false }
+jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "46ad50fc71cf75afbf98eec455f7892a6387c1fc", default-features = false }
 lazy_static = "1.4"
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "a10facb353b41460eeb98578868ebf19c2084fac" }
 mockall = "0.11.4"
 moka = "0.12"
 notify = "6.1"
@@ -136,15 +137,19 @@ opentelemetry-proto = { version = "0.5", features = [
     "gen-tonic",
     "metrics",
     "trace",
+    "with-serde",
+    "logs",
 ] }
+parking_lot = "0.12"
 parquet = { version = "51.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.4" }
+promql-parser = { version = "0.4.3", features = ["ser"] }
 prost = "0.12"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
+ratelimit = "0.9"
 regex = "1.8"
 regex-automata = { version = "0.4" }
 reqwest = { version = "0.12", default-features = false, features = [
@@ -164,7 +169,8 @@ schemars = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
-shadow-rs = "0.31"
+shadow-rs = "0.35"
+similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
 sysinfo = "0.30"
@@ -174,13 +180,16 @@ sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "5
 ] }
 strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
-tokio = { version = "1.36", features = ["full"] }
+tokio = { version = "1.40", features = ["full"] }
 tokio-postgres = "0.7"
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
 tonic = { version = "0.11", features = ["tls", "gzip", "zstd"] }
 tower = { version = "0.4" }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+typetag = "0.2"
 uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
 zstd = "0.13"
 
@@ -206,6 +215,7 @@ common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
 common-meta = { path = "src/common/meta" }
 common-plugins = { path = "src/common/plugins" }
+common-pprof = { path = "src/common/pprof" }
 common-procedure = { path = "src/common/procedure" }
 common-procedure-test = { path = "src/common/procedure-test" }
 common-query = { path = "src/common/query" }
@@ -243,9 +253,18 @@ store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
 
+[patch.crates-io]
+# change all rustls dependencies to use our fork to default to `ring` to make it "just work"
+hyper-rustls = { git = "https://github.com/GreptimeTeam/hyper-rustls" }
+rustls = { git = "https://github.com/GreptimeTeam/rustls" }
+tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls" }
+# This is commented, since we are not using aws-lc-sys, if we need to use it, we need to uncomment this line or use a release after this commit, or it wouldn't compile with gcc < 8.1
+# see https://github.com/aws/aws-lc-rs/pull/526
+# aws-lc-sys = { git ="https://github.com/aws/aws-lc-rs", rev = "556558441e3494af4b156ae95ebc07ebc2fd38aa" }
+
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd"
+rev = "a10facb353b41460eeb98578868ebf19c2084fac"
 
 [profile.release]
 debug = 1

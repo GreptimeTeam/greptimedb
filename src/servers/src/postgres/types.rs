@@ -20,23 +20,24 @@ mod interval;
 use std::collections::HashMap;
 use std::ops::Deref;
 
-use chrono::{NaiveDate, NaiveDateTime};
-use common_time::Interval;
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
-use datatypes::types::TimestampType;
+use datatypes::types::{IntervalType, TimestampType};
+use datatypes::value::ListValue;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::api::Type;
 use pgwire::error::{PgWireError, PgWireResult};
-use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use session::session_config::PGByteaOutputValue;
 
 use self::bytea::{EscapeOutputBytea, HexOutputBytea};
 use self::datetime::{StylingDate, StylingDateTime};
-pub use self::error::PgErrorCode;
+pub use self::error::{PgErrorCode, PgErrorSeverity};
 use self::interval::PgInterval;
 use crate::error::{self as server_error, Error, Result};
 use crate::SqlPlan;
@@ -56,6 +57,319 @@ pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Ve
             ))
         })
         .collect::<Result<Vec<FieldInfo>>>()
+}
+
+fn encode_array(
+    query_ctx: &QueryContextRef,
+    value_list: &ListValue,
+    builder: &mut DataRowEncoder,
+) -> PgWireResult<()> {
+    match value_list.datatype() {
+        &ConcreteDataType::Boolean(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Boolean(v) => Ok(Some(*v)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected bool",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<bool>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Int8(v) => Ok(Some(*v)),
+                    Value::UInt8(v) => Ok(Some(*v as i8)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!(
+                            "Invalid list item type, find {v:?}, expected int8 or uint8",
+                        ),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<i8>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Int16(v) => Ok(Some(*v)),
+                    Value::UInt16(v) => Ok(Some(*v as i16)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!(
+                            "Invalid list item type, find {v:?}, expected int16 or uint16",
+                        ),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<i16>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Int32(v) => Ok(Some(*v)),
+                    Value::UInt32(v) => Ok(Some(*v as i32)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!(
+                            "Invalid list item type, find {v:?}, expected int32 or uint32",
+                        ),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<i32>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Int64(v) => Ok(Some(*v)),
+                    Value::UInt64(v) => Ok(Some(*v as i64)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!(
+                            "Invalid list item type, find {v:?}, expected int64 or uint64",
+                        ),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<i64>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Float32(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Float32(v) => Ok(Some(v.0)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected float32",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<f32>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Float64(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Float64(v) => Ok(Some(v.0)),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected float64",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<f64>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Binary(_) => {
+            let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
+
+            match *bytea_output {
+                PGByteaOutputValue::ESCAPE => {
+                    let array = value_list
+                        .items()
+                        .iter()
+                        .map(|v| match v {
+                            Value::Null => Ok(None),
+                            Value::Binary(v) => Ok(Some(EscapeOutputBytea(v.deref()))),
+
+                            _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                                err_msg: format!(
+                                    "Invalid list item type, find {v:?}, expected binary",
+                                ),
+                            }))),
+                        })
+                        .collect::<PgWireResult<Vec<Option<EscapeOutputBytea>>>>()?;
+                    builder.encode_field(&array)
+                }
+                PGByteaOutputValue::HEX => {
+                    let array = value_list
+                        .items()
+                        .iter()
+                        .map(|v| match v {
+                            Value::Null => Ok(None),
+                            Value::Binary(v) => Ok(Some(HexOutputBytea(v.deref()))),
+
+                            _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                                err_msg: format!(
+                                    "Invalid list item type, find {v:?}, expected binary",
+                                ),
+                            }))),
+                        })
+                        .collect::<PgWireResult<Vec<Option<HexOutputBytea>>>>()?;
+                    builder.encode_field(&array)
+                }
+            }
+        }
+        &ConcreteDataType::String(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::String(v) => Ok(Some(v.as_utf8())),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected string",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<&str>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Date(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Date(v) => {
+                        if let Some(date) = v.to_chrono_date() {
+                            let (style, order) =
+                                *query_ctx.configuration_parameter().pg_datetime_style();
+                            Ok(Some(StylingDate(date, style, order)))
+                        } else {
+                            Err(PgWireError::ApiError(Box::new(Error::Internal {
+                                err_msg: format!("Failed to convert date to postgres type {v:?}",),
+                            })))
+                        }
+                    }
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected date",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<StylingDate>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::DateTime(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::DateTime(v) => {
+                        if let Some(datetime) =
+                            v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
+                        {
+                            let (style, order) =
+                                *query_ctx.configuration_parameter().pg_datetime_style();
+                            Ok(Some(StylingDateTime(datetime, style, order)))
+                        } else {
+                            Err(PgWireError::ApiError(Box::new(Error::Internal {
+                                err_msg: format!("Failed to convert date to postgres type {v:?}",),
+                            })))
+                        }
+                    }
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected date",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<StylingDateTime>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Timestamp(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Timestamp(v) => {
+                        if let Some(datetime) =
+                            v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
+                        {
+                            let (style, order) =
+                                *query_ctx.configuration_parameter().pg_datetime_style();
+                            Ok(Some(StylingDateTime(datetime, style, order)))
+                        } else {
+                            Err(PgWireError::ApiError(Box::new(Error::Internal {
+                                err_msg: format!("Failed to convert date to postgres type {v:?}",),
+                            })))
+                        }
+                    }
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected timestamp",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<StylingDateTime>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Time(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Time(v) => Ok(v.to_chrono_time()),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected time",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<NaiveTime>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Interval(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::IntervalYearMonth(v) => Ok(Some(PgInterval::from(*v))),
+                    Value::IntervalDayTime(v) => Ok(Some(PgInterval::from(*v))),
+                    Value::IntervalMonthDayNano(v) => Ok(Some(PgInterval::from(*v))),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected interval",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<PgInterval>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Decimal128(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Decimal128(v) => Ok(Some(v.to_string())),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected decimal",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<String>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Json(_) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Binary(v) => Ok(Some(jsonb::to_string(v))),
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected json",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<String>>>>()?;
+            builder.encode_field(&array)
+        }
+        _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+            err_msg: format!(
+                "cannot write array type {:?} in postgres protocol: unimplemented",
+                value_list.datatype()
+            ),
+        }))),
+    }
 }
 
 pub(super) fn encode_value(
@@ -93,7 +407,7 @@ pub(super) fn encode_value(
         Value::Date(v) => {
             if let Some(date) = v.to_chrono_date() {
                 let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
-                builder.encode_field(&StylingDate(&date, style, order))
+                builder.encode_field(&StylingDate(date, style, order))
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
                     err_msg: format!("Failed to convert date to postgres type {v:?}",),
@@ -101,9 +415,10 @@ pub(super) fn encode_value(
             }
         }
         Value::DateTime(v) => {
-            if let Some(datetime) = v.to_chrono_datetime() {
+            if let Some(datetime) = v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
+            {
                 let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
-                builder.encode_field(&StylingDateTime(&datetime, style, order))
+                builder.encode_field(&StylingDateTime(datetime, style, order))
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
                     err_msg: format!("Failed to convert date to postgres type {v:?}",),
@@ -111,9 +426,10 @@ pub(super) fn encode_value(
             }
         }
         Value::Timestamp(v) => {
-            if let Some(datetime) = v.to_chrono_datetime() {
+            if let Some(datetime) = v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
+            {
                 let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
-                builder.encode_field(&StylingDateTime(&datetime, style, order))
+                builder.encode_field(&StylingDateTime(datetime, style, order))
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
                     err_msg: format!("Failed to convert date to postgres type {v:?}",),
@@ -129,16 +445,17 @@ pub(super) fn encode_value(
                 })))
             }
         }
-        Value::Interval(v) => builder.encode_field(&PgInterval::from(*v)),
+        Value::IntervalYearMonth(v) => builder.encode_field(&PgInterval::from(*v)),
+        Value::IntervalDayTime(v) => builder.encode_field(&PgInterval::from(*v)),
+        Value::IntervalMonthDayNano(v) => builder.encode_field(&PgInterval::from(*v)),
         Value::Decimal128(v) => builder.encode_field(&v.to_string()),
-        Value::List(_) | Value::Duration(_) => {
-            Err(PgWireError::ApiError(Box::new(Error::Internal {
-                err_msg: format!(
-                    "cannot write value {:?} in postgres protocol: unimplemented",
-                    &value
-                ),
-            })))
-        }
+        Value::List(values) => encode_array(query_ctx, values, builder),
+        Value::Duration(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
+            err_msg: format!(
+                "cannot write value {:?} in postgres protocol: unimplemented",
+                &value
+            ),
+        }))),
     }
 }
 
@@ -155,19 +472,45 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Binary(_) => Ok(Type::BYTEA),
         &ConcreteDataType::String(_) => Ok(Type::VARCHAR),
         &ConcreteDataType::Date(_) => Ok(Type::DATE),
-        &ConcreteDataType::DateTime(_) => Ok(Type::TIMESTAMP),
-        &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
+        &ConcreteDataType::DateTime(_) | &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Time(_) => Ok(Type::TIME),
         &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL),
         &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC),
         &ConcreteDataType::Json(_) => Ok(Type::JSON),
-        &ConcreteDataType::Duration(_)
-        | &ConcreteDataType::List(_)
-        | &ConcreteDataType::Dictionary(_) => server_error::UnsupportedDataTypeSnafu {
-            data_type: origin,
-            reason: "not implemented",
+        ConcreteDataType::List(list) => match list.item_type() {
+            &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
+            &ConcreteDataType::Boolean(_) => Ok(Type::BOOL_ARRAY),
+            &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => Ok(Type::CHAR_ARRAY),
+            &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => Ok(Type::INT2_ARRAY),
+            &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => Ok(Type::INT4_ARRAY),
+            &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => Ok(Type::INT8_ARRAY),
+            &ConcreteDataType::Float32(_) => Ok(Type::FLOAT4_ARRAY),
+            &ConcreteDataType::Float64(_) => Ok(Type::FLOAT8_ARRAY),
+            &ConcreteDataType::Binary(_) => Ok(Type::BYTEA_ARRAY),
+            &ConcreteDataType::String(_) => Ok(Type::VARCHAR_ARRAY),
+            &ConcreteDataType::Date(_) => Ok(Type::DATE_ARRAY),
+            &ConcreteDataType::DateTime(_) | &ConcreteDataType::Timestamp(_) => {
+                Ok(Type::TIMESTAMP_ARRAY)
+            }
+            &ConcreteDataType::Time(_) => Ok(Type::TIME_ARRAY),
+            &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL_ARRAY),
+            &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC_ARRAY),
+            &ConcreteDataType::Json(_) => Ok(Type::JSON_ARRAY),
+            &ConcreteDataType::Duration(_)
+            | &ConcreteDataType::Dictionary(_)
+            | &ConcreteDataType::List(_) => server_error::UnsupportedDataTypeSnafu {
+                data_type: origin,
+                reason: "not implemented",
+            }
+            .fail(),
+        },
+        &ConcreteDataType::Duration(_) | &ConcreteDataType::Dictionary(_) => {
+            server_error::UnsupportedDataTypeSnafu {
+                data_type: origin,
+                reason: "not implemented",
+            }
+            .fail()
         }
-        .fail(),
     }
 }
 
@@ -239,14 +582,14 @@ pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWir
             .unwrap_or_else(|| "".to_owned())),
         _ => Err(invalid_parameter_error(
             "unsupported_parameter_type",
-            Some(&param_type.to_string()),
+            Some(param_type.to_string()),
         )),
     }
 }
 
-pub(super) fn invalid_parameter_error(msg: &str, detail: Option<&str>) -> PgWireError {
+pub(super) fn invalid_parameter_error(msg: &str, detail: Option<String>) -> PgWireError {
     let mut error_info = PgErrorCode::Ec22023.to_err_info(msg.to_string());
-    error_info.detail = detail.map(|s| s.to_owned());
+    error_info.detail = detail;
     PgWireError::UserError(Box::new(error_info))
 }
 
@@ -276,306 +619,364 @@ pub(super) fn parameters_to_scalar_values(
 
     let client_param_types = &portal.statement.parameter_types;
     let param_types = plan
-        .get_param_types()
-        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-
-    // ensure parameter count consistent for: client parameter types, server
-    // parameter types and parameter count
-    if param_types.len() != param_count {
-        return Err(invalid_parameter_error(
-            "invalid_parameter_count",
-            Some(&format!(
-                "Expected: {}, found: {}",
-                param_types.len(),
-                param_count
-            )),
-        ));
-    }
+        .get_parameter_types()
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+        .into_iter()
+        .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+        .collect::<HashMap<_, _>>();
 
     for idx in 0..param_count {
-        let server_type =
-            if let Some(Some(server_infer_type)) = param_types.get(&format!("${}", idx + 1)) {
-                server_infer_type
-            } else {
-                // at the moment we require type information inferenced by
-                // server so here we return error if the type is unknown from
-                // server-side.
-                //
-                // It might be possible to parse the parameter just using client
-                // specified type, we will implement that if there is a case.
-                return Err(invalid_parameter_error("unknown_parameter_type", None));
-            };
+        let server_type = param_types
+            .get(&format!("${}", idx + 1))
+            .and_then(|t| t.as_ref());
 
         let client_type = if let Some(client_given_type) = client_param_types.get(idx) {
             client_given_type.clone()
+        } else if let Some(server_provided_type) = &server_type {
+            type_gt_to_pg(server_provided_type).map_err(|e| PgWireError::ApiError(Box::new(e)))?
         } else {
-            type_gt_to_pg(server_type).map_err(|e| PgWireError::ApiError(Box::new(e)))?
+            return Err(invalid_parameter_error(
+                "unknown_parameter_type",
+                Some(format!(
+                    "Cannot get parameter type information for parameter {}",
+                    idx
+                )),
+            ));
         };
 
         let value = match &client_type {
             &Type::VARCHAR | &Type::TEXT => {
                 let data = portal.parameter::<String>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::String(_) => ScalarValue::Utf8(data),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::String(_) => ScalarValue::Utf8(data),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
+                } else {
+                    ScalarValue::Utf8(data)
                 }
             }
             &Type::BOOL => {
                 let data = portal.parameter::<bool>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Boolean(_) => ScalarValue::Boolean(data),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Boolean(_) => ScalarValue::Boolean(data),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
+                } else {
+                    ScalarValue::Boolean(data)
                 }
             }
             &Type::INT2 => {
                 let data = portal.parameter::<i16>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                    ConcreteDataType::Int16(_) => ScalarValue::Int16(data),
-                    ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                    ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                    ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                    ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                    ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                    ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
-                    ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, unit, server_type)?
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Timestamp(unit) => {
+                            to_timestamp_scalar_value(data, unit, server_type)?
+                        }
+                        ConcreteDataType::DateTime(_) => {
+                            ScalarValue::Date64(data.map(|d| d as i64))
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
-                    ConcreteDataType::DateTime(_) => ScalarValue::Date64(data.map(|d| d as i64)),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
-                    }
+                } else {
+                    ScalarValue::Int16(data)
                 }
             }
             &Type::INT4 => {
                 let data = portal.parameter::<i32>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                    ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                    ConcreteDataType::Int32(_) => ScalarValue::Int32(data),
-                    ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                    ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                    ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                    ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                    ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
-                    ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, unit, server_type)?
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Timestamp(unit) => {
+                            to_timestamp_scalar_value(data, unit, server_type)?
+                        }
+                        ConcreteDataType::DateTime(_) => {
+                            ScalarValue::Date64(data.map(|d| d as i64))
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
-                    ConcreteDataType::DateTime(_) => ScalarValue::Date64(data.map(|d| d as i64)),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
-                    }
+                } else {
+                    ScalarValue::Int32(data)
                 }
             }
             &Type::INT8 => {
                 let data = portal.parameter::<i64>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                    ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                    ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                    ConcreteDataType::Int64(_) => ScalarValue::Int64(data),
-                    ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                    ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                    ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                    ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
-                    ConcreteDataType::Timestamp(unit) => {
-                        to_timestamp_scalar_value(data, unit, server_type)?
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Timestamp(unit) => {
+                            to_timestamp_scalar_value(data, unit, server_type)?
+                        }
+                        ConcreteDataType::DateTime(_) => ScalarValue::Date64(data),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
-                    ConcreteDataType::DateTime(_) => ScalarValue::Date64(data),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
-                    }
+                } else {
+                    ScalarValue::Int64(data)
                 }
             }
             &Type::FLOAT4 => {
                 let data = portal.parameter::<f32>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                    ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                    ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                    ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                    ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                    ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                    ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                    ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
-                    ConcreteDataType::Float32(_) => ScalarValue::Float32(data),
-                    ConcreteDataType::Float64(_) => ScalarValue::Float64(data.map(|n| n as f64)),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Float32(_) => ScalarValue::Float32(data),
+                        ConcreteDataType::Float64(_) => {
+                            ScalarValue::Float64(data.map(|n| n as f64))
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
+                } else {
+                    ScalarValue::Float32(data)
                 }
             }
             &Type::FLOAT8 => {
                 let data = portal.parameter::<f64>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                    ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                    ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                    ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                    ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                    ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                    ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                    ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
-                    ConcreteDataType::Float32(_) => ScalarValue::Float32(data.map(|n| n as f32)),
-                    ConcreteDataType::Float64(_) => ScalarValue::Float64(data),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Float32(_) => {
+                            ScalarValue::Float32(data.map(|n| n as f32))
+                        }
+                        ConcreteDataType::Float64(_) => ScalarValue::Float64(data),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
+                } else {
+                    ScalarValue::Float64(data)
                 }
             }
             &Type::TIMESTAMP => {
                 let data = portal.parameter::<NaiveDateTime>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Timestamp(unit) => match *unit {
-                        TimestampType::Second(_) => ScalarValue::TimestampSecond(
-                            data.map(|ts| ts.and_utc().timestamp()),
-                            None,
-                        ),
-                        TimestampType::Millisecond(_) => ScalarValue::TimestampMillisecond(
-                            data.map(|ts| ts.and_utc().timestamp_millis()),
-                            None,
-                        ),
-                        TimestampType::Microsecond(_) => ScalarValue::TimestampMicrosecond(
-                            data.map(|ts| ts.and_utc().timestamp_micros()),
-                            None,
-                        ),
-                        TimestampType::Nanosecond(_) => ScalarValue::TimestampNanosecond(
-                            data.map(|ts| ts.and_utc().timestamp_micros()),
-                            None,
-                        ),
-                    },
-                    ConcreteDataType::DateTime(_) => {
-                        ScalarValue::Date64(data.map(|d| d.and_utc().timestamp_millis()))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Timestamp(unit) => match *unit {
+                            TimestampType::Second(_) => ScalarValue::TimestampSecond(
+                                data.map(|ts| ts.and_utc().timestamp()),
+                                None,
+                            ),
+                            TimestampType::Millisecond(_) => ScalarValue::TimestampMillisecond(
+                                data.map(|ts| ts.and_utc().timestamp_millis()),
+                                None,
+                            ),
+                            TimestampType::Microsecond(_) => ScalarValue::TimestampMicrosecond(
+                                data.map(|ts| ts.and_utc().timestamp_micros()),
+                                None,
+                            ),
+                            TimestampType::Nanosecond(_) => ScalarValue::TimestampNanosecond(
+                                data.map(|ts| ts.and_utc().timestamp_micros()),
+                                None,
+                            ),
+                        },
+                        ConcreteDataType::DateTime(_) => {
+                            ScalarValue::Date64(data.map(|d| d.and_utc().timestamp_millis()))
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ))
+                        }
                     }
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ))
-                    }
+                } else {
+                    ScalarValue::TimestampMillisecond(
+                        data.map(|ts| ts.and_utc().timestamp_millis()),
+                        None,
+                    )
                 }
             }
             &Type::DATE => {
                 let data = portal.parameter::<NaiveDate>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Date(_) => ScalarValue::Date32(data.map(|d| {
-                        (d - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days() as i32
-                    })),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ));
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Date(_) => ScalarValue::Date32(data.map(|d| {
+                            (d - NaiveDate::from(NaiveDateTime::UNIX_EPOCH)).num_days() as i32
+                        })),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ));
+                        }
                     }
+                } else {
+                    ScalarValue::Date32(data.map(|d| {
+                        (d - NaiveDate::from(NaiveDateTime::UNIX_EPOCH)).num_days() as i32
+                    }))
                 }
             }
             &Type::INTERVAL => {
                 let data = portal.parameter::<PgInterval>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Interval(_) => {
-                        ScalarValue::IntervalMonthDayNano(data.map(|i| Interval::from(i).to_i128()))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Interval(IntervalType::YearMonth(_)) => {
+                            ScalarValue::IntervalYearMonth(
+                                data.map(|i| {
+                                    if i.days != 0 || i.microseconds != 0 {
+                                        Err(invalid_parameter_error(
+                                            "invalid_parameter_type",
+                                            Some(format!(
+                                                "Expected: {}, found: {}",
+                                                server_type, client_type
+                                            )),
+                                        ))
+                                    } else {
+                                        Ok(IntervalYearMonth::new(i.months).to_i32())
+                                    }
+                                })
+                                .transpose()?,
+                            )
+                        }
+                        ConcreteDataType::Interval(IntervalType::DayTime(_)) => {
+                            ScalarValue::IntervalDayTime(
+                                data.map(|i| {
+                                    if i.months != 0 || i.microseconds % 1000 != 0 {
+                                        Err(invalid_parameter_error(
+                                            "invalid_parameter_type",
+                                            Some(format!(
+                                                "Expected: {}, found: {}",
+                                                server_type, client_type
+                                            )),
+                                        ))
+                                    } else {
+                                        Ok(IntervalDayTime::new(
+                                            i.days,
+                                            (i.microseconds / 1000) as i32,
+                                        )
+                                        .to_i64())
+                                    }
+                                })
+                                .transpose()?,
+                            )
+                        }
+                        ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => {
+                            ScalarValue::IntervalMonthDayNano(
+                                data.map(|i| IntervalMonthDayNano::from(i).to_i128()),
+                            )
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ));
+                        }
                     }
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ));
-                    }
+                } else {
+                    ScalarValue::IntervalMonthDayNano(
+                        data.map(|i| IntervalMonthDayNano::from(i).to_i128()),
+                    )
                 }
             }
             &Type::BYTEA => {
                 let data = portal.parameter::<Vec<u8>>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::String(_) => {
-                        ScalarValue::Utf8(data.map(|d| String::from_utf8_lossy(&d).to_string()))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::String(_) => {
+                            ScalarValue::Utf8(data.map(|d| String::from_utf8_lossy(&d).to_string()))
+                        }
+                        ConcreteDataType::Binary(_) => ScalarValue::Binary(data),
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ));
+                        }
                     }
-                    ConcreteDataType::Binary(_) => ScalarValue::Binary(data),
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ));
-                    }
+                } else {
+                    ScalarValue::Binary(data)
                 }
             }
             &Type::JSONB => {
                 let data = portal.parameter::<serde_json::Value>(idx, &client_type)?;
-                match server_type {
-                    ConcreteDataType::Binary(_) => {
-                        ScalarValue::Binary(data.map(|d| jsonb::Value::from(d).to_vec()))
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Binary(_) => {
+                            ScalarValue::Binary(data.map(|d| d.to_string().into_bytes()))
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ));
+                        }
                     }
-                    _ => {
-                        return Err(invalid_parameter_error(
-                            "invalid_parameter_type",
-                            Some(&format!(
-                                "Expected: {}, found: {}",
-                                server_type, client_type
-                            )),
-                        ));
-                    }
+                } else {
+                    ScalarValue::Binary(data.map(|d| d.to_string().into_bytes()))
                 }
             }
             _ => Err(invalid_parameter_error(
                 "unsupported_parameter_value",
-                Some(&format!("Found type: {}", client_type)),
+                Some(format!("Found type: {}", client_type)),
             ))?,
         };
 
@@ -607,6 +1008,7 @@ mod test {
 
     use common_time::interval::IntervalUnit;
     use common_time::timestamp::TimeUnit;
+    use common_time::Timestamp;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::value::ListValue;
     use pgwire::api::results::{FieldFormat, FieldInfo};
@@ -796,10 +1198,52 @@ mod test {
                 FieldFormat::Text,
             ),
             FieldInfo::new(
-                "intervals".into(),
+                "interval_year_month".into(),
                 None,
                 None,
                 Type::INTERVAL,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "interval_day_time".into(),
+                None,
+                None,
+                Type::INTERVAL,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "interval_month_day_nano".into(),
+                None,
+                None,
+                Type::INTERVAL,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "int_list".into(),
+                None,
+                None,
+                Type::INT8_ARRAY,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "float_list".into(),
+                None,
+                None,
+                Type::FLOAT8_ARRAY,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "string_list".into(),
+                None,
+                None,
+                Type::VARCHAR_ARRAY,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "timestamp_list".into(),
+                None,
+                None,
+                Type::TIMESTAMP_ARRAY,
                 FieldFormat::Text,
             ),
         ];
@@ -832,6 +1276,12 @@ mod test {
             ConcreteDataType::datetime_datatype(),
             ConcreteDataType::timestamp_datatype(TimeUnit::Second),
             ConcreteDataType::interval_datatype(IntervalUnit::YearMonth),
+            ConcreteDataType::interval_datatype(IntervalUnit::DayTime),
+            ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
+            ConcreteDataType::list_datatype(ConcreteDataType::int64_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::float64_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::timestamp_second_datatype()),
         ];
         let values = vec![
             Value::Null,
@@ -860,7 +1310,25 @@ mod test {
             Value::Time(1001i64.into()),
             Value::DateTime(1000001i64.into()),
             Value::Timestamp(1000001i64.into()),
-            Value::Interval(1000001i128.into()),
+            Value::IntervalYearMonth(IntervalYearMonth::new(1)),
+            Value::IntervalDayTime(IntervalDayTime::new(1, 10)),
+            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 10)),
+            Value::List(ListValue::new(
+                vec![Value::Int64(1i64)],
+                ConcreteDataType::int64_datatype(),
+            )),
+            Value::List(ListValue::new(
+                vec![Value::Float64(1.0f64.into())],
+                ConcreteDataType::float64_datatype(),
+            )),
+            Value::List(ListValue::new(
+                vec![Value::String("tom".into())],
+                ConcreteDataType::string_datatype(),
+            )),
+            Value::List(ListValue::new(
+                vec![Value::Timestamp(Timestamp::new(1i64, TimeUnit::Second))],
+                ConcreteDataType::timestamp_second_datatype(),
+            )),
         ];
         let query_context = QueryContextBuilder::default()
             .configuration_parameter(Default::default())
@@ -869,22 +1337,6 @@ mod test {
         let mut builder = DataRowEncoder::new(Arc::new(schema));
         for (value, datatype) in values.iter().zip(datatypes) {
             encode_value(&query_context, value, &mut builder, &datatype).unwrap();
-        }
-
-        let err = encode_value(
-            &query_context,
-            &Value::List(ListValue::new(vec![], ConcreteDataType::int16_datatype())),
-            &mut builder,
-            &ConcreteDataType::list_datatype(ConcreteDataType::int16_datatype()),
-        )
-        .unwrap_err();
-        match err {
-            PgWireError::ApiError(e) => {
-                assert!(format!("{e}").contains("Internal error:"));
-            }
-            _ => {
-                unreachable!()
-            }
         }
     }
 

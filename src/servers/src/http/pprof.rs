@@ -13,9 +13,6 @@
 // limitations under the License.
 
 #[cfg(feature = "pprof")]
-pub(crate) mod nix;
-
-#[cfg(feature = "pprof")]
 pub mod handler {
     use std::num::NonZeroI32;
     use std::time::Duration;
@@ -23,13 +20,13 @@ pub mod handler {
     use axum::extract::Query;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+    use common_pprof::Profiling;
     use common_telemetry::info;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use snafu::ResultExt;
 
     use crate::error::{DumpPprofSnafu, Result};
-    use crate::http::pprof::nix::Profiling;
 
     /// Output format.
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -70,8 +67,8 @@ pub mod handler {
         let body = match req.output {
             Output::Proto => profiling.dump_proto().await.context(DumpPprofSnafu)?,
             Output::Text => {
-                let report = profiling.report().await.context(DumpPprofSnafu)?;
-                format!("{:?}", report).into_bytes()
+                let report = profiling.dump_text().await.context(DumpPprofSnafu)?;
+                report.into_bytes()
             }
             Output::Flamegraph => profiling.dump_flamegraph().await.context(DumpPprofSnafu)?,
         };

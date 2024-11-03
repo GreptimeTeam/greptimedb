@@ -22,6 +22,7 @@
 pub mod cache;
 pub mod cache_invalidator;
 pub mod cluster;
+pub mod datanode;
 pub mod ddl;
 pub mod ddl_manager;
 pub mod distributed_time_constants;
@@ -31,6 +32,7 @@ pub mod heartbeat;
 pub mod instruction;
 pub mod key;
 pub mod kv_backend;
+pub mod leadership_notifier;
 pub mod lock_key;
 pub mod metrics;
 pub mod node_manager;

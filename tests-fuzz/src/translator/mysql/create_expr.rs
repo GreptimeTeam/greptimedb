@@ -151,7 +151,7 @@ impl CreateTableExprTranslator {
             for (key, value) in &input.options {
                 output.push(format!("\"{key}\" = \"{value}\""));
             }
-            format!(" with ({})", output.join("\n"))
+            format!(" with ({})", output.join(",\n"))
         }
     }
 }

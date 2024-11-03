@@ -16,10 +16,11 @@ use std::time::Duration;
 
 pub use api::v1::meta::{MigrateRegionResponse, ProcedureStateResponse};
 use api::v1::meta::{
-    ProcedureId as PbProcedureId, ProcedureStateResponse as PbProcedureStateResponse,
+    ProcedureDetailResponse as PbProcedureDetailResponse, ProcedureId as PbProcedureId,
+    ProcedureMeta as PbProcedureMeta, ProcedureStateResponse as PbProcedureStateResponse,
     ProcedureStatus as PbProcedureStatus,
 };
-use common_procedure::{ProcedureId, ProcedureState};
+use common_procedure::{ProcedureId, ProcedureInfo, ProcedureState};
 use snafu::ResultExt;
 
 use crate::error::{ParseProcedureIdSnafu, Result};
@@ -30,7 +31,7 @@ pub struct MigrateRegionRequest {
     pub region_id: u64,
     pub from_peer: u64,
     pub to_peer: u64,
-    pub replay_timeout: Duration,
+    pub timeout: Duration,
 }
 
 /// Cast the protobuf [`ProcedureId`] to common [`ProcedureId`].
@@ -49,9 +50,9 @@ pub fn pid_to_pb_pid(pid: ProcedureId) -> PbProcedureId {
     }
 }
 
-/// Cast the common [`ProcedureState`] to pb [`ProcedureStateResponse`].
-pub fn procedure_state_to_pb_response(state: &ProcedureState) -> PbProcedureStateResponse {
-    let (status, error) = match state {
+/// Cast the [`ProcedureState`] to protobuf [`PbProcedureStatus`].
+pub fn procedure_state_to_pb_state(state: &ProcedureState) -> (PbProcedureStatus, String) {
+    match state {
         ProcedureState::Running => (PbProcedureStatus::Running, String::default()),
         ProcedureState::Done { .. } => (PbProcedureStatus::Done, String::default()),
         ProcedureState::Retrying { error } => (PbProcedureStatus::Retrying, error.to_string()),
@@ -62,11 +63,37 @@ pub fn procedure_state_to_pb_response(state: &ProcedureState) -> PbProcedureStat
         ProcedureState::RollingBack { error } => {
             (PbProcedureStatus::RollingBack, error.to_string())
         }
-    };
+    }
+}
 
+/// Cast the common [`ProcedureState`] to pb [`ProcedureStateResponse`].
+pub fn procedure_state_to_pb_response(state: &ProcedureState) -> PbProcedureStateResponse {
+    let (status, error) = procedure_state_to_pb_state(state);
     PbProcedureStateResponse {
         status: status.into(),
         error,
+        ..Default::default()
+    }
+}
+
+pub fn procedure_details_to_pb_response(metas: Vec<ProcedureInfo>) -> PbProcedureDetailResponse {
+    let procedures = metas
+        .into_iter()
+        .map(|meta| {
+            let (status, error) = procedure_state_to_pb_state(&meta.state);
+            PbProcedureMeta {
+                id: Some(pid_to_pb_pid(meta.id)),
+                type_name: meta.type_name.to_string(),
+                status: status.into(),
+                start_time_ms: meta.start_time_ms,
+                end_time_ms: meta.end_time_ms,
+                lock_keys: meta.lock_keys,
+                error,
+            }
+        })
+        .collect();
+    PbProcedureDetailResponse {
+        procedures,
         ..Default::default()
     }
 }

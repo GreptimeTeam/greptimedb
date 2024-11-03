@@ -115,6 +115,15 @@ impl MemtableVersion {
             .sum()
     }
 
+    /// Returns the number of rows in memtables.
+    pub(crate) fn num_rows(&self) -> u64 {
+        self.immutables
+            .iter()
+            .map(|mem| mem.stats().num_rows as u64)
+            .sum::<u64>()
+            + self.mutable.num_rows()
+    }
+
     /// Returns true if the memtable version is empty.
     ///
     /// The version is empty when mutable memtable is empty and there is no

@@ -360,7 +360,7 @@ fn cache_uncompressed_pages(column: &ColumnChunkMetaData) -> bool {
     column.uncompressed_size() as usize <= DEFAULT_PAGE_SIZE
 }
 
-impl<'a> RowGroups for InMemoryRowGroup<'a> {
+impl RowGroups for InMemoryRowGroup<'_> {
     fn num_rows(&self) -> usize {
         self.row_count
     }

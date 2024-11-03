@@ -147,6 +147,20 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("Failed to start procedure manager"))]
+    StartProcedureManager {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Failed to stop procedure manager"))]
+    StopProcedureManager {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_procedure::Error,
+    },
+
     #[snafu(display(
         "Failed to get procedure output, procedure id: {procedure_id}, error: {err_msg}"
     ))]
@@ -216,6 +230,24 @@ pub enum Error {
         location: Location,
         #[snafu(source)]
         error: JsonError,
+    },
+
+    #[snafu(display("Failed to serialize to json: {}", input))]
+    SerializeToJson {
+        input: String,
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to deserialize from json: {}", input))]
+    DeserializeFromJson {
+        input: String,
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Payload not exist"))]
@@ -531,8 +563,15 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid  node info key: {}", key))]
+    #[snafu(display("Invalid node info key: {}", key))]
     InvalidNodeInfoKey {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid node stat key: {}", key))]
+    InvalidStatKey {
         key: String,
         #[snafu(implicit)]
         location: Location,
@@ -613,6 +652,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Datanode table info not found, table id: {}, datanode id: {}",
+        table_id,
+        datanode_id
+    ))]
+    DatanodeTableInfoNotFound {
+        datanode_id: DatanodeId,
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -627,7 +678,9 @@ impl ErrorExt for Error {
             | EtcdTxnFailed { .. }
             | ConnectEtcd { .. }
             | MoveValues { .. }
-            | GetCache { .. } => StatusCode::Internal,
+            | GetCache { .. }
+            | SerializeToJson { .. }
+            | DeserializeFromJson { .. } => StatusCode::Internal,
 
             ValueNotExist { .. } => StatusCode::Unexpected,
 
@@ -688,7 +741,9 @@ impl ErrorExt for Error {
 
             SubmitProcedure { source, .. }
             | QueryProcedure { source, .. }
-            | WaitProcedure { source, .. } => source.status_code(),
+            | WaitProcedure { source, .. }
+            | StartProcedureManager { source, .. }
+            | StopProcedureManager { source, .. } => source.status_code(),
             RegisterProcedureLoader { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
             OperateDatanode { source, .. } => source.status_code(),
@@ -700,6 +755,7 @@ impl ErrorExt for Error {
             | InvalidNumTopics { .. }
             | SchemaNotFound { .. }
             | InvalidNodeInfoKey { .. }
+            | InvalidStatKey { .. }
             | ParseNum { .. }
             | InvalidRole { .. }
             | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
@@ -708,6 +764,7 @@ impl ErrorExt for Error {
             PostgresExecution { .. } => StatusCode::Internal,
             #[cfg(feature = "pg_kvbackend")]
             ConnectPostgres { .. } => StatusCode::Internal,
+            Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
         }
     }
 
