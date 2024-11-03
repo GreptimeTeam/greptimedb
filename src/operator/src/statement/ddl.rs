@@ -189,6 +189,23 @@ impl StatementExecutor {
 
         let _timer = crate::metrics::DIST_CREATE_TABLE.start_timer();
 
+        let schema = self
+            .table_metadata_manager
+            .schema_manager()
+            .get(SchemaNameKey::new(
+                &create_table.catalog_name,
+                &create_table.schema_name,
+            ))
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        ensure!(
+            schema.is_some(),
+            SchemaNotFoundSnafu {
+                schema_info: &create_table.schema_name,
+            }
+        );
+
         // if table exists.
         if let Some(table) = self
             .catalog_manager
