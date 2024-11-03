@@ -42,7 +42,8 @@ SHOW CREATE TABLE data_types;
 |            |   "ts6" TIMESTAMP(6) NULL,                                 |
 |            |   "ts9" TIMESTAMP(9) NOT NULL DEFAULT current_timestamp(), |
 |            |   TIME INDEX ("ts9"),                                      |
-|            |   PRIMARY KEY ("s")                                        |
+|            |   PRIMARY KEY ("s"),                                       |
+|            |   INVERTED INDEX ("s")                                     |
 |            | )                                                          |
 |            |                                                            |
 |            | ENGINE=mito                                                |

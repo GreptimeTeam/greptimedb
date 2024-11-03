@@ -32,7 +32,8 @@ SHOW CREATE TABLE system_metrics;
 |                |   "disk" FLOAT NULL COMMENT 'comment',                    |
 |                |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
 |                |   TIME INDEX ("ts"),                                      |
-|                |   PRIMARY KEY ("id", "host")                              |
+|                |   PRIMARY KEY ("id", "host"),                             |
+|                |   INVERTED INDEX ("id", "host")                           |
 |                | )                                                         |
 |                | PARTITION ON COLUMNS ("id") (                             |
 |                |   id < 5,                                                 |
@@ -113,7 +114,8 @@ show create table phy;
 |       |   "val" DOUBLE NULL,               |
 |       |   "host" STRING NULL,              |
 |       |   TIME INDEX ("ts"),               |
-|       |   PRIMARY KEY ("host")             |
+|       |   PRIMARY KEY ("host"),            |
+|       |   INVERTED INDEX ("host")          |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=metric                      |
@@ -132,7 +134,8 @@ show create table t1;
 |       |   "ts" TIMESTAMP(3) NOT NULL,     |
 |       |   "val" DOUBLE NULL,              |
 |       |   TIME INDEX ("ts"),              |
-|       |   PRIMARY KEY ("host")            |
+|       |   PRIMARY KEY ("host"),           |
+|       |   INVERTED INDEX ("host")         |
 |       | )                                 |
 |       |                                   |
 |       | ENGINE=metric                     |
@@ -168,25 +171,26 @@ Affected Rows: 0
 
 show create table phy;
 
-+-------+-------------------------------------------------------+
-| Table | Create Table                                          |
-+-------+-------------------------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" (                    |
-|       |   "ts" TIMESTAMP(3) NOT NULL,                         |
-|       |   "val" DOUBLE NULL,                                  |
-|       |   "__table_id" INT UNSIGNED NOT NULL,                 |
-|       |   "__tsid" BIGINT UNSIGNED NOT NULL,                  |
-|       |   "host" STRING NULL,                                 |
-|       |   "job" STRING NULL,                                  |
-|       |   TIME INDEX ("ts"),                                  |
-|       |   PRIMARY KEY ("__table_id", "__tsid", "host", "job") |
-|       | )                                                     |
-|       |                                                       |
-|       | ENGINE=mito                                           |
-|       | WITH(                                                 |
-|       |   physical_metric_table = ''                          |
-|       | )                                                     |
-+-------+-------------------------------------------------------+
++-------+----------------------------------------------------------+
+| Table | Create Table                                             |
++-------+----------------------------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" (                       |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                            |
+|       |   "val" DOUBLE NULL,                                     |
+|       |   "__table_id" INT UNSIGNED NOT NULL,                    |
+|       |   "__tsid" BIGINT UNSIGNED NOT NULL,                     |
+|       |   "host" STRING NULL,                                    |
+|       |   "job" STRING NULL,                                     |
+|       |   TIME INDEX ("ts"),                                     |
+|       |   PRIMARY KEY ("__table_id", "__tsid", "host", "job"),   |
+|       |   INVERTED INDEX ("__table_id", "__tsid", "host", "job") |
+|       | )                                                        |
+|       |                                                          |
+|       | ENGINE=mito                                              |
+|       | WITH(                                                    |
+|       |   physical_metric_table = ''                             |
+|       | )                                                        |
++-------+----------------------------------------------------------+
 
 drop table phy;
 
