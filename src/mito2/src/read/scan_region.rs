@@ -27,7 +27,7 @@ use datafusion_expr::utils::expr_to_columns;
 use parquet::arrow::arrow_reader::RowSelection;
 use smallvec::SmallVec;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
-use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
+use store_api::storage::{ColumnId, ScanRequest, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
@@ -393,31 +393,13 @@ impl ScanRegion {
             .and_then(|c| c.index_cache())
             .cloned();
 
-        let ignore_column_ids = &self
-            .version
-            .options
-            .index_options
-            .inverted_index
-            .ignore_column_ids;
-        let indexed_column_ids = self
-            .version
-            .metadata
-            .column_metadatas
-            .iter()
-            .filter(|column| {
-                column.column_schema.has_inverted_index()
-                    && !ignore_column_ids.contains(&column.column_id)
-            })
-            .map(|column| column.column_id)
-            .collect::<HashSet<_>>();
-
         InvertedIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
             file_cache,
             index_cache,
             self.version.metadata.as_ref(),
-            indexed_column_ids,
+            self.build_inverted_indexed_column_ids(),
             self.access_layer.puffin_manager_factory().clone(),
         )
         .build(&self.request.filters)
@@ -444,6 +426,45 @@ impl ScanRegion {
         .ok()
         .flatten()
         .map(Arc::new)
+    }
+
+    fn build_inverted_indexed_column_ids(&self) -> HashSet<ColumnId> {
+        // For compatibility
+        let pk_as_inverted_index = !self
+            .version
+            .metadata
+            .column_metadatas
+            .iter()
+            .any(|c| c.column_schema.has_inverted_index_key());
+
+        let mut inverted_index: HashSet<_> = if pk_as_inverted_index {
+            self.version
+                .metadata
+                .primary_key_columns()
+                .map(|c| c.column_id)
+                .collect()
+        } else {
+            self.version
+                .metadata
+                .column_metadatas
+                .iter()
+                .filter(|column| column.column_schema.is_inverted_indexed())
+                .map(|column| column.column_id)
+                .collect()
+        };
+
+        let ignore_column_ids = &self
+            .version
+            .options
+            .index_options
+            .inverted_index
+            .ignore_column_ids;
+
+        for ignored in ignore_column_ids {
+            inverted_index.remove(ignored);
+        }
+
+        inverted_index
     }
 }
 

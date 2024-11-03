@@ -151,7 +151,7 @@ fn create_table_constraints(
     let inverted_index_cols = schema
         .column_schemas()
         .iter()
-        .filter(|c| c.has_inverted_index())
+        .filter(|c| c.is_inverted_indexed())
         .map(|c| Ident::with_quote(quote_style, &c.name))
         .collect::<Vec<_>>();
     if !inverted_index_cols.is_empty() || !table_meta.primary_key_indices.is_empty() {
@@ -214,7 +214,7 @@ mod tests {
         let schema = vec![
             ColumnSchema::new("id", ConcreteDataType::uint32_datatype(), true),
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), true)
-                .with_inverted_index(true),
+                .set_inverted_index(true),
             ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("disk", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("msg", ConcreteDataType::string_datatype(), true)

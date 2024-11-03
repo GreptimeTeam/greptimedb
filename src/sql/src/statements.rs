@@ -470,7 +470,7 @@ pub fn column_to_schema(
 
     let mut column_schema = ColumnSchema::new(name, data_type, is_nullable)
         .with_time_index(is_time_index)
-        .with_inverted_index(with_inverted_index)
+        .set_inverted_index(with_inverted_index)
         .with_default_constraint(default_constraint)
         .context(error::InvalidDefaultSnafu {
             column: &column.name().value,

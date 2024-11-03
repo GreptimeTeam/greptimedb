@@ -135,22 +135,22 @@ impl ColumnSchema {
         self
     }
 
-    pub fn with_inverted_index(mut self, value: bool) -> Self {
-        if value {
-            let _ = self
-                .metadata
-                .insert(INVERTED_INDEX_KEY.to_string(), "true".to_string());
-        } else {
-            let _ = self.metadata.remove(INVERTED_INDEX_KEY);
-        }
+    pub fn set_inverted_index(mut self, value: bool) -> Self {
+        let _ = self
+            .metadata
+            .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
         self
     }
 
-    pub fn has_inverted_index(&self) -> bool {
+    pub fn is_inverted_indexed(&self) -> bool {
         self.metadata
             .get(INVERTED_INDEX_KEY)
             .map(|v| v == "true")
             .unwrap_or(false)
+    }
+
+    pub fn has_inverted_index_key(&self) -> bool {
+        self.metadata.contains_key(INVERTED_INDEX_KEY)
     }
 
     /// Set default constraint.

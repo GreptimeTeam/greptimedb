@@ -213,28 +213,13 @@ impl<'a> IndexerBuilder<'a> {
             segment_row_count = row_group_size;
         }
 
-        let indexed_column_ids = self
-            .metadata
-            .column_metadatas
-            .iter()
-            .filter(|column| {
-                column.column_schema.has_inverted_index()
-                    && !self
-                        .index_options
-                        .inverted_index
-                        .ignore_column_ids
-                        .contains(&column.column_id)
-            })
-            .map(|column| column.column_id)
-            .collect::<HashSet<_>>();
-
         let indexer = InvertedIndexer::new(
             self.file_id,
             self.metadata,
             self.intermediate_manager.clone(),
             self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
-            indexed_column_ids,
+            self.inverted_indexed_column_ids(),
         );
 
         Some(indexer)
@@ -291,6 +276,35 @@ impl<'a> IndexerBuilder<'a> {
         }
 
         None
+    }
+
+    fn inverted_indexed_column_ids(&self) -> HashSet<ColumnId> {
+        // For compatibility
+        let pk_as_inverted_index = !self
+            .metadata
+            .column_metadatas
+            .iter()
+            .any(|c| c.column_schema.has_inverted_index_key());
+
+        let mut inverted_index: HashSet<_> = if pk_as_inverted_index {
+            self.metadata
+                .primary_key_columns()
+                .map(|c| c.column_id)
+                .collect()
+        } else {
+            self.metadata
+                .column_metadatas
+                .iter()
+                .filter(|column| column.column_schema.is_inverted_indexed())
+                .map(|column| column.column_id)
+                .collect()
+        };
+
+        for ignored in &self.index_options.inverted_index.ignore_column_ids {
+            inverted_index.remove(ignored);
+        }
+
+        inverted_index
     }
 }
 

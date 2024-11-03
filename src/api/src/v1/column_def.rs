@@ -78,11 +78,15 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
             .options
             .insert(FULLTEXT_GRPC_KEY.to_string(), fulltext.clone());
     }
-    if let Some(inverted_index) = column_schema.metadata().get(INVERTED_INDEX_KEY) {
-        options
-            .options
-            .insert(INVERTED_INDEX_GRPC_KEY.to_string(), inverted_index.clone());
-    }
+
+    let inverted_index = column_schema
+        .metadata()
+        .get(INVERTED_INDEX_KEY)
+        .cloned()
+        .unwrap_or_else(|| false.to_string());
+    options
+        .options
+        .insert(INVERTED_INDEX_GRPC_KEY.to_string(), inverted_index);
 
     (!options.options.is_empty()).then_some(options)
 }
@@ -104,10 +108,14 @@ pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<Column
     Ok((!options.options.is_empty()).then_some(options))
 }
 
-pub fn set_inverted_index(options: &mut ColumnOptions) {
-    options
-        .options
-        .insert(INVERTED_INDEX_GRPC_KEY.to_string(), "true".to_string());
+/// Tries to set the inverted index option in the given `ColumnOptions`.
+pub fn set_inverted_index_if_absent(options: &mut ColumnOptions, is_primary_key: bool) {
+    if !options.options.contains_key(INVERTED_INDEX_GRPC_KEY) {
+        options.options.insert(
+            INVERTED_INDEX_GRPC_KEY.to_string(),
+            is_primary_key.to_string(),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -159,7 +167,7 @@ mod tests {
                 ..Default::default()
             }
         );
-        assert!(schema.has_inverted_index());
+        assert!(schema.is_inverted_indexed());
     }
 
     #[test]
@@ -175,7 +183,7 @@ mod tests {
                 case_sensitive: false,
             })
             .unwrap()
-            .with_inverted_index(true);
+            .set_inverted_index(true);
         let options = options_from_column_schema(&schema).unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),

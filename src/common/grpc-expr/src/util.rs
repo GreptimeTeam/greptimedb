@@ -128,10 +128,9 @@ pub fn build_create_table_expr(
         }
 
         let mut options = options.clone();
-        if is_primary_key {
-            let opt = options.get_or_insert_with(ColumnOptions::default);
-            column_def::set_inverted_index(opt);
-        }
+        let opt = options.get_or_insert_with(ColumnOptions::default);
+        // Automatically set inverted index for primary key columns if table is created on insertions.
+        column_def::set_inverted_index_if_absent(opt, is_primary_key);
 
         let column_type =
             ColumnDataType::try_from(datatype).context(UnknownColumnDataTypeSnafu { datatype })?;
