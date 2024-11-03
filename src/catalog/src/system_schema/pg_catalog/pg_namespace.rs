@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! The `pg_catalog.pg_namespace` table implementation.
+//! namespace is a schema in greptime
+
 pub(super) mod oid_map;
 
 use std::sync::{Arc, Weak};
@@ -39,9 +42,6 @@ use crate::information_schema::Predicates;
 use crate::system_schema::utils::tables::{string_column, u32_column};
 use crate::system_schema::SystemTable;
 use crate::CatalogManager;
-
-/// The `pg_catalog.pg_namespace` table implementation.
-/// namespace is a schema in greptime
 
 const NSPNAME: &str = "nspname";
 const INIT_CAPACITY: usize = 42;

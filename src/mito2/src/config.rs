@@ -28,9 +28,6 @@ use crate::error::Result;
 use crate::memtable::MemtableConfig;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
-/// Default max running background job.
-const DEFAULT_MAX_BG_JOB: usize = 4;
-
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
 /// Default channel size for parallel scan task.
 const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
@@ -69,8 +66,12 @@ pub struct MitoConfig {
     pub compress_manifest: bool,
 
     // Background job configs:
-    /// Max number of running background jobs (default 4).
-    pub max_background_jobs: usize,
+    /// Max number of running background flush jobs (default: 1/2 of cpu cores).
+    pub max_background_flushes: usize,
+    /// Max number of running background compaction jobs (default: 1/4 of cpu cores).
+    pub max_background_compactions: usize,
+    /// Max number of running background purge jobs (default: number of cpu cores).
+    pub max_background_purges: usize,
 
     // Flush configs:
     /// Interval to auto flush a region if it has not flushed yet (default 30 min).
@@ -137,7 +138,9 @@ impl Default for MitoConfig {
             worker_request_batch_size: 64,
             manifest_checkpoint_distance: 10,
             compress_manifest: false,
-            max_background_jobs: DEFAULT_MAX_BG_JOB,
+            max_background_flushes: divide_num_cpus(2),
+            max_background_compactions: divide_num_cpus(4),
+            max_background_purges: common_config::utils::get_cpus(),
             auto_flush_interval: Duration::from_secs(30 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
@@ -185,9 +188,26 @@ impl MitoConfig {
             self.worker_channel_size = 1;
         }
 
-        if self.max_background_jobs == 0 {
-            warn!("Sanitize max background jobs 0 to {}", DEFAULT_MAX_BG_JOB);
-            self.max_background_jobs = DEFAULT_MAX_BG_JOB;
+        if self.max_background_flushes == 0 {
+            warn!(
+                "Sanitize max background flushes 0 to {}",
+                divide_num_cpus(2)
+            );
+            self.max_background_flushes = divide_num_cpus(2);
+        }
+        if self.max_background_compactions == 0 {
+            warn!(
+                "Sanitize max background compactions 0 to {}",
+                divide_num_cpus(4)
+            );
+            self.max_background_compactions = divide_num_cpus(4);
+        }
+        if self.max_background_purges == 0 {
+            warn!(
+                "Sanitize max background purges 0 to {}",
+                common_config::utils::get_cpus()
+            );
+            self.max_background_purges = common_config::utils::get_cpus();
         }
 
         if self.global_write_buffer_reject_size <= self.global_write_buffer_size {
@@ -499,7 +519,7 @@ fn divide_num_cpus(divisor: usize) -> usize {
     let cores = common_config::utils::get_cpus();
     debug_assert!(cores > 0);
 
-    (cores + divisor - 1) / divisor
+    cores.div_ceil(divisor)
 }
 
 #[cfg(test)]

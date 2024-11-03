@@ -25,7 +25,7 @@ pub fn format_raw_object_name(name: &ObjectName) -> String {
         name: &'a ObjectName,
     }
 
-    impl<'a> Display for Inner<'a> {
+    impl Display for Inner<'_> {
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
             let mut delim = "";
             for ident in self.name.0.iter() {

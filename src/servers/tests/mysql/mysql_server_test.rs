@@ -19,6 +19,7 @@ use std::time::Duration;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_recordbatch::RecordBatch;
+use common_runtime::runtime::BuilderBuild;
 use common_runtime::Builder as RuntimeBuilder;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, Schema};

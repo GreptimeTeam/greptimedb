@@ -41,7 +41,7 @@ pub struct SchemaNameKey<'a> {
     pub schema: &'a str,
 }
 
-impl<'a> Default for SchemaNameKey<'a> {
+impl Default for SchemaNameKey<'_> {
     fn default() -> Self {
         Self {
             catalog: DEFAULT_CATALOG_NAME,

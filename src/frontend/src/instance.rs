@@ -225,11 +225,45 @@ impl Instance {
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
-        let stmt = QueryStatement::Sql(stmt);
-        self.statement_executor
-            .execute_stmt(stmt, query_ctx)
-            .await
-            .context(TableOperationSnafu)
+        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let query_interceptor = query_interceptor.as_ref();
+
+        let output = match stmt {
+            Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
+                let stmt = QueryStatement::Sql(stmt);
+                let plan = self
+                    .statement_executor
+                    .plan(&stmt, query_ctx.clone())
+                    .await?;
+
+                let QueryStatement::Sql(stmt) = stmt else {
+                    unreachable!()
+                };
+                query_interceptor.pre_execute(&stmt, Some(&plan), query_ctx.clone())?;
+
+                self.statement_executor.exec_plan(plan, query_ctx).await
+            }
+            Statement::Tql(tql) => {
+                let plan = self
+                    .statement_executor
+                    .plan_tql(tql.clone(), &query_ctx)
+                    .await?;
+
+                query_interceptor.pre_execute(
+                    &Statement::Tql(tql),
+                    Some(&plan),
+                    query_ctx.clone(),
+                )?;
+
+                self.statement_executor.exec_plan(plan, query_ctx).await
+            }
+            _ => {
+                query_interceptor.pre_execute(&stmt, None, query_ctx.clone())?;
+
+                self.statement_executor.execute_sql(stmt, query_ctx).await
+            }
+        };
+        output.context(TableOperationSnafu)
     }
 }
 
@@ -255,14 +289,6 @@ impl SqlQueryHandler for Instance {
             Ok(stmts) => {
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
-                    // TODO(sunng87): figure out at which stage we can call
-                    // this hook after ArrowFlight adoption. We need to provide
-                    // LogicalPlan as to this hook.
-                    if let Err(e) = query_interceptor.pre_execute(&stmt, None, query_ctx.clone()) {
-                        results.push(Err(e));
-                        break;
-                    }
-
                     if let Err(e) = checker
                         .check_permission(
                             query_ctx.current_user(),
@@ -341,7 +367,7 @@ impl SqlQueryHandler for Instance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
+                .plan(&QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
             self.query_engine

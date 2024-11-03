@@ -29,7 +29,10 @@ use crate::test_util::MockDatanodeHandler;
 #[async_trait::async_trait]
 impl MockDatanodeHandler for () {
     async fn handle(&self, _peer: &Peer, _request: RegionRequest) -> Result<RegionResponse> {
-        unreachable!()
+        Ok(RegionResponse {
+            affected_rows: 0,
+            extensions: Default::default(),
+        })
     }
 
     async fn handle_query(

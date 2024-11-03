@@ -19,7 +19,7 @@ use index::inverted_index::search::predicate::{Predicate, RegexMatchPredicate};
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
-impl<'a> InvertedIndexApplierBuilder<'a> {
+impl InvertedIndexApplierBuilder<'_> {
     /// Collects a regex match expression in the form of `column ~ pattern`.
     pub(crate) fn collect_regex_match(&mut self, column: &DfExpr, pattern: &DfExpr) -> Result<()> {
         let Some(column_name) = Self::column_name(column) else {

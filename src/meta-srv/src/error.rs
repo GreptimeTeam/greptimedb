@@ -18,7 +18,6 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_meta::DatanodeId;
 use common_runtime::JoinError;
-use rand::distributions::WeightedError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -32,6 +31,14 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to choose items"))]
+    ChooseItems {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: rand::distributions::WeightedError,
+    },
+
     #[snafu(display("Exceeded deadline, operation: {}", operation))]
     ExceededDeadline {
         #[snafu(implicit)]
@@ -643,20 +650,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to set weight array"))]
-    WeightArray {
-        #[snafu(source)]
-        error: WeightedError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Weight array is not set"))]
-    NotSetWeightArray {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Unexpected table route type: {}", err_msg))]
     UnexpectedLogicalRouteTable {
         #[snafu(implicit)]
@@ -759,10 +752,9 @@ impl ErrorExt for Error {
             | Error::NoEnoughAvailableNode { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
-            | Error::WeightArray { .. }
-            | Error::NotSetWeightArray { .. }
             | Error::PeerUnavailable { .. }
-            | Error::ExceededDeadline { .. } => StatusCode::Internal,
+            | Error::ExceededDeadline { .. }
+            | Error::ChooseItems { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 

@@ -203,6 +203,9 @@ pub struct ScannerProperties {
     /// Total rows that **may** return by scanner. This field is only read iff
     /// [ScannerProperties::append_mode] is true.
     total_rows: usize,
+
+    /// Whether to yield an empty batch to distinguish partition ranges.
+    pub distinguish_partition_range: bool,
 }
 
 impl ScannerProperties {
@@ -230,6 +233,7 @@ impl ScannerProperties {
             partitions,
             append_mode,
             total_rows,
+            distinguish_partition_range: false,
         }
     }
 
@@ -244,9 +248,14 @@ impl ScannerProperties {
     pub fn total_rows(&self) -> usize {
         self.total_rows
     }
+
+    pub fn distinguish_partition_range(&self) -> bool {
+        self.distinguish_partition_range
+    }
 }
 
 /// A scanner that provides a way to scan the region concurrently.
+///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
 /// You can use this trait to implement an [`ExecutionPlan`](datafusion_physical_plan::ExecutionPlan).
 pub trait RegionScanner: Debug + DisplayAs + Send {
@@ -256,10 +265,17 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Returns the schema of the record batches.
     fn schema(&self) -> SchemaRef;
 
+    /// Returns the metadata of the region.
+    fn metadata(&self) -> RegionMetadataRef;
+
     /// Prepares the scanner with the given partition ranges.
     ///
     /// This method is for the planner to adjust the scanner's behavior based on the partition ranges.
-    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError>;
+    fn prepare(
+        &mut self,
+        ranges: Vec<Vec<PartitionRange>>,
+        distinguish_partition_range: bool,
+    ) -> Result<(), BoxedError>;
 
     /// Scans the partition and returns a stream of record batches.
     ///
@@ -278,14 +294,20 @@ pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
 /// Represents the statistics of a region.
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct RegionStatistic {
+    /// The number of rows
+    #[serde(default)]
+    pub num_rows: u64,
     /// The size of memtable in bytes.
     pub memtable_size: u64,
     /// The size of WAL in bytes.
     pub wal_size: u64,
     /// The size of manifest in bytes.
     pub manifest_size: u64,
-    /// The size of SST files in bytes.
+    /// The size of SST data files in bytes.
     pub sst_size: u64,
+    /// The size of SST index files in bytes.
+    #[serde(default)]
+    pub index_size: u64,
 }
 
 impl RegionStatistic {
@@ -307,7 +329,7 @@ impl RegionStatistic {
 impl RegionStatistic {
     /// Returns the estimated disk size of the region.
     pub fn estimated_disk_size(&self) -> u64 {
-        self.wal_size + self.sst_size + self.manifest_size
+        self.wal_size + self.sst_size + self.manifest_size + self.index_size
     }
 }
 
@@ -395,11 +417,16 @@ pub struct SinglePartitionScanner {
     stream: Mutex<Option<SendableRecordBatchStream>>,
     schema: SchemaRef,
     properties: ScannerProperties,
+    metadata: RegionMetadataRef,
 }
 
 impl SinglePartitionScanner {
-    /// Creates a new [SinglePartitionScanner] with the given stream.
-    pub fn new(stream: SendableRecordBatchStream, append_mode: bool) -> Self {
+    /// Creates a new [SinglePartitionScanner] with the given stream and metadata.
+    pub fn new(
+        stream: SendableRecordBatchStream,
+        append_mode: bool,
+        metadata: RegionMetadataRef,
+    ) -> Self {
         let schema = stream.schema();
         Self {
             stream: Mutex::new(Some(stream)),
@@ -407,6 +434,7 @@ impl SinglePartitionScanner {
             properties: ScannerProperties::default()
                 .with_parallelism(1)
                 .with_append_mode(append_mode),
+            metadata,
         }
     }
 }
@@ -426,8 +454,13 @@ impl RegionScanner for SinglePartitionScanner {
         self.schema.clone()
     }
 
-    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+    fn prepare(
+        &mut self,
+        ranges: Vec<Vec<PartitionRange>>,
+        distinguish_partition_range: bool,
+    ) -> Result<(), BoxedError> {
         self.properties.partitions = ranges;
+        self.properties.distinguish_partition_range = distinguish_partition_range;
         Ok(())
     }
 
@@ -443,6 +476,10 @@ impl RegionScanner for SinglePartitionScanner {
 
     fn has_predicate(&self) -> bool {
         false
+    }
+
+    fn metadata(&self) -> RegionMetadataRef {
+        self.metadata.clone()
     }
 }
 

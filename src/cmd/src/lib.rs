@@ -84,6 +84,7 @@ pub trait App: Send {
 }
 
 /// Log the versions of the application, and the arguments passed to the cli.
+///
 /// `version` should be the same as the output of cli "--version";
 /// and the `short_version` is the short version of the codes, often consist of git branch and commit.
 pub fn log_versions(version: &str, short_version: &str, app: &str) {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// All table names in `information_schema`.
+//! All table names in `information_schema`.
 
 pub const TABLES: &str = "tables";
 pub const COLUMNS: &str = "columns";

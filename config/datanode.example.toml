@@ -215,12 +215,12 @@ dump_index_interval = "60s"
 
 ## Ignore missing entries during read WAL.
 ## **It's only used when the provider is `kafka`**.
-## 
-## This option ensures that when Kafka messages are deleted, the system 
-## can still successfully replay memtable data without throwing an 
-## out-of-range error. 
-## However, enabling this option might lead to unexpected data loss, 
-## as the system will skip over missing entries instead of treating 
+##
+## This option ensures that when Kafka messages are deleted, the system
+## can still successfully replay memtable data without throwing an
+## out-of-range error.
+## However, enabling this option might lead to unexpected data loss,
+## as the system will skip over missing entries instead of treating
 ## them as critical errors.
 overwrite_entry_start_id = false
 
@@ -416,8 +416,17 @@ manifest_checkpoint_distance = 10
 ## Whether to compress manifest and checkpoint file by gzip (default false).
 compress_manifest = false
 
-## Max number of running background jobs
-max_background_jobs = 4
+## Max number of running background flush jobs (default: 1/2 of cpu cores).
+## @toml2docs:none-default="Auto"
+#+ max_background_flushes = 4
+
+## Max number of running background compaction jobs (default: 1/4 of cpu cores).
+## @toml2docs:none-default="Auto"
+#+ max_background_compactions = 2
+
+## Max number of running background purge jobs (default: number of cpu cores).
+## @toml2docs:none-default="Auto"
+#+ max_background_purges = 8
 
 ## Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "1h"
@@ -637,7 +646,7 @@ url = ""
 headers = { }
 
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
-[tracing]
+#+ [tracing]
 ## The tokio console address.
 ## @toml2docs:none-default
-tokio_console_addr = "127.0.0.1"
+#+ tokio_console_addr = "127.0.0.1"

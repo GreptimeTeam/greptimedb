@@ -17,6 +17,8 @@ pub mod global;
 mod metrics;
 mod repeated_task;
 pub mod runtime;
+pub mod runtime_default;
+pub mod runtime_throttleable;
 
 pub use global::{
     block_on_compact, block_on_global, compact_runtime, create_runtime, global_runtime,

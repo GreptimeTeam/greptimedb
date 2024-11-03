@@ -446,12 +446,10 @@ fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<Value
             None => CoerceUnsupportedEpochTypeSnafu { ty: "String" }.fail(),
         },
 
-        Value::Array(_) | Value::Map(_) => {
-            return CoerceJsonTypeToSnafu {
-                ty: transform.type_.to_str_type(),
-            }
-            .fail()
+        Value::Array(_) | Value::Map(_) => CoerceJsonTypeToSnafu {
+            ty: transform.type_.to_str_type(),
         }
+        .fail(),
 
         Value::Null => Ok(None),
     }

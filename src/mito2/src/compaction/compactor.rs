@@ -134,7 +134,7 @@ pub async fn open_compaction_region(
     ));
 
     let file_purger = {
-        let purge_scheduler = Arc::new(LocalScheduler::new(mito_config.max_background_jobs));
+        let purge_scheduler = Arc::new(LocalScheduler::new(mito_config.max_background_purges));
         Arc::new(LocalFilePurger::new(
             purge_scheduler.clone(),
             access_layer.clone(),

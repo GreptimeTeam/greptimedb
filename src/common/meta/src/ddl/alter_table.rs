@@ -43,10 +43,10 @@ use crate::ddl::DdlContext;
 use crate::error::{Error, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
-use crate::key::DeserializedValueWithBytes;
+use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::rpc::ddl::AlterTableTask;
-use crate::rpc::router::{find_leader_regions, find_leaders};
+use crate::rpc::router::{find_leader_regions, find_leaders, region_distribution};
 use crate::{metrics, ClusterId};
 
 /// The alter table procedure
@@ -100,6 +100,9 @@ impl AlterTableProcedure {
             .table_route_manager()
             .get_physical_table_route(table_id)
             .await?;
+
+        self.data.region_distribution =
+            Some(region_distribution(&physical_table_route.region_routes));
 
         let leaders = find_leaders(&physical_table_route.region_routes);
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
@@ -161,8 +164,14 @@ impl AlterTableProcedure {
             self.on_update_metadata_for_rename(new_table_name.to_string(), table_info_value)
                 .await?;
         } else {
-            self.on_update_metadata_for_alter(new_info.into(), table_info_value)
-                .await?;
+            // region distribution is set in submit_alter_region_requests
+            let region_distribution = self.data.region_distribution.as_ref().unwrap().clone();
+            self.on_update_metadata_for_alter(
+                new_info.into(),
+                region_distribution,
+                table_info_value,
+            )
+            .await?;
         }
 
         info!("Updated table metadata for table {table_ref}, table_id: {table_id}");
@@ -271,6 +280,8 @@ pub struct AlterTableData {
     table_id: TableId,
     /// Table info value before alteration.
     table_info_value: Option<DeserializedValueWithBytes<TableInfoValue>>,
+    /// Region distribution for table in case we need to update region options.
+    region_distribution: Option<RegionDistribution>,
 }
 
 impl AlterTableData {
@@ -281,6 +292,7 @@ impl AlterTableData {
             table_id,
             cluster_id,
             table_info_value: None,
+            region_distribution: None,
         }
     }
 

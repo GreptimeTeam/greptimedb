@@ -62,7 +62,7 @@ pub struct RangeExprRewriter<'a> {
     query_ctx: &'a QueryContextRef,
 }
 
-impl<'a> RangeExprRewriter<'a> {
+impl RangeExprRewriter<'_> {
     pub fn get_range_expr(&self, args: &[Expr], i: usize) -> DFResult<Expr> {
         match args.get(i) {
             Some(Expr::Column(column)) => {
@@ -263,7 +263,7 @@ macro_rules! inconsistent_check {
     };
 }
 
-impl<'a> TreeNodeRewriter for RangeExprRewriter<'a> {
+impl TreeNodeRewriter for RangeExprRewriter<'_> {
     type Node = Expr;
 
     fn f_down(&mut self, node: Expr) -> DFResult<Transformed<Expr>> {
@@ -634,7 +634,7 @@ mod test {
     async fn do_query(sql: &str) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_test_engine().await;
-        engine.planner().plan(stmt, QueryContext::arc()).await
+        engine.planner().plan(&stmt, QueryContext::arc()).await
     }
 
     async fn query_plan_compare(sql: &str, expected: String) {

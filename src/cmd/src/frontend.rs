@@ -266,9 +266,10 @@ impl StartCommand {
         info!("Frontend start command: {:#?}", self);
         info!("Frontend options: {:#?}", opts);
 
+        let plugin_opts = opts.plugins;
         let opts = opts.component;
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &opts)
+        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
             .await
             .context(StartFrontendSnafu)?;
 
@@ -342,6 +343,8 @@ impl StartCommand {
         // Some queries are expected to take long time.
         let channel_config = ChannelConfig {
             timeout: None,
+            tcp_nodelay: opts.datanode.client.tcp_nodelay,
+            connect_timeout: Some(opts.datanode.client.connect_timeout),
             ..Default::default()
         };
         let client = NodeClients::new(channel_config);
@@ -472,7 +475,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
             .await
             .unwrap();
 

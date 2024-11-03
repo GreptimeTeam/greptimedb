@@ -37,9 +37,9 @@ pub struct ParserContext<'a> {
     pub(crate) sql: &'a str,
 }
 
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     /// Construct a new ParserContext.
-    pub fn new(dialect: &'a dyn Dialect, sql: &'a str) -> Result<ParserContext<'a>> {
+    pub fn new<'a>(dialect: &'a dyn Dialect, sql: &'a str) -> Result<ParserContext<'a>> {
         let parser = Parser::new(dialect)
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
@@ -55,7 +55,7 @@ impl<'a> ParserContext<'a> {
 
     /// Parses SQL with given dialect
     pub fn create_with_dialect(
-        sql: &'a str,
+        sql: &str,
         dialect: &dyn Dialect,
         _opts: ParseOptions,
     ) -> Result<Vec<Statement>> {
@@ -87,7 +87,7 @@ impl<'a> ParserContext<'a> {
         Ok(stmts)
     }
 
-    pub fn parse_table_name(sql: &'a str, dialect: &dyn Dialect) -> Result<ObjectName> {
+    pub fn parse_table_name(sql: &str, dialect: &dyn Dialect) -> Result<ObjectName> {
         let parser = Parser::new(dialect)
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
@@ -106,7 +106,7 @@ impl<'a> ParserContext<'a> {
         Ok(Self::canonicalize_object_name(raw_table_name))
     }
 
-    pub fn parse_function(sql: &'a str, dialect: &dyn Dialect) -> Result<Expr> {
+    pub fn parse_function(sql: &str, dialect: &dyn Dialect) -> Result<Expr> {
         let mut parser = Parser::new(dialect)
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
@@ -191,23 +191,20 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Parses MySQL style 'PREPARE stmt_name FROM stmt' into a (stmt_name, stmt) tuple.
-    pub fn parse_mysql_prepare_stmt(
-        sql: &'a str,
-        dialect: &dyn Dialect,
-    ) -> Result<(String, String)> {
+    pub fn parse_mysql_prepare_stmt(sql: &str, dialect: &dyn Dialect) -> Result<(String, String)> {
         ParserContext::new(dialect, sql)?.parse_mysql_prepare()
     }
 
     /// Parses MySQL style 'EXECUTE stmt_name USING param_list' into a stmt_name string and a list of parameters.
     pub fn parse_mysql_execute_stmt(
-        sql: &'a str,
+        sql: &str,
         dialect: &dyn Dialect,
     ) -> Result<(String, Vec<Expr>)> {
         ParserContext::new(dialect, sql)?.parse_mysql_execute()
     }
 
     /// Parses MySQL style 'DEALLOCATE stmt_name' into a stmt_name string.
-    pub fn parse_mysql_deallocate_stmt(sql: &'a str, dialect: &dyn Dialect) -> Result<String> {
+    pub fn parse_mysql_deallocate_stmt(sql: &str, dialect: &dyn Dialect) -> Result<String> {
         ParserContext::new(dialect, sql)?.parse_deallocate()
     }
 

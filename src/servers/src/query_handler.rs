@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //! All query handler traits for various request protocols, like SQL or GRPC.
+//!
 //! Instance that wishes to support certain request protocol, just implement the corresponding
 //! trait, the Server will handle codec for you.
 //!
@@ -131,6 +132,7 @@ pub trait OpenTelemetryProtocolHandler: LogHandler {
 }
 
 /// LogHandler is responsible for handling log related requests.
+///
 /// It should be able to insert logs and manage pipelines.
 /// The pipeline is a series of transformations that can be applied to logs.
 /// The pipeline is stored in the database and can be retrieved by name.

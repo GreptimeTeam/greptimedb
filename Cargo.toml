@@ -121,13 +121,13 @@ etcd-client = { version = "0.13" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "b4d301184eb0d01fd4d1042fcc7c5dfb54f3c1e3" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "255f87a3318ace3f88a67f76995a0e14910983f4" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
-jsonb = { git = "https://github.com/datafuselabs/jsonb.git", rev = "46ad50fc71cf75afbf98eec455f7892a6387c1fc", default-features = false }
+jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "46ad50fc71cf75afbf98eec455f7892a6387c1fc", default-features = false }
 lazy_static = "1.4"
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "a10facb353b41460eeb98578868ebf19c2084fac" }
 mockall = "0.11.4"
 moka = "0.12"
 notify = "6.1"
@@ -140,14 +140,16 @@ opentelemetry-proto = { version = "0.5", features = [
     "with-serde",
     "logs",
 ] }
+parking_lot = "0.12"
 parquet = { version = "51.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.4.1" }
+promql-parser = { version = "0.4.3", features = ["ser"] }
 prost = "0.12"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
+ratelimit = "0.9"
 regex = "1.8"
 regex-automata = { version = "0.4" }
 reqwest = { version = "0.12", default-features = false, features = [
@@ -167,7 +169,7 @@ schemars = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
-shadow-rs = "0.31"
+shadow-rs = "0.35"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
@@ -178,13 +180,16 @@ sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "5
 ] }
 strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
-tokio = { version = "1.36", features = ["full"] }
+tokio = { version = "1.40", features = ["full"] }
 tokio-postgres = "0.7"
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
 tonic = { version = "0.11", features = ["tls", "gzip", "zstd"] }
 tower = { version = "0.4" }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+typetag = "0.2"
 uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
 zstd = "0.13"
 
@@ -259,7 +264,7 @@ tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "80eb97c24c88af4dd9a86f8bbaf50e741d4eb8cd"
+rev = "a10facb353b41460eeb98578868ebf19c2084fac"
 
 [profile.release]
 debug = 1

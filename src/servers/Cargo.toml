@@ -72,7 +72,7 @@ openmetrics-parser = "0.4"
 # opensrv-mysql = "0.7.0"
 opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "6bbc3b65e6b19212c4f7fc4f40c20daf6f452deb" }
 opentelemetry-proto.workspace = true
-parking_lot = "0.12"
+parking_lot.workspace = true
 pgwire = { version = "0.25.0", default-features = false, features = ["server-api-ring"] }
 pin-project = "1.0"
 pipeline.workspace = true

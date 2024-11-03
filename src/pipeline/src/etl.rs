@@ -317,8 +317,33 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
         .context(IntermediateKeyIndexSnafu { kind, key })
 }
 
+/// SelectInfo is used to store the selected keys from OpenTelemetry record attrs
+#[derive(Default)]
+pub struct SelectInfo {
+    pub keys: Vec<String>,
+}
+
+/// Try to convert a string to SelectInfo
+/// The string should be a comma-separated list of keys
+/// example: "key1,key2,key3"
+/// The keys will be sorted and deduplicated
+impl From<String> for SelectInfo {
+    fn from(value: String) -> Self {
+        let mut keys: Vec<String> = value.split(',').map(|s| s.to_string()).sorted().collect();
+        keys.dedup();
+
+        SelectInfo { keys }
+    }
+}
+
+impl SelectInfo {
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+}
+
 pub enum PipelineWay {
-    Identity,
+    OtlpLog(Box<SelectInfo>),
     Custom(std::sync::Arc<Pipeline<crate::GreptimeTransformer>>),
 }
 

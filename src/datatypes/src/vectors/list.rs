@@ -157,7 +157,7 @@ pub struct ListIter<'a> {
 }
 
 impl<'a> ListIter<'a> {
-    fn new(vector: &'a ListVector) -> ListIter {
+    fn new(vector: &'a ListVector) -> ListIter<'a> {
         ListIter { vector, idx: 0 }
     }
 }

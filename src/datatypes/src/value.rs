@@ -1087,7 +1087,7 @@ macro_rules! impl_as_for_value_ref {
     };
 }
 
-impl<'a> ValueRef<'a> {
+impl ValueRef<'_> {
     define_data_type_func!(ValueRef);
 
     /// Returns true if this is null.
@@ -1214,13 +1214,13 @@ impl<'a> ValueRef<'a> {
     }
 }
 
-impl<'a> PartialOrd for ValueRef<'a> {
+impl PartialOrd for ValueRef<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a> Ord for ValueRef<'a> {
+impl Ord for ValueRef<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         impl_ord_for_value_like!(ValueRef, self, other)
     }
@@ -1347,7 +1347,7 @@ pub enum ListValueRef<'a> {
     Ref { val: &'a ListValue },
 }
 
-impl<'a> ListValueRef<'a> {
+impl ListValueRef<'_> {
     /// Convert self to [Value]. This method would clone the underlying data.
     fn to_value(self) -> Value {
         match self {
@@ -1365,7 +1365,7 @@ impl<'a> ListValueRef<'a> {
     }
 }
 
-impl<'a> Serialize for ListValueRef<'a> {
+impl Serialize for ListValueRef<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         match self {
             ListValueRef::Indexed { vector, idx } => match vector.get(*idx) {
@@ -1377,28 +1377,28 @@ impl<'a> Serialize for ListValueRef<'a> {
     }
 }
 
-impl<'a> PartialEq for ListValueRef<'a> {
+impl PartialEq for ListValueRef<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.to_value().eq(&other.to_value())
     }
 }
 
-impl<'a> Eq for ListValueRef<'a> {}
+impl Eq for ListValueRef<'_> {}
 
-impl<'a> Ord for ListValueRef<'a> {
+impl Ord for ListValueRef<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         // Respect the order of `Value` by converting into value before comparison.
         self.to_value().cmp(&other.to_value())
     }
 }
 
-impl<'a> PartialOrd for ListValueRef<'a> {
+impl PartialOrd for ListValueRef<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a> ValueRef<'a> {
+impl ValueRef<'_> {
     /// Returns the size of the underlying data in bytes,
     /// The size is estimated and only considers the data size.
     pub fn data_size(&self) -> usize {

@@ -15,6 +15,7 @@
 use clap::Parser;
 use common_config::Configurable;
 use common_runtime::global::RuntimeOptions;
+use plugins::PluginOptions;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Default, Debug, Clone)]
@@ -40,6 +41,8 @@ pub struct GlobalOptions {
 pub struct GreptimeOptions<T> {
     /// The runtime options.
     pub runtime: RuntimeOptions,
+    /// The plugin options.
+    pub plugins: Vec<PluginOptions>,
 
     /// The options of each component (like Datanode or Standalone) of GreptimeDB.
     #[serde(flatten)]

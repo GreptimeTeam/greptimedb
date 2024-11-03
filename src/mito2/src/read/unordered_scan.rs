@@ -26,6 +26,7 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
@@ -89,7 +90,7 @@ impl UnorderedScan {
             let range_meta = &stream_ctx.ranges[part_range_id];
             for index in &range_meta.row_group_indices {
                 if stream_ctx.is_mem_range_index(*index) {
-                    let stream = scan_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index);
+                    let stream = scan_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index, range_meta.time_range);
                     for await batch in stream {
                         yield batch;
                     }
@@ -129,6 +130,7 @@ impl UnorderedScan {
         );
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
+        let distinguish_range = self.properties.distinguish_partition_range();
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
@@ -138,6 +140,10 @@ impl UnorderedScan {
             for part_range in part_ranges {
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
+                #[cfg(debug_assertions)]
+                let mut checker = crate::read::BatchChecker::default()
+                    .with_start(Some(part_range.start))
+                    .with_end(Some(part_range.end));
 
                 let stream = Self::scan_partition_range(
                     stream_ctx.clone(),
@@ -150,6 +156,20 @@ impl UnorderedScan {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
 
+                    debug_assert!(!batch.is_empty());
+                    if batch.is_empty() {
+                        continue;
+                    }
+
+                    #[cfg(debug_assertions)]
+                    checker.ensure_part_range_batch(
+                        "UnorderedScan",
+                        stream_ctx.input.mapper.metadata().region_id,
+                        partition,
+                        part_range,
+                        &batch,
+                    );
+
                     let convert_start = Instant::now();
                     let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
                     metrics.convert_cost += convert_start.elapsed();
@@ -158,6 +178,14 @@ impl UnorderedScan {
                     metrics.yield_cost += yield_start.elapsed();
 
                     fetch_start = Instant::now();
+                }
+
+                // Yields an empty part to indicate this range is terminated.
+                // The query engine can use this to optimize some queries.
+                if distinguish_range {
+                    let yield_start = Instant::now();
+                    yield stream_ctx.input.mapper.empty_record_batch();
+                    metrics.yield_cost += yield_start.elapsed();
                 }
 
                 metrics.scan_cost += fetch_start.elapsed();
@@ -184,8 +212,13 @@ impl RegionScanner for UnorderedScan {
         self.stream_ctx.input.mapper.output_schema()
     }
 
-    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+    fn prepare(
+        &mut self,
+        ranges: Vec<Vec<PartitionRange>>,
+        distinguish_partition_range: bool,
+    ) -> Result<(), BoxedError> {
         self.properties.partitions = ranges;
+        self.properties.distinguish_partition_range = distinguish_partition_range;
         Ok(())
     }
 
@@ -196,6 +229,10 @@ impl RegionScanner for UnorderedScan {
     fn has_predicate(&self) -> bool {
         let predicate = self.stream_ctx.input.predicate();
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
+    }
+
+    fn metadata(&self) -> RegionMetadataRef {
+        self.stream_ctx.input.mapper.metadata().clone()
     }
 }
 

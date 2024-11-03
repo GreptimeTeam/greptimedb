@@ -25,7 +25,8 @@ use common_base::secrets::ExposeSecret;
 use common_config::Configurable;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
-use common_runtime::Builder as RuntimeBuilder;
+use common_runtime::runtime::BuilderBuild;
+use common_runtime::{Builder as RuntimeBuilder, Runtime};
 use common_telemetry::warn;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
@@ -494,7 +495,7 @@ pub async fn setup_grpc_server_with(
 ) -> (String, TestGuard, Arc<GrpcServer>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
-    let runtime = RuntimeBuilder::default()
+    let runtime: Runtime = RuntimeBuilder::default()
         .worker_threads(2)
         .thread_name("grpc-handlers")
         .build()

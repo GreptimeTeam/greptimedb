@@ -218,7 +218,7 @@ async fn execute_region_migration(ctx: FuzzContext, input: FuzzInput) -> Result<
     } in &migrations
     {
         let procedure_id =
-            migrate_region(&ctx.greptime, region_id.as_u64(), *from_peer, *to_peer, 120).await;
+            migrate_region(&ctx.greptime, region_id.as_u64(), *from_peer, *to_peer, 240).await;
         info!("Migrating region: {region_id} from {from_peer} to {to_peer}, procedure: {procedure_id}");
         procedure_ids.push(procedure_id);
     }
@@ -228,7 +228,7 @@ async fn execute_region_migration(ctx: FuzzContext, input: FuzzInput) -> Result<
         info!("Waits for migration: {migration:?}");
         let region_id = migration.region_id.as_u64();
         wait_condition_fn(
-            Duration::from_secs(120),
+            Duration::from_secs(240),
             || {
                 let greptime = ctx.greptime.clone();
                 let procedure_id = procedure_id.to_string();

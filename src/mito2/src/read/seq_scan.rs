@@ -27,6 +27,7 @@ use common_telemetry::tracing;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
@@ -203,6 +204,7 @@ impl SeqScan {
         let semaphore = self.semaphore.clone();
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
+        let distinguish_range = self.properties.distinguish_partition_range();
         let part_metrics = PartitionMetrics::new(
             self.stream_ctx.input.mapper.metadata().region_id,
             partition,
@@ -230,6 +232,11 @@ impl SeqScan {
                 let cache = stream_ctx.input.cache_manager.as_deref();
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
+                #[cfg(debug_assertions)]
+                let mut checker = crate::read::BatchChecker::default()
+                    .with_start(Some(part_range.start))
+                    .with_end(Some(part_range.end));
+
                 while let Some(batch) = reader
                     .next_batch()
                     .await
@@ -240,6 +247,20 @@ impl SeqScan {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
 
+                    debug_assert!(!batch.is_empty());
+                    if batch.is_empty() {
+                        continue;
+                    }
+
+                    #[cfg(debug_assertions)]
+                    checker.ensure_part_range_batch(
+                        "SeqScan",
+                        stream_ctx.input.mapper.metadata().region_id,
+                        partition,
+                        part_range,
+                        &batch,
+                    );
+
                     let convert_start = Instant::now();
                     let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
                     metrics.convert_cost += convert_start.elapsed();
@@ -249,6 +270,15 @@ impl SeqScan {
 
                     fetch_start = Instant::now();
                 }
+
+                // Yields an empty part to indicate this range is terminated.
+                // The query engine can use this to optimize some queries.
+                if distinguish_range {
+                    let yield_start = Instant::now();
+                    yield stream_ctx.input.mapper.empty_record_batch();
+                    metrics.yield_cost += yield_start.elapsed();
+                }
+
                 metrics.scan_cost += fetch_start.elapsed();
                 part_metrics.merge_metrics(&metrics);
             }
@@ -278,14 +308,23 @@ impl RegionScanner for SeqScan {
         self.scan_partition_impl(partition)
     }
 
-    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+    fn prepare(
+        &mut self,
+        ranges: Vec<Vec<PartitionRange>>,
+        distinguish_partition_range: bool,
+    ) -> Result<(), BoxedError> {
         self.properties.partitions = ranges;
+        self.properties.distinguish_partition_range = distinguish_partition_range;
         Ok(())
     }
 
     fn has_predicate(&self) -> bool {
         let predicate = self.stream_ctx.input.predicate();
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
+    }
+
+    fn metadata(&self) -> RegionMetadataRef {
+        self.stream_ctx.input.mapper.metadata().clone()
     }
 }
 
@@ -321,7 +360,12 @@ fn build_sources(
     sources.reserve(range_meta.row_group_indices.len());
     for index in &range_meta.row_group_indices {
         let stream = if stream_ctx.is_mem_range_index(*index) {
-            let stream = scan_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index);
+            let stream = scan_mem_ranges(
+                stream_ctx.clone(),
+                part_metrics.clone(),
+                *index,
+                range_meta.time_range,
+            );
             Box::pin(stream) as _
         } else {
             let read_type = if compaction {

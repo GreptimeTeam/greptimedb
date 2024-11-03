@@ -53,7 +53,7 @@ impl Display for ViewInfoKey {
     }
 }
 
-impl<'a> MetadataKey<'a, ViewInfoKey> for ViewInfoKey {
+impl MetadataKey<'_, ViewInfoKey> for ViewInfoKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
@@ -139,6 +139,8 @@ pub struct ViewInfoManager {
 
 pub type ViewInfoManagerRef = Arc<ViewInfoManager>;
 
+pub type ViewInfoValueDecodeResult = Result<Option<DeserializedValueWithBytes<ViewInfoValue>>>;
+
 impl ViewInfoManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
@@ -151,9 +153,7 @@ impl ViewInfoManager {
         view_info_value: &ViewInfoValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<ViewInfoValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> ViewInfoValueDecodeResult,
     )> {
         let key = ViewInfoKey::new(view_id);
         let raw_key = key.to_bytes();
@@ -175,9 +175,7 @@ impl ViewInfoManager {
         new_view_info_value: &ViewInfoValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<ViewInfoValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> ViewInfoValueDecodeResult,
     )> {
         let key = ViewInfoKey::new(view_id);
         let raw_key = key.to_bytes();

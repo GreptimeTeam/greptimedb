@@ -60,6 +60,7 @@ macro_rules! sql_tests {
                 $service,
 
                 test_mysql_auth,
+                test_mysql_stmts,
                 test_mysql_crud,
                 test_mysql_timezone,
                 test_mysql_async_timestamp,
@@ -133,6 +134,25 @@ pub async fn test_mysql_auth(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_mysql_stmts(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let (addr, mut guard, fe_mysql_server) = setup_mysql_server(store_type, "sql_crud").await;
+
+    let mut conn = MySqlConnection::connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    conn.execute("SET SESSION TRANSACTION READ ONLY")
+        .await
+        .unwrap();
+
+    conn.execute("SET TRANSACTION READ ONLY").await.unwrap();
+
+    let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
+}
+
 pub async fn test_mysql_crud(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
@@ -145,7 +165,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .unwrap();
 
     sqlx::query(
-        "create table demo(i bigint, ts timestamp time index default current_timestamp, d date default null, dt datetime default null, b blob default null)",
+        "create table demo(i bigint, ts timestamp time index default current_timestamp, d date default null, dt datetime default null, b blob default null, j json default null)",
     )
     .execute(&pool)
     .await
@@ -158,18 +178,30 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         let hello = format!("hello{i}");
         let bytes = hello.as_bytes();
-        sqlx::query("insert into demo values(?, ?, ?, ?, ?)")
+        let jsons = serde_json::json!({
+            "code": i,
+            "success": true,
+            "payload": {
+                "features": [
+                    "serde",
+                    "json"
+                ],
+                "homepage": null
+            }
+        });
+        sqlx::query("insert into demo values(?, ?, ?, ?, ?, ?)")
             .bind(i)
             .bind(i)
             .bind(d)
             .bind(dt)
             .bind(bytes)
+            .bind(jsons)
             .execute(&pool)
             .await
             .unwrap();
     }
 
-    let rows = sqlx::query("select i, d, dt, b from demo")
+    let rows = sqlx::query("select i, d, dt, b, j from demo")
         .fetch_all(&pool)
         .await
         .unwrap();
@@ -180,6 +212,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let d: NaiveDate = row.get("d");
         let dt: DateTime<Utc> = row.get("dt");
         let bytes: Vec<u8> = row.get("b");
+        let json: serde_json::Value = row.get("j");
         assert_eq!(ret, i as i64);
         let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         assert_eq!(expected_d, d);
@@ -194,6 +227,18 @@ pub async fn test_mysql_crud(store_type: StorageType) {
             format!("{}", dt.format("%Y-%m-%d %H:%M:%S"))
         );
         assert_eq!(format!("hello{i}"), String::from_utf8_lossy(&bytes));
+        let expected_j = serde_json::json!({
+            "code": i,
+            "success": true,
+            "payload": {
+                "features": [
+                    "serde",
+                    "json"
+                ],
+                "homepage": null
+            }
+        });
+        assert_eq!(json, expected_j);
     }
 
     let rows = sqlx::query("select i from demo where i=?")
@@ -396,7 +441,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         let dt = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
         let bytes = "hello".as_bytes();
         let json = serde_json::json!({
-            "code": 200,
+            "code": i,
             "success": true,
             "payload": {
                 "features": [
@@ -444,7 +489,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         assert_eq!("hello".as_bytes(), bytes);
 
         let expected_j = serde_json::json!({
-            "code": 200,
+            "code": i,
             "success": true,
             "payload": {
                 "features": [

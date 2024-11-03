@@ -116,6 +116,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                     ConcreteDataType::binary_datatype()
                 }
             }
+            ColumnDataType::Json => ConcreteDataType::json_datatype(),
             ColumnDataType::String => ConcreteDataType::string_datatype(),
             ColumnDataType::Date => ConcreteDataType::date_datatype(),
             ColumnDataType::Datetime => ConcreteDataType::datetime_datatype(),
@@ -415,6 +416,10 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
         },
         ColumnDataType::Decimal128 => Values {
             decimal128_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::Json => Values {
+            string_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
     }

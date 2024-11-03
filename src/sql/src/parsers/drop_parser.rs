@@ -22,7 +22,7 @@ use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
 use crate::statements::statement::Statement;
 
 /// DROP statement parser implementation
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_drop(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
         match self.parser.peek_token().token {

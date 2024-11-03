@@ -523,6 +523,9 @@ impl RegionMetadataBuilder {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ChangeColumnTypes { columns } => self.change_column_types(columns),
+            AlterKind::ChangeRegionOptions { options: _ } => {
+                // nothing to be done with RegionMetadata
+            }
         }
         Ok(self)
     }
@@ -735,6 +738,14 @@ pub enum MetadataError {
     #[snafu(display("Failed to convert column schema"))]
     ConvertColumnSchema {
         source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid region option change request, key: {}, value: {}", key, value))]
+    InvalidRegionOptionChangeRequest {
+        key: String,
+        value: String,
         #[snafu(implicit)]
         location: Location,
     },

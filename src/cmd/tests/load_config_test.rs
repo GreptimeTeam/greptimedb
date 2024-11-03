@@ -20,7 +20,7 @@ use common_config::Configurable;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
-use common_telemetry::logging::{LoggingOptions, DEFAULT_OTLP_ENDPOINT};
+use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, DEFAULT_OTLP_ENDPOINT};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
@@ -159,7 +159,19 @@ fn test_load_metasrv_example_config() {
                 level: Some("info".to_string()),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
+                slow_query: SlowQueryOptions {
+                    enable: false,
+                    threshold: Some(Duration::from_secs(10)),
+                    sample_ratio: Some(1.0),
+                },
                 ..Default::default()
+            },
+            datanode: meta_srv::metasrv::DatanodeOptions {
+                client: meta_srv::metasrv::DatanodeClientOptions {
+                    timeout: Duration::from_secs(10),
+                    connect_timeout: Duration::from_secs(10),
+                    tcp_nodelay: true,
+                },
             },
             export_metrics: ExportMetricsOption {
                 self_import: Some(Default::default()),

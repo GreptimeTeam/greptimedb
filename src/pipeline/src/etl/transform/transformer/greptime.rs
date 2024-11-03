@@ -207,11 +207,11 @@ impl Transformer for GreptimeTransformer {
 /// As you traverse the user input JSON, this will change.
 /// It will record a superset of all user input schemas.
 #[derive(Debug, Default)]
-struct SchemaInfo {
+pub struct SchemaInfo {
     /// schema info
-    schema: Vec<ColumnSchema>,
+    pub schema: Vec<ColumnSchema>,
     /// index of the column name
-    index: HashMap<String, usize>,
+    pub index: HashMap<String, usize>,
 }
 
 fn resolve_schema(

@@ -74,7 +74,7 @@ impl Scanner {
 
     /// Returns a [RegionScanner] to scan the region.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
-    pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
+    pub(crate) fn region_scanner(self) -> Result<RegionScannerRef> {
         match self {
             Scanner::Seq(seq_scan) => Ok(Box::new(seq_scan)),
             Scanner::Unordered(unordered_scan) => Ok(Box::new(unordered_scan)),

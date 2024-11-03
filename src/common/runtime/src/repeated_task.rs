@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{IllegalStateSnafu, Result, WaitGcTaskStopSnafu};
+use crate::runtime::RuntimeTrait;
 use crate::Runtime;
 
 /// Task to execute repeatedly.

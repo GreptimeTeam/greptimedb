@@ -62,7 +62,8 @@ const TARGET_FIELDS_NAME: &str = "target_fields";
 // const ON_FAILURE_NAME: &str = "on_failure";
 // const TAG_NAME: &str = "tag";
 
-/// Processor trait defines the interface for all processors
+/// Processor trait defines the interface for all processors.
+///
 /// A processor is a transformation that can be applied to a field in a document
 /// It can be used to extract, transform, or enrich data
 /// Now Processor only have one input field. In the future, we may support multiple input fields.

@@ -29,4 +29,4 @@ futures = "0.3"
 meta-srv = { workspace = true, features = ["mock"] }
 tower.workspace = true
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber.workspace = true

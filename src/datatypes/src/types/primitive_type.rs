@@ -83,9 +83,10 @@ pub trait LogicalPrimitiveType: 'static + Sized {
     fn cast_value_ref(value: ValueRef) -> Result<Option<Self::Wrapper>>;
 }
 
-/// A new type for [WrapperType], complement the `Ord` feature for it. Wrapping non ordered
-/// primitive types like `f32` and `f64` in `OrdPrimitive` can make them be used in places that
-/// require `Ord`. For example, in `Median` UDAFs.
+/// A new type for [WrapperType], complement the `Ord` feature for it.
+///
+/// Wrapping non ordered primitive types like `f32` and `f64` in `OrdPrimitive`
+/// can make them be used in places that require `Ord`. For example, in `Median` UDAFs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrdPrimitive<T: WrapperType>(pub T);
 

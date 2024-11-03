@@ -335,7 +335,7 @@ impl TryFrom<&yaml_rust::Yaml> for Value {
     }
 }
 
-impl<'a> From<&Value> for JsonbValue<'a> {
+impl From<&Value> for JsonbValue<'_> {
     fn from(value: &Value) -> Self {
         match value {
             Value::Null => JsonbValue::Null,
@@ -373,7 +373,7 @@ impl<'a> From<&Value> for JsonbValue<'a> {
     }
 }
 
-impl<'a> From<Value> for JsonbValue<'a> {
+impl From<Value> for JsonbValue<'_> {
     fn from(value: Value) -> Self {
         match value {
             Value::Null => JsonbValue::Null,

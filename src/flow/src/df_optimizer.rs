@@ -106,7 +106,7 @@ pub async fn sql_to_flow_plan(
         .context(ExternalSnafu)?;
     let plan = engine
         .planner()
-        .plan(stmt, query_ctx)
+        .plan(&stmt, query_ctx)
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
@@ -273,7 +273,7 @@ impl<'a> ExpandAvgRewriter<'a> {
     }
 }
 
-impl<'a> TreeNodeRewriter for ExpandAvgRewriter<'a> {
+impl TreeNodeRewriter for ExpandAvgRewriter<'_> {
     type Node = Expr;
 
     fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>, DataFusionError> {

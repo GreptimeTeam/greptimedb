@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use auth::UserProviderRef;
+use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;

@@ -55,6 +55,7 @@ pub trait ClusterInfo {
 }
 
 /// The key of [NodeInfo] in the storage. The format is `__meta_cluster_node_info-{cluster_id}-{role}-{node_id}`.
+///
 /// This key cannot be used to describe the `Metasrv` because the `Metasrv` does not have
 /// a `cluster_id`, it serves multiple clusters.
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
