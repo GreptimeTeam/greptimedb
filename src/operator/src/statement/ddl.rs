@@ -26,7 +26,7 @@ use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::ExecutorContext;
 use common_meta::instruction::CacheIdent;
-use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
+use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::NAME_PATTERN;
 use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
@@ -177,15 +177,8 @@ impl StatementExecutor {
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
-            let catalog_name = &create_table.catalog_name;
-            let schema_name = &create_table.schema_name;
             return self
-                .create_logical_tables(
-                    catalog_name,
-                    schema_name,
-                    &[create_table.clone()],
-                    query_ctx,
-                )
+                .create_logical_tables(&[create_table.clone()], query_ctx)
                 .await?
                 .into_iter()
                 .next()
@@ -195,22 +188,6 @@ impl StatementExecutor {
         }
 
         let _timer = crate::metrics::DIST_CREATE_TABLE.start_timer();
-        let schema = self
-            .table_metadata_manager
-            .schema_manager()
-            .get(SchemaNameKey::new(
-                &create_table.catalog_name,
-                &create_table.schema_name,
-            ))
-            .await
-            .context(TableMetadataManagerSnafu)?;
-
-        let Some(schema_opts) = schema else {
-            return SchemaNotFoundSnafu {
-                schema_info: &create_table.schema_name,
-            }
-            .fail();
-        };
 
         // if table exists.
         if let Some(table) = self
@@ -252,7 +229,7 @@ impl StatementExecutor {
         );
 
         let (partitions, partition_cols) = parse_partitions(create_table, partitions, &query_ctx)?;
-        let mut table_info = create_table_info(create_table, partition_cols, schema_opts)?;
+        let mut table_info = create_table_info(create_table, partition_cols)?;
 
         let resp = self
             .create_table_procedure(
@@ -285,8 +262,6 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn create_logical_tables(
         &self,
-        catalog_name: &str,
-        schema_name: &str,
         create_table_exprs: &[CreateTableExpr],
         query_context: QueryContextRef,
     ) -> Result<Vec<TableRef>> {
@@ -308,19 +283,9 @@ impl StatementExecutor {
             );
         }
 
-        let schema = self
-            .table_metadata_manager
-            .schema_manager()
-            .get(SchemaNameKey::new(catalog_name, schema_name))
-            .await
-            .context(TableMetadataManagerSnafu)?
-            .context(SchemaNotFoundSnafu {
-                schema_info: schema_name,
-            })?;
-
         let mut raw_tables_info = create_table_exprs
             .iter()
-            .map(|create| create_table_info(create, vec![], schema.clone()))
+            .map(|create| create_table_info(create, vec![]))
             .collect::<Result<Vec<_>>>()?;
         let tables_data = create_table_exprs
             .iter()
@@ -1273,7 +1238,6 @@ fn parse_partitions(
 fn create_table_info(
     create_table: &CreateTableExpr,
     partition_columns: Vec<String>,
-    schema_opts: SchemaNameValue,
 ) -> Result<RawTableInfo> {
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
@@ -1322,7 +1286,6 @@ fn create_table_info(
 
     let table_options = TableOptions::try_from_iter(&create_table.table_options)
         .context(UnrecognizedTableOptionSnafu)?;
-    let table_options = merge_options(table_options, schema_opts);
 
     let meta = RawTableMeta {
         schema: raw_schema,
@@ -1505,12 +1468,6 @@ fn convert_value(
 ) -> Result<Value> {
     sql_value_to_value("<NONAME>", &data_type, value, Some(timezone), unary_op)
         .context(ParseSqlValueSnafu)
-}
-
-/// Merge table level table options with schema level table options.
-fn merge_options(mut table_opts: TableOptions, schema_opts: SchemaNameValue) -> TableOptions {
-    table_opts.ttl = table_opts.ttl.or(schema_opts.ttl);
-    table_opts
 }
 
 #[cfg(test)]

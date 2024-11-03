@@ -177,8 +177,7 @@ pub async fn open_compaction_region(
         current_version.options.ttl,
         &schema_metadata_manager,
     )
-    .await
-    .expect("===");
+    .await?;
     Ok(CompactionRegion {
         region_id: req.region_id,
         region_options: req.region_options.clone(),

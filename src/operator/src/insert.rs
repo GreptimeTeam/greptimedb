@@ -758,10 +758,8 @@ impl Inserter {
         ctx: &QueryContextRef,
         statement_executor: &StatementExecutor,
     ) -> Result<Vec<TableRef>> {
-        let catalog_name = ctx.current_catalog();
-        let schema_name = ctx.current_schema();
         let res = statement_executor
-            .create_logical_tables(catalog_name, &schema_name, &create_table_exprs, ctx.clone())
+            .create_logical_tables(&create_table_exprs, ctx.clone())
             .await;
 
         match res {
