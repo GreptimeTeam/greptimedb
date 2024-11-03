@@ -47,7 +47,7 @@ impl SchemaMetadataManager {
         }
     }
 
-    /// Gets schema metadata by table id.
+    /// Gets schema options by table id.
     pub async fn get_schema_options_by_table_id(
         &self,
         table_id: TableId,

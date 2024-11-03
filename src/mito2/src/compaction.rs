@@ -49,8 +49,8 @@ use crate::compaction::picker::{new_picker, CompactionTask};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
-    CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu,
-    RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu,
+    CompactRegionSnafu, Error, GetSchemaMetadataSnafu, RegionClosedSnafu, RegionDroppedSnafu,
+    RegionTruncatedSnafu, RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu,
 };
 use crate::metrics::COMPACTION_STAGE_ELAPSED;
 use crate::read::projection::ProjectionMapper;
@@ -434,6 +434,7 @@ impl PendingCompaction {
     }
 }
 
+/// Finds TTL of table by first examine table options then database options.
 async fn find_ttl(
     table_id: TableId,
     table_ttl: Option<Duration>,
@@ -446,7 +447,7 @@ async fn find_ttl(
     let ttl = schema_metadata_manager
         .get_schema_options_by_table_id(table_id)
         .await
-        .expect("Failed to get table ")
+        .context(GetSchemaMetadataSnafu)?
         .and_then(|options| options.ttl);
     Ok(ttl)
 }
