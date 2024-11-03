@@ -90,7 +90,7 @@ use crate::error::{
 };
 use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
-use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
+use crate::read::scan_region::{ScanParallelism, ScanRegion, Scanner};
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::wal::entry_distributor::{
     build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
@@ -427,7 +427,7 @@ impl EngineInner {
         let version = region.version();
         // Get cache.
         let cache_manager = self.workers.cache_manager();
-        let scan_parallelism = ScanParallism {
+        let scan_parallelism = ScanParallelism {
             parallelism: self.config.scan_parallelism,
             channel_size: self.config.parallel_scan_channel_size,
         };
