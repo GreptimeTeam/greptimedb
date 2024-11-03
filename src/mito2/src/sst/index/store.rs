@@ -265,7 +265,7 @@ pub(crate) struct InstrumentedRangeReader<'a> {
 }
 
 #[async_trait]
-impl<'a> RangeReader for InstrumentedRangeReader<'a> {
+impl RangeReader for InstrumentedRangeReader<'_> {
     async fn metadata(&mut self) -> io::Result<Metadata> {
         let stat = self.store.stat(&self.path).await?;
         Ok(Metadata {

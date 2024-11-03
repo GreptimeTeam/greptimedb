@@ -19,14 +19,14 @@ use async_compression::futures::bufread::ZstdDecoder;
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes};
 use common_base::range_read::{AsyncReadAdapter, Metadata, RangeReader};
-use futures::io::{BufReader, Cursor};
+use futures::io::BufReader;
 use futures::{AsyncRead, AsyncWrite};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::blob_metadata::{BlobMetadata, CompressionCodec};
 use crate::error::{
     BlobIndexOutOfBoundSnafu, BlobNotFoundSnafu, DeserializeJsonSnafu, FileKeyNotMatchSnafu,
-    Result, UnsupportedDecompressionSnafu, WriteSnafu,
+    MetadataSnafu, ReadSnafu, Result, UnsupportedDecompressionSnafu, WriteSnafu,
 };
 use crate::file_format::reader::{AsyncReader, PuffinFileReader};
 use crate::partial_reader::PartialReader;
@@ -134,16 +134,12 @@ where
     F: PuffinFileAccessor + Clone,
 {
     async fn init_blob_to_stager(
-        mut reader: PuffinFileReader<F::Reader>,
+        reader: PuffinFileReader<F::Reader>,
         blob_metadata: BlobMetadata,
         mut writer: BoxWriter,
     ) -> Result<u64> {
-        let mut reader = reader.blob_reader(&blob_metadata)?;
-        // let m = reader.metadata().await.unwrap();
-        // let buf = reader.read(0..m.content_length).await.unwrap();
-        // let buf = buf.to_vec();
-        // let reader = AsyncReadAdapter::new(buf);
-        let reader = AsyncReadAdapter::new(reader);
+        let reader = reader.into_blob_reader(&blob_metadata);
+        let reader = AsyncReadAdapter::new(reader).await.context(MetadataSnafu)?;
         let compression = blob_metadata.compression_codec;
         let size = Self::handle_decompress(reader, &mut writer, compression).await?;
         Ok(size)
@@ -166,9 +162,12 @@ where
             .context(BlobNotFoundSnafu { blob: key })?;
 
         let mut reader = file.blob_reader(blob_metadata)?;
-        let meta = reader.metadata().await.unwrap();
-        let buf = reader.read(0..meta.content_length).await.unwrap();
-        let dir_meta: DirMetadata = serde_json::from_slice(&*buf).context(DeserializeJsonSnafu)?;
+        let meta = reader.metadata().await.context(MetadataSnafu)?;
+        let buf = reader
+            .read(0..meta.content_length)
+            .await
+            .context(ReadSnafu)?;
+        let dir_meta: DirMetadata = serde_json::from_slice(&buf).context(DeserializeJsonSnafu)?;
 
         let mut tasks = vec![];
         for file_meta in dir_meta.files {
@@ -192,7 +191,7 @@ where
             let writer = writer_provider.writer(&file_meta.relative_path).await?;
             let task = common_runtime::spawn_global(async move {
                 let reader = PuffinFileReader::new(reader).into_blob_reader(&blob_meta);
-                let reader = AsyncReadAdapter::new(reader);
+                let reader = AsyncReadAdapter::new(reader).await.context(MetadataSnafu)?;
                 let compression = blob_meta.compression_codec;
                 let size = Self::handle_decompress(reader, writer, compression).await?;
                 Ok(size)

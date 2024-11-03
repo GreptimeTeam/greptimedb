@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_base::range_read::{RangeReader, TokioFileReader};
+use common_base::range_read::{FileReader, RangeReader};
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt as _;
@@ -43,7 +43,7 @@ async fn new_bounded_stager(prefix: &str, capacity: u64) -> (TempDir, Arc<Bounde
 #[tokio::test]
 async fn test_put_get_file() {
     let capicities = [1, 16, u64::MAX];
-    let compression_codecs = [None];
+    let compression_codecs = [None, Some(CompressionCodec::Zstd)];
 
     for capacity in capicities {
         for compression_codec in compression_codecs {
@@ -385,14 +385,13 @@ impl MockFileAccessor {
 
 #[async_trait]
 impl PuffinFileAccessor for MockFileAccessor {
-    type Reader = TokioFileReader;
+    type Reader = FileReader;
     type Writer = Compat<File>;
 
     async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader> {
-        let f = tokio::fs::File::open(self.tempdir.path().join(puffin_file_name))
+        Ok(FileReader::new(self.tempdir.path().join(puffin_file_name))
             .await
-            .unwrap();
-        Ok(TokioFileReader::new(f))
+            .unwrap())
     }
 
     async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer> {

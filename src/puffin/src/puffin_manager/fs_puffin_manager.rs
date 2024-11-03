@@ -20,8 +20,8 @@ use async_trait::async_trait;
 pub use reader::FsPuffinReader;
 pub use writer::FsPuffinWriter;
 
-use super::file_accessor::PuffinFileAccessor;
 use crate::error::Result;
+use crate::puffin_manager::file_accessor::PuffinFileAccessor;
 use crate::puffin_manager::stager::Stager;
 use crate::puffin_manager::PuffinManager;
 

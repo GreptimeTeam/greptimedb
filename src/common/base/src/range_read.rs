@@ -12,14 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
 use std::io;
 use std::ops::Range;
-use std::task::Poll;
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes};
+use futures::AsyncRead;
 use pin_project::pin_project;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+use tokio::sync::Mutex;
 
 /// `Metadata` contains the metadata of a source.
 pub struct Metadata {
@@ -82,57 +88,95 @@ impl<R: ?Sized + RangeReader> RangeReader for &mut R {
     }
 }
 
-/// `AsyncReadAdapter` adapts an `AsyncRead` to a `RangeReader`.
+/// `AsyncReadAdapter` adapts a `RangeReader` to an `AsyncRead`.
 #[pin_project]
 pub struct AsyncReadAdapter<R> {
-    #[pin]
-    reader: R,
+    /// The inner `RangeReader`.
+    /// Use `Mutex` to get rid of the borrow checker issue.
+    inner: Arc<Mutex<R>>,
+
+    /// The current position from the view of the reader.
     position: u64,
+
+    /// The buffer for the read bytes.
     buffer: Vec<u8>,
+
+    /// The length of the content.
+    content_length: u64,
+
+    /// The future for reading the next bytes.
+    #[pin]
+    read_fut: Option<Pin<Box<dyn Future<Output = io::Result<Bytes>> + Send>>>,
 }
 
-impl<R: RangeReader> AsyncReadAdapter<R> {
-    /// Creates a new `AsyncReadAdapter` with the given `RangeReader`.
-    pub fn new(reader: R) -> Self {
-        Self {
-            reader,
+impl<R: RangeReader + 'static> AsyncReadAdapter<R> {
+    pub async fn new(inner: R) -> io::Result<Self> {
+        let mut inner = inner;
+        let metadata = inner.metadata().await?;
+        Ok(AsyncReadAdapter {
+            inner: Arc::new(Mutex::new(inner)),
             position: 0,
             buffer: Vec::new(),
-        }
+            content_length: metadata.content_length,
+            read_fut: None,
+        })
     }
 }
 
-impl<R: RangeReader> futures::AsyncRead for AsyncReadAdapter<R> {
+impl<R: RangeReader + 'static> AsyncRead for AsyncReadAdapter<R> {
     fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &mut [u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
+    ) -> Poll<io::Result<usize>> {
         let mut this = self.as_mut().project();
 
-        if this.buffer.is_empty() {
-            let range = *this.position..(*this.position + buf.len() as u64);
-            let mut bytes = this.reader.read(range);
-            let poll = bytes.as_mut().poll(cx);
-            let r = match poll {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(r) => r,
-            };
-            match r {
-                Ok(bytes) => {
-                    this.buffer.extend_from_slice(&bytes);
-                }
-                Err(e) => return Poll::Ready(Err(e)),
-            }
+        if *this.position >= *this.content_length {
+            return Poll::Ready(Ok(0));
         }
 
-        // Copy data from the internal buffer to the provided buffer
-        let len = std::cmp::min(buf.len(), self.buffer.len());
-        buf[..len].copy_from_slice(&self.buffer[..len]);
-        self.buffer.drain(..len);
-        self.position += len as u64;
+        if !this.buffer.is_empty() {
+            let to_read = this.buffer.len().min(buf.len());
+            buf[..to_read].copy_from_slice(&this.buffer[..to_read]);
+            this.buffer.drain(..to_read);
+            *this.position += to_read as u64;
+            return Poll::Ready(Ok(to_read));
+        }
 
-        Poll::Ready(Ok(len))
+        if this.read_fut.is_none() {
+            let range = *this.position..*this.content_length;
+            let inner = this.inner.clone();
+            let fut = async move {
+                let mut inner = inner.lock().await;
+                inner.read(range).await
+            };
+
+            *this.read_fut = Some(Box::pin(fut));
+        }
+
+        match this
+            .read_fut
+            .as_mut()
+            .as_pin_mut()
+            .expect("checked above")
+            .poll(cx)
+        {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(bytes)) => {
+                *this.read_fut = None;
+
+                if !bytes.is_empty() {
+                    this.buffer.extend_from_slice(&bytes);
+                    self.poll_read(cx, buf)
+                } else {
+                    Poll::Ready(Ok(0))
+                }
+            }
+            Poll::Ready(Err(e)) => {
+                *this.read_fut = None;
+                Poll::Ready(Err(e))
+            }
+        }
     }
 }
 
@@ -153,50 +197,53 @@ impl RangeReader for Vec<u8> {
     }
 }
 
-pub struct TokioFileReader {
+/// `FileReader` is a `RangeReader` for reading a file.
+pub struct FileReader {
+    content_length: u64,
+    position: u64,
     file: tokio::fs::File,
 }
 
-impl TokioFileReader {
-    pub fn new(file: tokio::fs::File) -> Self {
-        Self { file }
+impl FileReader {
+    /// Creates a new `FileReader` for the file at the given path.
+    pub async fn new(path: impl AsRef<Path>) -> io::Result<Self> {
+        let file = tokio::fs::File::open(path).await?;
+        let metadata = file.metadata().await?;
+        Ok(FileReader {
+            content_length: metadata.len(),
+            position: 0,
+            file,
+        })
     }
 }
 
 #[async_trait]
-impl RangeReader for TokioFileReader {
+impl RangeReader for FileReader {
     async fn metadata(&mut self) -> io::Result<Metadata> {
-        let metadata = self.file.metadata().await?;
         Ok(Metadata {
-            content_length: metadata.len(),
+            content_length: self.content_length,
         })
     }
 
     async fn read(&mut self, mut range: Range<u64>) -> io::Result<Bytes> {
-        // let metadata = self.metadata().await.unwrap();
-        // range.end = range.end.min(metadata.content_length);
+        if range.start != self.position {
+            self.file.seek(io::SeekFrom::Start(range.start)).await?;
+            self.position = range.start;
+        }
 
-        // let mut buf = vec![0; (range.end - range.start) as usize];
-        // self.seek(io::SeekFrom::Start(range.start)).await?;
-        // self.read_exact(&mut buf).await?;
-        // if range != (4..26) {
-        //     let mut buf = vec![0; (range.end - range.start) as usize];
-        //     self.seek(io::SeekFrom::Start(range.start)).await?;
-        //     self.read_exact(&mut buf).await?;
-        //     return Ok(Bytes::from(buf));
-        // }
-        // self.seek(io::SeekFrom::Start(0)).await?;
+        range.end = range.end.min(self.content_length);
+        if range.end <= self.position {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Start of range is out of bounds",
+            ));
+        }
 
-        // let mut buf = vec![0; 32];
-        // let _ = self.read_exact(&mut buf).await.unwrap();
-        // let b = &buf[4..26];
-        // Ok(Bytes::copy_from_slice(b))
-
-        let metadata = self.metadata().await.unwrap();
-        range.end = range.end.min(metadata.content_length);
         let mut buf = vec![0; (range.end - range.start) as usize];
-        self.file.seek(io::SeekFrom::Start(range.start)).await?;
+
         self.file.read_exact(&mut buf).await?;
+        self.position = range.end;
+
         Ok(Bytes::from(buf))
     }
 }

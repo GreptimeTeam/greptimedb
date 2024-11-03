@@ -17,7 +17,7 @@ use std::fs::File;
 use std::io::{Cursor, Read};
 use std::vec;
 
-use common_base::range_read::{RangeReader, TokioFileReader};
+use common_base::range_read::{FileReader, RangeReader};
 use futures::io::Cursor as AsyncCursor;
 
 use crate::file_format::reader::{AsyncReader, PuffinFileReader, SyncReader};
@@ -38,8 +38,7 @@ fn test_read_empty_puffin_sync() {
 async fn test_read_empty_puffin_async() {
     let path = "src/tests/resources/empty-puffin-uncompressed.puffin";
 
-    let file = tokio::fs::File::open(path).await.unwrap();
-    let reader = TokioFileReader::new(file);
+    let reader = FileReader::new(path).await.unwrap();
     let mut reader = PuffinFileReader::new(reader);
     let metadata = reader.metadata().await.unwrap();
     assert_eq!(metadata.properties.len(), 0);
@@ -85,8 +84,7 @@ fn test_sample_metric_data_puffin_sync() {
 async fn test_sample_metric_data_puffin_async() {
     let path = "src/tests/resources/sample-metric-data-uncompressed.puffin";
 
-    let file = tokio::fs::File::open(path).await.unwrap();
-    let reader = TokioFileReader::new(file);
+    let reader = FileReader::new(path).await.unwrap();
     let mut reader = PuffinFileReader::new(reader);
     let metadata = reader.metadata().await.unwrap();
 

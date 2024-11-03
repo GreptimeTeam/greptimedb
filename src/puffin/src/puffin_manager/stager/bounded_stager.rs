@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use async_walkdir::{Filtering, WalkDir};
 use base64::prelude::BASE64_URL_SAFE;
 use base64::Engine;
-use common_base::range_read::TokioFileReader;
+use common_base::range_read::FileReader;
 use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::{info, warn};
 use futures::{FutureExt, StreamExt};
@@ -428,11 +428,10 @@ pub struct FsBlobGuard {
 
 #[async_trait]
 impl BlobGuard for FsBlobGuard {
-    type Reader = TokioFileReader;
+    type Reader = FileReader;
 
     async fn reader(&self) -> Result<Self::Reader> {
-        let file = fs::File::open(&self.path).await.context(OpenSnafu)?;
-        Ok(TokioFileReader::new(file))
+        FileReader::new(&self.path).await.context(OpenSnafu)
     }
 }
 
@@ -529,413 +528,415 @@ impl BoundedStager {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use common_test_util::temp_dir::create_temp_dir;
-//     use futures::AsyncWriteExt;
-//     use tokio::io::AsyncReadExt as _;
+#[cfg(test)]
+mod tests {
+    use common_base::range_read::RangeReader;
+    use common_test_util::temp_dir::create_temp_dir;
+    use futures::AsyncWriteExt;
+    use tokio::io::AsyncReadExt as _;
 
-//     use super::*;
-//     use crate::error::BlobNotFoundSnafu;
-//     use crate::puffin_manager::stager::Stager;
+    use super::*;
+    use crate::error::BlobNotFoundSnafu;
+    use crate::puffin_manager::stager::Stager;
 
-//     #[tokio::test]
-//     async fn test_get_blob() {
-//         let tempdir = create_temp_dir("test_get_blob_");
-//         let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
-//             .await
-//             .unwrap();
+    #[tokio::test]
+    async fn test_get_blob() {
+        let tempdir = create_temp_dir("test_get_blob_");
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
+            .await
+            .unwrap();
 
-//         let puffin_file_name = "test_get_blob";
-//         let key = "key";
-//         let mut reader = stager
-//             .get_blob(
-//                 puffin_file_name,
-//                 key,
-//                 Box::new(|mut writer| {
-//                     Box::pin(async move {
-//                         writer.write_all(b"hello world").await.unwrap();
-//                         Ok(11)
-//                     })
-//                 }),
-//             )
-//             .await
-//             .unwrap()
-//             .reader()
-//             .await
-//             .unwrap();
+        let puffin_file_name = "test_get_blob";
+        let key = "key";
+        let mut reader = stager
+            .get_blob(
+                puffin_file_name,
+                key,
+                Box::new(|mut writer| {
+                    Box::pin(async move {
+                        writer.write_all(b"hello world").await.unwrap();
+                        Ok(11)
+                    })
+                }),
+            )
+            .await
+            .unwrap()
+            .reader()
+            .await
+            .unwrap();
 
-//         let mut buf = Vec::new();
-//         reader.read_to_end(&mut buf).await.unwrap();
-//         assert_eq!(buf, b"hello world");
+        let m = reader.metadata().await.unwrap();
+        let buf = reader.read(0..m.content_length).await.unwrap();
+        assert_eq!(&*buf, b"hello world");
 
-//         let mut file = stager.must_get_file(puffin_file_name, key).await;
-//         let mut buf = Vec::new();
-//         file.read_to_end(&mut buf).await.unwrap();
-//         assert_eq!(buf, b"hello world");
-//     }
+        let mut file = stager.must_get_file(puffin_file_name, key).await;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"hello world");
+    }
 
-//     #[tokio::test]
-//     async fn test_get_dir() {
-//         let tempdir = create_temp_dir("test_get_dir_");
-//         let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
-//             .await
-//             .unwrap();
+    #[tokio::test]
+    async fn test_get_dir() {
+        let tempdir = create_temp_dir("test_get_dir_");
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
+            .await
+            .unwrap();
 
-//         let files_in_dir = [
-//             ("file_a", "Hello, world!".as_bytes()),
-//             ("file_b", "Hello, Rust!".as_bytes()),
-//             ("file_c", "你好，世界！".as_bytes()),
-//             ("subdir/file_d", "Hello, Puffin!".as_bytes()),
-//             ("subdir/subsubdir/file_e", "¡Hola mundo!".as_bytes()),
-//         ];
+        let files_in_dir = [
+            ("file_a", "Hello, world!".as_bytes()),
+            ("file_b", "Hello, Rust!".as_bytes()),
+            ("file_c", "你好，世界！".as_bytes()),
+            ("subdir/file_d", "Hello, Puffin!".as_bytes()),
+            ("subdir/subsubdir/file_e", "¡Hola mundo!".as_bytes()),
+        ];
 
-//         let puffin_file_name = "test_get_dir";
-//         let key = "key";
-//         let dir_path = stager
-//             .get_dir(
-//                 puffin_file_name,
-//                 key,
-//                 Box::new(|writer_provider| {
-//                     Box::pin(async move {
-//                         for (rel_path, content) in &files_in_dir {
-//                             let mut writer = writer_provider.writer(rel_path).await.unwrap();
-//                             writer.write_all(content).await.unwrap();
-//                         }
-//                         Ok(0)
-//                     })
-//                 }),
-//             )
-//             .await
-//             .unwrap();
+        let puffin_file_name = "test_get_dir";
+        let key = "key";
+        let dir_path = stager
+            .get_dir(
+                puffin_file_name,
+                key,
+                Box::new(|writer_provider| {
+                    Box::pin(async move {
+                        for (rel_path, content) in &files_in_dir {
+                            let mut writer = writer_provider.writer(rel_path).await.unwrap();
+                            writer.write_all(content).await.unwrap();
+                        }
+                        Ok(0)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
 
-//         for (rel_path, content) in &files_in_dir {
-//             let file_path = dir_path.path().join(rel_path);
-//             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
-//             let mut buf = Vec::new();
-//             file.read_to_end(&mut buf).await.unwrap();
-//             assert_eq!(buf, *content);
-//         }
+        for (rel_path, content) in &files_in_dir {
+            let file_path = dir_path.path().join(rel_path);
+            let mut file = tokio::fs::File::open(&file_path).await.unwrap();
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, *content);
+        }
 
-//         let dir_path = stager.must_get_dir(puffin_file_name, key).await;
-//         for (rel_path, content) in &files_in_dir {
-//             let file_path = dir_path.join(rel_path);
-//             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
-//             let mut buf = Vec::new();
-//             file.read_to_end(&mut buf).await.unwrap();
-//             assert_eq!(buf, *content);
-//         }
-//     }
+        let dir_path = stager.must_get_dir(puffin_file_name, key).await;
+        for (rel_path, content) in &files_in_dir {
+            let file_path = dir_path.join(rel_path);
+            let mut file = tokio::fs::File::open(&file_path).await.unwrap();
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, *content);
+        }
+    }
 
-//     #[tokio::test]
-//     async fn test_recover() {
-//         let tempdir = create_temp_dir("test_recover_");
-//         let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
-//             .await
-//             .unwrap();
+    #[tokio::test]
+    async fn test_recover() {
+        let tempdir = create_temp_dir("test_recover_");
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
+            .await
+            .unwrap();
 
-//         // initialize stager
-//         let puffin_file_name = "test_recover";
-//         let blob_key = "blob_key";
-//         let guard = stager
-//             .get_blob(
-//                 puffin_file_name,
-//                 blob_key,
-//                 Box::new(|mut writer| {
-//                     Box::pin(async move {
-//                         writer.write_all(b"hello world").await.unwrap();
-//                         Ok(11)
-//                     })
-//                 }),
-//             )
-//             .await
-//             .unwrap();
-//         drop(guard);
+        // initialize stager
+        let puffin_file_name = "test_recover";
+        let blob_key = "blob_key";
+        let guard = stager
+            .get_blob(
+                puffin_file_name,
+                blob_key,
+                Box::new(|mut writer| {
+                    Box::pin(async move {
+                        writer.write_all(b"hello world").await.unwrap();
+                        Ok(11)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
+        drop(guard);
 
-//         let files_in_dir = [
-//             ("file_a", "Hello, world!".as_bytes()),
-//             ("file_b", "Hello, Rust!".as_bytes()),
-//             ("file_c", "你好，世界！".as_bytes()),
-//             ("subdir/file_d", "Hello, Puffin!".as_bytes()),
-//             ("subdir/subsubdir/file_e", "¡Hola mundo!".as_bytes()),
-//         ];
+        let files_in_dir = [
+            ("file_a", "Hello, world!".as_bytes()),
+            ("file_b", "Hello, Rust!".as_bytes()),
+            ("file_c", "你好，世界！".as_bytes()),
+            ("subdir/file_d", "Hello, Puffin!".as_bytes()),
+            ("subdir/subsubdir/file_e", "¡Hola mundo!".as_bytes()),
+        ];
 
-//         let dir_key = "dir_key";
-//         let guard = stager
-//             .get_dir(
-//                 puffin_file_name,
-//                 dir_key,
-//                 Box::new(|writer_provider| {
-//                     Box::pin(async move {
-//                         for (rel_path, content) in &files_in_dir {
-//                             let mut writer = writer_provider.writer(rel_path).await.unwrap();
-//                             writer.write_all(content).await.unwrap();
-//                         }
-//                         Ok(0)
-//                     })
-//                 }),
-//             )
-//             .await
-//             .unwrap();
-//         drop(guard);
+        let dir_key = "dir_key";
+        let guard = stager
+            .get_dir(
+                puffin_file_name,
+                dir_key,
+                Box::new(|writer_provider| {
+                    Box::pin(async move {
+                        for (rel_path, content) in &files_in_dir {
+                            let mut writer = writer_provider.writer(rel_path).await.unwrap();
+                            writer.write_all(content).await.unwrap();
+                        }
+                        Ok(0)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
+        drop(guard);
 
-//         // recover stager
-//         drop(stager);
-//         let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
-//             .await
-//             .unwrap();
+        // recover stager
+        drop(stager);
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
+            .await
+            .unwrap();
 
-//         let mut reader = stager
-//             .get_blob(
-//                 puffin_file_name,
-//                 blob_key,
-//                 Box::new(|_| Box::pin(async { Ok(0) })),
-//             )
-//             .await
-//             .unwrap()
-//             .reader()
-//             .await
-//             .unwrap();
-//         let mut buf = Vec::new();
-//         reader.read_to_end(&mut buf).await.unwrap();
-//         assert_eq!(buf, b"hello world");
+        let mut reader = stager
+            .get_blob(
+                puffin_file_name,
+                blob_key,
+                Box::new(|_| Box::pin(async { Ok(0) })),
+            )
+            .await
+            .unwrap()
+            .reader()
+            .await
+            .unwrap();
 
-//         let dir_path = stager
-//             .get_dir(
-//                 puffin_file_name,
-//                 dir_key,
-//                 Box::new(|_| Box::pin(async { Ok(0) })),
-//             )
-//             .await
-//             .unwrap();
-//         for (rel_path, content) in &files_in_dir {
-//             let file_path = dir_path.path().join(rel_path);
-//             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
-//             let mut buf = Vec::new();
-//             file.read_to_end(&mut buf).await.unwrap();
-//             assert_eq!(buf, *content);
-//         }
-//     }
+        let m = reader.metadata().await.unwrap();
+        let buf = reader.read(0..m.content_length).await.unwrap();
+        assert_eq!(&*buf, b"hello world");
 
-//     #[tokio::test]
-//     async fn test_eviction() {
-//         let tempdir = create_temp_dir("test_eviction_");
-//         let stager = BoundedStager::new(
-//             tempdir.path().to_path_buf(),
-//             1, /* extremely small size */
-//         )
-//         .await
-//         .unwrap();
+        let dir_path = stager
+            .get_dir(
+                puffin_file_name,
+                dir_key,
+                Box::new(|_| Box::pin(async { Ok(0) })),
+            )
+            .await
+            .unwrap();
+        for (rel_path, content) in &files_in_dir {
+            let file_path = dir_path.path().join(rel_path);
+            let mut file = tokio::fs::File::open(&file_path).await.unwrap();
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, *content);
+        }
+    }
 
-//         let puffin_file_name = "test_eviction";
-//         let blob_key = "blob_key";
+    #[tokio::test]
+    async fn test_eviction() {
+        let tempdir = create_temp_dir("test_eviction_");
+        let stager = BoundedStager::new(
+            tempdir.path().to_path_buf(),
+            1, /* extremely small size */
+        )
+        .await
+        .unwrap();
 
-//         // First time to get the blob
-//         let mut reader = stager
-//             .get_blob(
-//                 puffin_file_name,
-//                 blob_key,
-//                 Box::new(|mut writer| {
-//                     Box::pin(async move {
-//                         writer.write_all(b"Hello world").await.unwrap();
-//                         Ok(11)
-//                     })
-//                 }),
-//             )
-//             .await
-//             .unwrap()
-//             .reader()
-//             .await
-//             .unwrap();
+        let puffin_file_name = "test_eviction";
+        let blob_key = "blob_key";
 
-//         // The blob should be evicted
-//         stager.cache.run_pending_tasks().await;
-//         assert!(!stager.in_cache(puffin_file_name, blob_key));
+        // First time to get the blob
+        let mut reader = stager
+            .get_blob(
+                puffin_file_name,
+                blob_key,
+                Box::new(|mut writer| {
+                    Box::pin(async move {
+                        writer.write_all(b"Hello world").await.unwrap();
+                        Ok(11)
+                    })
+                }),
+            )
+            .await
+            .unwrap()
+            .reader()
+            .await
+            .unwrap();
 
-//         let mut buf = Vec::new();
-//         reader.read_to_end(&mut buf).await.unwrap();
-//         assert_eq!(buf, b"Hello world");
+        // The blob should be evicted
+        stager.cache.run_pending_tasks().await;
+        assert!(!stager.in_cache(puffin_file_name, blob_key));
 
-//         // Second time to get the blob, get from recycle bin
-//         let mut reader = stager
-//             .get_blob(
-//                 puffin_file_name,
-//                 blob_key,
-//                 Box::new(|_| async { Ok(0) }.boxed()),
-//             )
-//             .await
-//             .unwrap()
-//             .reader()
-//             .await
-//             .unwrap();
+        let m = reader.metadata().await.unwrap();
+        let buf = reader.read(0..m.content_length).await.unwrap();
+        assert_eq!(&*buf, b"Hello world");
 
-//         // The blob should be evicted
-//         stager.cache.run_pending_tasks().await;
-//         assert!(!stager.in_cache(puffin_file_name, blob_key));
+        // Second time to get the blob, get from recycle bin
+        let mut reader = stager
+            .get_blob(
+                puffin_file_name,
+                blob_key,
+                Box::new(|_| async { Ok(0) }.boxed()),
+            )
+            .await
+            .unwrap()
+            .reader()
+            .await
+            .unwrap();
 
-//         let mut buf = Vec::new();
-//         reader.read_to_end(&mut buf).await.unwrap();
-//         assert_eq!(buf, b"Hello world");
+        // The blob should be evicted
+        stager.cache.run_pending_tasks().await;
+        assert!(!stager.in_cache(puffin_file_name, blob_key));
 
-//         let dir_key = "dir_key";
-//         let files_in_dir = [
-//             ("file_a", "Hello, world!".as_bytes()),
-//             ("file_b", "Hello, Rust!".as_bytes()),
-//             ("file_c", "你好，世界！".as_bytes()),
-//             ("subdir/file_d", "Hello, Puffin!".as_bytes()),
-//             ("subdir/subsubdir/file_e", "¡Hola mundo!".as_bytes()),
-//         ];
+        let m = reader.metadata().await.unwrap();
+        let buf = reader.read(0..m.content_length).await.unwrap();
+        assert_eq!(&*buf, b"Hello world");
 
-//         // First time to get the directory
-//         let guard_0 = stager
-//             .get_dir(
-//                 puffin_file_name,
-//                 dir_key,
-//                 Box::new(|writer_provider| {
-//                     Box::pin(async move {
-//                         let mut size = 0;
-//                         for (rel_path, content) in &files_in_dir {
-//                             let mut writer = writer_provider.writer(rel_path).await.unwrap();
-//                             writer.write_all(content).await.unwrap();
-//                             size += content.len() as u64;
-//                         }
-//                         Ok(size)
-//                     })
-//                 }),
-//             )
-//             .await
-//             .unwrap();
+        let dir_key = "dir_key";
+        let files_in_dir = [
+            ("file_a", "Hello, world!".as_bytes()),
+            ("file_b", "Hello, Rust!".as_bytes()),
+            ("file_c", "你好，世界！".as_bytes()),
+            ("subdir/file_d", "Hello, Puffin!".as_bytes()),
+            ("subdir/subsubdir/file_e", "¡Hola mundo!".as_bytes()),
+        ];
 
-//         for (rel_path, content) in &files_in_dir {
-//             let file_path = guard_0.path().join(rel_path);
-//             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
-//             let mut buf = Vec::new();
-//             file.read_to_end(&mut buf).await.unwrap();
-//             assert_eq!(buf, *content);
-//         }
+        // First time to get the directory
+        let guard_0 = stager
+            .get_dir(
+                puffin_file_name,
+                dir_key,
+                Box::new(|writer_provider| {
+                    Box::pin(async move {
+                        let mut size = 0;
+                        for (rel_path, content) in &files_in_dir {
+                            let mut writer = writer_provider.writer(rel_path).await.unwrap();
+                            writer.write_all(content).await.unwrap();
+                            size += content.len() as u64;
+                        }
+                        Ok(size)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
 
-//         // The directory should be evicted
-//         stager.cache.run_pending_tasks().await;
-//         assert!(!stager.in_cache(puffin_file_name, dir_key));
+        for (rel_path, content) in &files_in_dir {
+            let file_path = guard_0.path().join(rel_path);
+            let mut file = tokio::fs::File::open(&file_path).await.unwrap();
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, *content);
+        }
 
-//         // Second time to get the directory
-//         let guard_1 = stager
-//             .get_dir(
-//                 puffin_file_name,
-//                 dir_key,
-//                 Box::new(|_| async { Ok(0) }.boxed()),
-//             )
-//             .await
-//             .unwrap();
+        // The directory should be evicted
+        stager.cache.run_pending_tasks().await;
+        assert!(!stager.in_cache(puffin_file_name, dir_key));
 
-//         for (rel_path, content) in &files_in_dir {
-//             let file_path = guard_1.path().join(rel_path);
-//             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
-//             let mut buf = Vec::new();
-//             file.read_to_end(&mut buf).await.unwrap();
-//             assert_eq!(buf, *content);
-//         }
+        // Second time to get the directory
+        let guard_1 = stager
+            .get_dir(
+                puffin_file_name,
+                dir_key,
+                Box::new(|_| async { Ok(0) }.boxed()),
+            )
+            .await
+            .unwrap();
 
-//         // Still hold the guard
-//         stager.cache.run_pending_tasks().await;
-//         assert!(!stager.in_cache(puffin_file_name, dir_key));
+        for (rel_path, content) in &files_in_dir {
+            let file_path = guard_1.path().join(rel_path);
+            let mut file = tokio::fs::File::open(&file_path).await.unwrap();
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, *content);
+        }
 
-//         // Third time to get the directory and all guards are dropped
-//         drop(guard_0);
-//         drop(guard_1);
-//         let guard_2 = stager
-//             .get_dir(
-//                 puffin_file_name,
-//                 dir_key,
-//                 Box::new(|_| Box::pin(async move { Ok(0) })),
-//             )
-//             .await
-//             .unwrap();
+        // Still hold the guard
+        stager.cache.run_pending_tasks().await;
+        assert!(!stager.in_cache(puffin_file_name, dir_key));
 
-//         // Still hold the guard, so the directory should not be removed even if it's evicted
-//         stager.cache.run_pending_tasks().await;
-//         assert!(!stager.in_cache(puffin_file_name, blob_key));
+        // Third time to get the directory and all guards are dropped
+        drop(guard_0);
+        drop(guard_1);
+        let guard_2 = stager
+            .get_dir(
+                puffin_file_name,
+                dir_key,
+                Box::new(|_| Box::pin(async move { Ok(0) })),
+            )
+            .await
+            .unwrap();
 
-//         for (rel_path, content) in &files_in_dir {
-//             let file_path = guard_2.path().join(rel_path);
-//             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
-//             let mut buf = Vec::new();
-//             file.read_to_end(&mut buf).await.unwrap();
-//             assert_eq!(buf, *content);
-//         }
-//     }
+        // Still hold the guard, so the directory should not be removed even if it's evicted
+        stager.cache.run_pending_tasks().await;
+        assert!(!stager.in_cache(puffin_file_name, blob_key));
 
-//     #[tokio::test]
-//     async fn test_get_blob_concurrency_on_fail() {
-//         let tempdir = create_temp_dir("test_get_blob_concurrency_on_fail_");
-//         let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
-//             .await
-//             .unwrap();
+        for (rel_path, content) in &files_in_dir {
+            let file_path = guard_2.path().join(rel_path);
+            let mut file = tokio::fs::File::open(&file_path).await.unwrap();
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, *content);
+        }
+    }
 
-//         let puffin_file_name = "test_get_blob_concurrency_on_fail";
-//         let key = "key";
+    #[tokio::test]
+    async fn test_get_blob_concurrency_on_fail() {
+        let tempdir = create_temp_dir("test_get_blob_concurrency_on_fail_");
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
+            .await
+            .unwrap();
 
-//         let stager = Arc::new(stager);
-//         let handles = (0..10)
-//             .map(|_| {
-//                 let stager = stager.clone();
-//                 let task = async move {
-//                     let failed_init = Box::new(|_| {
-//                         async {
-//                             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-//                             BlobNotFoundSnafu { blob: "whatever" }.fail()
-//                         }
-//                         .boxed()
-//                     });
-//                     stager.get_blob(puffin_file_name, key, failed_init).await
-//                 };
+        let puffin_file_name = "test_get_blob_concurrency_on_fail";
+        let key = "key";
 
-//                 tokio::spawn(task)
-//             })
-//             .collect::<Vec<_>>();
+        let stager = Arc::new(stager);
+        let handles = (0..10)
+            .map(|_| {
+                let stager = stager.clone();
+                let task = async move {
+                    let failed_init = Box::new(|_| {
+                        async {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            BlobNotFoundSnafu { blob: "whatever" }.fail()
+                        }
+                        .boxed()
+                    });
+                    stager.get_blob(puffin_file_name, key, failed_init).await
+                };
 
-//         for handle in handles {
-//             let r = handle.await.unwrap();
-//             assert!(r.is_err());
-//         }
+                tokio::spawn(task)
+            })
+            .collect::<Vec<_>>();
 
-//         assert!(!stager.in_cache(puffin_file_name, key));
-//     }
+        for handle in handles {
+            let r = handle.await.unwrap();
+            assert!(r.is_err());
+        }
 
-//     #[tokio::test]
-//     async fn test_get_dir_concurrency_on_fail() {
-//         let tempdir = create_temp_dir("test_get_dir_concurrency_on_fail_");
-//         let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
-//             .await
-//             .unwrap();
+        assert!(!stager.in_cache(puffin_file_name, key));
+    }
 
-//         let puffin_file_name = "test_get_dir_concurrency_on_fail";
-//         let key = "key";
+    #[tokio::test]
+    async fn test_get_dir_concurrency_on_fail() {
+        let tempdir = create_temp_dir("test_get_dir_concurrency_on_fail_");
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
+            .await
+            .unwrap();
 
-//         let stager = Arc::new(stager);
-//         let handles = (0..10)
-//             .map(|_| {
-//                 let stager = stager.clone();
-//                 let task = async move {
-//                     let failed_init = Box::new(|_| {
-//                         async {
-//                             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-//                             BlobNotFoundSnafu { blob: "whatever" }.fail()
-//                         }
-//                         .boxed()
-//                     });
-//                     stager.get_dir(puffin_file_name, key, failed_init).await
-//                 };
+        let puffin_file_name = "test_get_dir_concurrency_on_fail";
+        let key = "key";
 
-//                 tokio::spawn(task)
-//             })
-//             .collect::<Vec<_>>();
+        let stager = Arc::new(stager);
+        let handles = (0..10)
+            .map(|_| {
+                let stager = stager.clone();
+                let task = async move {
+                    let failed_init = Box::new(|_| {
+                        async {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            BlobNotFoundSnafu { blob: "whatever" }.fail()
+                        }
+                        .boxed()
+                    });
+                    stager.get_dir(puffin_file_name, key, failed_init).await
+                };
 
-//         for handle in handles {
-//             let r = handle.await.unwrap();
-//             assert!(r.is_err());
-//         }
+                tokio::spawn(task)
+            })
+            .collect::<Vec<_>>();
 
-//         assert!(!stager.in_cache(puffin_file_name, key));
-//     }
-// }
+        for handle in handles {
+            let r = handle.await.unwrap();
+            assert!(r.is_err());
+        }
+
+        assert!(!stager.in_cache(puffin_file_name, key));
+    }
+}

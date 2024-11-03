@@ -16,11 +16,11 @@ common-error.workspace = true
 common-macro.workspace = true
 futures.workspace = true
 paste = "1.0"
+pin-project.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 snafu.workspace = true
-zeroize = { version = "1.6", default-features = false, features = ["alloc"] }
-pin-project.workspace = true
 tokio.workspace = true
+zeroize = { version = "1.6", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 toml.workspace = true
