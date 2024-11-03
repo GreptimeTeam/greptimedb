@@ -16,14 +16,12 @@
 
 use std::sync::Arc;
 
-use common_telemetry::info;
 use snafu::OptionExt;
 use store_api::storage::TableId;
-use table::metadata::{RawTableInfo, TableType};
 
 use crate::error::TableInfoNotFoundSnafu;
-use crate::key::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
-use crate::key::table_info::{TableInfoManager, TableInfoManagerRef, TableInfoValue};
+use crate::key::schema_name::{SchemaManager, SchemaNameKey};
+use crate::key::table_info::{TableInfoManager, TableInfoManagerRef};
 use crate::kv_backend::KvBackendRef;
 use crate::{error, SchemaOptions};
 
@@ -32,11 +30,24 @@ pub type SchemaMetadataManagerRef = Arc<SchemaMetadataManager>;
 pub struct SchemaMetadataManager {
     table_info_manager: TableInfoManagerRef,
     schema_manager: SchemaManager,
+    #[cfg(any(test, feature = "testing"))]
     kv_backend: KvBackendRef,
 }
 
 impl SchemaMetadataManager {
     /// Creates a new database meta
+    #[cfg(not(any(test, feature = "testing")))]
+    pub fn new(kv_backend: KvBackendRef) -> Self {
+        let table_info_manager = Arc::new(TableInfoManager::new(kv_backend.clone()));
+        let schema_manager = SchemaManager::new(kv_backend);
+        Self {
+            table_info_manager,
+            schema_manager,
+        }
+    }
+
+    /// Creates a new database meta
+    #[cfg(any(test, feature = "testing"))]
     pub fn new(kv_backend: KvBackendRef) -> Self {
         let table_info_manager = Arc::new(TableInfoManager::new(kv_backend.clone()));
         let schema_manager = SchemaManager::new(kv_backend.clone());
@@ -74,9 +85,10 @@ impl SchemaMetadataManager {
         table_name: &str,
         schema_name: &str,
         catalog_name: &str,
-        schema_value: Option<SchemaNameValue>,
+        schema_value: Option<crate::key::schema_name::SchemaNameValue>,
     ) {
-        let value = TableInfoValue::new(RawTableInfo {
+        use table::metadata::{RawTableInfo, TableType};
+        let value = crate::key::table_info::TableInfoValue::new(RawTableInfo {
             ident: Default::default(),
             name: table_name.to_string(),
             desc: None,
@@ -99,9 +111,12 @@ impl SchemaMetadataManager {
             .create(key, schema_value, false)
             .await
             .expect("Failed to create schema metadata");
-        info!(
+        common_telemetry::info!(
             "Register table: {}, id: {}, schema: {}, catalog: {}",
-            table_name, table_id, schema_name, catalog_name
+            table_name,
+            table_id,
+            schema_name,
+            catalog_name
         );
     }
 }
