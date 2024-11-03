@@ -116,9 +116,21 @@ impl StatementExecutor {
             .await
             .context(error::FindTablePartitionRuleSnafu { table_name: table })?;
 
+        // CREATE TABLE LIKE also inherits database level options.
+        let schema_options = self
+            .table_metadata_manager
+            .schema_manager()
+            .get(SchemaNameKey {
+                catalog: &catalog,
+                schema: &schema,
+            })
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
         let quote_style = ctx.quote_style();
-        let mut create_stmt = create_table_stmt(&table_ref.table_info(), quote_style)
-            .context(error::ParseQuerySnafu)?;
+        let mut create_stmt =
+            create_table_stmt(&table_ref.table_info(), schema_options, quote_style)
+                .context(error::ParseQuerySnafu)?;
         create_stmt.name = stmt.table_name;
         create_stmt.if_not_exists = false;
 

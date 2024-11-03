@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use common_meta::SchemaOptions;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef, COMMENT_KEY};
 use humantime::format_duration;
 use snafu::ResultExt;
@@ -36,7 +37,8 @@ use crate::error::{
     ConvertSqlTypeSnafu, ConvertSqlValueSnafu, GetFulltextOptionsSnafu, Result, SqlSnafu,
 };
 
-fn create_sql_options(table_meta: &TableMeta) -> OptionMap {
+/// Generates CREATE TABLE options from given table metadata and schema-level options.
+fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptions>) -> OptionMap {
     let table_opts = &table_meta.options;
     let mut options = OptionMap::default();
     if let Some(write_buffer_size) = table_opts.write_buffer_size {
@@ -47,7 +49,12 @@ fn create_sql_options(table_meta: &TableMeta) -> OptionMap {
     }
     if let Some(ttl) = table_opts.ttl {
         options.insert(TTL_KEY.to_string(), format_duration(ttl).to_string());
-    }
+    } else if let Some(database_ttl) = schema_options.and_then(|o| o.ttl) {
+        options.insert(
+            TTL_KEY.to_string(),
+            format_duration(database_ttl).to_string(),
+        );
+    };
     for (k, v) in table_opts
         .extra_options
         .iter()
@@ -169,7 +176,11 @@ fn create_table_constraints(
 }
 
 /// Create a CreateTable statement from table info.
-pub fn create_table_stmt(table_info: &TableInfoRef, quote_style: char) -> Result<CreateTable> {
+pub fn create_table_stmt(
+    table_info: &TableInfoRef,
+    schema_options: Option<SchemaOptions>,
+    quote_style: char,
+) -> Result<CreateTable> {
     let table_meta = &table_info.meta;
     let table_name = &table_info.name;
     let schema = &table_info.meta.schema;
@@ -195,7 +206,7 @@ pub fn create_table_stmt(table_info: &TableInfoRef, quote_style: char) -> Result
         columns,
         engine: table_meta.engine.clone(),
         constraints,
-        options: create_sql_options(table_meta),
+        options: create_sql_options(table_meta, schema_options),
         partitions: None,
     })
 }
@@ -271,7 +282,7 @@ mod tests {
                 .unwrap(),
         );
 
-        let stmt = create_table_stmt(&info, '"').unwrap();
+        let stmt = create_table_stmt(&info, None, '"').unwrap();
 
         let sql = format!("\n{}", stmt);
         assert_eq!(
@@ -337,7 +348,7 @@ ENGINE=mito
                 .unwrap(),
         );
 
-        let stmt = create_table_stmt(&info, '"').unwrap();
+        let stmt = create_table_stmt(&info, None, '"').unwrap();
 
         let sql = format!("\n{}", stmt);
         assert_eq!(
