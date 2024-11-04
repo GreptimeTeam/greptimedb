@@ -39,11 +39,10 @@ async fn test_engine_drop_region() {
     let engine = env
         .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
         .await;
-    let kv_backend = env.get_kv_backend();
+
     let region_id = RegionId::new(1, 1);
 
-    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
-    schema_metadata_manager
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
@@ -144,9 +143,7 @@ async fn test_engine_drop_region_for_custom_store() {
             &["Gcs"],
         )
         .await;
-    let kv_backend = env.get_kv_backend();
-
-    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
+    let schema_metadata_manager = env.get_schema_metadata_manager();
     let object_store_manager = env.get_object_store_manager().unwrap();
 
     let global_region_id = RegionId::new(1, 1);

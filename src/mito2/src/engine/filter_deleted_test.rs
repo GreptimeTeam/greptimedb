@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use api::v1::Rows;
-use common_meta::key::SchemaMetadataManager;
 use common_recordbatch::RecordBatches;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
@@ -31,10 +30,10 @@ async fn test_scan_without_filtering_deleted() {
 
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
-    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
-    SchemaMetadataManager::new(kv_backend)
+
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",

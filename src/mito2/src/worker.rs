@@ -31,8 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::Plugins;
-use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
-use common_meta::kv_backend::KvBackendRef;
+use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
@@ -134,7 +133,7 @@ impl WorkerGroup {
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
-        kv_backend: KvBackendRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
@@ -194,7 +193,7 @@ impl WorkerGroup {
                     flush_sender: flush_sender.clone(),
                     flush_receiver: flush_receiver.clone(),
                     plugins: plugins.clone(),
-                    kv_backend: kv_backend.clone(),
+                    schema_metadata_manager: schema_metadata_manager.clone(),
                 }
                 .start()
             })
@@ -277,7 +276,7 @@ impl WorkerGroup {
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
-        kv_backend: KvBackendRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
         time_provider: TimeProviderRef,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
@@ -334,7 +333,7 @@ impl WorkerGroup {
                     flush_sender: flush_sender.clone(),
                     flush_receiver: flush_receiver.clone(),
                     plugins: Plugins::new(),
-                    kv_backend: kv_backend.clone(),
+                    schema_metadata_manager: schema_metadata_manager.clone(),
                 }
                 .start()
             })
@@ -411,7 +410,7 @@ struct WorkerStarter<S> {
     /// Watch channel receiver to wait for background flush job.
     flush_receiver: watch::Receiver<()>,
     plugins: Plugins,
-    kv_backend: KvBackendRef,
+    schema_metadata_manager: SchemaMetadataManagerRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -421,7 +420,6 @@ impl<S: LogStore> WorkerStarter<S> {
         let opening_regions = Arc::new(OpeningRegions::default());
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
-        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(self.kv_backend));
         let running = Arc::new(AtomicBool::new(true));
         let now = self.time_provider.current_time_millis();
         let id_string = self.id.to_string();
@@ -463,7 +461,7 @@ impl<S: LogStore> WorkerStarter<S> {
             stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&id_string]),
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
-            schema_metadata_manager,
+            schema_metadata_manager: self.schema_metadata_manager,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;

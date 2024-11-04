@@ -13,13 +13,11 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_meta::key::SchemaMetadataManager;
 use common_recordbatch::RecordBatches;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
@@ -245,10 +243,9 @@ async fn test_engine_region_open_with_custom_store() {
 async fn test_open_region_skip_wal_replay() {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
-    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
-    SchemaMetadataManager::new(kv_backend)
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
@@ -434,10 +431,9 @@ async fn test_open_compaction_region() {
         .unwrap();
 
     let engine = env.create_engine(mito_config.clone()).await;
-    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
-    let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(kv_backend));
+    let schema_metadata_manager = env.get_schema_metadata_manager();
     schema_metadata_manager
         .register_region_table_info(
             region_id.table_id(),

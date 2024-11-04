@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::Rows;
-use common_meta::key::SchemaMetadataManager;
 use common_recordbatch::RecordBatches;
 use common_telemetry::{info, init_default_ut_logging};
 use store_api::region_engine::RegionEngine;
@@ -149,12 +148,11 @@ async fn test_engine_put_data_after_truncate() {
 async fn test_engine_truncate_after_flush() {
     let mut env = TestEnv::with_prefix("truncate-flush");
     let engine = env.create_engine(MitoConfig::default()).await;
-    let kv_backend = env.get_kv_backend();
 
     // Create the region.
     let region_id = RegionId::new(1, 1);
 
-    SchemaMetadataManager::new(kv_backend)
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",

@@ -16,7 +16,6 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use api::v1::{ColumnSchema, Rows};
-use common_meta::key::SchemaMetadataManager;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::TimestampMillisecondVector;
@@ -111,12 +110,9 @@ async fn test_compaction_region() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
-    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
-
-    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
-    schema_metadata_manager
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
@@ -185,12 +181,9 @@ async fn test_compaction_region_with_overlapping() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
-    let kv_backend = env.get_kv_backend();
-
     let region_id = RegionId::new(1, 1);
 
-    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
-    schema_metadata_manager
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
@@ -242,11 +235,10 @@ async fn test_compaction_region_with_overlapping_delete_all() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
-    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
-    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
-    schema_metadata_manager
+
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
@@ -318,11 +310,9 @@ async fn test_readonly_during_compaction() {
             Some(listener.clone()),
         )
         .await;
-    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
-    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
-    schema_metadata_manager
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",

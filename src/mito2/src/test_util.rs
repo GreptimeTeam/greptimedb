@@ -35,6 +35,7 @@ use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
+use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_telemetry::warn;
@@ -197,7 +198,7 @@ pub struct TestEnv {
     log_store: Option<LogStoreImpl>,
     log_store_factory: LogStoreFactory,
     object_store_manager: Option<ObjectStoreManagerRef>,
-    kv_backend: KvBackendRef,
+    schema_metadata_manager: SchemaMetadataManagerRef,
 }
 
 impl Default for TestEnv {
@@ -214,7 +215,10 @@ impl TestEnv {
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
-            kv_backend: Arc::new(MemoryKvBackend::new()),
+            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
+                MemoryKvBackend::new(),
+            )
+                as KvBackendRef)),
         }
     }
 
@@ -225,7 +229,10 @@ impl TestEnv {
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
-            kv_backend: Arc::new(MemoryKvBackend::new()),
+            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
+                MemoryKvBackend::new(),
+            )
+                as KvBackendRef)),
         }
     }
 
@@ -236,7 +243,10 @@ impl TestEnv {
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
-            kv_backend: Arc::new(MemoryKvBackend::new()),
+            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
+                MemoryKvBackend::new(),
+            )
+                as KvBackendRef)),
         }
     }
 
@@ -275,7 +285,7 @@ impl TestEnv {
                 config,
                 log_store,
                 object_store_manager,
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -285,7 +295,7 @@ impl TestEnv {
                 config,
                 log_store,
                 object_store_manager,
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -303,7 +313,7 @@ impl TestEnv {
                 config,
                 log_store,
                 object_store_manager,
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -313,7 +323,7 @@ impl TestEnv {
                 config,
                 log_store,
                 object_store_manager,
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -345,7 +355,7 @@ impl TestEnv {
                 manager,
                 listener,
                 Arc::new(StdTimeProvider),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -357,7 +367,7 @@ impl TestEnv {
                 manager,
                 listener,
                 Arc::new(StdTimeProvider),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -400,7 +410,7 @@ impl TestEnv {
                 manager,
                 listener,
                 Arc::new(StdTimeProvider),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -412,7 +422,7 @@ impl TestEnv {
                 manager,
                 listener,
                 Arc::new(StdTimeProvider),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -444,7 +454,7 @@ impl TestEnv {
                 manager,
                 listener,
                 time_provider.clone(),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -456,7 +466,7 @@ impl TestEnv {
                 manager,
                 listener,
                 time_provider.clone(),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -472,7 +482,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -482,7 +492,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -498,7 +508,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -508,7 +518,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -534,7 +544,7 @@ impl TestEnv {
                 Arc::new(config),
                 log_store,
                 Arc::new(object_store_manager),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -543,7 +553,7 @@ impl TestEnv {
                 Arc::new(config),
                 log_store,
                 Arc::new(object_store_manager),
-                self.kv_backend.clone(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -652,8 +662,8 @@ impl TestEnv {
         Arc::new(write_cache)
     }
 
-    pub fn get_kv_backend(&self) -> KvBackendRef {
-        self.kv_backend.clone()
+    pub fn get_schema_metadata_manager(&self) -> SchemaMetadataManagerRef {
+        self.schema_metadata_manager.clone()
     }
 }
 

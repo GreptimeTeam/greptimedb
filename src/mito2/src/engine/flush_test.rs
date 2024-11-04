@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::Rows;
-use common_meta::key::SchemaMetadataManager;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
 use common_wal::options::WAL_OPTIONS_KEY;
@@ -44,11 +43,9 @@ use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
 async fn test_manual_flush() {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
-    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
-
-    SchemaMetadataManager::new(kv_backend)
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
@@ -103,10 +100,9 @@ async fn test_flush_engine() {
             Some(listener.clone()),
         )
         .await;
-    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
-    SchemaMetadataManager::new(kv_backend)
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
@@ -174,10 +170,8 @@ async fn test_write_stall() {
         )
         .await;
 
-    let kv_backend = env.get_kv_backend();
-
     let region_id = RegionId::new(1, 1);
-    SchemaMetadataManager::new(kv_backend)
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
@@ -248,10 +242,9 @@ async fn test_flush_empty() {
             None,
         )
         .await;
-    let kv_backend = env.get_kv_backend();
 
     let region_id = RegionId::new(1, 1);
-    SchemaMetadataManager::new(kv_backend)
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
@@ -294,10 +287,8 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
 
     let mut env = TestEnv::new().with_log_store_factory(factory.clone());
     let engine = env.create_engine(MitoConfig::default()).await;
-    let kv_backend = env.get_kv_backend();
     let region_id = RegionId::new(1, 1);
-
-    SchemaMetadataManager::new(kv_backend)
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
@@ -416,10 +407,8 @@ async fn test_auto_flush_engine() {
             time_provider.clone(),
         )
         .await;
-    let kv_backend = env.get_kv_backend();
-
     let region_id = RegionId::new(1, 1);
-    SchemaMetadataManager::new(kv_backend)
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
@@ -486,11 +475,9 @@ async fn test_flush_workers() {
         )
         .await;
 
-    let kv_backend = env.get_kv_backend();
-
     let region_id0 = RegionId::new(1, 0);
     let region_id1 = RegionId::new(1, 1);
-    SchemaMetadataManager::new(kv_backend)
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id0.table_id(),
             "test_table",

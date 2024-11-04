@@ -15,7 +15,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common_meta::key::SchemaMetadataManager;
 use common_time::util::current_time_millis;
 use object_store::ObjectStore;
 use store_api::region_engine::RegionEngine;
@@ -64,11 +63,9 @@ async fn test_edit_region_schedule_compaction() {
         )
         .await;
 
-    let kv_backend = env.get_kv_backend();
     let region_id = RegionId::new(1, 1);
 
-    let schema_metadata_manager = SchemaMetadataManager::new(kv_backend);
-    schema_metadata_manager
+    env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
             "test_table",
