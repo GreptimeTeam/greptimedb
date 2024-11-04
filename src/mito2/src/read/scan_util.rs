@@ -163,7 +163,11 @@ pub(crate) fn scan_file_ranges(
         for range in ranges {
             let build_reader_start = Instant::now();
             let reader = range.reader(None).await?;
-            part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
+            let build_cost = build_reader_start.elapsed();
+            part_metrics.inc_build_reader_cost(build_cost);
+            if read_type == "unordered_scan_files" {
+                common_telemetry::debug!("Scan file range, region_id: {}, file_id: {}, build_cost: {:?}", stream_ctx.input.mapper.metadata().region_id, range.file_handle().file_id(), build_cost);
+            }
             let compat_batch = range.compat_batch();
             let mut source = Source::PruneReader(reader);
             while let Some(mut batch) = source.next_batch().await? {

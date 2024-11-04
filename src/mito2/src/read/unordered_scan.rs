@@ -188,7 +188,9 @@ impl UnorderedScan {
                     metrics.yield_cost += yield_start.elapsed();
                 }
 
-                metrics.scan_cost += fetch_start.elapsed();
+                let scan_cost = fetch_start.elapsed();
+                common_telemetry::debug!("Unordered scan range, region_id: {}, scan_cost: {:?}", stream_ctx.input.mapper.metadata().region_id, scan_cost);
+                metrics.scan_cost += scan_cost;
                 part_metrics.merge_metrics(&metrics);
             }
 
