@@ -429,7 +429,7 @@ impl ScanRegion {
     }
 
     fn build_inverted_indexed_column_ids(&self) -> HashSet<ColumnId> {
-        // For compatibility
+        // Default to use primary key columns as inverted index columns.
         let pk_as_inverted_index = !self
             .version
             .metadata
