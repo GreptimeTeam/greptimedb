@@ -152,16 +152,20 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
     let mut partition_ranges = None;
     let mut time_index = None;
     let mut tag_columns = None;
+    let mut is_batch_coalesced = false;
 
     input.transform_up(|plan| {
         // Unappliable case, reset the state.
         if plan.as_any().is::<RepartitionExec>()
-            || plan.as_any().is::<CoalesceBatchesExec>()
             || plan.as_any().is::<CoalescePartitionsExec>()
             || plan.as_any().is::<SortExec>()
             || plan.as_any().is::<WindowedSortExec>()
         {
             partition_ranges = None;
+        }
+
+        if plan.as_any().is::<CoalesceBatchesExec>() {
+            is_batch_coalesced = true;
         }
 
         if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
@@ -170,7 +174,9 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             tag_columns = Some(region_scan_exec.tag_columns());
 
             // set distinguish_partition_ranges to true, this is an incorrect workaround
-            region_scan_exec.with_distinguish_partition_range(true);
+            if !is_batch_coalesced {
+                region_scan_exec.with_distinguish_partition_range(true);
+            }
         }
 
         Ok(Transformed::no(plan))

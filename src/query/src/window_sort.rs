@@ -21,7 +21,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use arrow::array::{Array, ArrayRef, PrimitiveArray};
+use arrow::array::{Array, ArrayRef};
 use arrow::compute::SortColumn;
 use arrow_schema::{DataType, SchemaRef, SortOptions};
 use common_error::ext::{BoxedError, PlainError};
@@ -812,9 +812,16 @@ fn find_slice_from_range(
     Ok((start, end - start))
 }
 
+/// Get an iterator from a primitive array.
+///
+/// Used with `downcast_ts_array`. The returned iter is wrapped with `.enumerate()`.
+#[macro_export]
 macro_rules! array_iter_helper {
     ($t:ty, $unit:expr, $arr:expr) => {{
-        let typed = $arr.as_any().downcast_ref::<PrimitiveArray<$t>>().unwrap();
+        let typed = $arr
+            .as_any()
+            .downcast_ref::<arrow::array::PrimitiveArray<$t>>()
+            .unwrap();
         let iter = typed.iter().enumerate();
         Box::new(iter) as Box<dyn Iterator<Item = (usize, Option<i64>)>>
     }};
