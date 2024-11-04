@@ -276,7 +276,6 @@ mod tests {
         let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
         let val: DatanodeStatValue = kv.value.try_into().unwrap();
-        // refresh every 10 stats
         assert_eq!(handler.flush_stats_factor, val.stats.len());
     }
 
