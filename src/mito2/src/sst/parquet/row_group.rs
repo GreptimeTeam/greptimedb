@@ -33,7 +33,7 @@ use tokio::task::yield_now;
 
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheManagerRef, PageKey, PageValue};
-use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
+use crate::metrics::{READ_STAGE_BUILD_PAGE_READER, READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::page_reader::RowGroupCachedReader;
@@ -308,6 +308,7 @@ impl<'a> InMemoryRowGroup<'a> {
 
     /// Creates a page reader to read column at `i`.
     fn column_page_reader(&self, i: usize) -> Result<Box<dyn PageReader>> {
+        let _timer = READ_STAGE_BUILD_PAGE_READER.start_timer();
         if let Some(cached_pages) = &self.column_uncompressed_pages[i] {
             debug_assert!(!cached_pages.row_group.is_empty());
             // Hits the row group level page cache.

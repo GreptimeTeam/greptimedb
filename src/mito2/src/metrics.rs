@@ -134,6 +134,7 @@ lazy_static! {
     )
     .unwrap();
     pub static ref READ_STAGE_FETCH_PAGES: Histogram = READ_STAGE_ELAPSED.with_label_values(&["fetch_pages"]);
+    pub static ref READ_STAGE_BUILD_PAGE_READER: Histogram = READ_STAGE_ELAPSED.with_label_values(&["build_page_reader"]);
     /// Counter of rows read from different source.
     pub static ref READ_ROWS_TOTAL: IntCounterVec =
         register_int_counter_vec!("greptime_mito_read_rows_total", "mito read rows total", &[TYPE_LABEL]).unwrap();
