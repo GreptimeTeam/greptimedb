@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
-use common_catalog::consts::INFORMATION_SCHEMA_TABLES_TABLE_ID;
+use common_catalog::consts::{INFORMATION_SCHEMA_TABLES_TABLE_ID, MITO_ENGINE};
 use common_error::ext::BoxedError;
 use common_meta::datanode::RegionStat;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -245,16 +245,23 @@ impl InformationSchemaTablesBuilder {
 
             while let Some(table) = stream.try_next().await? {
                 let table_info = table.table_info();
-                let region_ids = table_info
-                    .meta
-                    .region_numbers
-                    .iter()
-                    .map(|n| RegionId::new(table_info.ident.table_id, *n))
-                    .collect::<HashSet<_>>();
-                let table_region_stats = region_stats
-                    .iter()
-                    .filter(|stat| region_ids.contains(&stat.id))
-                    .collect::<Vec<_>>();
+
+                // TODO(dennis): make it working for metric engine
+                let table_region_stats = if table_info.meta.engine == MITO_ENGINE {
+                    let region_ids = table_info
+                        .meta
+                        .region_numbers
+                        .iter()
+                        .map(|n| RegionId::new(table_info.ident.table_id, *n))
+                        .collect::<HashSet<_>>();
+
+                    region_stats
+                        .iter()
+                        .filter(|stat| region_ids.contains(&stat.id))
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![]
+                };
 
                 self.add_table(
                     &predicates,
