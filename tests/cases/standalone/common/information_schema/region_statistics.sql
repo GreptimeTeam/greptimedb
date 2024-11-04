@@ -21,4 +21,6 @@ SELECT SUM(region_rows), SUM(disk_size), SUM(sst_size), SUM(index_size)
        FROM INFORMATION_SCHEMA.REGION_STATISTICS WHERE table_id
        IN (SELECT TABLE_ID FROM INFORMATION_SCHEMA.TABLES WHERE table_name = 'test' and table_schema = 'public');
 
+SELECT data_length, index_length, avg_row_length, table_rows FROM INFORMATION_SCHEMA.TABLES WHERE table_name = 'test';
+
 DROP TABLE test;
