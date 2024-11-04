@@ -128,6 +128,9 @@ pub struct MitoConfig {
     /// To align with the old behavior, the default value is 0 (no restrictions).
     #[serde(with = "humantime_serde")]
     pub min_compaction_interval: Duration,
+
+    /// Skip wal
+    pub skip_wal: bool,
 }
 
 impl Default for MitoConfig {
@@ -161,6 +164,7 @@ impl Default for MitoConfig {
             fulltext_index: FulltextIndexConfig::default(),
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
+            skip_wal: false,
         };
 
         // Adjust buffer and cache size according to system memory if we can.
