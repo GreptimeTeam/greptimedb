@@ -17,9 +17,13 @@ pub(crate) mod partitioner;
 use std::collections::HashMap;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::column_data_type_extension::TypeExt;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::value::ValueData;
-use api::v1::{Column, ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
+use api::v1::{
+    Column, ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
+    RowDeleteRequest, RowInsertRequest, Rows, SemanticType, Value,
+};
 use common_base::BitVec;
 use datatypes::vectors::VectorRef;
 use snafu::prelude::*;
@@ -27,9 +31,76 @@ use snafu::ResultExt;
 use table::metadata::TableInfo;
 
 use crate::error::{
-    ColumnDataTypeSnafu, ColumnNotFoundSnafu, InvalidInsertRequestSnafu,
-    MissingTimeIndexColumnSnafu, Result,
+    ColumnDataTypeSnafu, ColumnNotFoundSnafu, InvalidInsertRequestSnafu, InvalidJsonFormatSnafu,
+    MissingTimeIndexColumnSnafu, Result, UnexpectedSnafu,
 };
+
+/// Encodes a string value as JSONB binary data if the value is of `StringValue` type.
+fn encode_string_to_jsonb_binary(value_data: ValueData) -> Result<ValueData> {
+    if let ValueData::StringValue(json) = &value_data {
+        let binary = jsonb::parse_value(json.as_bytes())
+            .map_err(|_| InvalidJsonFormatSnafu { json }.build())
+            .map(|jsonb| jsonb.to_vec())?;
+        Ok(ValueData::BinaryValue(binary))
+    } else {
+        UnexpectedSnafu {
+            violated: "Expected to value data to be a string.",
+        }
+        .fail()
+    }
+}
+
+/// Prepares row insertion requests by converting any JSON values to binary JSONB format.
+pub fn preprocess_row_insert_requests(requests: &mut Vec<RowInsertRequest>) -> Result<()> {
+    for request in requests {
+        prepare_rows(&mut request.rows)?;
+    }
+
+    Ok(())
+}
+
+/// Prepares row deletion requests by converting any JSON values to binary JSONB format.
+pub fn preprocess_row_delete_requests(requests: &mut Vec<RowDeleteRequest>) -> Result<()> {
+    for request in requests {
+        prepare_rows(&mut request.rows)?;
+    }
+
+    Ok(())
+}
+
+fn prepare_rows(rows: &mut Option<Rows>) -> Result<()> {
+    if let Some(rows) = rows {
+        let indexes = rows
+            .schema
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, schema)| {
+                if schema.datatype() == ColumnDataType::Json {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for idx in &indexes {
+            let column = &mut rows.schema[*idx];
+            column.datatype_extension = Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+            });
+            column.datatype = ColumnDataType::Binary.into();
+        }
+
+        for idx in &indexes {
+            for row in &mut rows.rows {
+                if let Some(value_data) = row.values[*idx].value_data.take() {
+                    row.values[*idx].value_data = Some(encode_string_to_jsonb_binary(value_data)?);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
 
 pub fn columns_to_rows(columns: Vec<Column>, row_count: u32) -> Result<Rows> {
     let row_count = row_count as usize;

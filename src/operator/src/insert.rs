@@ -54,6 +54,7 @@ use crate::error::{
 };
 use crate::expr_factory::CreateExprFactory;
 use crate::region_req_factory::RegionRequestFactory;
+use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{ColumnToRow, RowToRegion, StatementToRegion, TableToRegion};
 use crate::statement::StatementExecutor;
 
@@ -119,10 +120,11 @@ impl Inserter {
     /// Handles row inserts request and creates a physical table on demand.
     pub async fn handle_row_inserts(
         &self,
-        requests: RowInsertRequests,
+        mut requests: RowInsertRequests,
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
     ) -> Result<Output> {
+        preprocess_row_insert_requests(&mut requests.inserts)?;
         self.handle_row_inserts_with_create_type(
             requests,
             ctx,
