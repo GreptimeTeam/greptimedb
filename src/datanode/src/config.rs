@@ -30,7 +30,7 @@ use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
 
-pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::mb(256);
+pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(1);
 
 /// Default data home in file storage
 const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";

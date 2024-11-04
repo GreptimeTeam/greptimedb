@@ -29,8 +29,6 @@ use crate::error::{self, Result};
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
-const MAX_CACHED_STATS_PER_KEY: usize = 10;
-
 #[derive(Debug, Default)]
 struct EpochStats {
     stats: Vec<Stat>,
@@ -69,9 +67,26 @@ impl EpochStats {
     }
 }
 
-#[derive(Default)]
+const DEFAULT_FLUSH_STATS_FACTOR: usize = 3;
+
 pub struct CollectStatsHandler {
     stats_cache: DashMap<DatanodeStatKey, EpochStats>,
+    flush_stats_factor: usize,
+}
+
+impl Default for CollectStatsHandler {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl CollectStatsHandler {
+    pub fn new(flush_stats_factor: Option<usize>) -> Self {
+        Self {
+            flush_stats_factor: flush_stats_factor.unwrap_or(DEFAULT_FLUSH_STATS_FACTOR),
+            stats_cache: DashMap::default(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -130,7 +145,7 @@ impl HeartbeatHandler for CollectStatsHandler {
             rewrite_node_address(ctx, last).await;
         }
 
-        if !refresh && epoch_stats.len() < MAX_CACHED_STATS_PER_KEY {
+        if !refresh && epoch_stats.len() < self.flush_stats_factor {
             return Ok(HandleControl::Continue);
         }
 
@@ -261,8 +276,7 @@ mod tests {
         let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
         let val: DatanodeStatValue = kv.value.try_into().unwrap();
-        // refresh every 10 stats
-        assert_eq!(10, val.stats.len());
+        assert_eq!(handler.flush_stats_factor, val.stats.len());
     }
 
     async fn handle_request_many_times(

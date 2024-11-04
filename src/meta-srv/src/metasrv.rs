@@ -130,6 +130,10 @@ pub struct MetasrvOptions {
     /// limit the number of operations in a txn because an infinitely large txn could
     /// potentially block other operations.
     pub max_txn_ops: usize,
+    /// The factor that determines how often statistics should be flushed,
+    /// based on the number of received heartbeats. When the number of heartbeats
+    /// reaches this factor, a flush operation is triggered.
+    pub flush_stats_factor: usize,
     /// The tracing options.
     pub tracing: TracingOptions,
     /// The datastore for kv metadata.
@@ -165,6 +169,7 @@ impl Default for MetasrvOptions {
             export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
             max_txn_ops: 128,
+            flush_stats_factor: 3,
             tracing: TracingOptions::default(),
             backend: BackendImpl::EtcdStore,
         }

@@ -146,13 +146,15 @@ impl RegionScanExec {
         let _ = scanner.prepare(partition_ranges, distinguish_partition_range);
     }
 
-    pub fn time_index(&self) -> Option<String> {
+    pub fn time_index(&self) -> String {
         self.scanner
             .lock()
             .unwrap()
-            .schema()
-            .timestamp_column()
-            .map(|x| x.name.clone())
+            .metadata()
+            .time_index_column()
+            .column_schema
+            .name
+            .clone()
     }
 
     pub fn tag_columns(&self) -> Vec<String> {

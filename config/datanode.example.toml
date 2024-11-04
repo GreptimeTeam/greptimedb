@@ -294,14 +294,14 @@ data_home = "/tmp/greptimedb/"
 ## - `Oss`: the data is stored in the Aliyun OSS.
 type = "File"
 
-## Cache configuration for object storage such as 'S3' etc.
+## Cache configuration for object storage such as 'S3' etc. It is recommended to configure it when using object storage for better performance.
 ## The local file cache directory.
 ## @toml2docs:none-default
 cache_path = "/path/local_cache"
 
-## The local file cache capacity in bytes.
+## The local file cache capacity in bytes. If your disk space is sufficient, it is recommended to set it larger.
 ## @toml2docs:none-default
-cache_capacity = "256MB"
+cache_capacity = "1GiB"
 
 ## The S3 bucket name.
 ## **It's only used when the storage type is `S3`, `Oss` and `Gcs`**.
@@ -459,14 +459,14 @@ auto_flush_interval = "1h"
 ## @toml2docs:none-default="Auto"
 #+ selector_result_cache_size = "512MB"
 
-## Whether to enable the experimental write cache.
+## Whether to enable the experimental write cache. It is recommended to enable it when using object storage for better performance.
 enable_experimental_write_cache = false
 
 ## File system path for write cache, defaults to `{data_home}/write_cache`.
 experimental_write_cache_path = ""
 
-## Capacity for write cache.
-experimental_write_cache_size = "512MB"
+## Capacity for write cache. If your disk space is sufficient, it is recommended to set it larger.
+experimental_write_cache_size = "1GiB"
 
 ## TTL for write cache.
 ## @toml2docs:none-default

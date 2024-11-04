@@ -169,7 +169,16 @@ impl WindowedSortExec {
 
 impl DisplayAs for WindowedSortExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "WindowedSortExec")
+        write!(
+            f,
+            "WindowedSortExec: expr={} num_ranges={}",
+            self.expression,
+            self.ranges.len()
+        )?;
+        if let Some(fetch) = self.fetch {
+            write!(f, " fetch={}", fetch)?;
+        }
+        Ok(())
     }
 }
 

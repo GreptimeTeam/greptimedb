@@ -303,7 +303,7 @@ impl FlownodeBuilder {
     ///
     /// or recover all existing flow tasks if in standalone mode(nodeid is None)
     ///
-    /// TODO(discord9): persisent flow tasks with internal state
+    /// TODO(discord9): persistent flow tasks with internal state
     async fn recover_flows(&self, manager: &FlowWorkerManagerRef) -> Result<usize, Error> {
         let nodeid = self.opts.node_id;
         let to_be_recovered: Vec<_> = if let Some(nodeid) = nodeid {

@@ -31,13 +31,14 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt32Array, UInt64Array};
 use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
 use datatypes::vectors::{Helper, Vector};
-use parquet::file::metadata::RowGroupMetaData;
+use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
@@ -48,6 +49,7 @@ use crate::error::{
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::to_sst_arrow_schema;
 
 /// Arrow array type for the primary key dictionary.
@@ -556,6 +558,50 @@ fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
 
     // Safety: The key index is valid.
     Arc::new(DictionaryArray::new(keys, values))
+}
+
+/// Gets the min/max time index of the row group from the parquet meta.
+/// It assumes the parquet is created by the mito engine.
+pub(crate) fn parquet_row_group_time_range(
+    file_meta: &FileMeta,
+    parquet_meta: &ParquetMetaData,
+    row_group_idx: usize,
+) -> Option<FileTimeRange> {
+    let row_group_meta = parquet_meta.row_group(row_group_idx);
+    let num_columns = parquet_meta.file_metadata().schema_descr().num_columns();
+    assert!(
+        num_columns >= FIXED_POS_COLUMN_NUM,
+        "file only has {} columns",
+        num_columns
+    );
+    let time_index_pos = num_columns - FIXED_POS_COLUMN_NUM;
+
+    let stats = row_group_meta.column(time_index_pos).statistics()?;
+    if stats.has_min_max_set() {
+        // The physical type for the timestamp should be i64.
+        let (min, max) = match stats {
+            Statistics::Int64(value_stats) => (*value_stats.min(), *value_stats.max()),
+            Statistics::Int32(_)
+            | Statistics::Boolean(_)
+            | Statistics::Int96(_)
+            | Statistics::Float(_)
+            | Statistics::Double(_)
+            | Statistics::ByteArray(_)
+            | Statistics::FixedLenByteArray(_) => return None,
+        };
+
+        debug_assert!(
+            min >= file_meta.time_range.0.value() && min <= file_meta.time_range.1.value()
+        );
+        debug_assert!(
+            max >= file_meta.time_range.0.value() && max <= file_meta.time_range.1.value()
+        );
+        let unit = file_meta.time_range.0.unit();
+
+        Some((Timestamp::new(min, unit), Timestamp::new(max, unit)))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
