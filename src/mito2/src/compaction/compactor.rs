@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use api::v1::region::compact_request;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -177,7 +177,11 @@ pub async fn open_compaction_region(
         current_version.options.ttl,
         &schema_metadata_manager,
     )
-    .await?;
+    .await
+    .unwrap_or_else(|e| {
+        warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
+        None
+    });
     Ok(CompactionRegion {
         region_id: req.region_id,
         region_options: req.region_options.clone(),
