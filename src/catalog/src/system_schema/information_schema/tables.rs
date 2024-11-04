@@ -240,7 +240,8 @@ impl InformationSchemaTablesBuilder {
         let information_extension = utils::information_extension(&self.catalog_manager)?;
 
         // TODO(dennis): `region_stats` API is not stable in distributed cluster because of network issue etc.
-        // But we don't want the statments such as `show tables` fails.
+        // But we don't want the statements such as `show tables` fail,
+        // so using `unwrap_or_else` here instead of `?` operator.
         let region_stats = information_extension
             .region_stats()
             .await
