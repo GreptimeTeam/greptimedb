@@ -169,7 +169,7 @@ pub(crate) struct ScanRegion {
     /// Cache.
     cache_manager: Option<CacheManagerRef>,
     /// Parallelism to scan.
-    parallelism: ScanParallism,
+    parallelism: ScanParallelism,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
     /// Whether to ignore fulltext index.
@@ -191,7 +191,7 @@ impl ScanRegion {
             access_layer,
             request,
             cache_manager,
-            parallelism: ScanParallism::default(),
+            parallelism: ScanParallelism::default(),
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
             start_time: None,
@@ -200,7 +200,7 @@ impl ScanRegion {
 
     /// Sets parallelism.
     #[must_use]
-    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallism) -> Self {
+    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallelism) -> Self {
         self.parallelism = parallelism;
         self
     }
@@ -470,7 +470,7 @@ impl ScanRegion {
 
 /// Config for parallel scan.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ScanParallism {
+pub(crate) struct ScanParallelism {
     /// Number of tasks expect to spawn to read data.
     pub(crate) parallelism: usize,
     /// Channel size to send batches. Only takes effect when the parallelism > 1.
@@ -507,7 +507,7 @@ pub(crate) struct ScanInput {
     /// Ignores file not found error.
     ignore_file_not_found: bool,
     /// Parallelism to scan data.
-    pub(crate) parallelism: ScanParallism,
+    pub(crate) parallelism: ScanParallelism,
     /// Index appliers.
     inverted_index_applier: Option<InvertedIndexApplierRef>,
     fulltext_index_applier: Option<FulltextIndexApplierRef>,
@@ -536,7 +536,7 @@ impl ScanInput {
             files: Vec::new(),
             cache_manager: None,
             ignore_file_not_found: false,
-            parallelism: ScanParallism::default(),
+            parallelism: ScanParallelism::default(),
             inverted_index_applier: None,
             fulltext_index_applier: None,
             query_start: None,
@@ -591,7 +591,7 @@ impl ScanInput {
 
     /// Sets scan parallelism.
     #[must_use]
-    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallism) -> Self {
+    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallelism) -> Self {
         self.parallelism = parallelism;
         self
     }

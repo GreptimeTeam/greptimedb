@@ -1355,7 +1355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_region_server_parallism() {
+    async fn test_region_server_parallelism() {
         let p = RegionServerParallelism::from_opts(2, Duration::from_millis(1)).unwrap();
         let first_query = p.acquire().await;
         assert!(first_query.is_ok());
