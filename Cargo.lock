@@ -5553,7 +5553,9 @@ dependencies = [
 
 [[package]]
 name = "jsonpath-rust"
-version = "0.7.2"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69a61b87f6a55cc6c28fed5739dd36b9642321ce63e4a5e4a4715d69106f4a10"
 dependencies = [
  "pest",
  "pest_derive",
@@ -8209,7 +8211,7 @@ dependencies = [
  "greptime-proto",
  "itertools 0.10.5",
  "jsonb",
- "jsonpath-rust 0.7.2",
+ "jsonpath-rust 0.7.3",
  "lazy_static",
  "moka",
  "once_cell",
