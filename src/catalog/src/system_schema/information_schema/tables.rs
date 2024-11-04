@@ -21,6 +21,7 @@ use common_error::ext::BoxedError;
 use common_meta::datanode::RegionStat;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use common_telemetry::error;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
@@ -245,6 +246,10 @@ impl InformationSchemaTablesBuilder {
         let region_stats = information_extension
             .region_stats()
             .await
+            .map_err(|e| {
+                error!(e; "Failed to call region_stats");
+                e
+            })
             .unwrap_or_else(|_| vec![]);
 
         for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
