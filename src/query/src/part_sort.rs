@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Module for sorting input data within each [`PartitionRange`].
+//!
+//! This module defines the [`PartSortExec`] execution plan, which sorts each
+//! partition ([`PartitionRange`]) independently based on the provided physical
+//! sort expressions.
+
 use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -36,7 +42,7 @@ use itertools::Itertools;
 use snafu::location;
 use store_api::region_engine::PartitionRange;
 
-use crate::downcast_ts_array;
+use crate::{array_iter_helper, downcast_ts_array};
 
 /// Sort input within given PartitionRange
 ///
@@ -288,9 +294,51 @@ impl PartSortStream {
         Ok(())
     }
 
+    /// Try find data whose value exceeds the current partition range.
+    ///
+    /// Returns `None` if no such data is found, and `Some(idx)` where idx points to
+    /// the first data that exceeds the current partition range.
+    fn try_find_next_range(
+        &self,
+        sort_column: &ArrayRef,
+    ) -> datafusion_common::Result<Option<usize>> {
+        if sort_column.len() == 0 {
+            return Ok(Some(0));
+        }
+
+        // check if the current partition index is out of range
+        if self.cur_part_idx >= self.partition_ranges.len() {
+            internal_err!(
+                "Partition index out of range: {} >= {}",
+                self.cur_part_idx,
+                self.partition_ranges.len()
+            )?;
+        }
+        let cur_range = self.partition_ranges[self.cur_part_idx];
+
+        let sort_column_iter = downcast_ts_array!(
+            sort_column.data_type() => (array_iter_helper, sort_column),
+            _ => internal_err!(
+                "Unsupported data type for sort column: {:?}",
+                sort_column.data_type()
+            )?,
+        );
+
+        for (idx, val) in sort_column_iter {
+            // ignore vacant time index data
+            if let Some(val) = val {
+                if val >= cur_range.end.value() || val < cur_range.start.value() {
+                    return Ok(Some(idx));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Sort and clear the buffer and return the sorted record batch
     ///
-    /// this function should return a empty record batch if the buffer is empty
+    /// this function will return a empty record batch if the buffer is empty
     fn sort_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
         if self.buffer.is_empty() {
             return Ok(DfRecordBatch::new_empty(self.schema.clone()));
@@ -317,6 +365,9 @@ impl PartSortStream {
                 Some(format!("Fail to sort to indices at {}", location!())),
             )
         })?;
+        if indices.is_empty() {
+            return Ok(DfRecordBatch::new_empty(self.schema.clone()));
+        }
 
         self.check_in_range(
             &sort_column,
@@ -379,6 +430,7 @@ impl PartSortStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
         loop {
+            // no more input, sort the buffer and return
             if self.input_complete {
                 if self.buffer.is_empty() {
                     return Poll::Ready(None);
@@ -386,19 +438,47 @@ impl PartSortStream {
                     return Poll::Ready(Some(self.sort_buffer()));
                 }
             }
+
+            // fetch next batch from input
             let res = self.input.as_mut().poll_next(cx);
             match res {
                 Poll::Ready(Some(Ok(batch))) => {
-                    if batch.num_rows() == 0 {
+                    let sort_column = self
+                        .expression
+                        .expr
+                        .evaluate(&batch)?
+                        .into_array(batch.num_rows())?;
+                    let next_range_idx = self.try_find_next_range(&sort_column)?;
+                    // `Some` means the current range is finished, split the batch into two parts and sort
+                    if let Some(idx) = next_range_idx {
+                        let this_range = batch.slice(0, idx);
+                        let next_range = batch.slice(idx, batch.num_rows() - idx);
+                        if this_range.num_rows() != 0 {
+                            self.buffer.push(this_range);
+                        }
                         // mark end of current PartitionRange
                         let sorted_batch = self.sort_buffer()?;
-                        self.cur_part_idx += 1;
+                        let next_sort_column = sort_column.slice(idx, batch.num_rows() - idx);
+                        // step to next proper PartitionRange
+                        loop {
+                            self.cur_part_idx += 1;
+                            if next_sort_column.is_empty()
+                                || self.try_find_next_range(&next_sort_column)?.is_none()
+                            {
+                                break;
+                            }
+                        }
+                        // push the next range to the buffer
+                        if next_range.num_rows() != 0 {
+                            self.buffer.push(next_range);
+                        }
                         if sorted_batch.num_rows() == 0 {
                             // Current part is empty, continue polling next part.
                             continue;
                         }
                         return Poll::Ready(Some(Ok(sorted_batch)));
                     }
+
                     self.buffer.push(batch);
                     // keep polling until boundary(a empty RecordBatch) is reached
                     continue;
