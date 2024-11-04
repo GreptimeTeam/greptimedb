@@ -78,15 +78,11 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
             .options
             .insert(FULLTEXT_GRPC_KEY.to_string(), fulltext.clone());
     }
-
-    let inverted_index = column_schema
-        .metadata()
-        .get(INVERTED_INDEX_KEY)
-        .cloned()
-        .unwrap_or_else(|| false.to_string());
-    options
-        .options
-        .insert(INVERTED_INDEX_GRPC_KEY.to_string(), inverted_index);
+    if let Some(inverted_index) = column_schema.metadata().get(INVERTED_INDEX_KEY) {
+        options
+            .options
+            .insert(INVERTED_INDEX_GRPC_KEY.to_string(), inverted_index.clone());
+    }
 
     (!options.options.is_empty()).then_some(options)
 }
@@ -106,16 +102,6 @@ pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<Column
     options.options.insert(FULLTEXT_GRPC_KEY.to_string(), v);
 
     Ok((!options.options.is_empty()).then_some(options))
-}
-
-/// Tries to set the inverted index option in the given `ColumnOptions`.
-pub fn set_inverted_index_if_absent(options: &mut ColumnOptions, is_primary_key: bool) {
-    if !options.options.contains_key(INVERTED_INDEX_GRPC_KEY) {
-        options.options.insert(
-            INVERTED_INDEX_GRPC_KEY.to_string(),
-            is_primary_key.to_string(),
-        );
-    }
 }
 
 #[cfg(test)]

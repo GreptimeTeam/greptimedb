@@ -279,7 +279,7 @@ impl<'a> IndexerBuilder<'a> {
     }
 
     fn inverted_indexed_column_ids(&self) -> HashSet<ColumnId> {
-        // For compatibility
+        // Default to use primary key columns as inverted index columns.
         let pk_as_inverted_index = !self
             .metadata
             .column_metadatas

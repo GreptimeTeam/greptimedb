@@ -148,15 +148,18 @@ fn create_table_constraints(
             .collect();
         constraints.push(TableConstraint::PrimaryKey { columns });
     }
-    let inverted_index_cols = schema
+
+    let inverted_index_set = schema
         .column_schemas()
         .iter()
-        .filter(|c| c.is_inverted_indexed())
-        .map(|c| Ident::with_quote(quote_style, &c.name))
-        .collect::<Vec<_>>();
-    if !inverted_index_cols.is_empty() || !table_meta.primary_key_indices.is_empty() {
-        // Do not show inverted index constraint if there are no inverted index columns
-        // and no primary key columns.
+        .any(|c| c.has_inverted_index_key());
+    if inverted_index_set {
+        let inverted_index_cols = schema
+            .column_schemas()
+            .iter()
+            .filter(|c| c.is_inverted_indexed())
+            .map(|c| Ident::with_quote(quote_style, &c.name))
+            .collect::<Vec<_>>();
         constraints.push(TableConstraint::InvertedIndex {
             columns: inverted_index_cols,
         });

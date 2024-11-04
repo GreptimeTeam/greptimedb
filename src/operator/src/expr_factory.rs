@@ -130,12 +130,12 @@ pub(crate) async fn create_external_expr(
         // expanded form
         let time_index = find_time_index(&create.constraints)?;
         let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
-        let inverted_index_cols =
-            find_inverted_index_cols(&primary_keys, &create.columns, &create.constraints)?;
+        let inverted_index_cols = find_inverted_index_cols(&create.columns, &create.constraints)?;
         let column_schemas = columns_to_column_schemas(
             &create.columns,
             &time_index,
             &inverted_index_cols,
+            &primary_keys,
             Some(&query_ctx.timezone()),
         )?;
         (time_index, primary_keys, column_schemas)
@@ -192,8 +192,7 @@ pub fn create_to_expr(
     );
 
     let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
-    let inverted_index_cols =
-        find_inverted_index_cols(&primary_keys, &create.columns, &create.constraints)?;
+    let inverted_index_cols = find_inverted_index_cols(&create.columns, &create.constraints)?;
 
     let expr = CreateTableExpr {
         catalog_name,
@@ -352,13 +351,11 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
 }
 
 /// Finds the inverted index columns from the constraints. If no inverted index
-/// columns are provided in the constraints, use the primary keys as the inverted
-/// index columns.
+/// columns are provided in the constraints, return `None`.
 fn find_inverted_index_cols(
-    primary_keys: &[String],
     columns: &[SqlColumn],
     constraints: &[TableConstraint],
-) -> Result<Vec<String>> {
+) -> Result<Option<Vec<String>>> {
     let inverted_index_cols = constraints.iter().find_map(|constraint| {
         if let TableConstraint::InvertedIndex { columns } = constraint {
             Some(
@@ -373,7 +370,7 @@ fn find_inverted_index_cols(
     });
 
     let Some(inverted_index_cols) = inverted_index_cols else {
-        return Ok(primary_keys.to_owned());
+        return Ok(None);
     };
 
     for col in &inverted_index_cols {
@@ -385,33 +382,38 @@ fn find_inverted_index_cols(
         }
     }
 
-    Ok(inverted_index_cols)
+    Ok(Some(inverted_index_cols))
 }
 
 fn columns_to_expr(
     column_defs: &[SqlColumn],
     time_index: &str,
     primary_keys: &[String],
-    invereted_index_cols: &[String],
+    invereted_index_cols: &Option<Vec<String>>,
     timezone: Option<&Timezone>,
 ) -> Result<Vec<api::v1::ColumnDef>> {
-    let column_schemas =
-        columns_to_column_schemas(column_defs, time_index, invereted_index_cols, timezone)?;
+    let column_schemas = columns_to_column_schemas(
+        column_defs,
+        time_index,
+        invereted_index_cols,
+        primary_keys,
+        timezone,
+    )?;
     column_schemas_to_defs(column_schemas, primary_keys)
 }
 
 fn columns_to_column_schemas(
     columns: &[SqlColumn],
     time_index: &str,
-    invereted_index_cols: &[String],
+    invereted_index_cols: &Option<Vec<String>>,
+    primary_keys: &[String],
     timezone: Option<&Timezone>,
 ) -> Result<Vec<ColumnSchema>> {
     columns
         .iter()
         .map(|c| {
-            let is_time_index = c.name().to_string() == time_index;
-            let with_inverted_index = invereted_index_cols.contains(&c.name().value);
-            column_to_schema(c, is_time_index, with_inverted_index, timezone).context(ParseSqlSnafu)
+            column_to_schema(c, time_index, invereted_index_cols, primary_keys, timezone)
+                .context(ParseSqlSnafu)
         })
         .collect::<Result<Vec<ColumnSchema>>>()
 }

@@ -257,8 +257,7 @@ SHOW CREATE TABLE monitor;
 |         |   "cpu" DOUBLE NULL DEFAULT 0,                            |
 |         |   "memory" DOUBLE NULL,                                   |
 |         |   TIME INDEX ("ts"),                                      |
-|         |   PRIMARY KEY ("host"),                                   |
-|         |   INVERTED INDEX ("host")                                 |
+|         |   PRIMARY KEY ("host")                                    |
 |         | )                                                         |
 |         |                                                           |
 |         | ENGINE=mito                                               |
