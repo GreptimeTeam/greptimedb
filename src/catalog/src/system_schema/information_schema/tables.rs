@@ -238,7 +238,13 @@ impl InformationSchemaTablesBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         let information_extension = utils::information_extension(&self.catalog_manager)?;
-        let region_stats = information_extension.region_stats().await?;
+
+        // TODO(dennis): `region_stats` API is not stable in distributed cluster because of network issue etc.
+        // But we don't want the statments such as `show tables` fails.
+        let region_stats = information_extension
+            .region_stats()
+            .await
+            .unwrap_or_else(|_| vec![]);
 
         for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name, None);
