@@ -31,8 +31,8 @@ use store_api::storage::RegionId;
 
 use crate::error::{
     AddEntryLogBatchSnafu, DiscontinuousLogIndexSnafu, Error, FetchEntrySnafu,
-    IllegalNamespaceSnafu, IllegalStateSnafu, InvalidProviderSnafu, OverrideCompactedEntrySnafu,
-    RaftEngineSnafu, Result, StartGcTaskSnafu, StopGcTaskSnafu,
+    IllegalNamespaceSnafu, IllegalStateSnafu, InvalidProviderSnafu, JoinSnafu,
+    OverrideCompactedEntrySnafu, RaftEngineSnafu, Result, StartGcTaskSnafu, StopGcTaskSnafu,
 };
 use crate::metrics;
 use crate::raft_engine::backend::SYSTEM_NAMESPACE;
@@ -250,6 +250,12 @@ impl LogStore for RaftEngineLogStore {
             .engine
             .write(&mut batch, sync)
             .context(RaftEngineSnafu)?;
+        let engine = self.engine.clone();
+        let _ = common_runtime::spawn_blocking_global(move || {
+            engine.write(&mut batch, sync).context(RaftEngineSnafu)
+        })
+        .await
+        .context(JoinSnafu)?;
 
         Ok(AppendBatchResponse { last_entry_ids })
     }

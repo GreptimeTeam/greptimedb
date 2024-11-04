@@ -17,6 +17,7 @@ use std::any::Any;
 use common_error::ext::ErrorExt;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
+use common_runtime::JoinError;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -305,6 +306,14 @@ pub enum Error {
     NoMaxValue {
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Join error"))]
+    Join {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: JoinError,
     },
 }
 
