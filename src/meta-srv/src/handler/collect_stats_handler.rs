@@ -67,11 +67,11 @@ impl EpochStats {
     }
 }
 
-const DEFAULT_HEARTBEAT_FLUSH_THRESHOLD: usize = 3;
+const DEFAULT_FLUSH_STATS_FACTOR: usize = 3;
 
 pub struct CollectStatsHandler {
     stats_cache: DashMap<DatanodeStatKey, EpochStats>,
-    heartbeat_flush_threshold: usize,
+    flush_stats_factor: usize,
 }
 
 impl Default for CollectStatsHandler {
@@ -81,10 +81,9 @@ impl Default for CollectStatsHandler {
 }
 
 impl CollectStatsHandler {
-    pub fn new(heartbeat_flush_threshold: Option<usize>) -> Self {
+    pub fn new(flush_stats_factor: Option<usize>) -> Self {
         Self {
-            heartbeat_flush_threshold: heartbeat_flush_threshold
-                .unwrap_or(DEFAULT_HEARTBEAT_FLUSH_THRESHOLD),
+            flush_stats_factor: flush_stats_factor.unwrap_or(DEFAULT_FLUSH_STATS_FACTOR),
             stats_cache: DashMap::default(),
         }
     }
@@ -146,7 +145,7 @@ impl HeartbeatHandler for CollectStatsHandler {
             rewrite_node_address(ctx, last).await;
         }
 
-        if !refresh && epoch_stats.len() < self.heartbeat_flush_threshold {
+        if !refresh && epoch_stats.len() < self.flush_stats_factor {
             return Ok(HandleControl::Continue);
         }
 
@@ -278,7 +277,7 @@ mod tests {
         let kv = res.unwrap();
         let val: DatanodeStatValue = kv.value.try_into().unwrap();
         // refresh every 10 stats
-        assert_eq!(10, val.stats.len());
+        assert_eq!(handler.flush_stats_factor, val.stats.len());
     }
 
     async fn handle_request_many_times(

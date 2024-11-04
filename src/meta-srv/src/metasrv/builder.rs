@@ -347,7 +347,7 @@ impl MetasrvBuilder {
                     .with_plugins(plugins.clone())
                     .with_region_failure_handler(region_failover_handler)
                     .with_region_lease_handler(Some(region_lease_handler))
-                    .with_heartbeat_flush_threshold(Some(options.heartbeat_flush_threshold))
+                    .with_flush_stats_factor(Some(options.flush_stats_factor))
                     .add_default_handlers()
             }
         };
