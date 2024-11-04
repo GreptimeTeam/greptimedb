@@ -83,47 +83,23 @@ impl Function for JsonPathExistsFunction {
         match (jsons.data_type(), paths.data_type()) {
             (ConcreteDataType::Binary(_), ConcreteDataType::String(_)) => {
                 for i in 0..size {
-                    let json = jsons.get_ref(i);
-                    let path = paths.get_ref(i);
-
-                    // Get json as bytes.
-                    let json = match json.as_binary() {
-                        Ok(Some(bytes)) => bytes,
-                        _ => {
-                            return InvalidFuncArgsSnafu {
-                                err_msg: format!("Illegal json binary: {:?}", json),
-                            }
-                            .fail();
+                    let result = match (jsons.get_ref(i).as_binary(), paths.get_ref(i).as_string())
+                    {
+                        (Ok(Some(json)), Ok(Some(path))) => {
+                            // Get `JsonPath`.
+                            let json_path = match jsonb::jsonpath::parse_json_path(path.as_bytes())
+                            {
+                                Ok(json_path) => json_path,
+                                Err(_) => {
+                                    return InvalidFuncArgsSnafu {
+                                        err_msg: format!("Illegal json path: {:?}", path),
+                                    }
+                                    .fail();
+                                }
+                            };
+                            jsonb::path_exists(json, json_path).ok()
                         }
-                    };
-
-                    let result = if !path.is_null() {
-                        // Get path as str.
-                        let path_str = match path.as_string() {
-                            Ok(Some(str)) => str,
-                            _ => {
-                                return InvalidFuncArgsSnafu {
-                                    err_msg: format!("Unable to parse path as string: {:?}", path),
-                                }
-                                .fail();
-                            }
-                        };
-
-                        // Get `JsonPath`.
-                        let json_path = match jsonb::jsonpath::parse_json_path(path_str.as_bytes())
-                        {
-                            Ok(json_path) => json_path,
-                            Err(_) => {
-                                return InvalidFuncArgsSnafu {
-                                    err_msg: format!("Illegal JSON path: {:?}", path),
-                                }
-                                .fail();
-                            }
-                        };
-
-                        jsonb::path_exists(json, json_path).ok()
-                    } else {
-                        None
+                        _ => None,
                     };
 
                     results.push(result);
