@@ -361,6 +361,7 @@ fn build_sources(
     for index in &range_meta.row_group_indices {
         let stream = if stream_ctx.is_mem_range_index(*index) {
             let stream = scan_mem_ranges(
+                part_metrics.partition(),
                 stream_ctx.clone(),
                 part_metrics.clone(),
                 *index,
@@ -373,8 +374,13 @@ fn build_sources(
             } else {
                 "seq_scan_files"
             };
-            let stream =
-                scan_file_ranges(stream_ctx.clone(), part_metrics.clone(), *index, read_type);
+            let stream = scan_file_ranges(
+                part_metrics.partition(),
+                stream_ctx.clone(),
+                part_metrics.clone(),
+                *index,
+                read_type,
+            );
             Box::pin(stream) as _
         };
         sources.push(Source::Stream(stream));

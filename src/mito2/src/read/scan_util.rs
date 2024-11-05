@@ -88,6 +88,10 @@ impl PartitionMetrics {
         Self(Arc::new(Mutex::new(inner)))
     }
 
+    pub(crate) fn partition(&self) -> usize {
+        self.0.lock().unwrap().partition
+    }
+
     pub(crate) fn on_first_poll(&self) {
         let mut inner = self.0.lock().unwrap();
         inner.first_poll = inner.query_start.elapsed();
@@ -126,6 +130,7 @@ impl PartitionMetrics {
 
 /// Scans memtable ranges at `index`.
 pub(crate) fn scan_mem_ranges(
+    partition: usize,
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
@@ -140,9 +145,10 @@ pub(crate) fn scan_mem_ranges(
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
             common_telemetry::debug!(
-                "Thread: {:?}, Scan mem range, region_id: {}, time_range: {:?}, index: {:?}, build_cost: {:?}",
+                "Thread: {:?}, Scan mem range, region_id: {}, partition: {}, time_range: {:?}, index: {:?}, build_cost: {:?}",
                 std::thread::current().id(),
                 stream_ctx.input.mapper.metadata().region_id,
+                partition,
                 time_range,
                 index,
                 build_cost
@@ -158,6 +164,7 @@ pub(crate) fn scan_mem_ranges(
 
 /// Scans file ranges at `index`.
 pub(crate) fn scan_file_ranges(
+    partition: usize,
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
@@ -176,9 +183,10 @@ pub(crate) fn scan_file_ranges(
             part_metrics.inc_build_reader_cost(build_cost);
             if read_type == "unordered_scan_files" {
                 common_telemetry::debug!(
-                    "Thread: {:?}, Scan file range, region_id: {}, file_id: {}, index: {:?}, build_cost: {:?}",
+                    "Thread: {:?}, Scan file range, region_id: {}, partition: {}, file_id: {}, index: {:?}, build_cost: {:?}",
                     std::thread::current().id(),
                     stream_ctx.input.mapper.metadata().region_id,
+                    partition,
                     range.file_handle().file_id(),
                     index,
                     build_cost

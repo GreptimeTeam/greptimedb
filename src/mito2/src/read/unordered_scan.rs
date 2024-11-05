@@ -81,6 +81,7 @@ impl UnorderedScan {
 
     /// Scans a [PartitionRange] by its `identifier` and returns a stream.
     fn scan_partition_range(
+        partition: usize,
         stream_ctx: Arc<StreamContext>,
         part_range_id: usize,
         part_metrics: PartitionMetrics,
@@ -90,12 +91,12 @@ impl UnorderedScan {
             let range_meta = &stream_ctx.ranges[part_range_id];
             for index in &range_meta.row_group_indices {
                 if stream_ctx.is_mem_range_index(*index) {
-                    let stream = scan_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index, range_meta.time_range);
+                    let stream = scan_mem_ranges(partition, stream_ctx.clone(), part_metrics.clone(), *index, range_meta.time_range);
                     for await batch in stream {
                         yield batch;
                     }
                 } else {
-                    let stream = scan_file_ranges(stream_ctx.clone(), part_metrics.clone(), *index, "unordered_scan_files");
+                    let stream = scan_file_ranges(partition, stream_ctx.clone(), part_metrics.clone(), *index, "unordered_scan_files");
                     for await batch in stream {
                         yield batch;
                     }
@@ -160,6 +161,7 @@ impl UnorderedScan {
                     .with_end(Some(part_range.end));
 
                 let stream = Self::scan_partition_range(
+                    partition,
                     stream_ctx.clone(),
                     part_range.identifier,
                     part_metrics.clone(),
