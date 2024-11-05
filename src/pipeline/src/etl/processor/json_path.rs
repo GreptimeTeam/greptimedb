@@ -216,6 +216,7 @@ mod test {
         let json_path = JsonPath::try_from("$.hello").unwrap();
         let processor = JsonPathProcessor {
             json_path,
+            result_idex: Some(0),
             ..Default::default()
         };
 
