@@ -6455,6 +6455,7 @@ dependencies = [
  "common-telemetry",
  "datatypes",
  "futures",
+ "futures-util",
  "humantime-serde",
  "meta-srv",
  "rand",
