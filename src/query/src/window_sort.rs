@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use arrow::array::{Array, ArrayRef};
 use arrow::compute::SortColumn;
@@ -126,6 +127,8 @@ impl WindowedSortExec {
             input.execution_mode(),
         );
 
+        let start = Instant::now();
+
         let mut all_avail_working_range = Vec::with_capacity(ranges.len());
         for r in &ranges {
             let overlap_counts = split_overlapping_ranges(r);
@@ -133,6 +136,11 @@ impl WindowedSortExec {
                 compute_all_working_ranges(&overlap_counts, expression.options.descending);
             all_avail_working_range.push(working_ranges);
         }
+
+        common_telemetry::info!(
+            "WindowSortExec compute working ranges, cost: {:?}",
+            start.elapsed()
+        );
 
         Ok(Self {
             expression,
