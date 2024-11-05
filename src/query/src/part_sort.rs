@@ -517,6 +517,7 @@ impl PartSortStream {
                     }
 
                     self.buffer.push(batch);
+
                     // keep polling until boundary(a empty RecordBatch) is reached
                     continue;
                 }
