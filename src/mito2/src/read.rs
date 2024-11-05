@@ -535,7 +535,7 @@ impl Batch {
     }
 
     /// Returns Ok if the given batch is behind the current batch.
-    #[cfg(debug_assertions)]
+    // #[cfg(debug_assertions)]
     pub(crate) fn check_next_batch(&self, other: &Batch) -> Result<(), String> {
         // Checks the primary key
         if self.primary_key() < other.primary_key() {
