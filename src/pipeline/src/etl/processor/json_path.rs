@@ -171,17 +171,14 @@ impl JsonPathProcessor {
 }
 
 impl Processor for JsonPathProcessor {
-    #[doc = " Get the processor\'s kind"]
     fn kind(&self) -> &str {
         PROCESSOR_JSON_PATH
     }
 
-    #[doc = " Whether to ignore missing"]
     fn ignore_missing(&self) -> bool {
         self.ignore_missing
     }
 
-    #[doc = " Execute the processor on a vector which be preprocessed by the pipeline"]
     fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_index();
