@@ -341,6 +341,17 @@ impl PartSortStream {
             )?,
         );
 
+        match sort_column.data_type() {
+            arrow_schema::DataType::Timestamp(unit, _) => {
+                assert_eq!(cur_range.start.unit().as_arrow_time_unit(), *unit);
+                assert_eq!(cur_range.end.unit().as_arrow_time_unit(), *unit);
+            }
+            _ => panic!(
+                "Unsupported data type for sort column: {:?}",
+                sort_column.data_type()
+            ),
+        }
+
         for (idx, val) in sort_column_iter {
             // ignore vacant time index data
             if let Some(val) = val {
