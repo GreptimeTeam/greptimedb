@@ -75,6 +75,8 @@ pub mod handler {
 
         info!("finish pprof");
 
+        info!("Dump data success, size: {}", body.len());
+
         Ok((StatusCode::OK, body))
     }
 }
