@@ -132,6 +132,14 @@ impl UnorderedScan {
         let part_ranges = self.properties.partitions[partition].clone();
         let distinguish_range = self.properties.distinguish_partition_range();
 
+        common_telemetry::info!(
+            "Thread: {:?}, Unordered scan start, region_id: {}, partition: {}, part_ranges: {:?}",
+            std::thread::current().id(),
+            stream_ctx.input.mapper.metadata().region_id,
+            partition,
+            part_ranges,
+        );
+
         let stream = try_stream! {
             part_metrics.on_first_poll();
 

@@ -25,6 +25,7 @@ use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DataFusionResult;
 use datafusion_physical_expr::expressions::Column as PhysicalColumn;
 use store_api::region_engine::PartitionRange;
+use store_api::storage::RegionId;
 use table::table::scan::RegionScanExec;
 
 use crate::part_sort::PartSortExec;
@@ -100,6 +101,7 @@ impl WindowedSortPhysicalRule {
                         sort_exec.input().clone()
                     } else {
                         Arc::new(PartSortExec::new(
+                            scanner_info.region_id,
                             first_sort_expr.clone(),
                             sort_exec.fetch(),
                             scanner_info.partition_ranges.clone(),
@@ -143,6 +145,7 @@ impl WindowedSortPhysicalRule {
 
 #[derive(Debug)]
 struct ScannerInfo {
+    region_id: RegionId,
     partition_ranges: Vec<Vec<PartitionRange>>,
     time_index: String,
     tag_columns: Vec<String>,
@@ -152,6 +155,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
     let mut partition_ranges = None;
     let mut time_index = None;
     let mut tag_columns = None;
+    let mut region_id = None;
     let mut is_batch_coalesced = false;
 
     input.transform_up(|plan| {
@@ -172,6 +176,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             partition_ranges = Some(region_scan_exec.get_uncollapsed_partition_ranges());
             time_index = Some(region_scan_exec.time_index());
             tag_columns = Some(region_scan_exec.tag_columns());
+            region_id = Some(region_scan_exec.region_id());
 
             // set distinguish_partition_ranges to true, this is an incorrect workaround
             if !is_batch_coalesced {
@@ -184,6 +189,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
 
     let result = try {
         ScannerInfo {
+            region_id: region_id?,
             partition_ranges: partition_ranges?,
             time_index: time_index?,
             tag_columns: tag_columns?,

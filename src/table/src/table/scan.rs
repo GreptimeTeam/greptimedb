@@ -36,6 +36,7 @@ use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSort
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use futures::{Stream, StreamExt};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
+use store_api::storage::RegionId;
 
 use crate::table::metrics::StreamMetrics;
 
@@ -165,6 +166,10 @@ impl RegionScanExec {
             .primary_key_columns()
             .map(|col| col.column_schema.name.clone())
             .collect()
+    }
+
+    pub fn region_id(&self) -> RegionId {
+        self.scanner.lock().unwrap().metadata().region_id
     }
 }
 

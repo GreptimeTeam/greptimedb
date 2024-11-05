@@ -41,6 +41,7 @@ use futures::Stream;
 use itertools::Itertools;
 use snafu::location;
 use store_api::region_engine::PartitionRange;
+use store_api::storage::RegionId;
 
 use crate::{array_iter_helper, downcast_ts_array};
 
@@ -51,6 +52,7 @@ use crate::{array_iter_helper, downcast_ts_array};
 /// and this operator will sort each partition independently within the partition.
 #[derive(Debug, Clone)]
 pub struct PartSortExec {
+    region_id: RegionId,
     /// Physical sort expressions(that is, sort by timestamp)
     expression: PhysicalSortExpr,
     limit: Option<usize>,
@@ -63,6 +65,7 @@ pub struct PartSortExec {
 
 impl PartSortExec {
     pub fn new(
+        region_id: RegionId,
         expression: PhysicalSortExpr,
         limit: Option<usize>,
         partition_ranges: Vec<Vec<PartitionRange>>,
@@ -76,6 +79,7 @@ impl PartSortExec {
         );
 
         Self {
+            region_id,
             expression,
             limit,
             input,
@@ -107,6 +111,7 @@ impl PartSortExec {
         }
 
         let df_stream = Box::pin(PartSortStream::new(
+            self.region_id,
             context,
             self,
             self.limit,
@@ -161,6 +166,7 @@ impl ExecutionPlan for PartSortExec {
             internal_err!("No children found")?
         };
         Ok(Arc::new(Self::new(
+            self.region_id,
             self.expression.clone(),
             self.limit,
             self.partition_ranges.clone(),
@@ -191,6 +197,7 @@ impl ExecutionPlan for PartSortExec {
 }
 
 struct PartSortStream {
+    region_id: RegionId,
     /// Memory pool for this stream
     reservation: MemoryReservation,
     buffer: Vec<DfRecordBatch>,
@@ -209,6 +216,7 @@ struct PartSortStream {
 
 impl PartSortStream {
     fn new(
+        region_id: RegionId,
         context: Arc<TaskContext>,
         sort: &PartSortExec,
         limit: Option<usize>,
@@ -216,7 +224,11 @@ impl PartSortStream {
         partition_ranges: Vec<PartitionRange>,
         partition: usize,
     ) -> Self {
+        common_telemetry::info!(
+            "[PartSortStream] Region {region_id} Partition {partition} new stream with ranges: {partition_ranges:?}"
+        );
         Self {
+            region_id,
             reservation: MemoryConsumer::new("PartSortStream".to_string())
                 .register(&context.runtime_env().memory_pool),
             buffer: Vec::new(),
@@ -320,13 +332,17 @@ impl PartSortStream {
         // check if the current partition index is out of range
         if self.cur_part_idx >= self.partition_ranges.len() {
             common_telemetry::error!(
-                "try_find_next_range: Partition index out of range: {} >= {}, ranges: {:?}",
+                "try_find_next_range: Region {} Partition {} index out of range: {} >= {}, ranges: {:?}",
+                self.region_id,
+                self.partition,
                 self.cur_part_idx,
                 self.partition_ranges.len(),
                 self.partition_ranges,
             );
             internal_err!(
-                "try_find_next_range: Partition index out of range: {} >= {}",
+                "try_find_next_range: Region {} Partition {} index out of range: {} >= {}",
+                self.region_id,
+                self.partition,
                 self.cur_part_idx,
                 self.partition_ranges.len()
             )?;
@@ -356,6 +372,11 @@ impl PartSortStream {
             // ignore vacant time index data
             if let Some(val) = val {
                 if val >= cur_range.end.value() || val < cur_range.start.value() {
+                    common_telemetry::info!(
+                        "[PartSortStream] Region {} Partition {} find val {} at index {} out of range {}: {:?}",
+                        self.region_id, self.partition, val, idx, self.cur_part_idx, cur_range,
+                    );
+
                     return Ok(Some(idx));
                 }
             }
@@ -479,12 +500,21 @@ impl PartSortStream {
                     let next_range_idx = self.try_find_next_range(&sort_column)?;
                     // `Some` means the current range is finished, split the batch into two parts and sort
                     if let Some(idx) = next_range_idx {
-                        common_telemetry::info!("[PartSortStream] Partition {} current range {} finished, range: {:?}, idx: {}", self.partition, self.cur_part_idx, self.partition_ranges[self.cur_part_idx], idx);
                         let this_range = batch.slice(0, idx);
                         let next_range = batch.slice(idx, batch.num_rows() - idx);
                         if this_range.num_rows() != 0 {
                             self.buffer.push(this_range);
                         }
+                        common_telemetry::info!("
+                            [PartSortStream] Region: {} Partition {} current range {} finished, range: {:?}, idx: {}, buffer rows: {}, remaining: {}",
+                            self.region_id,
+                            self.partition,
+                            self.cur_part_idx,
+                            self.partition_ranges[self.cur_part_idx],
+                            idx,
+                            self.buffer.iter().map(|b| b.num_rows()).sum::<usize>(),
+                           batch.num_rows() - idx,
+                        );
                         // mark end of current PartitionRange
                         let sorted_batch = self.sort_buffer()?;
                         let next_sort_column = sort_column.slice(idx, batch.num_rows() - idx);
@@ -493,7 +523,8 @@ impl PartSortStream {
                             self.cur_part_idx += 1;
                             if self.cur_part_idx >= self.partition_ranges.len() {
                                 common_telemetry::info!(
-                                    "[PartSortStream] Partition {} is finished its range with remaining {} rows",
+                                    "[PartSortStream] Region: {} Partition {} is finished its range with remaining {} rows",
+                                    self.region_id,
                                     self.partition,
                                     next_sort_column.len()
                                 );
@@ -504,6 +535,13 @@ impl PartSortStream {
                             {
                                 break;
                             }
+
+                            common_telemetry::info!(
+                                "[PartSortStream] Region: {} Partition {} next sort column {} rows has out of range data",
+                                self.region_id,
+                                self.partition,
+                                next_sort_column.len(),
+                            );
                         }
                         // push the next range to the buffer
                         if next_range.num_rows() != 0 {
@@ -805,6 +843,7 @@ mod test {
         let mock_input = MockInputExec::new(batches, schema.clone());
 
         let exec = PartSortExec::new(
+            RegionId::new(0, 0),
             PhysicalSortExpr {
                 expr: Arc::new(Column::new("ts", 0)),
                 options: opt,
