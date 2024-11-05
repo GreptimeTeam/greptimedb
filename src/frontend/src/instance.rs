@@ -51,6 +51,7 @@ use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
+use query::stats::StatementStatistics;
 use query::QueryEngineRef;
 use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::error as server_error;
@@ -122,6 +123,7 @@ pub struct Instance {
     deleter: DeleterRef,
     export_metrics_task: Option<ExportMetricsTask>,
     table_metadata_manager: TableMetadataManagerRef,
+    stats: StatementStatistics,
 }
 
 impl Instance {
@@ -227,6 +229,10 @@ impl Instance {
 
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
+
+        let _slow_query_timer = self
+            .stats
+            .start_slow_query_timer(QueryStatement::Sql(stmt.clone()));
 
         let output = match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
@@ -412,7 +418,6 @@ impl PrometheusHandler for Instance {
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
-        interceptor.pre_execute(query, query_ctx.clone())?;
 
         self.plugins
             .get::<PermissionCheckerRef>()
@@ -426,9 +431,20 @@ impl PrometheusHandler for Instance {
             }
         })?;
 
+        let _slow_query_timer = self.stats.start_slow_query_timer(stmt.clone());
+
+        let plan = self
+            .statement_executor
+            .plan(&stmt, query_ctx.clone())
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)?;
+
+        interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
+
         let output = self
             .statement_executor
-            .execute_stmt(stmt, query_ctx.clone())
+            .exec_plan(plan, query_ctx.clone())
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;

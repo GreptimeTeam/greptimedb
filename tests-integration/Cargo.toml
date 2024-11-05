@@ -52,7 +52,7 @@ mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
 object-store.workspace = true
-operator.workspace = true
+operator = { workspace = true, features = ["testing"] }
 prost.workspace = true
 query.workspace = true
 rstest.workspace = true
