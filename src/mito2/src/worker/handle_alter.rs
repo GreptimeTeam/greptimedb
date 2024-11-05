@@ -27,6 +27,8 @@ use crate::error::{
 };
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
+use crate::region::options::CompactionOptions::Twcs;
+use crate::region::options::TwcsOptions;
 use crate::region::version::VersionRef;
 use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
@@ -166,6 +168,67 @@ impl<S> RegionWorkerLoop<S> {
                     } else {
                         current_options.ttl = Some(new_ttl);
                     }
+                }
+                ChangeOption::TwscMaxActiveWindowRuns(runs) => {
+                    let Twcs(options) = &mut current_options.compaction;
+                    let runs = runs.unwrap_or(TwcsOptions::default().max_active_window_runs);
+                    info!(
+                        "Update region compaction.twcs.max_active_window_runs: {}, previous: {} new: {}",
+                        region.region_id, options.max_active_window_runs, runs
+                    );
+                    options.max_active_window_runs = runs;
+                }
+                ChangeOption::TwscMaxActiveWindowFiles(files) => {
+                    let Twcs(options) = &mut current_options.compaction;
+                    let files = files.unwrap_or(TwcsOptions::default().max_active_window_files);
+                    info!(
+                        "Update region compaction.twcs.max_active_window_files: {}, previous: {} new: {}",
+                        region.region_id, options.max_active_window_files, files
+                    );
+                    options.max_active_window_files = files;
+                }
+                ChangeOption::TwscMaxInactiveWindowRuns(runs) => {
+                    let Twcs(options) = &mut current_options.compaction;
+                    let runs = runs.unwrap_or(TwcsOptions::default().max_inactive_window_runs);
+                    info!(
+                        "Update region compaction.twcs.max_inactive_window_runs: {}, previous: {} new: {}",
+                        region.region_id, options.max_inactive_window_runs, runs
+                    );
+                    options.max_inactive_window_runs = runs;
+                }
+                ChangeOption::TwscMaxInactiveWindowFiles(files) => {
+                    let Twcs(options) = &mut current_options.compaction;
+                    let files = files.unwrap_or(TwcsOptions::default().max_inactive_window_files);
+                    info!(
+                        "Update region compaction.twcs.max_inactive_window_files: {}, previous: {} new: {}",
+                        region.region_id, options.max_inactive_window_files, files
+                    );
+                    options.max_inactive_window_files = files;
+                }
+                ChangeOption::TwscMaxOutputFileSize(size) => {
+                    let Twcs(options) = &mut current_options.compaction;
+                    info!(
+                        "Update region compaction.twcs.max_output_file_size: {}, previous: {:?} new: {:?}",
+                        region.region_id, options.max_output_file_size, size
+                    );
+                    options.max_output_file_size = size;
+                }
+                ChangeOption::TwscTimeWindow(window) => {
+                    let Twcs(options) = &mut current_options.compaction;
+                    info!(
+                        "Update region compaction.twcs.time_window: {}, previous: {:?} new: {:?}",
+                        region.region_id, options.time_window, window
+                    );
+                    options.time_window = window;
+                }
+                ChangeOption::TwscFallbackToLocal(allow) => {
+                    let Twcs(options) = &mut current_options.compaction;
+                    let allow = allow.unwrap_or(TwcsOptions::default().fallback_to_local);
+                    info!(
+                        "Update region compaction.twcs.fallback_to_local: {}, previous: {:?} new: {:?}",
+                        region.region_id, options.remote_compaction, allow
+                    );
+                    options.fallback_to_local = allow;
                 }
             }
         }

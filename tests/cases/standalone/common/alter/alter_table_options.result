@@ -137,6 +137,87 @@ SELECT i FROM ato;
 | 2 |
 +---+
 
+ALTER TABLE ato SET 'compaction.twcs.time_window'='2h';
+
+Affected Rows: 0
+
+ALTER TABLE ato SET 'compaction.twcs.max_output_file_size'='500MB';
+
+Affected Rows: 0
+
+ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_files'='2';
+
+Affected Rows: 0
+
+ALTER TABLE ato SET 'compaction.twcs.max_active_window_files'='2';
+
+Affected Rows: 0
+
+ALTER TABLE ato SET 'compaction.twcs.max_active_window_runs'='6';
+
+Affected Rows: 0
+
+ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_runs'='6';
+
+Affected Rows: 0
+
+ALTER TABLE ato SET 'compaction.twcs.fallback_to_local'='false';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE ato;
+
++-------+------------------------------------------------------+
+| Table | Create Table                                         |
++-------+------------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                   |
+|       |   "i" INT NULL,                                      |
+|       |   "j" TIMESTAMP(3) NOT NULL,                         |
+|       |   TIME INDEX ("j"),                                  |
+|       |   PRIMARY KEY ("i")                                  |
+|       | )                                                    |
+|       |                                                      |
+|       | ENGINE=mito                                          |
+|       | WITH(                                                |
+|       |   compaction.twcs.fallback_to_local = 'false',       |
+|       |   compaction.twcs.max_active_window_files = '2',     |
+|       |   compaction.twcs.max_active_window_runs = '6',      |
+|       |   compaction.twcs.max_inactive_window_files = '2',   |
+|       |   compaction.twcs.max_inactive_window_runs = '6',    |
+|       |   compaction.twcs.max_output_file_size = '500.0MiB', |
+|       |   compaction.twcs.time_window = '2h',                |
+|       |   ttl = '1s'                                         |
+|       | )                                                    |
++-------+------------------------------------------------------+
+
+ALTER TABLE ato SET 'compaction.twcs.time_window'='';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE ato;
+
++-------+------------------------------------------------------+
+| Table | Create Table                                         |
++-------+------------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                   |
+|       |   "i" INT NULL,                                      |
+|       |   "j" TIMESTAMP(3) NOT NULL,                         |
+|       |   TIME INDEX ("j"),                                  |
+|       |   PRIMARY KEY ("i")                                  |
+|       | )                                                    |
+|       |                                                      |
+|       | ENGINE=mito                                          |
+|       | WITH(                                                |
+|       |   compaction.twcs.fallback_to_local = 'false',       |
+|       |   compaction.twcs.max_active_window_files = '2',     |
+|       |   compaction.twcs.max_active_window_runs = '6',      |
+|       |   compaction.twcs.max_inactive_window_files = '2',   |
+|       |   compaction.twcs.max_inactive_window_runs = '6',    |
+|       |   compaction.twcs.max_output_file_size = '500.0MiB', |
+|       |   ttl = '1s'                                         |
+|       | )                                                    |
++-------+------------------------------------------------------+
+
 DROP TABLE ato;
 
 Affected Rows: 0

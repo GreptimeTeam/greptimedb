@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -25,6 +26,7 @@ use api::v1::region::{
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{self, ChangeTableOption, Rows, SemanticType};
+use common_base::readable_size::ReadableSize;
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
 use serde::{Deserialize, Serialize};
@@ -36,7 +38,11 @@ use crate::metadata::{
     ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionOptionChangeRequestSnafu,
     InvalidRegionRequestSnafu, MetadataError, RegionMetadata, Result,
 };
-use crate::mito_engine_options::TTL_KEY;
+use crate::mito_engine_options::{
+    TTL_KEY, TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_ACTIVE_WINDOW_FILES, TWCS_MAX_ACTIVE_WINDOW_RUNS,
+    TWCS_MAX_INACTIVE_WINDOW_FILES, TWCS_MAX_INACTIVE_WINDOW_RUNS, TWCS_MAX_OUTPUT_FILE_SIZE,
+    TWCS_TIME_WINDOW,
+};
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
@@ -661,6 +667,54 @@ impl From<v1::ChangeColumnType> for ChangeColumnType {
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ChangeOption {
     TTL(Duration),
+    TwscMaxActiveWindowRuns(Option<usize>),
+    TwscMaxActiveWindowFiles(Option<usize>),
+    TwscMaxInactiveWindowRuns(Option<usize>),
+    TwscMaxInactiveWindowFiles(Option<usize>),
+    TwscMaxOutputFileSize(Option<ReadableSize>),
+    TwscTimeWindow(Option<Duration>),
+    TwscFallbackToLocal(Option<bool>),
+}
+
+impl ChangeOption {
+    pub fn to_change_table_option(&self) -> ChangeTableOption {
+        match self {
+            ChangeOption::TTL(duration) => ChangeTableOption {
+                key: "ttl".to_string(),
+                value: humantime::format_duration(*duration).to_string(),
+            },
+            ChangeOption::TwscMaxActiveWindowRuns(runs) => ChangeTableOption {
+                key: TWCS_MAX_ACTIVE_WINDOW_RUNS.to_string(),
+                value: runs.map(|s| s.to_string()).unwrap_or_default(),
+            },
+            ChangeOption::TwscMaxActiveWindowFiles(files) => ChangeTableOption {
+                key: TWCS_MAX_ACTIVE_WINDOW_FILES.to_string(),
+                value: files.map(|s| s.to_string()).unwrap_or_default(),
+            },
+            ChangeOption::TwscMaxInactiveWindowRuns(runs) => ChangeTableOption {
+                key: TWCS_MAX_INACTIVE_WINDOW_RUNS.to_string(),
+                value: runs.map(|s| s.to_string()).unwrap_or_default(),
+            },
+            ChangeOption::TwscMaxInactiveWindowFiles(files) => ChangeTableOption {
+                key: TWCS_MAX_INACTIVE_WINDOW_FILES.to_string(),
+                value: files.map(|s| s.to_string()).unwrap_or_default(),
+            },
+            ChangeOption::TwscMaxOutputFileSize(size) => ChangeTableOption {
+                key: TWCS_MAX_OUTPUT_FILE_SIZE.to_string(),
+                value: size.map(|s| s.to_string()).unwrap_or_default(),
+            },
+            ChangeOption::TwscTimeWindow(window) => ChangeTableOption {
+                key: TWCS_TIME_WINDOW.to_string(),
+                value: window
+                    .map(|s| humantime::format_duration(s).to_string())
+                    .unwrap_or_default(),
+            },
+            ChangeOption::TwscFallbackToLocal(flag) => ChangeTableOption {
+                key: TWCS_FALLBACK_TO_LOCAL.to_string(),
+                value: flag.map(|s| s.to_string()).unwrap_or_default(),
+            },
+        }
+    }
 }
 
 impl TryFrom<&ChangeTableOption> for ChangeOption {
@@ -668,16 +722,71 @@ impl TryFrom<&ChangeTableOption> for ChangeOption {
 
     fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
         let ChangeTableOption { key, value } = value;
-        if key == TTL_KEY {
-            let ttl = if value.is_empty() {
-                Duration::from_secs(0)
+
+        // Inline helper for parsing Option<usize>
+        let parse_optional_usize = |value: &str| {
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                value
+                    .parse::<usize>()
+                    .map(Some)
+                    .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())
+            }
+        };
+
+        // Inline helper for parsing Option<bool>
+        let parse_optional_bool = |value: &str| {
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                value
+                    .parse::<bool>()
+                    .map(Some)
+                    .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())
+            }
+        };
+
+        // Inline helper for parsing Option<Duration>
+        let parse_optional_duration = |value: &str| {
+            if value.is_empty() {
+                Ok(None)
             } else {
                 humantime::parse_duration(value)
-                    .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())?
-            };
-            Ok(Self::TTL(ttl))
-        } else {
-            InvalidRegionOptionChangeRequestSnafu { key, value }.fail()
+                    .map(Some)
+                    .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())
+            }
+        };
+
+        match key.as_str() {
+            TTL_KEY => Ok(Self::TTL(
+                parse_optional_duration(value)?.unwrap_or(Duration::from_secs(0)),
+            )),
+            TWCS_MAX_ACTIVE_WINDOW_RUNS => {
+                Ok(Self::TwscMaxActiveWindowRuns(parse_optional_usize(value)?))
+            }
+            TWCS_MAX_ACTIVE_WINDOW_FILES => {
+                Ok(Self::TwscMaxActiveWindowFiles(parse_optional_usize(value)?))
+            }
+            TWCS_MAX_INACTIVE_WINDOW_RUNS => Ok(Self::TwscMaxInactiveWindowRuns(
+                parse_optional_usize(value)?,
+            )),
+            TWCS_MAX_INACTIVE_WINDOW_FILES => Ok(Self::TwscMaxInactiveWindowFiles(
+                parse_optional_usize(value)?,
+            )),
+            TWCS_MAX_OUTPUT_FILE_SIZE => {
+                let size = if value.is_empty() {
+                    None
+                } else {
+                    Some(ReadableSize::from_str(value).map_err(|_| {
+                        InvalidRegionOptionChangeRequestSnafu { key, value }.build()
+                    })?)
+                };
+                Ok(Self::TwscMaxOutputFileSize(size))
+            }
+            TWCS_TIME_WINDOW => Ok(Self::TwscTimeWindow(parse_optional_duration(value)?)),
+            TWCS_FALLBACK_TO_LOCAL => Ok(Self::TwscFallbackToLocal(parse_optional_bool(value)?)),
+            _ => InvalidRegionOptionChangeRequestSnafu { key, value }.fail(),
         }
     }
 }

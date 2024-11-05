@@ -28,4 +28,24 @@ SHOW CREATE TABLE ato;
 
 SELECT i FROM ato;
 
+ALTER TABLE ato SET 'compaction.twcs.time_window'='2h';
+
+ALTER TABLE ato SET 'compaction.twcs.max_output_file_size'='500MB';
+
+ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_files'='2';
+
+ALTER TABLE ato SET 'compaction.twcs.max_active_window_files'='2';
+
+ALTER TABLE ato SET 'compaction.twcs.max_active_window_runs'='6';
+
+ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_runs'='6';
+
+ALTER TABLE ato SET 'compaction.twcs.fallback_to_local'='false';
+
+SHOW CREATE TABLE ato;
+
+ALTER TABLE ato SET 'compaction.twcs.time_window'='';
+
+SHOW CREATE TABLE ato;
+
 DROP TABLE ato;

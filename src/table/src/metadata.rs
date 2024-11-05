@@ -219,6 +219,17 @@ impl TableMeta {
                         new_options.ttl = Some(*new_ttl);
                     }
                 }
+                _ => {
+                    let change_option = request.to_change_table_option();
+                    if !change_option.value.is_empty() {
+                        new_options
+                            .extra_options
+                            .insert(change_option.key, change_option.value);
+                    } else {
+                        // Invalidate the previous change option if an empty value has been set.
+                        new_options.extra_options.remove(&change_option.key);
+                    }
+                }
             }
         }
         let mut builder = self.new_meta_builder();
