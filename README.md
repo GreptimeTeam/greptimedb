@@ -34,9 +34,6 @@
 <a href="https://github.com/greptimeTeam/greptimedb/blob/main/LICENSE">
 <img src="https://img.shields.io/github/license/greptimeTeam/greptimedb" alt="License"/>
 </a>
-<a href="https://gurubase.io/g/greptimedb">
-<img src="https://img.shields.io/badge/Gurubase-Ask%20GreptimeDB%20Guru-006BFF" alt="Gurubase"/>
-</a>
 
 <br/>
 
@@ -48,6 +45,9 @@
 </a>
 <a href="https://www.linkedin.com/company/greptime/">
 <img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg?style=for-the-badge" alt="LinkedIn"/>
+</a>
+<a href="https://gurubase.io/g/greptimedb">
+<img src="https://img.shields.io/badge/Gurubase-Ask%20GreptimeDB%20Guru-006BFF?style=for-the-badge" alt="Gurubase"/>
 </a>
 </div>
 
