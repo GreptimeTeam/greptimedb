@@ -201,6 +201,7 @@ pub trait PromQueryInterceptor {
     fn pre_execute(
         &self,
         _query: &PromQuery,
+        _plan: Option<&LogicalPlan>,
         _query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
         Ok(())
@@ -229,10 +230,11 @@ where
     fn pre_execute(
         &self,
         query: &PromQuery,
+        plan: Option<&LogicalPlan>,
         query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
         if let Some(this) = self {
-            this.pre_execute(query, query_ctx)
+            this.pre_execute(query, plan, query_ctx)
         } else {
             Ok(())
         }
