@@ -94,8 +94,13 @@ impl PartSortExec {
             self.input.execute(partition, context.clone())?;
 
         if partition >= self.partition_ranges.len() {
+            common_telemetry::error!(
+                "to_stream: Partition index out of range: {} >= {}",
+                partition,
+                self.partition_ranges.len()
+            );
             internal_err!(
-                "Partition index out of range: {} >= {}",
+                "to_stream: Partition index out of range: {} >= {}",
                 partition,
                 self.partition_ranges.len()
             )?;
@@ -275,8 +280,14 @@ impl PartSortStream {
         min_max_idx: (usize, usize),
     ) -> datafusion_common::Result<()> {
         if self.cur_part_idx >= self.partition_ranges.len() {
+            common_telemetry::error!(
+                "check_in_range: Partition index out of range: {} >= {}, ranges: {:?}",
+                self.cur_part_idx,
+                self.partition_ranges.len(),
+                self.partition_ranges,
+            );
             internal_err!(
-                "Partition index out of range: {} >= {}",
+                "check_in_range: Partition index out of range: {} >= {}",
                 self.cur_part_idx,
                 self.partition_ranges.len()
             )?;
@@ -308,8 +319,14 @@ impl PartSortStream {
 
         // check if the current partition index is out of range
         if self.cur_part_idx >= self.partition_ranges.len() {
+            common_telemetry::error!(
+                "try_find_next_range: Partition index out of range: {} >= {}, ranges: {:?}",
+                self.cur_part_idx,
+                self.partition_ranges.len(),
+                self.partition_ranges,
+            );
             internal_err!(
-                "Partition index out of range: {} >= {}",
+                "try_find_next_range: Partition index out of range: {} >= {}",
                 self.cur_part_idx,
                 self.partition_ranges.len()
             )?;

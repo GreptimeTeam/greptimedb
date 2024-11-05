@@ -137,7 +137,16 @@ pub(crate) fn scan_mem_ranges(
         for range in ranges {
             let build_reader_start = Instant::now();
             let iter = range.build_iter(time_range)?;
-            part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
+            let build_cost = build_reader_start.elapsed();
+            part_metrics.inc_build_reader_cost(build_cost);
+            common_telemetry::debug!(
+                "Thread: {:?}, Scan mem range, region_id: {}, time_range: {:?}, index: {:?}, build_cost: {:?}",
+                std::thread::current().id(),
+                stream_ctx.input.mapper.metadata().region_id,
+                time_range,
+                index,
+                build_cost
+            );
 
             let mut source = Source::Iter(iter);
             while let Some(batch) = source.next_batch().await? {
@@ -166,7 +175,14 @@ pub(crate) fn scan_file_ranges(
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
             if read_type == "unordered_scan_files" {
-                common_telemetry::debug!("Scan file range, region_id: {}, file_id: {}, build_cost: {:?}", stream_ctx.input.mapper.metadata().region_id, range.file_handle().file_id(), build_cost);
+                common_telemetry::debug!(
+                    "Thread: {:?}, Scan file range, region_id: {}, file_id: {}, index: {:?}, build_cost: {:?}",
+                    std::thread::current().id(),
+                    stream_ctx.input.mapper.metadata().region_id,
+                    range.file_handle().file_id(),
+                    index,
+                    build_cost
+                );
             }
             let compat_batch = range.compat_batch();
             let mut source = Source::PruneReader(reader);

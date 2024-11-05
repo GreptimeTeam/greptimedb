@@ -138,8 +138,13 @@ impl UnorderedScan {
             let cache = stream_ctx.input.cache_manager.as_deref();
             // Scans each part.
             for part_range in part_ranges {
-                let mut metrics = ScannerMetrics::default();
-                let mut fetch_start = Instant::now();
+                common_telemetry::debug!(
+                    "Thread: {:?}, Unordered scan range start, region_id: {}, partition: {}, part_range: {:?}",
+                    std::thread::current().id(),
+                    stream_ctx.input.mapper.metadata().region_id,
+                    partition,
+                    part_range,
+                );
                 #[cfg(debug_assertions)]
                 let mut checker = crate::read::BatchChecker::default()
                     .with_start(Some(part_range.start))
@@ -150,6 +155,8 @@ impl UnorderedScan {
                     part_range.identifier,
                     part_metrics.clone(),
                 );
+                let mut metrics = ScannerMetrics::default();
+                let mut fetch_start = Instant::now();
                 for await batch in stream {
                     let batch = batch.map_err(BoxedError::new).context(ExternalSnafu)?;
                     metrics.scan_cost += fetch_start.elapsed();
@@ -189,7 +196,16 @@ impl UnorderedScan {
                 }
 
                 let scan_cost = fetch_start.elapsed();
-                common_telemetry::debug!("Unordered scan range, region_id: {}, scan_cost: {:?}", stream_ctx.input.mapper.metadata().region_id, scan_cost);
+                common_telemetry::debug!(
+                    "Thread: {:?}, Unordered scan range end, region_id: {}, partition: {}, part_range: {:?}, scan_cost: {:?}, yieid_cost: {:?}, num_rows: {}",
+                    std::thread::current().id(),
+                    stream_ctx.input.mapper.metadata().region_id,
+                    partition,
+                    part_range,
+                    scan_cost,
+                    metrics.yield_cost,
+                    metrics.num_rows,
+                );
                 metrics.scan_cost += scan_cost;
                 part_metrics.merge_metrics(&metrics);
             }
