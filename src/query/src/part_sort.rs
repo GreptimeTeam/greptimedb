@@ -479,6 +479,14 @@ impl PartSortStream {
                         // step to next proper PartitionRange
                         loop {
                             self.cur_part_idx += 1;
+                            if self.cur_part_idx >= self.partition_ranges.len() {
+                                common_telemetry::info!(
+                                    "[PartSortStream] Partition {} is finished its range with remaining {} rows",
+                                    self.partition,
+                                    next_sort_column.len()
+                                );
+                                break;
+                            }
                             if next_sort_column.is_empty()
                                 || self.try_find_next_range(&next_sort_column)?.is_none()
                             {
