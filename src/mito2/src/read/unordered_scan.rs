@@ -139,11 +139,12 @@ impl UnorderedScan {
             // Scans each part.
             for part_range in part_ranges {
                 common_telemetry::debug!(
-                    "Thread: {:?}, Unordered scan range start, region_id: {}, partition: {}, part_range: {:?}",
+                    "Thread: {:?}, Unordered scan range start, region_id: {}, partition: {}, part_range: {:?}, range_meta: {:?}",
                     std::thread::current().id(),
                     stream_ctx.input.mapper.metadata().region_id,
                     partition,
                     part_range,
+                    stream_ctx.ranges[part_range.identifier]
                 );
                 // #[cfg(debug_assertions)]
                 let mut checker = crate::read::BatchChecker::default()
