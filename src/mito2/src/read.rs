@@ -572,7 +572,7 @@ impl Batch {
 }
 
 /// A struct to check the batch is monotonic.
-#[cfg(debug_assertions)]
+// #[cfg(debug_assertions)]
 #[derive(Default)]
 pub(crate) struct BatchChecker {
     last_batch: Option<Batch>,
@@ -580,7 +580,7 @@ pub(crate) struct BatchChecker {
     end: Option<Timestamp>,
 }
 
-#[cfg(debug_assertions)]
+// #[cfg(debug_assertions)]
 impl BatchChecker {
     /// Attaches the given start timestamp to the checker.
     pub(crate) fn with_start(mut self, start: Option<Timestamp>) -> Self {

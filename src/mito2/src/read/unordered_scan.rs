@@ -145,7 +145,7 @@ impl UnorderedScan {
                     partition,
                     part_range,
                 );
-                #[cfg(debug_assertions)]
+                // #[cfg(debug_assertions)]
                 let mut checker = crate::read::BatchChecker::default()
                     .with_start(Some(part_range.start))
                     .with_end(Some(part_range.end));
@@ -168,7 +168,7 @@ impl UnorderedScan {
                         continue;
                     }
 
-                    #[cfg(debug_assertions)]
+                    // #[cfg(debug_assertions)]
                     checker.ensure_part_range_batch(
                         "UnorderedScan",
                         stream_ctx.input.mapper.metadata().region_id,
