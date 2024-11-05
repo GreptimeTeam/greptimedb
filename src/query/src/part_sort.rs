@@ -479,6 +479,7 @@ impl PartSortStream {
                     let next_range_idx = self.try_find_next_range(&sort_column)?;
                     // `Some` means the current range is finished, split the batch into two parts and sort
                     if let Some(idx) = next_range_idx {
+                        common_telemetry::info!("[PartSortStream] Partition {} current range {} finished, range: {:?}, idx: {}", self.partition, self.cur_part_idx, self.partition_ranges[self.cur_part_idx], idx);
                         let this_range = batch.slice(0, idx);
                         let next_range = batch.slice(idx, batch.num_rows() - idx);
                         if this_range.num_rows() != 0 {
