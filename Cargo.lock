@@ -8396,8 +8396,7 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 [[package]]
 name = "pprof"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef5c97c51bd34c7e742402e216abdeb44d415fbe6ae41d56b114723e953711cb"
+source = "git+https://github.com/GreptimeTeam/pprof-rs?rev=1bd1e21#1bd1e210d8626da3d1e5aff976e6feee994f576d"
 dependencies = [
  "backtrace",
  "cfg-if",
