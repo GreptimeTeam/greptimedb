@@ -36,7 +36,11 @@ use crate::metadata::{
     ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionOptionChangeRequestSnafu,
     InvalidRegionRequestSnafu, MetadataError, RegionMetadata, Result,
 };
-use crate::mito_engine_options::TTL_KEY;
+use crate::mito_engine_options::{
+    TTL_KEY, TWCS_MAX_ACTIVE_WINDOW_FILES, TWCS_MAX_ACTIVE_WINDOW_RUNS,
+    TWCS_MAX_INACTIVE_WINDOW_FILES, TWCS_MAX_INACTIVE_WINDOW_RUNS, TWCS_MAX_OUTPUT_FILE_SIZE,
+    TWCS_TIME_WINDOW,
+};
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
@@ -661,6 +665,8 @@ impl From<v1::ChangeColumnType> for ChangeColumnType {
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ChangeOption {
     TTL(Duration),
+    // Modifying TwscOptions with values as (option name, new value).
+    Twsc(String, String),
 }
 
 impl TryFrom<&ChangeTableOption> for ChangeOption {
@@ -668,16 +674,24 @@ impl TryFrom<&ChangeTableOption> for ChangeOption {
 
     fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
         let ChangeTableOption { key, value } = value;
-        if key == TTL_KEY {
-            let ttl = if value.is_empty() {
-                Duration::from_secs(0)
-            } else {
-                humantime::parse_duration(value)
-                    .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())?
-            };
-            Ok(Self::TTL(ttl))
-        } else {
-            InvalidRegionOptionChangeRequestSnafu { key, value }.fail()
+
+        match key.as_str() {
+            TTL_KEY => {
+                let ttl = if value.is_empty() {
+                    Duration::from_secs(0)
+                } else {
+                    humantime::parse_duration(value)
+                        .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())?
+                };
+                Ok(Self::TTL(ttl))
+            }
+            TWCS_MAX_ACTIVE_WINDOW_RUNS
+            | TWCS_MAX_ACTIVE_WINDOW_FILES
+            | TWCS_MAX_INACTIVE_WINDOW_FILES
+            | TWCS_MAX_INACTIVE_WINDOW_RUNS
+            | TWCS_MAX_OUTPUT_FILE_SIZE
+            | TWCS_TIME_WINDOW => Ok(Self::Twsc(key.to_string(), value.to_string())),
+            _ => InvalidRegionOptionChangeRequestSnafu { key, value }.fail(),
         }
     }
 }

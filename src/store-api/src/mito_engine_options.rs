@@ -23,20 +23,40 @@ pub const APPEND_MODE_KEY: &str = "append_mode";
 pub const MERGE_MODE_KEY: &str = "merge_mode";
 /// Option key for TTL(time-to-live)
 pub const TTL_KEY: &str = "ttl";
+/// Option key for compaction type.
+pub const COMPACTION_TYPE: &str = "compaction.type";
+/// TWCS compaction strategy.
+pub const COMPACTION_TYPE_TWCS: &str = "twcs";
+/// Option key for twcs max active window runs.
+pub const TWCS_MAX_ACTIVE_WINDOW_RUNS: &str = "compaction.twcs.max_active_window_runs";
+/// Option key for twcs max active window files.
+pub const TWCS_MAX_ACTIVE_WINDOW_FILES: &str = "compaction.twcs.max_active_window_files";
+/// Option key for twcs max inactive window runs.
+pub const TWCS_MAX_INACTIVE_WINDOW_RUNS: &str = "compaction.twcs.max_inactive_window_runs";
+/// Option key for twcs max inactive window files.
+pub const TWCS_MAX_INACTIVE_WINDOW_FILES: &str = "compaction.twcs.max_inactive_window_files";
+/// Option key for twcs max output file size.
+pub const TWCS_MAX_OUTPUT_FILE_SIZE: &str = "compaction.twcs.max_output_file_size";
+/// Option key for twcs time window.
+pub const TWCS_TIME_WINDOW: &str = "compaction.twcs.time_window";
+/// Option key for twcs remote compaction.
+pub const REMOTE_COMPACTION: &str = "compaction.twcs.remote_compaction";
+/// Option key for twcs fallback to local.
+pub const TWCS_FALLBACK_TO_LOCAL: &str = "compaction.twcs.fallback_to_local";
 
 /// Returns true if the `key` is a valid option key for the mito engine.
 pub fn is_mito_engine_option_key(key: &str) -> bool {
     [
         "ttl",
-        "compaction.type",
-        "compaction.twcs.max_active_window_runs",
-        "compaction.twcs.max_active_window_files",
-        "compaction.twcs.max_inactive_window_runs",
-        "compaction.twcs.max_inactive_window_files",
-        "compaction.twcs.max_output_file_size",
-        "compaction.twcs.time_window",
-        "compaction.twcs.remote_compaction",
-        "compaction.twcs.fallback_to_local",
+        COMPACTION_TYPE,
+        TWCS_MAX_ACTIVE_WINDOW_RUNS,
+        TWCS_MAX_ACTIVE_WINDOW_FILES,
+        TWCS_MAX_INACTIVE_WINDOW_RUNS,
+        TWCS_MAX_INACTIVE_WINDOW_FILES,
+        TWCS_MAX_OUTPUT_FILE_SIZE,
+        TWCS_TIME_WINDOW,
+        REMOTE_COMPACTION,
+        TWCS_FALLBACK_TO_LOCAL,
         "storage",
         "index.inverted_index.ignore_column_ids",
         "index.inverted_index.segment_row_count",
