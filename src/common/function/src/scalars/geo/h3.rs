@@ -23,8 +23,8 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::{Scalar, ScalarVectorBuilder};
 use datatypes::value::{ListValue, Value};
 use datatypes::vectors::{
-    BooleanVectorBuilder, Int32VectorBuilder, ListVectorBuilder, MutableVector,
-    StringVectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
+    BooleanVectorBuilder, Float64VectorBuilder, Int32VectorBuilder, ListVectorBuilder,
+    MutableVector, StringVectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
 };
 use derive_more::Display;
 use h3o::{CellIndex, LatLng, Resolution};
@@ -38,6 +38,7 @@ static CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     vec![
         ConcreteDataType::int64_datatype(),
         ConcreteDataType::uint64_datatype(),
+        ConcreteDataType::string_datatype(),
     ]
 });
 
@@ -952,6 +953,181 @@ impl Function for H3GridPathCells {
     }
 }
 
+/// Tests if cells contains given cells
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3CellContains;
+
+impl Function for H3CellContains {
+    fn name(&self) -> &str {
+        "h3_cells_contains"
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::boolean_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        let multi_cell_types = vec![
+            ConcreteDataType::list_datatype(ConcreteDataType::int64_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::uint64_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
+            ConcreteDataType::string_datatype(),
+        ];
+
+        let mut signatures = Vec::with_capacity(multi_cell_types.len() * CELL_TYPES.len());
+        for multi_cell_type in &multi_cell_types {
+            for cell_type in CELL_TYPES.as_slice() {
+                signatures.push(TypeSignature::Exact(vec![
+                    multi_cell_type.clone(),
+                    cell_type.clone(),
+                ]));
+            }
+        }
+
+        Signature::one_of(signatures, Volatility::Stable)
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure_columns_n!(columns, 2);
+
+        let cells_vec = &columns[0];
+        let cell_this_vec = &columns[1];
+
+        let size = cell_this_vec.len();
+        let mut results = BooleanVectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let mut result = None;
+            if let (cells, Some(cell_this)) = (
+                cells_from_value(cells_vec.get(i))?,
+                cell_from_value(cell_this_vec.get(i))?,
+            ) {
+                result = Some(false);
+
+                for cell_that in cells.iter() {
+                    // get cell resolution, and find cell_this's parent at
+                    //  this solution, test if cell_that equals the parent
+                    let resolution = cell_that.resolution();
+                    if let Some(cell_this_parent) = cell_this.parent(resolution) {
+                        if cell_this_parent == *cell_that {
+                            result = Some(true);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            results.push(result);
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
+/// Get WGS84 great circle distance of two cell centroid
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3CellDistanceSphereKm;
+
+impl Function for H3CellDistanceSphereKm {
+    fn name(&self) -> &str {
+        "h3_distance_sphere_km"
+    }
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::float64_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        signature_of_double_cells()
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure_columns_n!(columns, 2);
+
+        let cell_this_vec = &columns[0];
+        let cell_that_vec = &columns[1];
+        let size = cell_this_vec.len();
+
+        let mut results = Float64VectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let result = match (
+                cell_from_value(cell_this_vec.get(i))?,
+                cell_from_value(cell_that_vec.get(i))?,
+            ) {
+                (Some(cell_this), Some(cell_that)) => {
+                    let centroid_this = LatLng::from(cell_this);
+                    let centroid_that = LatLng::from(cell_that);
+
+                    Some(centroid_this.distance_km(centroid_that))
+                }
+                _ => None,
+            };
+
+            results.push(result);
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
+/// Get Euclidean distance of two cell centroid
+#[derive(Clone, Debug, Default, Display)]
+#[display("{}", self.name())]
+pub struct H3CellDistanceEuclideanDegree;
+
+impl H3CellDistanceEuclideanDegree {
+    fn distance(centroid_this: LatLng, centroid_that: LatLng) -> f64 {
+        ((centroid_this.lat() - centroid_that.lat()).powi(2)
+            + (centroid_this.lng() - centroid_that.lng()).powi(2))
+        .sqrt()
+    }
+}
+
+impl Function for H3CellDistanceEuclideanDegree {
+    fn name(&self) -> &str {
+        "h3_distance_degree"
+    }
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::float64_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        signature_of_double_cells()
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure_columns_n!(columns, 2);
+
+        let cell_this_vec = &columns[0];
+        let cell_that_vec = &columns[1];
+        let size = cell_this_vec.len();
+
+        let mut results = Float64VectorBuilder::with_capacity(size);
+
+        for i in 0..size {
+            let result = match (
+                cell_from_value(cell_this_vec.get(i))?,
+                cell_from_value(cell_that_vec.get(i))?,
+            ) {
+                (Some(cell_this), Some(cell_that)) => {
+                    let centroid_this = LatLng::from(cell_this);
+                    let centroid_that = LatLng::from(cell_that);
+
+                    let dist = Self::distance(centroid_this, centroid_that);
+                    Some(dist)
+                }
+                _ => None,
+            };
+
+            results.push(result);
+        }
+
+        Ok(results.to_vector())
+    }
+}
+
 fn value_to_resolution(v: Value) -> Result<Resolution> {
     let r = match v {
         Value::Int8(v) => v as u8,
@@ -1073,7 +1249,126 @@ fn cell_from_value(v: Value) -> Result<Option<CellIndex>> {
                 })
                 .context(error::ExecuteSnafu)?,
         ),
+        Value::String(s) => Some(
+            CellIndex::from_str(s.as_utf8())
+                .map_err(|e| {
+                    BoxedError::new(PlainError::new(
+                        format!("H3 error: {}", e),
+                        StatusCode::EngineExecuteQuery,
+                    ))
+                })
+                .context(error::ExecuteSnafu)?,
+        ),
         _ => None,
     };
     Ok(cell)
+}
+
+/// extract cell array from all possible types including:
+/// - int64 list
+/// - uint64 list
+/// - string list
+/// - comma-separated string
+fn cells_from_value(v: Value) -> Result<Vec<CellIndex>> {
+    match v {
+        Value::List(list) => match list.datatype() {
+            ConcreteDataType::Int64(_) => list
+                .items()
+                .iter()
+                .map(|v| {
+                    if let Value::Int64(v) = v {
+                        CellIndex::try_from(*v as u64)
+                            .map_err(|e| {
+                                BoxedError::new(PlainError::new(
+                                    format!("H3 error: {}", e),
+                                    StatusCode::EngineExecuteQuery,
+                                ))
+                            })
+                            .context(error::ExecuteSnafu)
+                    } else {
+                        Err(BoxedError::new(PlainError::new(
+                            "Invalid data type in array".to_string(),
+                            StatusCode::EngineExecuteQuery,
+                        )))
+                        .context(error::ExecuteSnafu)
+                    }
+                })
+                .collect::<Result<Vec<CellIndex>>>(),
+            ConcreteDataType::UInt64(_) => list
+                .items()
+                .iter()
+                .map(|v| {
+                    if let Value::UInt64(v) = v {
+                        CellIndex::try_from(*v)
+                            .map_err(|e| {
+                                BoxedError::new(PlainError::new(
+                                    format!("H3 error: {}", e),
+                                    StatusCode::EngineExecuteQuery,
+                                ))
+                            })
+                            .context(error::ExecuteSnafu)
+                    } else {
+                        Err(BoxedError::new(PlainError::new(
+                            "Invalid data type in array".to_string(),
+                            StatusCode::EngineExecuteQuery,
+                        )))
+                        .context(error::ExecuteSnafu)
+                    }
+                })
+                .collect::<Result<Vec<CellIndex>>>(),
+            ConcreteDataType::String(_) => list
+                .items()
+                .iter()
+                .map(|v| {
+                    if let Value::String(v) = v {
+                        CellIndex::from_str(v.as_utf8().trim())
+                            .map_err(|e| {
+                                BoxedError::new(PlainError::new(
+                                    format!("H3 error: {}", e),
+                                    StatusCode::EngineExecuteQuery,
+                                ))
+                            })
+                            .context(error::ExecuteSnafu)
+                    } else {
+                        Err(BoxedError::new(PlainError::new(
+                            "Invalid data type in array".to_string(),
+                            StatusCode::EngineExecuteQuery,
+                        )))
+                        .context(error::ExecuteSnafu)
+                    }
+                })
+                .collect::<Result<Vec<CellIndex>>>(),
+            _ => Ok(vec![]),
+        },
+        Value::String(csv) => {
+            let str_seq = csv.as_utf8().split(',');
+            str_seq
+                .map(|v| {
+                    CellIndex::from_str(v.trim())
+                        .map_err(|e| {
+                            BoxedError::new(PlainError::new(
+                                format!("H3 error: {}", e),
+                                StatusCode::EngineExecuteQuery,
+                            ))
+                        })
+                        .context(error::ExecuteSnafu)
+                })
+                .collect::<Result<Vec<CellIndex>>>()
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_h3_euclidean_distance() {
+        let point_this = LatLng::new(42.3521, -72.1235).expect("incorrect lat lng");
+        let point_that = LatLng::new(42.45, -72.1260).expect("incorrect lat lng");
+
+        let dist = H3CellDistanceEuclideanDegree::distance(point_this, point_that);
+        assert_eq!(dist, 0.09793191512474639);
+    }
 }
