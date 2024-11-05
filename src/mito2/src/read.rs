@@ -493,7 +493,7 @@ impl Batch {
     }
 
     /// Checks the batch is monotonic by timestamps.
-    #[cfg(debug_assertions)]
+    // #[cfg(debug_assertions)]
     pub(crate) fn check_monotonic(&self) -> Result<(), String> {
         use std::cmp::Ordering;
         if self.timestamps_native().is_none() {
