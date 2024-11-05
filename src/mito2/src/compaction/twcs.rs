@@ -212,8 +212,9 @@ impl Picker for TwcsPicker {
     fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
         let region_id = compaction_region.region_id;
         let levels = compaction_region.current_version.ssts.levels();
-        let ttl = compaction_region.current_version.options.ttl;
-        let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
+
+        let expired_ssts =
+            get_expired_ssts(levels, compaction_region.ttl, Timestamp::current_millis());
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
             // here we mark expired SSTs as compacting to avoid them being picked.

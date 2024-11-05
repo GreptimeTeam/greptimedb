@@ -78,6 +78,16 @@ async fn test_alter_region() {
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
 
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     let column_schemas = rows_schema(&request);
     let region_dir = request.region_dir.clone();
     engine
@@ -167,9 +177,18 @@ fn build_rows_for_tags(
 async fn test_put_after_alter() {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
-
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
 
     let mut column_schemas = rows_schema(&request);
     let region_dir = request.region_dir.clone();
@@ -266,6 +285,16 @@ async fn test_alter_region_retry() {
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
 
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     let column_schemas = rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
@@ -319,6 +348,16 @@ async fn test_alter_on_flushing() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
 
     let column_schemas = rows_schema(&request);
     engine

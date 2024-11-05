@@ -32,6 +32,7 @@ use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
 use common_meta::key::flow::flow_info::FlowInfoValue;
+use common_meta::SchemaOptions;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::Output;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -703,6 +704,7 @@ pub fn show_create_database(database_name: &str, options: OptionMap) -> Result<O
 
 pub fn show_create_table(
     table: TableRef,
+    schema_options: Option<SchemaOptions>,
     partitions: Option<Partitions>,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
@@ -711,7 +713,7 @@ pub fn show_create_table(
 
     let quote_style = query_ctx.quote_style();
 
-    let mut stmt = create_table_stmt(&table_info, quote_style)?;
+    let mut stmt = create_table_stmt(&table_info, schema_options, quote_style)?;
     stmt.partitions = partitions.map(|mut p| {
         p.set_quote(quote_style);
         p
