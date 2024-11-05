@@ -34,6 +34,9 @@
 <a href="https://github.com/greptimeTeam/greptimedb/blob/main/LICENSE">
 <img src="https://img.shields.io/github/license/greptimeTeam/greptimedb" alt="License"/>
 </a>
+<a href="https://gurubase.io/g/greptimedb">
+<img src="https://img.shields.io/badge/Gurubase-Ask%20GreptimeDB%20Guru-006BFF" alt="Gurubase"/>
+</a>
 
 <br/>
 
