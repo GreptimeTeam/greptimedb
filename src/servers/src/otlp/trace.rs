@@ -15,11 +15,11 @@
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
 use common_grpc::precision::Precision;
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
 use self::span::{parse_span, TraceSpan, TraceSpans};
 use crate::error::Result;
+use crate::otlp::utils::{make_column_data, make_string_column_data};
 use crate::row_writer::{self, MultiTableData, TableData};
 
 const APPROXIMATE_COLUMN_COUNT: usize = 24;
@@ -72,86 +72,77 @@ pub fn to_grpc_insert_requests(
 
 pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> {
     let mut row = writer.alloc_one_row();
-    {
-        // tags
-        let iter = vec![
-            ("trace_id", span.trace_id),
-            ("span_id", span.span_id),
-            ("parent_span_id", span.parent_span_id),
-        ]
-        .into_iter()
-        .map(|(col, val)| (col.to_string(), val));
-        row_writer::write_tags(writer, iter, &mut row)?;
-    }
-    {
-        // fields
-        let str_fields_iter = vec![
-            ("scope_name", span.scope_name),
-            ("scope_version", span.scope_version),
-            ("trace_state", span.trace_state),
-            ("span_name", span.span_name),
-            ("span_kind", span.span_kind),
-            ("span_status_code", span.span_status_code),
-            ("span_status_message", span.span_status_message),
-        ]
-        .into_iter()
-        .map(|(col, val)| {
-            (
-                col.into(),
-                ColumnDataType::String,
-                ValueData::StringValue(val),
-            )
-        });
 
-        let time_fields_iter = vec![
-            ("start", span.start_in_nanosecond),
-            ("end", span.end_in_nanosecond),
-        ]
-        .into_iter()
-        .map(|(col, val)| {
-            (
-                col.into(),
-                ColumnDataType::TimestampNanosecond,
-                ValueData::TimestampNanosecondValue(val as i64),
-            )
-        });
-        row_writer::write_json(
-            writer,
-            "resource_attributes",
-            span.resource_attributes.into(),
-            &mut row,
-        )?;
-        row_writer::write_json(
-            writer,
-            "scope_attributes",
-            span.scope_attributes.into(),
-            &mut row,
-        )?;
-        row_writer::write_json(
-            writer,
-            "span_attributes",
-            span.span_attributes.into(),
-            &mut row,
-        )?;
-        row_writer::write_json(writer, "span_events", span.span_events.into(), &mut row)?;
-        row_writer::write_json(writer, "span_links", span.span_links.into(), &mut row)?;
-
-        row_writer::write_fields(writer, str_fields_iter, &mut row)?;
-        row_writer::write_fields(writer, time_fields_iter, &mut row)?;
-        row_writer::write_fields(writer, span.uplifted_span_attributes.into_iter(), &mut row)?;
-    }
-
-    row_writer::write_f64(
-        writer,
-        GREPTIME_VALUE,
-        (span.end_in_nanosecond - span.start_in_nanosecond) as f64 / 1_000_000.0, // duration in millisecond
-        &mut row,
-    )?;
+    // write ts
     row_writer::write_ts_to_nanos(
         writer,
-        GREPTIME_TIMESTAMP,
+        "timestamp",
         Some(span.start_in_nanosecond as i64),
         Precision::Nanosecond,
+        &mut row,
+    )?;
+    // write ts fields
+    let fields = vec![
+        make_column_data(
+            "timestamp_end",
+            ColumnDataType::TimestampNanosecond,
+            ValueData::TimestampNanosecondValue(span.end_in_nanosecond as i64),
+        ),
+        make_column_data(
+            "duration_nano",
+            ColumnDataType::Uint64,
+            ValueData::U64Value(span.end_in_nanosecond - span.start_in_nanosecond),
+        ),
+    ];
+    row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
+
+    // tags
+    let iter = vec![
+        ("trace_id", span.trace_id),
+        ("span_id", span.span_id),
+        ("parent_span_id", span.parent_span_id),
+    ]
+    .into_iter()
+    .map(|(col, val)| (col.to_string(), val));
+    row_writer::write_tags(writer, iter, &mut row)?;
+
+    // write fields
+    let fields = vec![
+        make_string_column_data("span_kind", span.span_kind),
+        make_string_column_data("span_name", span.span_name),
+        make_string_column_data("span_status_code", span.span_status_code),
+        make_string_column_data("span_status_message", span.span_status_message),
+        make_string_column_data("trace_state", span.trace_state),
+    ];
+    row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
+
+    row_writer::write_json(
+        writer,
+        "span_attributes",
+        span.span_attributes.into(),
+        &mut row,
+    )?;
+    row_writer::write_json(writer, "span_events", span.span_events.into(), &mut row)?;
+    row_writer::write_json(writer, "span_links", span.span_links.into(), &mut row)?;
+
+    // write fields
+    let fields = vec![
+        make_string_column_data("scope_name", span.scope_name),
+        make_string_column_data("scope_version", span.scope_version),
+    ];
+    row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
+
+    row_writer::write_json(
+        writer,
+        "scope_attributes",
+        span.scope_attributes.into(),
+        &mut row,
+    )?;
+
+    row_writer::write_json(
+        writer,
+        "resource_attributes",
+        span.resource_attributes.into(),
         &mut row,
     )?;
 

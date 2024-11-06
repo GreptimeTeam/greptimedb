@@ -14,6 +14,8 @@
 
 use std::collections::BTreeMap;
 
+use api::v1::value::ValueData;
+use api::v1::ColumnDataType;
 use itertools::Itertools;
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
@@ -57,4 +59,21 @@ pub fn key_value_to_jsonb(key_values: Vec<KeyValue>) -> JsonbValue<'static> {
         map.insert(kv.key.clone(), value);
     }
     JsonbValue::Object(map)
+}
+
+#[inline]
+pub(crate) fn make_string_column_data(
+    name: &str,
+    value: String,
+) -> (String, ColumnDataType, ValueData) {
+    make_column_data(name, ColumnDataType::String, ValueData::StringValue(value))
+}
+
+#[inline]
+pub(crate) fn make_column_data(
+    name: &str,
+    data_type: ColumnDataType,
+    value: ValueData,
+) -> (String, ColumnDataType, ValueData) {
+    (name.to_string(), data_type, value)
 }

@@ -14,8 +14,6 @@
 
 use std::fmt::Display;
 
-use api::v1::value::ValueData;
-use api::v1::ColumnDataType;
 use common_time::timestamp::Timestamp;
 use itertools::Itertools;
 use opentelemetry_proto::tonic::common::v1::{InstrumentationScope, KeyValue};
@@ -48,8 +46,6 @@ pub struct TraceSpan {
     pub span_links: SpanLinks,       // TODO(yuanbohan): List in the future
     pub start_in_nanosecond: u64,    // this is also the Timestamp Index
     pub end_in_nanosecond: u64,
-
-    pub uplifted_span_attributes: Vec<(String, ColumnDataType, ValueData)>,
 }
 
 pub type TraceSpans = Vec<TraceSpan>;
@@ -221,8 +217,6 @@ pub fn parse_span(
 
         start_in_nanosecond: span.start_time_unix_nano,
         end_in_nanosecond: span.end_time_unix_nano,
-
-        uplifted_span_attributes: vec![],
     }
 }
 
