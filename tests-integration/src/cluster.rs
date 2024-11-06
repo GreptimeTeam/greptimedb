@@ -346,6 +346,7 @@ impl GreptimeDbClusterBuilder {
     ) -> Arc<FeInstance> {
         let mut meta_client = MetaClientBuilder::frontend_default_options(1000)
             .channel_manager(metasrv.channel_manager)
+            .enable_access_cluster_info()
             .build();
         meta_client.start(&[&metasrv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
