@@ -254,7 +254,8 @@ impl TableMeta {
         Ok(desc)
     }
 
-    /// Create a `[TableMetaBuilder]`
+    /// Create a [`TableMetaBuilder`].
+    ///
     /// Note: please always use this function to create the builder.
     fn new_meta_builder(&self) -> TableMetaBuilder {
         let mut builder = TableMetaBuilder::default();
