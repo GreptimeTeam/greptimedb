@@ -49,7 +49,8 @@
 </div>
 
 - [Introduction](#introduction)
-- [Why GreptimeDB](#why-greptimedb)
+- [**Features: Why GreptimeDB**](#why-greptimedb)
+- [Architecture](https://docs.greptime.com/contributor-guide/overview/#architecture)
 - [Try it for free](#try-greptimedb)
 - [Getting Started](#getting-started)
 - [Project Status](#project-status)
