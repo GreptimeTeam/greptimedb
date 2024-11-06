@@ -50,15 +50,13 @@
 
 - [Introduction](#introduction)
 - [Why GreptimeDB](#why-greptimedb)
-- [Try GreptimeDB](#try-greptimedb)
+- [Try it for free](#try-greptimedb)
 - [Getting Started](#getting-started)
-- [Build](#build)
-- [Extension](#extension)
 - [Project Status](#project-status)
-- [Community](#community)
-- [Commerial Support](#commerial-support)
+- [Join the community](#community)
+  - [Contributing](#contributing)
+- [Extension](#extension )
 - [License](#license)
-- [Contributing](#contributing)
 - [Acknowledgement](#acknowledgement)
 
 ## Introduction
