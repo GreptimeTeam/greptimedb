@@ -400,7 +400,7 @@ impl PartSortStream {
             self.region_id,
             self.partition,
             self.cur_part_idx,
-            self.buffer.iter().map(|b| b.len()).sum::<usize>(),
+            self.buffer.iter().map(|b| b.num_rows()).sum::<usize>(),
         );
 
         let mut sort_columns = Vec::with_capacity(self.buffer.len());
