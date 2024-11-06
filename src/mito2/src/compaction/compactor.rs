@@ -259,6 +259,7 @@ impl Compactor for DefaultCompactor {
 
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
+                compression_method: compaction_region.engine_config.compression_method,
                 ..Default::default()
             };
 

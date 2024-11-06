@@ -131,6 +131,17 @@ pub struct MitoConfig {
 
     /// Skip wal
     pub skip_wal: bool,
+    /// SST compression method.
+    pub compression_method: CompressionMethod,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressionMethod {
+    #[default]
+    Zstd,
+    Lz4,
+    None,
 }
 
 impl Default for MitoConfig {
@@ -165,6 +176,7 @@ impl Default for MitoConfig {
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
             skip_wal: false,
+            compression_method: CompressionMethod::Zstd,
         };
 
         // Adjust buffer and cache size according to system memory if we can.

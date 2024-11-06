@@ -19,6 +19,7 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
 
+use crate::config::CompressionMethod;
 use crate::sst::file::FileTimeRange;
 use crate::sst::index::IndexOutput;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -49,6 +50,8 @@ pub struct WriteOptions {
     pub write_buffer_size: ReadableSize,
     /// Row group size.
     pub row_group_size: usize,
+    /// Compression method.
+    pub compression_method: CompressionMethod,
 }
 
 impl Default for WriteOptions {
@@ -56,6 +59,7 @@ impl Default for WriteOptions {
         WriteOptions {
             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
+            compression_method: CompressionMethod::default(),
         }
     }
 }

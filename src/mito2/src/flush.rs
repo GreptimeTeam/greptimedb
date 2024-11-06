@@ -321,6 +321,7 @@ impl RegionFlushTask {
 
         let mut write_opts = WriteOptions {
             write_buffer_size: self.engine_config.sst_write_buffer_size,
+            compression_method: self.engine_config.compression_method,
             ..Default::default()
         };
         if let Some(row_group_size) = self.row_group_size {

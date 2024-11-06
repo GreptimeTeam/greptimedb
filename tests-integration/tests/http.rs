@@ -898,6 +898,7 @@ parallel_scan_channel_size = 32
 allow_stale_entries = false
 min_compaction_interval = "0s"
 skip_wal = false
+compression_method = "zstd"
 
 [region_engine.mito.index]
 aux_path = ""

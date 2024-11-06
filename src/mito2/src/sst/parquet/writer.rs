@@ -34,6 +34,7 @@ use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
+use crate::config::CompressionMethod;
 use crate::error::{InvalidMetadataSnafu, OpenDalSnafu, Result, WriteParquetSnafu};
 use crate::read::{Batch, Source};
 use crate::sst::index::Indexer;
@@ -217,9 +218,14 @@ where
             let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
             // TODO(yingwen): Find and set proper column encoding for internal columns: op type and tsid.
+            let compression = match opts.compression_method {
+                CompressionMethod::Zstd => Compression::ZSTD(ZstdLevel::default()),
+                CompressionMethod::Lz4 => Compression::LZ4_RAW,
+                CompressionMethod::None => Compression::UNCOMPRESSED,
+            };
             let props_builder = WriterProperties::builder()
                 .set_key_value_metadata(Some(vec![key_value_meta]))
-                .set_compression(Compression::ZSTD(ZstdLevel::default()))
+                .set_compression(compression)
                 .set_encoding(Encoding::PLAIN)
                 .set_max_row_group_size(opts.row_group_size);
 
