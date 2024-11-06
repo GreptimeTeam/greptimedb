@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::region::compact_request;
+use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_telemetry::{debug, error, info};
 use common_time::range::TimestampRange;
@@ -635,6 +636,17 @@ fn get_expired_ssts(
         .iter()
         .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
         .collect()
+}
+
+/// Finds all SSTs larger than `size` across levels.
+fn get_too_large_ssts(
+    levels: &[LevelMeta],
+    size: ReadableSize,
+    ssts_to_remove: &mut Vec<FileHandle>,
+) {
+    levels
+        .iter()
+        .for_each(|l| l.get_too_large_files(size, ssts_to_remove));
 }
 
 #[cfg(test)]
