@@ -201,15 +201,7 @@ impl TableMeta {
                 self.change_column_types(table_name, columns)
             }
             // No need to rebuild table meta when renaming tables.
-            AlterKind::RenameTable { .. } => {
-                let mut meta_builder = TableMetaBuilder::default();
-                let _ = meta_builder
-                    .schema(self.schema.clone())
-                    .primary_key_indices(self.primary_key_indices.clone())
-                    .engine(self.engine.clone())
-                    .next_column_id(self.next_column_id);
-                Ok(meta_builder)
-            }
+            AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::ChangeTableOptions { options } => self.change_table_options(options),
         }
     }
@@ -229,13 +221,9 @@ impl TableMeta {
                 }
             }
         }
-        let mut builder = TableMetaBuilder::default();
-        builder
-            .options(new_options)
-            .schema(self.schema.clone())
-            .primary_key_indices(self.primary_key_indices.clone())
-            .engine(self.engine.clone())
-            .next_column_id(self.next_column_id);
+        let mut builder = self.new_meta_builder();
+        builder.options(new_options);
+
         Ok(builder)
     }
 
@@ -266,9 +254,14 @@ impl TableMeta {
         Ok(desc)
     }
 
+    /// Create a [`TableMetaBuilder`].
+    ///
+    /// Note: please always use this function to create the builder.
     fn new_meta_builder(&self) -> TableMetaBuilder {
         let mut builder = TableMetaBuilder::default();
         let _ = builder
+            .schema(self.schema.clone())
+            .primary_key_indices(self.primary_key_indices.clone())
             .engine(&self.engine)
             .options(self.options.clone())
             .created_on(self.created_on)

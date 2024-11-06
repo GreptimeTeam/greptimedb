@@ -486,6 +486,8 @@ mod tests {
         let AlterTableOperation::ChangeTableOptions { options } = &alter.alter_operation else {
             unreachable!()
         };
+
+        assert_eq!(sql, alter.to_string());
         let res = options
             .iter()
             .map(|o| (o.key.as_str(), o.value.as_str()))
@@ -495,16 +497,16 @@ mod tests {
 
     #[test]
     fn test_parse_alter_column() {
-        check_parse_alter_table("ALTER TABLE test_table SET 'a'='A';", &[("a", "A")]);
+        check_parse_alter_table("ALTER TABLE test_table SET 'a'='A'", &[("a", "A")]);
         check_parse_alter_table(
             "ALTER TABLE test_table SET 'a'='A','b'='B'",
             &[("a", "A"), ("b", "B")],
         );
         check_parse_alter_table(
-            "ALTER TABLE test_table SET 'a'='A','b'='B','c'='C';",
+            "ALTER TABLE test_table SET 'a'='A','b'='B','c'='C'",
             &[("a", "A"), ("b", "B"), ("c", "C")],
         );
-        check_parse_alter_table("ALTER TABLE test_table SET 'a'=NULL;", &[("a", "")]);
+        check_parse_alter_table("ALTER TABLE test_table SET 'a'=NULL", &[("a", "")]);
 
         ParserContext::create_with_dialect(
             "ALTER TABLE test_table SET a INTEGER",
