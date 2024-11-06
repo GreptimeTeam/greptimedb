@@ -34,7 +34,7 @@ use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, InvalidFulltextAnalyzerProtoSnafu, InvalidRawRegionRequestSnafu,
+    ColumnMetadata, InvalidChangeFulltextOptionRequestSnafu, InvalidRawRegionRequestSnafu,
     InvalidRegionOptionChangeRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
     RegionMetadata, Result,
 };
@@ -538,7 +538,7 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 options: FulltextOptions {
                     enable: x.enable,
                     analyzer: try_as_fulltext_option(x.analyzer)
-                        .context(InvalidFulltextAnalyzerProtoSnafu)?,
+                        .context(InvalidChangeFulltextOptionRequestSnafu)?,
                     case_sensitive: x.case_sensitive,
                 },
             },

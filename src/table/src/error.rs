@@ -140,6 +140,18 @@ pub enum Error {
 
     #[snafu(display("Table options value is not valid, key: `{}`, value: `{}`", key, value))]
     InvalidTableOptionValue { key: String, value: String },
+
+    #[snafu(display(
+        "Failed to set fulltext options for column {}, reason: {}",
+        column_name,
+        reason
+    ))]
+    SetFulltextOptions {
+        column_name: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -156,6 +168,7 @@ impl ErrorExt for Error {
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
             Error::SchemaBuild { source, .. } => source.status_code(),
             Error::TableOperation { source } => source.status_code(),
+            Error::SetFulltextOptions { .. } => StatusCode::InvalidArguments,
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::Unsupported { .. } => StatusCode::Unsupported,
             Error::ParseTableOption { .. } => StatusCode::InvalidArguments,

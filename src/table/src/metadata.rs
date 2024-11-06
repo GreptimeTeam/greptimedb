@@ -208,7 +208,7 @@ impl TableMeta {
             AlterKind::ChangeColumnFulltext {
                 column_name,
                 options,
-            } => self.change_column_fulltext_options(column_name, options),
+            } => self.change_column_fulltext_options(table_name, column_name, options),
         }
     }
 
@@ -236,10 +236,88 @@ impl TableMeta {
     /// Creates a [TableMetaBuilder] with modified column fulltext options.
     fn change_column_fulltext_options(
         &self,
-        _column_name: &str,
-        _options: &FulltextOptions,
+        table_name: &str,
+        column_name: &str,
+        options: &FulltextOptions,
     ) -> Result<TableMetaBuilder> {
-        todo!()
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+
+        let column = &table_schema
+            .column_schema_by_name(column_name)
+            .with_context(|| error::ColumnNotExistsSnafu {
+                column_name,
+                table_name,
+            })?;
+
+        ensure!(
+            column.data_type.is_string(),
+            error::SetFulltextOptionsSnafu {
+                column_name: column_name.to_string(),
+                reason: format!(
+                    "column {} is not a string type, but {:?}",
+                    column_name, column.data_type
+                ),
+            }
+        );
+
+        let current_fulltext_options = column.fulltext_options().map_err(|e| {
+            error::SetFulltextOptionsSnafu {
+                column_name: column_name.to_string(),
+                reason: e.to_string(),
+            }
+            .build()
+        })?;
+
+        ensure!(
+            !(current_fulltext_options.is_some_and(|o| o.enable) && options.enable),
+            error::SetFulltextOptionsSnafu {
+                column_name: column_name.to_string(),
+                reason: "fulltext options already enabled".to_string(),
+            }
+        );
+
+        let mut columns = vec![];
+        for column_schema in table_schema.column_schemas() {
+            if column_schema.name == column_name {
+                let mut new_column_schema = column_schema.clone();
+                new_column_schema
+                    .set_fulltext_options(options)
+                    .map_err(|e| {
+                        error::SetFulltextOptionsSnafu {
+                            column_name: column_name.to_string(),
+                            reason: e.to_string(),
+                        }
+                        .build()
+                    })?;
+                columns.push(new_column_schema);
+            } else {
+                columns.push(column_schema.clone());
+            }
+        }
+
+        // TODO(CookiePieWw): This part for all alter table operations is similar. We can refactor it.
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            .version(table_schema.version() + 1);
+
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!(
+                "Table {table_name} cannot change fulltext options for column {column_name}",
+            ),
+        })?;
+
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
     }
 
     /// Allocate a new column for the table.

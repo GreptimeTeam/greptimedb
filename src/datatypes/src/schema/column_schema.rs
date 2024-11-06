@@ -291,6 +291,14 @@ impl ColumnSchema {
         );
         Ok(self)
     }
+
+    pub fn set_fulltext_options(&mut self, options: &FulltextOptions) -> Result<()> {
+        self.metadata.insert(
+            FULLTEXT_KEY.to_string(),
+            serde_json::to_string(options).context(error::SerializeSnafu)?,
+        );
+        Ok(())
+    }
 }
 
 impl TryFrom<&Field> for ColumnSchema {
