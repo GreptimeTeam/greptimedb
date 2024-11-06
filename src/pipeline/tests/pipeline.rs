@@ -615,8 +615,11 @@ transform:
     assert_eq!(StringValue("world".into()), object_target);
     assert_eq!(StringValue("world".into()), array_target);
     assert_eq!(complex_target3, complex_target2);
+
     assert_eq!(
-        BinaryValue([128, 0, 0, 2, 32, 0, 0, 2, 32, 0, 0, 2, 64, 1, 64, 4].to_vec()),
+        BinaryValue(
+            jsonb::Value::Array(vec![jsonb::Value::from(1), jsonb::Value::from(4),]).to_vec()
+        ),
         complex_target1
     );
 }

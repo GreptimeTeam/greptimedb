@@ -570,7 +570,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Parse json path error: {}",error.to_string()))]
+    #[snafu(display("Parse json path error"))]
     JsonPathParse {
         #[snafu(implicit)]
         location: Location,
