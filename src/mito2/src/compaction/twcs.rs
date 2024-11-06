@@ -310,7 +310,7 @@ fn assign_to_windows<'a>(
     let mut windows: HashMap<i64, Window> = HashMap::new();
     // Iterates all files and assign to time windows according to max timestamp
     for f in files {
-        if file.compacting() {
+        if f.compacting() {
             continue;
         }
         let (_, end) = f.time_range();
