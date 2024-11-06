@@ -209,7 +209,7 @@ fn enforce_file_num<T: Item>(files: &[T], max_file_num: usize) -> Vec<T> {
     files.iter().skip(min_idx).take(to_merge).cloned().collect()
 }
 
-const MAX_FILE_SIZE: ReadableSize = ReadableSize::gb(4);
+const MAX_FILE_SIZE: ReadableSize = ReadableSize::mb(512);
 
 impl Picker for TwcsPicker {
     fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
@@ -220,10 +220,12 @@ impl Picker for TwcsPicker {
         let mut expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
         let mut too_large_ssts = Vec::new();
         get_too_large_ssts(levels, MAX_FILE_SIZE, &mut too_large_ssts);
-        info!(
-            "Remove too large SSTs in region {}: {:?}",
-            region_id, too_large_ssts
-        );
+        if !too_large_ssts.is_empty() {
+            info!(
+                "Remove too large SSTs in region {}: {:?}",
+                region_id, too_large_ssts
+            );
+        }
         expired_ssts.append(&mut too_large_ssts);
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
