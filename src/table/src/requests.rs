@@ -25,7 +25,7 @@ use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, FulltextOptions};
 use greptime_proto::v1::region::compact_request;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
@@ -215,6 +215,10 @@ pub enum AlterKind {
     },
     ChangeTableOptions {
         options: Vec<ChangeOption>,
+    },
+    ChangeColumnFulltext {
+        column_name: String,
+        options: FulltextOptions,
     },
 }
 

@@ -17,7 +17,10 @@
 use std::collections::HashMap;
 
 use common_meta::SchemaOptions;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef, COMMENT_KEY};
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnSchema, SchemaRef, COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
+    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COMMENT_KEY,
+};
 use humantime::format_duration;
 use snafu::ResultExt;
 use sql::ast::{ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName};
@@ -25,7 +28,6 @@ use sql::dialect::GreptimeDbDialect;
 use sql::parser::ParserContext;
 use sql::statements::create::{Column, ColumnExtensions, CreateTable, TableConstraint};
 use sql::statements::{self, OptionMap};
-use sql::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY};

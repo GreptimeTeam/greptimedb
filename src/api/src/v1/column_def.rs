@@ -15,7 +15,8 @@
 use std::collections::HashMap;
 
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, COMMENT_KEY, FULLTEXT_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, COMMENT_KEY,
+    FULLTEXT_KEY,
     INVERTED_INDEX_KEY,
 };
 use snafu::ResultExt;
@@ -102,6 +103,15 @@ pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<Column
     options.options.insert(FULLTEXT_GRPC_KEY.to_string(), v);
 
     Ok((!options.options.is_empty()).then_some(options))
+}
+
+/// Tries to construct a `FulltextAnalyzer` from the given analyzer.
+pub fn try_as_fulltext_option(analyzer: i32) -> Result<FulltextAnalyzer> {
+    match analyzer {
+        0 => Ok(FulltextAnalyzer::English),
+        1 => Ok(FulltextAnalyzer::Chinese),
+        _ => error::InvalidFulltextAnalyzerSnafu { analyzer }.fail(),
+    }
 }
 
 #[cfg(test)]

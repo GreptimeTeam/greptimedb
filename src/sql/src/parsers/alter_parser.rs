@@ -12,16 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use common_query::AddColumnLocation;
-use snafu::ResultExt;
+use datatypes::schema::COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE;
+use snafu::{ensure, ResultExt};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::Token;
 
-use crate::error::{self, Result};
+use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
+use crate::parsers::utils::validate_column_fulltext_option;
 use crate::statements::alter::{AlterTable, AlterTableOperation, ChangeTableOption};
 use crate::statements::statement::Statement;
+use crate::util::parse_option_string;
 
 impl ParserContext<'_> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
@@ -143,12 +148,42 @@ impl ParserContext<'_> {
                 .parse_identifier(false)
                 .context(error::SyntaxSnafu)?,
         );
-        let target_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
 
-        Ok(AlterTableOperation::ChangeColumnType {
-            column_name,
-            target_type,
-        })
+        if self.parser.parse_keyword(Keyword::SET) {
+            self.parser
+                .expect_keyword(Keyword::FULLTEXT)
+                .context(error::SyntaxSnafu)?;
+
+            let options = self
+                .parser
+                .parse_options(Keyword::WITH)
+                .context(error::SyntaxSnafu)?
+                .into_iter()
+                .map(parse_option_string)
+                .collect::<Result<HashMap<String, String>>>()?;
+
+            for key in options.keys() {
+                ensure!(
+                    key == COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE
+                        || validate_column_fulltext_option(key),
+                    InvalidColumnOptionSnafu {
+                        name: column_name.to_string(),
+                        msg: format!("invalid FULLTEXT option: {key}"),
+                    }
+                );
+            }
+
+            Ok(AlterTableOperation::ChangeColumnFulltext {
+                column_name,
+                options: options.try_into().context(SetFulltextOptionSnafu)?,
+            })
+        } else {
+            let target_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
+            Ok(AlterTableOperation::ChangeColumnType {
+                column_name,
+                target_type,
+            })
+        }
     }
 }
 

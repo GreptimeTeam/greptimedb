@@ -12,19 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
-use datatypes::schema::{FulltextAnalyzer, FulltextOptions};
+use datatypes::schema::FulltextOptions;
 use itertools::Itertools;
+use snafu::ResultExt;
 use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
-use crate::error::{FulltextInvalidOptionSnafu, Result};
+use crate::error::{Result, SetFulltextOptionSnafu};
 use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
-use crate::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
@@ -156,36 +157,8 @@ impl ColumnExtensions {
             return Ok(None);
         };
 
-        let mut fulltext = FulltextOptions {
-            enable: true,
-            ..Default::default()
-        };
-        if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
-            match analyzer.to_ascii_lowercase().as_str() {
-                "english" => fulltext.analyzer = FulltextAnalyzer::English,
-                "chinese" => fulltext.analyzer = FulltextAnalyzer::Chinese,
-                _ => {
-                    return FulltextInvalidOptionSnafu {
-                        msg: format!("{analyzer}, expected: 'English' | 'Chinese'"),
-                    }
-                    .fail();
-                }
-            }
-        }
-        if let Some(case_sensitive) = options.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
-            match case_sensitive.to_ascii_lowercase().as_str() {
-                "true" => fulltext.case_sensitive = true,
-                "false" => fulltext.case_sensitive = false,
-                _ => {
-                    return FulltextInvalidOptionSnafu {
-                        msg: format!("{case_sensitive}, expected: 'true' | 'false'"),
-                    }
-                    .fail();
-                }
-            }
-        }
-
-        Ok(Some(fulltext))
+        let options: HashMap<String, String> = options.clone().into_map();
+        Ok(Some(options.try_into().context(SetFulltextOptionSnafu)?))
     }
 }
 

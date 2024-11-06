@@ -107,6 +107,9 @@ fn create_proto_alter_kind(
         }
         Kind::RenameTable(_) => Ok(None),
         Kind::ChangeTableOptions(v) => Ok(Some(alter_request::Kind::ChangeTableOptions(v.clone()))),
+        Kind::ChangeColumnFulltext(v) => {
+            Ok(Some(alter_request::Kind::ChangeColumnFulltext(v.clone())))
+        }
     }
 }
 

@@ -28,7 +28,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -553,6 +553,10 @@ impl RegionMetadataBuilder {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ChangeColumnTypes { columns } => self.change_column_types(columns),
+            AlterKind::ChangeColumnFulltext {
+                column_name,
+                options,
+            } => self.change_column_fulltext_options(column_name, options),
             AlterKind::ChangeRegionOptions { options: _ } => {
                 // nothing to be done with RegionMetadata
             }
@@ -654,6 +658,13 @@ impl RegionMetadataBuilder {
                 column_meta.column_schema.data_type = target_type;
             }
         }
+    }
+
+    fn change_column_fulltext_options(&mut self, column_name: String, _options: FulltextOptions) {
+        for column_meta in self.column_metadatas.iter_mut() {
+            if column_meta.column_schema.name == column_name {}
+        }
+        todo!()
     }
 }
 
@@ -776,6 +787,13 @@ pub enum MetadataError {
     InvalidRegionOptionChangeRequest {
         key: String,
         value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Fail to parse fulltext analyzer proto"))]
+    InvalidFulltextAnalyzerProto {
+        source: api::error::Error,
         #[snafu(implicit)]
         location: Location,
     },

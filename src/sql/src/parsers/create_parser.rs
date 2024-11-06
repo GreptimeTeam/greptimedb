@@ -36,6 +36,7 @@ use crate::error::{
     SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{ParserContext, FLOW};
+use crate::parsers::utils::validate_column_fulltext_option;
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
     CreateTableLike, CreateView, Partitions, TableConstraint,
@@ -57,17 +58,6 @@ const DB_OPT_KEY_TTL: &str = "ttl";
 
 fn validate_database_option(key: &str) -> bool {
     [DB_OPT_KEY_TTL].contains(&key)
-}
-
-pub const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
-pub const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
-
-fn validate_column_fulltext_option(key: &str) -> bool {
-    [
-        COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
-        COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
-    ]
-    .contains(&key)
 }
 
 /// Parses create [table] statement

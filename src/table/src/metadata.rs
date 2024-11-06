@@ -20,7 +20,9 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
-use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{
+    ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder, SchemaRef,
+};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -203,6 +205,10 @@ impl TableMeta {
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::ChangeTableOptions { options } => self.change_table_options(options),
+            AlterKind::ChangeColumnFulltext {
+                column_name,
+                options,
+            } => self.change_column_fulltext_options(column_name, options),
         }
     }
 
@@ -225,6 +231,15 @@ impl TableMeta {
         builder.options(new_options);
 
         Ok(builder)
+    }
+
+    /// Creates a [TableMetaBuilder] with modified column fulltext options.
+    fn change_column_fulltext_options(
+        &self,
+        _column_name: &str,
+        _options: &FulltextOptions,
+    ) -> Result<TableMetaBuilder> {
+        todo!()
     }
 
     /// Allocate a new column for the table.

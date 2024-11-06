@@ -15,20 +15,22 @@
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_expr::Kind;
+use api::v1::column_def::try_as_fulltext_option;
 use api::v1::{
     column_def, AddColumnLocation as Location, AlterExpr, ChangeColumnTypes, CreateTableExpr,
     DropColumns, RenameTable, SemanticType,
 };
 use common_query::AddColumnLocation;
-use datatypes::schema::{ColumnSchema, RawSchema};
+use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::region_request::ChangeOption;
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ChangeColumnTypeRequest};
 
 use crate::error::{
-    InvalidChangeTableOptionRequestSnafu, InvalidColumnDefSnafu, MissingFieldSnafu,
-    MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
+    InvalidChangeFulltextOptionRequestSnafu, InvalidChangeTableOptionRequestSnafu,
+    InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu, Result,
+    UnknownLocationTypeSnafu,
 };
 
 const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
@@ -101,6 +103,15 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
                 .map(ChangeOption::try_from)
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .context(InvalidChangeTableOptionRequestSnafu)?,
+        },
+        Kind::ChangeColumnFulltext(c) => AlterKind::ChangeColumnFulltext {
+            column_name: c.column_name.clone(),
+            options: FulltextOptions {
+                enable: c.enable,
+                analyzer: try_as_fulltext_option(c.analyzer)
+                    .context(InvalidChangeFulltextOptionRequestSnafu)?,
+                case_sensitive: c.case_sensitive,
+            },
         },
     };
 
