@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-<h2 align="center">Unified Time Series Database for Metrics, Logs, and Events</h2>
+<h2 align="center">Unified & Cost-Effective Time Series Database for Metrics, Logs, and Events</h2>
 
 <div align="center">
 <h3 align="center">
@@ -48,9 +48,28 @@
 </a>
 </div>
 
+- [Introduction](#introduction)
+- [Why GreptimeDB](#why-greptimedb)
+- [Try GreptimeDB](#try-greptimedb)
+  * [1. [GreptimePlay](https://greptime.com/playground)](#1--greptimeplay--https---greptimecom-playground-)
+  * [2. [GreptimeCloud](https://console.greptime.cloud/)](#2--greptimecloud--https---consolegreptimecloud--)
+  * [3. Docker Image](#3-docker-image)
+- [Getting Started](#getting-started)
+- [Build](#build)
+- [Extension](#extension)
+  * [Dashboard](#dashboard)
+  * [SDK](#sdk)
+  * [Grafana Dashboard](#grafana-dashboard)
+- [Project Status](#project-status)
+- [Community](#community)
+- [Commerial Support](#commerial-support)
+- [License](#license)
+- [Contributing](#contributing)
+- [Acknowledgement](#acknowledgement)
+
 ## Introduction
 
-**GreptimeDB** is an open-source unified time-series database for **Metrics**, **Logs**, and **Events** (also **Traces** in plan). You can gain real-time insights from Edge to Cloud at any scale.
+**GreptimeDB** is an open-source unified & cost-effective time-series database for **Metrics**, **Logs**, and **Events** (also **Traces** in plan). You can gain real-time insights from Edge to Cloud at Any Scale.
 
 ## Why GreptimeDB
 
