@@ -209,7 +209,7 @@ fn enforce_file_num<T: Item>(files: &[T], max_file_num: usize) -> Vec<T> {
     files.iter().skip(min_idx).take(to_merge).cloned().collect()
 }
 
-const MAX_FILE_SIZE: ReadableSize = ReadableSize::mb(512);
+const MAX_FILE_SIZE: ReadableSize = ReadableSize::gb(1);
 
 impl Picker for TwcsPicker {
     fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
@@ -310,6 +310,9 @@ fn assign_to_windows<'a>(
     let mut windows: HashMap<i64, Window> = HashMap::new();
     // Iterates all files and assign to time windows according to max timestamp
     for f in files {
+        if file.compacting() {
+            continue;
+        }
         let (_, end) = f.time_range();
         let time_window = end
             .convert_to(TimeUnit::Second)
