@@ -216,6 +216,15 @@ mod tests {
             assert_eq!(val, *real);
         }
 
+        // Test for path error.
+        let json_bytes = jsonb::parse_value("{}".as_bytes()).unwrap().to_vec();
+        let json = BinaryVector::from_vec(vec![json_bytes]);
+        let illegal_path = StringVector::from_vec(vec!["$..a"]);
+
+        let args: Vec<VectorRef> = vec![Arc::new(json), Arc::new(illegal_path)];
+        let err = json_path_exists.eval(FunctionContext::default(), &args);
+        assert!(err.is_err());
+
         // Test for nulls.
         let json_bytes = jsonb::parse_value("{}".as_bytes()).unwrap().to_vec();
         let json = BinaryVector::from_vec(vec![json_bytes]);
