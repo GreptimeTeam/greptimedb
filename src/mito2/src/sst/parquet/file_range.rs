@@ -34,7 +34,7 @@ use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::PruneReader;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
-use crate::sst::file::FileHandle;
+use crate::sst::file::FileId;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
 
@@ -112,7 +112,7 @@ impl FileRange {
         let prune_reader = if use_last_row_reader {
             // Row group is PUT only, use LastRowReader to skip unnecessary rows.
             let reader = RowGroupLastRowCachedReader::new(
-                self.file_handle().file_id(),
+                self.file_id(),
                 self.row_group_idx,
                 self.context.reader_builder.cache_manager().clone(),
                 RowGroupReader::new(self.context.clone(), parquet_reader),
@@ -135,8 +135,8 @@ impl FileRange {
     }
 
     /// Returns the file handle of the file range.
-    pub(crate) fn file_handle(&self) -> &FileHandle {
-        self.context.reader_builder.file_handle()
+    pub(crate) fn file_id(&self) -> FileId {
+        self.context.reader_builder.file_id()
     }
 }
 

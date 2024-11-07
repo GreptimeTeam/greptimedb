@@ -178,20 +178,20 @@ impl<'a> InMemoryRowGroup<'a> {
         row_group_idx: usize,
         parquet_meta: &'a ParquetMetaData,
         bytes: Bytes,
-    ) -> Result<Self> {
+    ) -> Self {
         let metadata = parquet_meta.row_group(row_group_idx);
         let row_count = metadata.num_rows() as usize;
         let page_locations = parquet_meta
             .offset_index()
             .map(|x| x[row_group_idx].as_slice());
-        Ok(Self {
+        Self {
             metadata,
             page_locations,
             column_chunks: vec![None; metadata.columns().len()],
             row_count,
             column_uncompressed_pages: vec![None; metadata.columns().len()],
             location: Location::Memory(bytes),
-        })
+        }
     }
 
     /// Creates a new [InMemoryRowGroup] by `row_group_idx`.
@@ -576,7 +576,7 @@ mod tests {
         let data = Bytes::from(tokio::fs::read(&path).await.unwrap());
         let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone()).unwrap();
         let parquet_metadata = builder.metadata();
-        let mut group = InMemoryRowGroup::create_memory(0, parquet_metadata, data).unwrap();
+        let mut group = InMemoryRowGroup::create_memory(0, parquet_metadata, data);
         group.fetch(&ProjectionMask::all(), None).await.unwrap();
         for col_idx in 0..group.metadata.num_columns() {
             assert!(

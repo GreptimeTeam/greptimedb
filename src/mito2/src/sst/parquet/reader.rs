@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use async_trait::async_trait;
+use bytes::Bytes;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{debug, warn};
+use common_telemetry::warn;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -53,7 +54,7 @@ use crate::metrics::{
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, SortField};
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, FileId};
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
@@ -229,13 +230,15 @@ impl ParquetReaderBuilder {
             .await;
 
         let reader_builder = RowGroupReaderBuilder {
-            file_handle: self.file_handle.clone(),
-            file_path,
             parquet_meta,
-            object_store: self.object_store.clone(),
             projection: projection_mask,
             field_levels,
-            cache_manager: self.cache_manager.clone(),
+            location: Location::Sst(Sst {
+                file_handle: self.file_handle.clone(),
+                file_path,
+                object_store: self.object_store.clone(),
+                cache_manager: self.cache_manager.clone(),
+            }),
         };
 
         let mut filters = if let Some(predicate) = &self.predicate {
@@ -829,43 +832,77 @@ impl ReaderMetrics {
     }
 }
 
-/// Builder to build a [ParquetRecordBatchReader] for a row group from file.
-pub(crate) struct RowGroupReaderBuilder {
+pub enum Location {
+    Sst(Sst),
+    Memory(Bytes),
+}
+
+impl Location {
+    /// Path of the file to read.
+    pub(crate) fn file_path(&self) -> &str {
+        match self {
+            Location::Sst(sst) => &sst.file_path,
+            Location::Memory(_) => "MEMORY",
+        }
+    }
+
+    /// Handle of the file to read.
+    pub(crate) fn file_id(&self) -> FileId {
+        match self {
+            Location::Sst(sst) => sst.file_handle.file_id(),
+            Location::Memory(_) => FileId::default(),
+        }
+    }
+
+    pub(crate) fn cache_manager(&self) -> &Option<CacheManagerRef> {
+        match self {
+            Location::Sst(sst) => &sst.cache_manager,
+            Location::Memory(_) => &None,
+        }
+    }
+}
+
+struct Sst {
     /// SST file to read.
     ///
     /// Holds the file handle to avoid the file purge it.
     file_handle: FileHandle,
     /// Path of the file.
     file_path: String,
-    /// Metadata of the parquet file.
-    parquet_meta: Arc<ParquetMetaData>,
     /// Object store as an Operator.
     object_store: ObjectStore,
+    /// Cache.
+    cache_manager: Option<CacheManagerRef>,
+}
+
+/// Builder to build a [ParquetRecordBatchReader] for a row group from file.
+pub(crate) struct RowGroupReaderBuilder {
+    /// Metadata of the parquet file.
+    parquet_meta: Arc<ParquetMetaData>,
     /// Projection mask.
     projection: ProjectionMask,
     /// Field levels to read.
     field_levels: FieldLevels,
-    /// Cache.
-    cache_manager: Option<CacheManagerRef>,
+    location: Location,
 }
 
 impl RowGroupReaderBuilder {
     /// Path of the file to read.
     pub(crate) fn file_path(&self) -> &str {
-        &self.file_path
+        &self.location.file_path()
     }
 
-    /// Handle of the file to read.
-    pub(crate) fn file_handle(&self) -> &FileHandle {
-        &self.file_handle
+    /// Id of the file to read.
+    pub(crate) fn file_id(&self) -> FileId {
+        self.location.file_id()
+    }
+
+    pub(crate) fn cache_manager(&self) -> &Option<CacheManagerRef> {
+        self.location.cache_manager()
     }
 
     pub(crate) fn parquet_metadata(&self) -> &Arc<ParquetMetaData> {
         &self.parquet_meta
-    }
-
-    pub(crate) fn cache_manager(&self) -> &Option<CacheManagerRef> {
-        &self.cache_manager
     }
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
@@ -874,21 +911,32 @@ impl RowGroupReaderBuilder {
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
     ) -> Result<ParquetRecordBatchReader> {
-        let mut row_group = InMemoryRowGroup::create_sst(
-            self.file_handle.region_id(),
-            self.file_handle.file_id(),
-            &self.parquet_meta,
-            row_group_idx,
-            self.cache_manager.clone(),
-            &self.file_path,
-            self.object_store.clone(),
-        );
+        let mut row_group = match &self.location {
+            Location::Sst(Sst {
+                file_handle,
+                file_path,
+                object_store,
+                cache_manager,
+            }) => InMemoryRowGroup::create_sst(
+                file_handle.region_id(),
+                file_handle.file_id(),
+                &self.parquet_meta,
+                row_group_idx,
+                cache_manager.clone(),
+                &file_path,
+                object_store.clone(),
+            ),
+            Location::Memory(bytes) => {
+                InMemoryRowGroup::create_memory(row_group_idx, &self.parquet_meta, bytes.clone())
+            }
+        };
+
         // Fetches data into memory.
         row_group
             .fetch(&self.projection, row_selection.as_ref())
             .await
             .context(ReadParquetSnafu {
-                path: &self.file_path,
+                path: self.location.file_path(),
             })?;
 
         // Builds the parquet reader.
@@ -900,7 +948,7 @@ impl RowGroupReaderBuilder {
             row_selection,
         )
         .context(ReadParquetSnafu {
-            path: &self.file_path,
+            path: self.location.file_path(),
         })
     }
 }
@@ -1054,19 +1102,28 @@ impl BatchReader for ParquetReader {
 impl Drop for ParquetReader {
     fn drop(&mut self) {
         let metrics = self.reader_state.metrics();
-        debug!(
-            "Read parquet {} {}, range: {:?}, {}/{} row groups, metrics: {:?}",
-            self.context.reader_builder().file_handle.region_id(),
-            self.context.reader_builder().file_handle.file_id(),
-            self.context.reader_builder().file_handle.time_range(),
-            metrics.filter_metrics.num_row_groups_before_filtering
-                - metrics
-                    .filter_metrics
-                    .num_row_groups_inverted_index_filtered
-                - metrics.filter_metrics.num_row_groups_min_max_filtered,
-            metrics.filter_metrics.num_row_groups_before_filtering,
-            metrics
-        );
+        // todo(hl): we should carry region info and time range info in location variants.
+        // debug!(
+        //     "Read parquet {} {}, range: {:?}, {}/{} row groups, metrics: {:?}",
+        //     self.context
+        //         .reader_builder()
+        //         .location
+        //         .file_handle
+        //         .region_id(),
+        //     self.context.reader_builder().location.file_id(),
+        //     self.context
+        //         .reader_builder()
+        //         .location
+        //         .file_handle
+        //         .time_range(),
+        //     metrics.filter_metrics.num_row_groups_before_filtering
+        //         - metrics
+        //             .filter_metrics
+        //             .num_row_groups_inverted_index_filtered
+        //         - metrics.filter_metrics.num_row_groups_min_max_filtered,
+        //     metrics.filter_metrics.num_row_groups_before_filtering,
+        //     metrics
+        // );
 
         // Report metrics.
         READ_STAGE_ELAPSED
