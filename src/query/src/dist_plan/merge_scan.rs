@@ -224,6 +224,11 @@ impl MergeScanExec {
                     region_id,
                     plan: plan.clone(),
                 };
+                common_telemetry::info!(
+                    "Merge scan start poll stream, partition: {}, region_id: {}",
+                    partition,
+                    region_id,
+                );
                 let do_get_start = Instant::now();
                 let mut stream = region_query_handler
                     .do_get(request)
@@ -255,7 +260,7 @@ impl MergeScanExec {
                     // reset poll timer
                     poll_timer = Instant::now();
                 }
-                common_telemetry::debug!(
+                common_telemetry::info!(
                     "Merge scan stop poll stream, partition: {}, region_id: {}, poll_duration: {:?}, first_consume: {}, do_get_cost: {:?}",
                     partition, region_id, poll_duration, metric.first_consume_time(), do_get_cost
                 );
