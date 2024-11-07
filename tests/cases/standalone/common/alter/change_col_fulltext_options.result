@@ -56,6 +56,26 @@ SELECT * FROM test WHERE MATCHES(message, 'hello');
 | world hello | 2020-01-02T00:00:01 |
 +-------------+---------------------+
 
+INSERT INTO test VALUES ('hello NiKo', '2020-01-03 00:00:00'), 
+('NiKo hello', '2020-01-03 00:00:01'), 
+('hello hello', '2020-01-04 00:00:00'), 
+('NiKo, NiKo', '2020-01-04 00:00:01');
+
+Affected Rows: 4
+
+SELECT * FROM test WHERE MATCHES(message, 'hello');
+
++-------------+---------------------+
+| message     | time                |
++-------------+---------------------+
+| hello NiKo  | 2020-01-03T00:00:00 |
+| NiKo hello  | 2020-01-03T00:00:01 |
+| hello hello | 2020-01-04T00:00:00 |
+| hello       | 2020-01-01T00:00:00 |
+| hello world | 2020-01-02T00:00:00 |
+| world hello | 2020-01-02T00:00:01 |
++-------------+---------------------+
+
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE test;
 

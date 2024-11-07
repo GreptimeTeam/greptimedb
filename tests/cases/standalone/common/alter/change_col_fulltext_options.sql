@@ -19,6 +19,13 @@ ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', c
 
 SELECT * FROM test WHERE MATCHES(message, 'hello');
 
+INSERT INTO test VALUES ('hello NiKo', '2020-01-03 00:00:00'), 
+('NiKo hello', '2020-01-03 00:00:01'), 
+('hello hello', '2020-01-04 00:00:00'), 
+('NiKo, NiKo', '2020-01-04 00:00:01');
+
+SELECT * FROM test WHERE MATCHES(message, 'hello');
+
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE test;
 
