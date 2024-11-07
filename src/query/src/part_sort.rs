@@ -655,7 +655,7 @@ mod test {
                 output_data.extend_from_slice(&per_part_sort_data);
             }
 
-            // adjust output data with adjecent PartitionRanges
+            // adjust output data with adjacent PartitionRanges
             let mut output_data_iter = output_data.iter().peekable();
             let mut output_data = vec![];
             for range in output_ranges.clone() {
