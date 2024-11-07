@@ -20,20 +20,16 @@ ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'English', c
 
 SHOW CREATE TABLE test;
 
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');
+
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(enable = 'false');
 
 SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinglish', case_sensitive = 'false');
 
-SHOW CREATE TABLE test;
-
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'no');
 
-SHOW CREATE TABLE test;
-
 ALTER TABLE test MODIFY COLUMN time SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');
-
-SHOW CREATE TABLE test;
 
 DROP TABLE test;
