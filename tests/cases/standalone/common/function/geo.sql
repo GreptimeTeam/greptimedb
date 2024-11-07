@@ -49,7 +49,7 @@ SELECT
     h3_grid_distance(cell1, cell2) AS distance,
     h3_grid_path_cells(cell1, cell2) AS path_cells,
     round(h3_distance_sphere_km(cell1, cell2), 5) AS sphere_distance,
-    h3_distance_degree(cell1, cell2) AS euclidean_distance,
+    round(h3_distance_degree(cell1, cell2), 14) AS euclidean_distance,
 FROM
     (
       SELECT
