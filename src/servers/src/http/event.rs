@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::result::Result as StdResult;
 use std::sync::Arc;
 use std::time::Instant;
@@ -415,7 +415,8 @@ pub async fn loki_ingest(
         // encoding: https://github.com/grafana/alloy/blob/be34410b9e841cc0c37c153f9550d9086a304bca/internal/component/common/loki/client/batch.go#L114-L145
         // use very dirty hack to parse labels
         let labels = stream.labels.replace("=", ":");
-        let labels: HashMap<String, String> = json5::from_str(&labels).context(ParseJson5Snafu)?;
+        // use btreemap to keep order
+        let labels: BTreeMap<String, String> = json5::from_str(&labels).context(ParseJson5Snafu)?;
 
         // process entries
         for entry in stream.entries {

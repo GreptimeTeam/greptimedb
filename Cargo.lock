@@ -12399,6 +12399,7 @@ dependencies = [
  "futures-util",
  "hex",
  "itertools 0.10.5",
+ "loki-api",
  "meta-client",
  "meta-srv",
  "moka",
