@@ -134,10 +134,11 @@ impl UnorderedScan {
         let distinguish_range = self.properties.distinguish_partition_range();
 
         common_telemetry::info!(
-            "Thread: {:?}, Unordered scan start, region_id: {}, partition: {}, part_ranges: {:?}",
+            "Thread: {:?}, Unordered scan start, region_id: {}, partition: {}, num_ranges: {}, part_ranges: {:?}",
             std::thread::current().id(),
             stream_ctx.input.mapper.metadata().region_id,
             partition,
+            part_ranges.len(),
             part_ranges,
         );
 
@@ -145,11 +146,14 @@ impl UnorderedScan {
             part_metrics.on_first_poll();
 
             let cache = stream_ctx.input.cache_manager.as_deref();
+            let ranges_len = part_ranges.len();
             // Scans each part.
-            for part_range in part_ranges {
+            for (part_idx, part_range) in part_ranges.into_iter().enumerate() {
                 common_telemetry::debug!(
-                    "Thread: {:?}, Unordered scan range start, region_id: {}, partition: {}, part_range: {:?}, range_meta: {:?}",
+                    "Thread: {:?}, Unordered scan range start {}/{}, region_id: {}, partition: {}, part_range: {:?}, range_meta: {:?}",
                     std::thread::current().id(),
+                    part_idx,
+                    ranges_len,
                     stream_ctx.input.mapper.metadata().region_id,
                     partition,
                     part_range,
@@ -207,17 +211,19 @@ impl UnorderedScan {
                 }
 
                 let scan_cost = fetch_start.elapsed();
+                metrics.scan_cost += scan_cost;
                 common_telemetry::debug!(
-                    "Thread: {:?}, Unordered scan range end, region_id: {}, partition: {}, part_range: {:?}, scan_cost: {:?}, yieid_cost: {:?}, num_rows: {}",
+                    "Thread: {:?}, Unordered scan range end {}/{}, region_id: {}, partition: {}, part_range: {:?}, scan_cost: {:?}, yieid_cost: {:?}, num_rows: {}",
                     std::thread::current().id(),
+                    part_idx,
+                    ranges_len,
                     stream_ctx.input.mapper.metadata().region_id,
                     partition,
                     part_range,
-                    scan_cost,
+                    metrics.scan_cost,
                     metrics.yield_cost,
                     metrics.num_rows,
                 );
-                metrics.scan_cost += scan_cost;
                 part_metrics.merge_metrics(&metrics);
             }
 

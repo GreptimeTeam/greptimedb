@@ -666,6 +666,11 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let file = &self.files[file_index];
+        common_telemetry::info!(
+            "ScanInput prune file start, region_id: {}, file: {}",
+            file.region_id(),
+            file.file_id()
+        );
         let res = self
             .access_layer
             .read_sst(file.clone())
@@ -701,6 +706,12 @@ impl ScanInput {
             )?;
             file_range_ctx.set_compat_batch(Some(compat));
         }
+        common_telemetry::info!(
+            "ScanInput prune file end, region_id: {}, file: {}, row_groups_num: {}",
+            file.region_id(),
+            file.file_id(),
+            row_groups.len()
+        );
         Ok(FileRangeBuilder {
             context: Some(Arc::new(file_range_ctx)),
             row_groups,

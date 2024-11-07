@@ -181,6 +181,15 @@ pub(crate) fn scan_file_ranges(
 ) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
         let mut reader_metrics = ReaderMetrics::default();
+        if read_type == "unordered_scan_files" {
+            common_telemetry::debug!(
+                "Thread: {:?}, Scan file ranges build ranges start, region_id: {}, partition: {}, index: {:?}",
+                std::thread::current().id(),
+                stream_ctx.input.mapper.metadata().region_id,
+                partition,
+                index,
+            );
+        }
         let ranges = stream_ctx
             .build_file_ranges(index, &mut reader_metrics)
             .await?;

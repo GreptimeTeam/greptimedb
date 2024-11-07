@@ -591,6 +591,12 @@ impl PartSortStream {
                 // input stream end, mark and continue
                 Poll::Ready(None) => {
                     self.input_complete = true;
+                    common_telemetry::info!(
+                        "[PartSortStream] Region {} Partition {} part index {} input complete",
+                        self.region_id,
+                        self.partition,
+                        self.cur_part_idx,
+                    );
                     continue;
                 }
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
