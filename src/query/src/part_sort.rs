@@ -504,7 +504,6 @@ impl PartSortStream {
             match res {
                 Poll::Ready(Some(Ok(batch))) => {
                     if let Some(sorted_batch) = self.split_batch(batch)? {
-                        // println!("produced {} rows", sorted_batch.num_rows());
                         return Poll::Ready(Some(Ok(sorted_batch)));
                     } else {
                         continue;
