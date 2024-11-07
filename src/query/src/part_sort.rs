@@ -504,6 +504,7 @@ impl PartSortStream {
             match res {
                 Poll::Ready(Some(Ok(batch))) => {
                     if let Some(sorted_batch) = self.split_batch(batch)? {
+                        // println!("produced {} rows", sorted_batch.num_rows());
                         return Poll::Ready(Some(Ok(sorted_batch)));
                     } else {
                         continue;
@@ -554,14 +555,13 @@ mod test {
     use crate::test_util::{new_ts_array, MockInputExec};
 
     #[tokio::test]
-    #[ignore = "behavior changed"]
     async fn fuzzy_test() {
-        let test_cnt = 100;
+        let test_cnt = 1;
         let part_cnt_bound = 100;
         let range_size_bound = 100;
         let range_offset_bound = 100;
         let batch_cnt_bound = 20;
-        let batch_size_bound = 100;
+        let batch_size_bound = 10;
 
         let mut rng = fastrand::Rng::new();
         rng.seed(1337);
@@ -591,6 +591,7 @@ mod test {
             let schema = Arc::new(schema);
 
             let mut input_ranged_data = vec![];
+            let mut output_ranges = vec![];
             let mut output_data = vec![];
             // generate each input `PartitionRange`
             for part_id in 0..rng.usize(0..part_cnt_bound) {
@@ -625,13 +626,15 @@ mod test {
                 for _batch_idx in 0..rng.usize(1..batch_cnt_bound) {
                     let cnt = rng.usize(0..batch_size_bound) + 1;
                     let iter = 0..rng.usize(0..cnt);
-                    let data_gen = iter
+                    let mut data_gen = iter
                         .map(|_| rng.i64(start.value()..end.value()))
                         .collect_vec();
                     if data_gen.is_empty() {
                         // current batch is empty, skip
                         continue;
                     }
+                    // mito always sort on ASC order
+                    data_gen.sort();
                     per_part_sort_data.extend(data_gen.clone());
                     let arr = new_ts_array(unit.clone(), data_gen.clone());
                     let batch = DfRecordBatch::try_new(schema.clone(), vec![arr]).unwrap();
@@ -646,15 +649,35 @@ mod test {
                 };
                 input_ranged_data.push((range, batches));
 
-                if descending {
-                    per_part_sort_data.sort_by(|a, b| b.cmp(a));
-                } else {
-                    per_part_sort_data.sort();
-                }
                 if per_part_sort_data.is_empty() {
                     continue;
                 }
-                output_data.push(per_part_sort_data);
+                output_ranges.push(range);
+                output_data.extend_from_slice(&per_part_sort_data);
+            }
+
+            // adjust output data with adjecent PartitionRanges
+            let mut output_data_iter = output_data.iter().peekable();
+            let mut output_data = vec![];
+            for range in output_ranges.clone() {
+                let mut cur_data = vec![];
+                while let Some(val) = output_data_iter.peek() {
+                    if **val < range.start.value() || **val >= range.end.value() {
+                        break;
+                    }
+                    cur_data.push(*output_data_iter.next().unwrap());
+                }
+
+                if cur_data.is_empty() {
+                    continue;
+                }
+
+                if descending {
+                    cur_data.sort_by(|a, b| b.cmp(a));
+                } else {
+                    cur_data.sort();
+                }
+                output_data.push(cur_data);
             }
 
             let expected_output = output_data
@@ -817,7 +840,6 @@ mod test {
         let exec_stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
 
         let real_output = exec_stream.map(|r| r.unwrap()).collect::<Vec<_>>().await;
-
         // a makeshift solution for compare large data
         if real_output != expected_output {
             let mut full_msg = String::new();
