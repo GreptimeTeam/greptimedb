@@ -26,6 +26,8 @@ pub const FLUSH_REASON: &str = "reason";
 pub const FILE_TYPE_LABEL: &str = "file_type";
 /// Region worker id label.
 pub const WORKER_LABEL: &str = "worker";
+/// Partition label.
+pub const PARTITION_LABEL: &str = "partition";
 
 lazy_static! {
     /// Global write buffer size in bytes.
@@ -135,6 +137,13 @@ lazy_static! {
     .unwrap();
     pub static ref READ_STAGE_FETCH_PAGES: Histogram = READ_STAGE_ELAPSED.with_label_values(&["fetch_pages"]);
     pub static ref READ_STAGE_BUILD_PAGE_READER: Histogram = READ_STAGE_ELAPSED.with_label_values(&["build_page_reader"]);
+    /// In progress scan for each partition.
+    pub static ref SCAN_PARTITION: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_scan_partition",
+        "mito partitions scanning",
+        &[TYPE_LABEL, PARTITION_LABEL]
+    )
+    .unwrap();
     /// Counter of rows read from different source.
     pub static ref READ_ROWS_TOTAL: IntCounterVec =
         register_int_counter_vec!("greptime_mito_read_rows_total", "mito read rows total", &[TYPE_LABEL]).unwrap();

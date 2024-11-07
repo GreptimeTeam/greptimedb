@@ -20,9 +20,11 @@ use std::time::{Duration, Instant};
 use async_stream::try_stream;
 use common_telemetry::debug;
 use futures::Stream;
+use prometheus::IntGauge;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::metrics::SCAN_PARTITION;
 use crate::read::range::RowGroupIndex;
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, ScannerMetrics, Source};
@@ -41,6 +43,7 @@ struct PartitionMetricsInner {
     first_poll: Duration,
     metrics: ScannerMetrics,
     reader_metrics: ReaderMetrics,
+    scan_partition_gauge: IntGauge,
 }
 
 impl PartitionMetricsInner {
@@ -56,6 +59,7 @@ impl Drop for PartitionMetricsInner {
     fn drop(&mut self) {
         self.on_finish();
         self.metrics.observe_metrics();
+        self.scan_partition_gauge.dec();
 
         debug!(
             "{} finished, region_id: {}, partition: {}, first_poll: {:?}, metrics: {:?}, reader_metrics: {:?}",
@@ -76,6 +80,10 @@ impl PartitionMetrics {
         query_start: Instant,
         metrics: ScannerMetrics,
     ) -> Self {
+        let partition_str = partition.to_string();
+        let scan_partition_gauge =
+            SCAN_PARTITION.with_label_values(&[scanner_type, &partition_str]);
+        scan_partition_gauge.inc();
         let inner = PartitionMetricsInner {
             region_id,
             partition,
@@ -84,6 +92,7 @@ impl PartitionMetrics {
             first_poll: Duration::default(),
             metrics,
             reader_metrics: ReaderMetrics::default(),
+            scan_partition_gauge,
         };
         Self(Arc::new(Mutex::new(inner)))
     }
