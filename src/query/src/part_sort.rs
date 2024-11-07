@@ -555,12 +555,12 @@ mod test {
 
     #[tokio::test]
     async fn fuzzy_test() {
-        let test_cnt = 1;
+        let test_cnt = 100;
         let part_cnt_bound = 100;
         let range_size_bound = 100;
         let range_offset_bound = 100;
         let batch_cnt_bound = 20;
-        let batch_size_bound = 10;
+        let batch_size_bound = 100;
 
         let mut rng = fastrand::Rng::new();
         rng.seed(1337);
@@ -602,7 +602,7 @@ mod test {
                             .checked_sub(rng.i64(0..range_offset_bound))
                             .expect("Bad luck, fuzzy test generate data that will overflow, change seed and try again")
                         )
-                        .unwrap_or_else(|| rng.i64(..));
+                        .unwrap_or_else(|| rng.i64(-100000000..100000000));
                     bound_val = Some(end);
                     let start = end - rng.i64(1..range_size_bound);
                     let start = Timestamp::new(start, unit.clone().into());
@@ -648,10 +648,10 @@ mod test {
                 };
                 input_ranged_data.push((range, batches));
 
+                output_ranges.push(range);
                 if per_part_sort_data.is_empty() {
                     continue;
                 }
-                output_ranges.push(range);
                 output_data.extend_from_slice(&per_part_sort_data);
             }
 
@@ -753,6 +753,25 @@ mod test {
                 true,
                 vec![],
             ),
+            (
+                TimeUnit::Millisecond,
+                vec![
+                    (
+                        (15, 20),
+                        vec![vec![15, 17, 19, 10, 11, 12, 5, 6, 7, 8, 9, 1, 2, 3, 4]],
+                    ),
+                    ((10, 15), vec![]),
+                    ((5, 10), vec![]),
+                    ((0, 10), vec![]),
+                ],
+                true,
+                vec![
+                    vec![19, 17, 15],
+                    vec![12, 11, 10],
+                    vec![9, 8, 7, 6, 5],
+                    vec![4, 3, 2, 1],
+                ],
+            ),
         ];
 
         for (identifier, (unit, input_ranged_data, descending, expected_output)) in
@@ -808,6 +827,7 @@ mod test {
         }
     }
 
+    #[allow(clippy::print_stdout)]
     async fn run_test(
         case_id: usize,
         input_ranged_data: Vec<(PartitionRange, Vec<DfRecordBatch>)>,
@@ -832,7 +852,7 @@ mod test {
                 options: opt,
             },
             None,
-            vec![ranges],
+            vec![ranges.clone()],
             Arc::new(mock_input),
         );
 
@@ -841,10 +861,27 @@ mod test {
         let real_output = exec_stream.map(|r| r.unwrap()).collect::<Vec<_>>().await;
         // a makeshift solution for compare large data
         if real_output != expected_output {
+            let mut first_diff = 0;
+            for (idx, (lhs, rhs)) in real_output.iter().zip(expected_output.iter()).enumerate() {
+                if lhs != rhs {
+                    first_diff = idx;
+                    break;
+                }
+            }
+            println!("first diff batch at {}", first_diff);
+            println!(
+                "ranges: {:?}",
+                ranges
+                    .into_iter()
+                    .map(|r| (r.start.to_chrono_datetime(), r.end.to_chrono_datetime()))
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            );
+
             let mut full_msg = String::new();
             {
                 let mut buf = Vec::with_capacity(10 * real_output.len());
-                for batch in &real_output {
+                for batch in real_output.iter().skip(first_diff) {
                     let mut rb_json: Vec<u8> = Vec::new();
                     let mut writer = ArrayWriter::new(&mut rb_json);
                     writer.write(batch).unwrap();
@@ -858,7 +895,7 @@ mod test {
             }
             {
                 let mut buf = Vec::with_capacity(10 * real_output.len());
-                for batch in &expected_output {
+                for batch in expected_output.iter().skip(first_diff) {
                     let mut rb_json: Vec<u8> = Vec::new();
                     let mut writer = ArrayWriter::new(&mut rb_json);
                     writer.write(batch).unwrap();
@@ -870,8 +907,12 @@ mod test {
                 full_msg += &format!("case_id:{case_id}, expected_output \n{buf}");
             }
             panic!(
-                "case_{} failed, opt: {:?}, full msg: {}",
-                case_id, opt, full_msg
+                "case_{} failed, opt: {:?},\n real output has {} batches, {} rows, expected has {} batches with {} rows\nfull msg: {}",
+                case_id, opt,
+                real_output.len(),
+                real_output.iter().map(|x|x.num_rows()).sum::<usize>(),
+                expected_output.len(),
+                expected_output.iter().map(|x|x.num_rows()).sum::<usize>(), full_msg
             );
         }
     }
