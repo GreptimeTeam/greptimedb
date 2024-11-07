@@ -16,7 +16,6 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 
-use common_base::readable_size::ReadableSize;
 use common_telemetry::{info, trace};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
@@ -26,7 +25,7 @@ use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::run::{find_sorted_runs, reduce_runs, Item};
-use crate::compaction::{get_expired_ssts, get_too_large_ssts, CompactionOutput};
+use crate::compaction::{get_expired_ssts, CompactionOutput};
 use crate::sst::file::{overlaps, FileHandle, FileId, Level};
 use crate::sst::version::LevelMeta;
 
@@ -209,24 +208,12 @@ fn enforce_file_num<T: Item>(files: &[T], max_file_num: usize) -> Vec<T> {
     files.iter().skip(min_idx).take(to_merge).cloned().collect()
 }
 
-const MAX_FILE_SIZE: ReadableSize = ReadableSize::gb(1);
-
 impl Picker for TwcsPicker {
     fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
         let region_id = compaction_region.region_id;
         let levels = compaction_region.current_version.ssts.levels();
         let ttl = compaction_region.current_version.options.ttl;
-
-        let mut expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
-        let mut too_large_ssts = Vec::new();
-        get_too_large_ssts(levels, MAX_FILE_SIZE, &mut too_large_ssts);
-        if !too_large_ssts.is_empty() {
-            info!(
-                "Remove too large SSTs in region {}: {:?}",
-                region_id, too_large_ssts
-            );
-        }
-        expired_ssts.append(&mut too_large_ssts);
+        let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
             // here we mark expired SSTs as compacting to avoid them being picked.

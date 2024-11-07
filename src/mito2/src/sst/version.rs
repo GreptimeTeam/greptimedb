@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use common_base::readable_size::ReadableSize;
 use common_time::Timestamp;
 
 use crate::sst::file::{FileHandle, FileId, FileMeta, Level, MAX_LEVEL};
@@ -170,14 +169,6 @@ impl LevelMeta {
             })
             .cloned()
             .collect()
-    }
-
-    /// Returns too large SSTs from current level.
-    pub fn get_too_large_files(&self, size: ReadableSize, files: &mut Vec<FileHandle>) {
-        self.files
-            .values()
-            .filter(|v| v.meta_ref().file_size > size.0)
-            .for_each(|f| files.push(f.clone()));
     }
 
     pub fn files(&self) -> impl Iterator<Item = &FileHandle> {
