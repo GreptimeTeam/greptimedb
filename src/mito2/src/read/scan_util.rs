@@ -183,7 +183,7 @@ pub(crate) fn scan_file_ranges(
         let mut reader_metrics = ReaderMetrics::default();
         if read_type == "unordered_scan_files" {
             common_telemetry::debug!(
-                "Thread: {:?}, Scan file ranges build ranges start, region_id: {}, partition: {}, index: {:?}",
+                "[DEBUG_SCAN] Thread: {:?}, Scan file ranges build ranges start, region_id: {}, partition: {}, index: {:?}",
                 std::thread::current().id(),
                 stream_ctx.input.mapper.metadata().region_id,
                 partition,
@@ -196,7 +196,7 @@ pub(crate) fn scan_file_ranges(
         part_metrics.inc_num_file_ranges(ranges.len());
         if read_type == "unordered_scan_files" {
             common_telemetry::debug!(
-                "Thread: {:?}, Scan file ranges build ranges end, region_id: {}, partition: {}, index: {:?}, ranges: {}",
+                "[DEBUG_SCAN] Thread: {:?}, Scan file ranges build ranges end, region_id: {}, partition: {}, index: {:?}, ranges: {}",
                 std::thread::current().id(),
                 stream_ctx.input.mapper.metadata().region_id,
                 partition,
@@ -211,7 +211,7 @@ pub(crate) fn scan_file_ranges(
             part_metrics.inc_build_reader_cost(build_cost);
             if read_type == "unordered_scan_files" {
                 common_telemetry::debug!(
-                    "Thread: {:?}, Scan file range, region_id: {}, partition: {}, file_id: {}, index: {:?}, build_cost: {:?}",
+                    "[DEBUG_SCAN] Thread: {:?}, Scan file range, region_id: {}, partition: {}, file_id: {}, index: {:?}, build_cost: {:?}",
                     std::thread::current().id(),
                     stream_ctx.input.mapper.metadata().region_id,
                     partition,

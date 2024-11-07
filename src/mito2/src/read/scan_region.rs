@@ -918,7 +918,7 @@ impl RangeBuilderList {
         let file_index = index.index - self.mem_builders.len();
         if read_type == "unordered_scan_files" {
             common_telemetry::debug!(
-                "RangeBuilderList build ranges start, region_id: {}, row_group_index: {:?}",
+                "[DEBUG_SCAN] RangeBuilderList build ranges start, region_id: {}, row_group_index: {:?}",
                 input.mapper.metadata().region_id,
                 index,
             );
@@ -928,7 +928,7 @@ impl RangeBuilderList {
             Some(builder) => {
                 if read_type == "unordered_scan_files" {
                     common_telemetry::debug!(
-                        "RangeBuilderList build ranges get lock, build ranges, region_id: {}, row_group_index: {:?}",
+                        "[DEBUG_SCAN] RangeBuilderList build ranges get lock, build ranges, region_id: {}, row_group_index: {:?}",
                         input.mapper.metadata().region_id,
                         index,
                     );
@@ -938,7 +938,7 @@ impl RangeBuilderList {
             None => {
                 if read_type == "unordered_scan_files" {
                     common_telemetry::debug!(
-                        "RangeBuilderList build ranges get lock, build builder, region_id: {}, row_group_index: {:?}",
+                        "[DEBUG_SCAN] RangeBuilderList build ranges get lock, build builder, region_id: {}, row_group_index: {:?}",
                         input.mapper.metadata().region_id,
                         index,
                     );
@@ -951,7 +951,7 @@ impl RangeBuilderList {
 
         if read_type == "unordered_scan_files" {
             common_telemetry::debug!(
-                "RangeBuilderList build ranges end, region_id: {}, row_group_index: {:?}, ranges: {}",
+                "[DEBUG_SCAN] RangeBuilderList build ranges end, region_id: {}, row_group_index: {:?}, ranges: {}",
                 input.mapper.metadata().region_id,
                 index,
                 ranges.len(),
