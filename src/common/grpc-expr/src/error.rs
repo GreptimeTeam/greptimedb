@@ -128,8 +128,8 @@ pub enum Error {
 
     #[snafu(display("Invalid change fulltext option request"))]
     InvalidChangeFulltextOptionRequest {
-        #[snafu(source)]
-        error: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 }
 

@@ -164,8 +164,8 @@ impl ParserContext<'_> {
 
             for key in options.keys() {
                 ensure!(
-                    key == COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE
-                        || validate_column_fulltext_option(key),
+                    key.to_ascii_lowercase().as_str() == COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE
+                        || validate_column_fulltext_option(key.to_ascii_lowercase().as_str()),
                     InvalidColumnOptionSnafu {
                         name: column_name.to_string(),
                         msg: format!("invalid FULLTEXT option: {key}"),

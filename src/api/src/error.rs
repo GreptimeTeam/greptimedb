@@ -59,16 +59,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "Invalid fulltext analyzer, given analyzer: {:?}, expect 0 for English and 1 for Chinese ",
-        analyzer
-    ))]
-    InvalidFulltextAnalyzer {
-        #[snafu(implicit)]
-        location: Location,
-        analyzer: i32,
-    },
-
     #[snafu(display("Failed to serialize JSON"))]
     SerializeJson {
         #[snafu(source)]
@@ -81,9 +71,7 @@ pub enum Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::UnknownColumnDataType { .. } | Error::InvalidFulltextAnalyzer { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::UnknownColumnDataType { .. } => StatusCode::InvalidArguments,
             Error::IntoColumnDataType { .. } | Error::SerializeJson { .. } => {
                 StatusCode::Unexpected
             }

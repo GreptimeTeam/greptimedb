@@ -838,8 +838,8 @@ pub enum MetadataError {
 
     #[snafu(display("Invalid change fulltext option request"))]
     InvalidChangeFulltextOptionRequest {
-        #[snafu(source)]
-        error: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display(

@@ -15,10 +15,10 @@
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_expr::Kind;
-use api::v1::column_def::try_as_fulltext_option;
+use api::v1::column_def::as_fulltext_option;
 use api::v1::{
-    column_def, AddColumnLocation as Location, AlterExpr, ChangeColumnTypes, CreateTableExpr,
-    DropColumns, RenameTable, SemanticType,
+    column_def, AddColumnLocation as Location, AlterExpr, Analyzer, ChangeColumnTypes,
+    CreateTableExpr, DropColumns, RenameTable, SemanticType,
 };
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema};
@@ -108,8 +108,10 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
             column_name: c.column_name.clone(),
             options: FulltextOptions {
                 enable: c.enable,
-                analyzer: try_as_fulltext_option(c.analyzer)
-                    .context(InvalidChangeFulltextOptionRequestSnafu)?,
+                analyzer: as_fulltext_option(
+                    Analyzer::try_from(c.analyzer)
+                        .map_err(|_| InvalidChangeFulltextOptionRequestSnafu.build())?,
+                ),
                 case_sensitive: c.case_sensitive,
             },
         },

@@ -19,6 +19,7 @@ use datatypes::schema::{
     FULLTEXT_KEY,
     INVERTED_INDEX_KEY,
 };
+use greptime_proto::v1::Analyzer;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -106,11 +107,10 @@ pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<Column
 }
 
 /// Tries to construct a `FulltextAnalyzer` from the given analyzer.
-pub fn try_as_fulltext_option(analyzer: i32) -> Result<FulltextAnalyzer> {
+pub fn as_fulltext_option(analyzer: Analyzer) -> FulltextAnalyzer {
     match analyzer {
-        0 => Ok(FulltextAnalyzer::English),
-        1 => Ok(FulltextAnalyzer::Chinese),
-        _ => error::InvalidFulltextAnalyzerSnafu { analyzer }.fail(),
+        Analyzer::English => FulltextAnalyzer::English,
+        Analyzer::Chinese => FulltextAnalyzer::Chinese,
     }
 }
 
