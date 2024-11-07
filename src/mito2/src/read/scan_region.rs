@@ -835,11 +835,12 @@ impl StreamContext {
     pub(crate) async fn build_file_ranges(
         &self,
         index: RowGroupIndex,
+        read_type: &'static str,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<SmallVec<[FileRange; 2]>> {
         let mut ranges = SmallVec::new();
         self.range_builders
-            .build_file_ranges(&self.input, index, &mut ranges, reader_metrics)
+            .build_file_ranges(&self.input, index, read_type, &mut ranges, reader_metrics)
             .await?;
         Ok(ranges)
     }
@@ -910,42 +911,52 @@ impl RangeBuilderList {
         &self,
         input: &ScanInput,
         index: RowGroupIndex,
+        read_type: &'static str,
         ranges: &mut SmallVec<[FileRange; 2]>,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<()> {
         let file_index = index.index - self.mem_builders.len();
-        common_telemetry::debug!(
-            "RangeBuilderList build ranges start, region_id: {}, row_group_index: {:?}",
-            input.mapper.metadata().region_id,
-            index,
-        );
+        if read_type == "unordered_scan_files" {
+            common_telemetry::debug!(
+                "RangeBuilderList build ranges start, region_id: {}, row_group_index: {:?}",
+                input.mapper.metadata().region_id,
+                index,
+            );
+        }
         let mut builder_opt = self.file_builders[file_index].lock().await;
         match &mut *builder_opt {
             Some(builder) => {
-                common_telemetry::debug!(
-                    "RangeBuilderList build ranges get lock, build ranges, region_id: {}, row_group_index: {:?}",
-                    input.mapper.metadata().region_id,
-                    index,
-                );
+                if read_type == "unordered_scan_files" {
+                    common_telemetry::debug!(
+                        "RangeBuilderList build ranges get lock, build ranges, region_id: {}, row_group_index: {:?}",
+                        input.mapper.metadata().region_id,
+                        index,
+                    );
+                }
                 builder.build_ranges(index.row_group_index, ranges)
             }
             None => {
-                common_telemetry::debug!(
-                    "RangeBuilderList build ranges get lock, build builder, region_id: {}, row_group_index: {:?}",
-                    input.mapper.metadata().region_id,
-                    index,
-                );
+                if read_type == "unordered_scan_files" {
+                    common_telemetry::debug!(
+                        "RangeBuilderList build ranges get lock, build builder, region_id: {}, row_group_index: {:?}",
+                        input.mapper.metadata().region_id,
+                        index,
+                    );
+                }
                 let builder = input.prune_file(index, file_index, reader_metrics).await?;
                 builder.build_ranges(index.row_group_index, ranges);
                 *builder_opt = Some(builder);
             }
         }
 
-        common_telemetry::debug!(
-            "RangeBuilderList build ranges end, region_id: {}, row_group_index: {:?}",
-            input.mapper.metadata().region_id,
-            index,
-        );
+        if read_type == "unordered_scan_files" {
+            common_telemetry::debug!(
+                "RangeBuilderList build ranges end, region_id: {}, row_group_index: {:?}, ranges: {}",
+                input.mapper.metadata().region_id,
+                index,
+                ranges.len(),
+            );
+        }
         Ok(())
     }
 

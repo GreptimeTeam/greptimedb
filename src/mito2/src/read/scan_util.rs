@@ -191,7 +191,7 @@ pub(crate) fn scan_file_ranges(
             );
         }
         let ranges = stream_ctx
-            .build_file_ranges(index, &mut reader_metrics)
+            .build_file_ranges(index, read_type, &mut reader_metrics)
             .await?;
         part_metrics.inc_num_file_ranges(ranges.len());
         for range in ranges {
