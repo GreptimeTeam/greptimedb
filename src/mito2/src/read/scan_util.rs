@@ -194,6 +194,16 @@ pub(crate) fn scan_file_ranges(
             .build_file_ranges(index, read_type, &mut reader_metrics)
             .await?;
         part_metrics.inc_num_file_ranges(ranges.len());
+        if read_type == "unordered_scan_files" {
+            common_telemetry::debug!(
+                "Thread: {:?}, Scan file ranges build ranges end, region_id: {}, partition: {}, index: {:?}, ranges: {}",
+                std::thread::current().id(),
+                stream_ctx.input.mapper.metadata().region_id,
+                partition,
+                index,
+                ranges.len(),
+            );
+        }
         for range in ranges {
             let build_reader_start = Instant::now();
             let reader = range.reader(None).await?;
