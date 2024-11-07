@@ -914,15 +914,38 @@ impl RangeBuilderList {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<()> {
         let file_index = index.index - self.mem_builders.len();
+        common_telemetry::debug!(
+            "RangeBuilderList build ranges start, region_id: {}, row_group_index: {:?}",
+            input.mapper.metadata().region_id,
+            index,
+        );
         let mut builder_opt = self.file_builders[file_index].lock().await;
         match &mut *builder_opt {
-            Some(builder) => builder.build_ranges(index.row_group_index, ranges),
+            Some(builder) => {
+                common_telemetry::debug!(
+                    "RangeBuilderList build ranges get lock, build ranges, region_id: {}, row_group_index: {:?}",
+                    input.mapper.metadata().region_id,
+                    index,
+                );
+                builder.build_ranges(index.row_group_index, ranges)
+            }
             None => {
+                common_telemetry::debug!(
+                    "RangeBuilderList build ranges get lock, build builder, region_id: {}, row_group_index: {:?}",
+                    input.mapper.metadata().region_id,
+                    index,
+                );
                 let builder = input.prune_file(index, file_index, reader_metrics).await?;
                 builder.build_ranges(index.row_group_index, ranges);
                 *builder_opt = Some(builder);
             }
         }
+
+        common_telemetry::debug!(
+            "RangeBuilderList build ranges end, region_id: {}, row_group_index: {:?}",
+            input.mapper.metadata().region_id,
+            index,
+        );
         Ok(())
     }
 
