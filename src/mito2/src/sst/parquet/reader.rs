@@ -829,7 +829,7 @@ impl ReaderMetrics {
     }
 }
 
-/// Builder to build a [ParquetRecordBatchReader] for a row group.
+/// Builder to build a [ParquetRecordBatchReader] for a row group from file.
 pub(crate) struct RowGroupReaderBuilder {
     /// SST file to read.
     ///
@@ -874,7 +874,7 @@ impl RowGroupReaderBuilder {
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
     ) -> Result<ParquetRecordBatchReader> {
-        let mut row_group = InMemoryRowGroup::create(
+        let mut row_group = InMemoryRowGroup::create_sst(
             self.file_handle.region_id(),
             self.file_handle.file_id(),
             &self.parquet_meta,

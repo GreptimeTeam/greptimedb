@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use api::v1::Mutation;
+use common_base::bytes::Bytes;
 use common_time::timestamp::TimeUnit;
 use datafusion::arrow::array::{TimestampNanosecondArray, UInt64Builder};
 use datatypes::arrow;
@@ -31,6 +32,9 @@ use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
 use datatypes::types::TimestampType;
+use parquet::arrow::arrow_reader::{
+    ArrowReaderBuilder, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+};
 use parquet::arrow::ArrowWriter;
 use parquet::data_type::AsBytes;
 use snafu::ResultExt;
@@ -111,8 +115,16 @@ impl BulkPartEncoder {
     }
 
     /// Decodes [BulkPart] to [Batch]es.
-    fn decode_to_batches(&self, _part: &BulkPart, _dest: &mut VecDeque<Batch>) -> Result<()> {
+    fn decode_to_batches(&self, part: &BulkPart, dest: &mut VecDeque<Batch>) -> Result<()> {
+        //todo(hl): maybe avoid a copy
+        let bytes = Bytes::from(part.data.as_slice());
         todo!()
+        // let mut builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+        // let result = builder.build().unwrap();
+        // for batch_res in result {
+        //     let record_batch = batch_res.unwrap();
+        //     dest.push_back(record_batch)
+        // }
     }
 }
 
