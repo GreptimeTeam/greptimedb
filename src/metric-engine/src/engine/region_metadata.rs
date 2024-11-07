@@ -58,7 +58,7 @@ impl MetricEngineInner {
 
         // Update cache
         let mut mutable_state = self.state.write().unwrap();
-        // Merge with existing cached columnd.
+        // Merge with existing cached columns.
         let existing_columns = mutable_state
             .logical_columns()
             .get(&logical_region_id)
