@@ -1,0 +1,178 @@
+CREATE TABLE `test` (
+  `message` STRING,
+  `time` TIMESTAMP TIME INDEX,
+) WITH (
+  append_mode = 'true'
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'true');
+
+Affected Rows: 0
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE test;
+
++-------+---------------------------------------------------------------------------------------+
+| Table | Create Table                                                                          |
++-------+---------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                   |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                       |
+|       |   TIME INDEX ("time")                                                                 |
+|       | )                                                                                     |
+|       |                                                                                       |
+|       | ENGINE=mito                                                                           |
+|       | WITH(                                                                                 |
+|       |   append_mode = 'true'                                                                |
+|       | )                                                                                     |
++-------+---------------------------------------------------------------------------------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(enable = 'false');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'English', case_sensitive = 'true');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+---------------------------------------------------------------------------------------+
+| Table | Create Table                                                                          |
++-------+---------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                   |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                       |
+|       |   TIME INDEX ("time")                                                                 |
+|       | )                                                                                     |
+|       |                                                                                       |
+|       | ENGINE=mito                                                                           |
+|       | WITH(                                                                                 |
+|       |   append_mode = 'true'                                                                |
+|       | )                                                                                     |
++-------+---------------------------------------------------------------------------------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(enable = 'false');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinglish', case_sensitive = 'false');
+
+Error: 1002(Unexpected), Invalid fulltext option: Chinglish, expected: 'English' | 'Chinese'
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'no');
+
+Error: 1002(Unexpected), Invalid fulltext option: no, expected: 'true' | 'false'
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+ALTER TABLE test MODIFY COLUMN time SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');
+
+Error: 1004(InvalidArguments), Failed to set fulltext options for column time, reason: column time is not a string type, but Timestamp(Millisecond(TimestampMillisecondType))
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+DROP TABLE test;
+
+Affected Rows: 0
+

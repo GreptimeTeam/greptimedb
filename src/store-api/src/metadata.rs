@@ -1285,6 +1285,32 @@ mod test {
             .column_schema
             .data_type;
         assert_eq!(ConcreteDataType::string_datatype(), *b_type);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::ChangeColumnFulltext {
+                column_name: "b".to_string(),
+                options: FulltextOptions {
+                    enable: true,
+                    analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                    case_sensitive: true,
+                },
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        let a_fulltext_options = metadata
+            .column_by_name("b")
+            .unwrap()
+            .column_schema
+            .fulltext_options()
+            .unwrap()
+            .unwrap();
+        assert!(a_fulltext_options.enable);
+        assert_eq!(
+            datatypes::schema::FulltextAnalyzer::Chinese,
+            a_fulltext_options.analyzer
+        );
+        assert!(a_fulltext_options.case_sensitive);
     }
 
     #[test]

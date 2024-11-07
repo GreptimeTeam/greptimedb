@@ -378,10 +378,10 @@ pub struct FulltextOptions {
 
 impl fmt::Display for FulltextOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "enable: {}", self.enable)?;
+        write!(f, "enable={}", self.enable)?;
         if self.enable {
-            write!(f, ", analyzer: {}", self.analyzer)?;
-            write!(f, ", case_sensitive: {}", self.case_sensitive)?;
+            write!(f, ", analyzer={}", self.analyzer)?;
+            write!(f, ", case_sensitive={}", self.case_sensitive)?;
         }
         Ok(())
     }

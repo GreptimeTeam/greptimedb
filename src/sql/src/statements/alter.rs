@@ -242,5 +242,26 @@ ALTER TABLE monitor RENAME monitor_new"#,
                 unreachable!();
             }
         }
+
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(enable='true',analyzer='English',case_sensitive='false')";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::Alter { .. });
+
+        match &stmts[0] {
+            Statement::Alter(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(enable=true, analyzer=English, case_sensitive=false)"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
     }
 }

@@ -793,7 +793,7 @@ mod tests {
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer};
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
@@ -1186,5 +1186,24 @@ mod tests {
         };
 
         assert!(create.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_change_column_fulltext_options() {
+        let kind = AlterKind::ChangeColumnFulltext {
+            column_name: "tag_0".to_string(),
+            options: FulltextOptions {
+                enable: true,
+                analyzer: FulltextAnalyzer::Chinese,
+                case_sensitive: false,
+            },
+        };
+        let request = RegionAlterRequest {
+            schema_version: 1,
+            kind,
+        };
+        let mut metadata = new_metadata();
+        metadata.schema_version = 1;
+        request.validate(&metadata).unwrap();
     }
 }

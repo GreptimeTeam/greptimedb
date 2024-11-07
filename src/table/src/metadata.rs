@@ -1420,4 +1420,55 @@ mod tests {
         assert_eq!(&[0, 1], &new_meta.primary_key_indices[..]);
         assert_eq!(&[2, 3, 4], &new_meta.value_indices[..]);
     }
+
+    #[test]
+    fn test_alter_column_fulltext_options() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::ChangeColumnFulltext {
+            column_name: "col1".to_string(),
+            options: FulltextOptions::default(),
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .err()
+            .unwrap();
+        assert_eq!("Failed to set fulltext options for column col1, reason: column col1 is not a string type, but Int32(Int32Type)", err.to_string());
+
+        // Add a string column and make it fulltext indexed
+        let new_meta = add_columns_to_meta_with_location(&meta);
+        assert_eq!(meta.region_numbers, new_meta.region_numbers);
+
+        let alter_kind = AlterKind::ChangeColumnFulltext {
+            column_name: "my_tag_first".to_string(),
+            options: FulltextOptions {
+                enable: true,
+                analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                case_sensitive: true,
+            },
+        };
+        let new_meta = new_meta
+            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .unwrap()
+            .build()
+            .unwrap();
+        let column_schema = new_meta
+            .schema
+            .column_schema_by_name("my_tag_first")
+            .unwrap();
+        let fulltext_options = column_schema.fulltext_options().unwrap().unwrap();
+        assert!(fulltext_options.enable);
+        assert_eq!(
+            datatypes::schema::FulltextAnalyzer::Chinese,
+            fulltext_options.analyzer
+        );
+        assert!(fulltext_options.case_sensitive);
+    }
 }
