@@ -62,6 +62,8 @@ impl IndexApplier for PredicatesIndexApplier {
                 break;
             }
 
+            common_telemetry::info!("Predicate apply, apply name start, name: {}", name);
+
             let Some(meta) = metadata.metas.get(name) else {
                 match context.index_not_found_strategy {
                     IndexNotFoundStrategy::ReturnEmpty => {
@@ -85,6 +87,8 @@ impl IndexApplier for PredicatesIndexApplier {
             let bm = mapper.map_values(&values).await?;
 
             bitmap &= bm;
+
+            common_telemetry::info!("Predicate apply, apply name end, name: {}", name);
         }
 
         output.matched_segment_ids = bitmap;

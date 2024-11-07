@@ -106,6 +106,10 @@ impl InvertedIndexApplier {
                 if let Err(err) = other {
                     warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
                 }
+                common_telemetry::debug!(
+                    "Inverted applier get from remote blob reader, file_id: {}",
+                    file_id,
+                );
                 self.remote_blob_reader(file_id).await?
             }
         };

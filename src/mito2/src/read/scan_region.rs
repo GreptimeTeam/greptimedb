@@ -662,14 +662,16 @@ impl ScanInput {
     /// Prunes a file to scan and returns the builder to build readers.
     async fn prune_file(
         &self,
+        row_group_index: RowGroupIndex,
         file_index: usize,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let file = &self.files[file_index];
         common_telemetry::info!(
-            "ScanInput prune file start, region_id: {}, file: {}",
+            "ScanInput prune file start, region_id: {}, file: {}, row_group_index: {:?}",
             file.region_id(),
-            file.file_id()
+            file.file_id(),
+            row_group_index,
         );
         let res = self
             .access_layer
@@ -707,10 +709,11 @@ impl ScanInput {
             file_range_ctx.set_compat_batch(Some(compat));
         }
         common_telemetry::info!(
-            "ScanInput prune file end, region_id: {}, file: {}, row_groups_num: {}",
+            "ScanInput prune file end, region_id: {}, file: {}, row_groups_num: {}, row_group_index: {:?}",
             file.region_id(),
             file.file_id(),
-            row_groups.len()
+            row_groups.len(),
+            row_group_index,
         );
         Ok(FileRangeBuilder {
             context: Some(Arc::new(file_range_ctx)),
@@ -915,7 +918,7 @@ impl RangeBuilderList {
         match &mut *builder_opt {
             Some(builder) => builder.build_ranges(index.row_group_index, ranges),
             None => {
-                let builder = input.prune_file(file_index, reader_metrics).await?;
+                let builder = input.prune_file(index, file_index, reader_metrics).await?;
                 builder.build_ranges(index.row_group_index, ranges);
                 *builder_opt = Some(builder);
             }

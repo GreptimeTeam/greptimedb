@@ -87,7 +87,16 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         &mut self,
         dest: &mut Vec<u8>,
     ) -> index::inverted_index::error::Result<usize> {
-        self.inner.read_all(dest).await
+        common_telemetry::debug!(
+            "Inverted index reader read_all start, file_id: {}",
+            self.file_id,
+        );
+        let res = self.inner.read_all(dest).await;
+        common_telemetry::debug!(
+            "Inverted index reader read_all end, file_id: {}",
+            self.file_id,
+        );
+        res
     }
 
     async fn seek_read(
@@ -95,7 +104,20 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         offset: u64,
         size: u32,
     ) -> index::inverted_index::error::Result<Vec<u8>> {
-        self.inner.seek_read(offset, size).await
+        common_telemetry::debug!(
+            "Inverted index reader seek_read start, file_id: {}, offset: {}, size: {}",
+            self.file_id,
+            offset,
+            size,
+        );
+        let res = self.inner.seek_read(offset, size).await;
+        common_telemetry::debug!(
+            "Inverted index reader seek_read end, file_id: {}, offset: {}, size: {}",
+            self.file_id,
+            offset,
+            size,
+        );
+        res
     }
 
     async fn metadata(&mut self) -> index::inverted_index::error::Result<Arc<InvertedIndexMetas>> {
@@ -103,8 +125,16 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(cached)
         } else {
+            common_telemetry::debug!(
+                "Inverted index reader get metadata start, file_id: {}",
+                self.file_id,
+            );
             let meta = self.inner.metadata().await?;
             self.cache.put_index_metadata(self.file_id, meta.clone());
+            common_telemetry::debug!(
+                "Inverted index reader get metadata end, file_id: {}",
+                self.file_id,
+            );
             CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(meta)
         }
@@ -115,9 +145,23 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         offset: u64,
         size: u32,
     ) -> index::inverted_index::error::Result<FstMap> {
-        self.get_or_load(offset, size)
+        common_telemetry::debug!(
+            "Inverted index reader fst start, file_id: {}, offset: {}, size: {}",
+            self.file_id,
+            offset,
+            size,
+        );
+        let res = self
+            .get_or_load(offset, size)
             .await
-            .and_then(|r| FstMap::new(r).context(DecodeFstSnafu))
+            .and_then(|r| FstMap::new(r).context(DecodeFstSnafu));
+        common_telemetry::debug!(
+            "Inverted index reader fst end, file_id: {}, offset: {}, size: {}",
+            self.file_id,
+            offset,
+            size,
+        );
+        res
     }
 
     async fn bitmap(
@@ -125,7 +169,20 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         offset: u64,
         size: u32,
     ) -> index::inverted_index::error::Result<BitVec> {
-        self.get_or_load(offset, size).await.map(BitVec::from_vec)
+        common_telemetry::debug!(
+            "Inverted index reader bitmap start, file_id: {}, offset: {}, size: {}",
+            self.file_id,
+            offset,
+            size,
+        );
+        let res = self.get_or_load(offset, size).await.map(BitVec::from_vec);
+        common_telemetry::debug!(
+            "Inverted index reader bitmap end, file_id: {}, offset: {}, size: {}",
+            self.file_id,
+            offset,
+            size,
+        );
+        res
     }
 }
 

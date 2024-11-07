@@ -193,6 +193,12 @@ impl ParquetReaderBuilder {
         let file_size = self.file_handle.meta_ref().file_size;
         // Loads parquet metadata of the file.
         let parquet_meta = self.read_parquet_metadata(&file_path, file_size).await?;
+        common_telemetry::debug!(
+            "Parquet read metadata done, region_id: {}, file_id: {}, elapsed: {:?}",
+            self.file_handle.region_id(),
+            self.file_handle.file_id(),
+            start.elapsed(),
+        );
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         // Gets the metadata stored in the SST.
@@ -476,6 +482,12 @@ impl ParquetReaderBuilder {
             return false;
         }
 
+        common_telemetry::debug!(
+            "Parquet prune by inverted index start, region_id: {}, file_id: {}",
+            self.file_handle.region_id(),
+            self.file_handle.file_id(),
+        );
+
         let apply_output = match index_applier.apply(self.file_handle.file_id()).await {
             Ok(output) => output,
             Err(err) => {
@@ -496,6 +508,12 @@ impl ParquetReaderBuilder {
                 return false;
             }
         };
+
+        common_telemetry::debug!(
+            "Parquet prune by inverted index stop, region_id: {}, file_id: {}",
+            self.file_handle.region_id(),
+            self.file_handle.file_id(),
+        );
 
         let segment_row_count = apply_output.segment_row_count;
         let grouped_in_row_groups = apply_output
