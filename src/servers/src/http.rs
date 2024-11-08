@@ -77,6 +77,7 @@ use crate::query_handler::{
 use crate::server::Server;
 
 pub mod authorize;
+pub mod dump;
 pub mod dyn_log;
 pub mod event;
 pub mod handler;
@@ -744,6 +745,7 @@ impl HttpServer {
                         "/log_level",
                         routing::get(dyn_log::dyn_log_handler).post(dyn_log::dyn_log_handler),
                     )
+                    .route("/dump_tasks", routing::get(dump::dump_tasks_handler))
                     .nest(
                         "/prof",
                         Router::new()

@@ -267,13 +267,15 @@ git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "a10facb353b41460eeb98578868ebf19c2084fac"
 
 [profile.release]
-debug = 1
+# debug = 1
+split-debuginfo = "off"
 
 [profile.nightly]
 inherits = "release"
-strip = "debuginfo"
+split-debuginfo = "off"
+# strip = "debuginfo"
 lto = "thin"
-debug = false
+# debug = false
 incremental = false
 
 [profile.ci]
