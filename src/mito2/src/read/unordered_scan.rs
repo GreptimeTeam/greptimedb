@@ -31,7 +31,9 @@ use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties}
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
+use crate::read::scan_util::{
+    scan_file_ranges_with_builder, scan_mem_ranges, PartitionMetrics, RangeBuilder,
+};
 use crate::read::{Batch, ScannerMetrics};
 
 /// Scans a region without providing any output ordering guarantee.
@@ -85,6 +87,7 @@ impl UnorderedScan {
         stream_ctx: Arc<StreamContext>,
         part_range_id: usize,
         part_metrics: PartitionMetrics,
+        range_builder: Arc<RangeBuilder>,
     ) -> impl Stream<Item = Result<Batch>> {
         stream! {
             // Gets range meta.
@@ -96,7 +99,7 @@ impl UnorderedScan {
                         yield batch;
                     }
                 } else {
-                    let stream = scan_file_ranges(partition, stream_ctx.clone(), part_metrics.clone(), *index, "unordered_scan_files");
+                    let stream = scan_file_ranges_with_builder(partition, stream_ctx.clone(), part_metrics.clone(), *index, "unordered_scan_files", range_builder.clone());
                     for await batch in stream {
                         yield batch;
                     }
@@ -147,6 +150,7 @@ impl UnorderedScan {
 
             let cache = stream_ctx.input.cache_manager.as_deref();
             let ranges_len = part_ranges.len();
+            let range_builder = Arc::new(RangeBuilder::default());
             // Scans each part.
             for (part_idx, part_range) in part_ranges.into_iter().enumerate() {
                 common_telemetry::debug!(
@@ -169,6 +173,7 @@ impl UnorderedScan {
                     stream_ctx.clone(),
                     part_range.identifier,
                     part_metrics.clone(),
+                    range_builder.clone(),
                 );
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
