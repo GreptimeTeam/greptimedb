@@ -134,7 +134,7 @@ impl FileRange {
         self.context.compat_batch()
     }
 
-    /// Returns the file handle of the file range.
+    /// Returns the file id of the file range.
     pub(crate) fn file_id(&self) -> FileId {
         self.context.reader_builder.file_id()
     }

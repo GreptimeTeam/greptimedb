@@ -122,12 +122,11 @@ mod tests {
             .join("data")
             .join(handle.file_path("."));
         let data = Bytes::from(tokio::fs::read(buf).await.unwrap());
-        let mem_reader = ParquetReaderBuilder::new_memory(handle.region_id(), data)
+        ParquetReaderBuilder::new_memory(handle.region_id(), data)
             .predicate(predicate)
             .build()
             .await
-            .unwrap();
-        mem_reader
+            .unwrap()
     }
 
     #[tokio::test]

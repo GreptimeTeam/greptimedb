@@ -116,15 +116,7 @@ impl BulkPartEncoder {
 
     /// Decodes [BulkPart] to [Batch]es.
     fn decode_to_batches(&self, part: &BulkPart, dest: &mut VecDeque<Batch>) -> Result<()> {
-        //todo(hl): maybe avoid a copy
-        let bytes = Bytes::from(part.data.as_slice());
         todo!()
-        // let mut builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        // let result = builder.build().unwrap();
-        // for batch_res in result {
-        //     let record_batch = batch_res.unwrap();
-        //     dest.push_back(record_batch)
-        // }
     }
 }
 

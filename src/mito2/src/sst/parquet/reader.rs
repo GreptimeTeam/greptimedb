@@ -75,7 +75,6 @@ pub struct ParquetReaderBuilder {
     location: Location,
     /// Predicate to push down.
     predicate: Option<Predicate>,
-
     /// Time range to filter.
     time_range: Option<TimestampRange>,
     /// Metadata of columns to read.
@@ -808,14 +807,18 @@ impl ReaderMetrics {
     }
 }
 
+/// Location of Parquet file.
 #[derive(Clone)]
 enum Location {
+    /// SST file
     Sst(Sst),
+    /// In memory Parquet file.
     Memory(Memory),
 }
 
 impl Location {
-    pub(crate) fn inverted_index_available(&self) -> bool {
+    /// Returns true if inverted index is enabled.
+    fn inverted_index_available(&self) -> bool {
         match self {
             Location::Sst(sst) => sst.file_handle.meta_ref().inverted_index_available(),
             Location::Memory(_) => {
@@ -825,7 +828,8 @@ impl Location {
         }
     }
 
-    pub(crate) fn fulltext_index_available(&self) -> bool {
+    /// Returns true if fulltext index is enabled.
+    fn fulltext_index_available(&self) -> bool {
         match self {
             Location::Sst(sst) => sst.file_handle.meta_ref().fulltext_index_available(),
             Location::Memory(_) => {
@@ -835,14 +839,16 @@ impl Location {
         }
     }
 
-    pub(crate) fn region_id(&self) -> RegionId {
+    /// Returns the region id of file.
+    fn region_id(&self) -> RegionId {
         match self {
             Location::Sst(sst) => sst.file_handle.region_id(),
             Location::Memory(memory) => memory.region_id,
         }
     }
+
     /// Path of the file to read.
-    pub(crate) fn file_path(&self) -> &str {
+    fn file_path(&self) -> &str {
         match self {
             Location::Sst(sst) => &sst.file_path,
             Location::Memory(_) => "MEMORY",
@@ -850,21 +856,23 @@ impl Location {
     }
 
     /// Handle of the file to read.
-    pub(crate) fn file_id(&self) -> FileId {
+    fn file_id(&self) -> FileId {
         match self {
             Location::Sst(sst) => sst.file_handle.file_id(),
             Location::Memory(_) => FileId::default(),
         }
     }
 
-    pub(crate) fn cache_manager(&self) -> &Option<CacheManagerRef> {
+    /// Returns the [CacheManagerRef] if enabled.
+    fn cache_manager(&self) -> &Option<CacheManagerRef> {
         match self {
             Location::Sst(sst) => &sst.cache_manager,
             Location::Memory(_) => &None,
         }
     }
 
-    pub async fn read_parquet_metadata(&self) -> Result<Arc<ParquetMetaData>> {
+    /// Reads Parquet metadata from current location.
+    async fn read_parquet_metadata(&self) -> Result<Arc<ParquetMetaData>> {
         match self {
             Location::Sst(sst) => sst.read_parquet_metadata().await,
             Location::Memory(memory) => {
