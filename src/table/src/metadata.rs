@@ -1428,7 +1428,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(
-            "Invalid column option, column name: col1, error: expect a string type, but got Int32",
+            "Invalid column option, column name: col1, error: FULLTEXT index only supports string type",
             err.to_string()
         );
 
