@@ -115,7 +115,7 @@ impl BulkPartEncoder {
     }
 
     /// Decodes [BulkPart] to [Batch]es.
-    fn decode_to_batches(&self, part: &BulkPart, dest: &mut VecDeque<Batch>) -> Result<()> {
+    fn decode_to_batches(&self, _part: &BulkPart, _dest: &mut VecDeque<Batch>) -> Result<()> {
         todo!()
     }
 }

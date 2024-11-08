@@ -23,7 +23,7 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use bytes::Bytes;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -96,6 +96,7 @@ pub struct ParquetReaderBuilder {
 
 impl ParquetReaderBuilder {
     /// Returns a new [ParquetReaderBuilder] to read specific Parquet file in memory.
+    #[allow(dead_code)]
     pub fn new_memory(region_id: RegionId, data: Bytes) -> ParquetReaderBuilder {
         ParquetReaderBuilder {
             location: Location::Memory(Memory { region_id, data }),
@@ -1013,6 +1014,11 @@ pub(crate) struct RowGroupReaderBuilder {
 }
 
 impl RowGroupReaderBuilder {
+    /// Region Id of given file.
+    pub(crate) fn region_id(&self) -> RegionId {
+        self.file_location.region_id()
+    }
+
     /// Path of the file to read.
     pub(crate) fn file_path(&self) -> &str {
         self.file_location.file_path()
@@ -1211,28 +1217,19 @@ impl BatchReader for ParquetReader {
 impl Drop for ParquetReader {
     fn drop(&mut self) {
         let metrics = self.reader_state.metrics();
-        // todo(hl): we should carry region info and time range info in location variants.
-        // debug!(
-        //     "Read parquet {} {}, range: {:?}, {}/{} row groups, metrics: {:?}",
-        //     self.context
-        //         .reader_builder()
-        //         .location
-        //         .file_handle
-        //         .region_id(),
-        //     self.context.reader_builder().location.file_id(),
-        //     self.context
-        //         .reader_builder()
-        //         .location
-        //         .file_handle
-        //         .time_range(),
-        //     metrics.filter_metrics.num_row_groups_before_filtering
-        //         - metrics
-        //             .filter_metrics
-        //             .num_row_groups_inverted_index_filtered
-        //         - metrics.filter_metrics.num_row_groups_min_max_filtered,
-        //     metrics.filter_metrics.num_row_groups_before_filtering,
-        //     metrics
-        // );
+        //todo(hl): Also carry time range when we implement the memory parquet.
+        debug!(
+            "Read parquet {} {}, {}/{} row groups, metrics: {:?}",
+            self.context.reader_builder().region_id(),
+            self.context.reader_builder().file_id(),
+            metrics.filter_metrics.num_row_groups_before_filtering
+                - metrics
+                    .filter_metrics
+                    .num_row_groups_inverted_index_filtered
+                - metrics.filter_metrics.num_row_groups_min_max_filtered,
+            metrics.filter_metrics.num_row_groups_before_filtering,
+            metrics
+        );
 
         // Report metrics.
         READ_STAGE_ELAPSED

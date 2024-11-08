@@ -34,20 +34,24 @@ use crate::metrics::READ_STAGE_FETCH_PAGES;
 use crate::sst::parquet::page_reader::RowGroupCachedReader;
 use crate::sst::parquet::reader::Location;
 
+/// Location of row group.
 struct RowGroupLocation<'a> {
     file_location: &'a Location,
     row_group_idx: usize,
 }
 
 impl<'a> RowGroupLocation<'a> {
-    async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> parquet::errors::Result<Vec<Bytes>> {
+    /// Fetches bytes from given ranges.
+    async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         self.file_location.fetch_bytes(ranges).await
     }
 
+    /// Returns true if cache manager is enabled for given [RowGroupLocation].
     fn has_cache_manager(&self) -> bool {
         self.file_location.cache_manager().is_some()
     }
 
+    /// Gets page value of given column index in row group.
     fn get_cache(&self, col_idx: usize, compressed: bool) -> Option<Arc<PageValue>> {
         let Location::Sst(sst) = &self.file_location else {
             return None;
@@ -63,6 +67,7 @@ impl<'a> RowGroupLocation<'a> {
         cache.get_pages(&page_key)
     }
 
+    /// Puts compressed pages to page cache.
     fn put_compressed_to_cache(&self, col_idx: usize, data: Bytes) {
         let Location::Sst(sst) = &self.file_location else {
             return;
@@ -83,6 +88,7 @@ impl<'a> RowGroupLocation<'a> {
         );
     }
 
+    /// Puts uncompressed pages to page cache.
     fn put_uncompressed_to_cache(&self, col_idx: usize, data: Arc<PageValue>) {
         let Location::Sst(sst) = &self.file_location else {
             return;
@@ -118,6 +124,7 @@ pub struct InMemoryRowGroup<'a> {
 }
 
 impl<'a> InMemoryRowGroup<'a> {
+    /// Creates a new [InMemoryRowGroup] with given file location.
     pub fn create(
         row_group_idx: usize,
         parquet_meta: &'a ParquetMetaData,
@@ -187,7 +194,6 @@ impl<'a> InMemoryRowGroup<'a> {
                 .collect::<Vec<_>>();
 
             let mut chunk_data = self.location.fetch_bytes(&fetch_ranges).await?.into_iter();
-
             let mut page_start_offsets = page_start_offsets.into_iter();
 
             for (idx, chunk) in self.column_chunks.iter_mut().enumerate() {
