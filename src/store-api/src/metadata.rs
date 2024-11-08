@@ -671,10 +671,7 @@ impl RegionMetadataBuilder {
                     column_meta.column_schema.data_type.is_string(),
                     InvalidColumnOptionSnafu {
                         column_name,
-                        msg: format!(
-                            "expect a string type, but got {}",
-                            column_meta.column_schema.data_type
-                        )
+                        msg: "FULLTEXT index only supports string type".to_string(),
                     }
                 );
 
@@ -689,7 +686,7 @@ impl RegionMetadataBuilder {
                 if current_fulltext_options.is_some_and(|o| o.enable) && options.enable {
                     return InvalidColumnOptionSnafu {
                         column_name,
-                        msg: "fulltext options is already enabled".to_string(),
+                        msg: "FULLTEXT index options already enabled".to_string(),
                     }
                     .fail();
                 } else {
