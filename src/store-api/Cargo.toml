@@ -23,12 +23,12 @@ datatypes.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
 humantime.workspace = true
+prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 strum.workspace = true
 tokio.workspace = true
-prost.workspace = true
 
 [dev-dependencies]
 async-stream.workspace = true
