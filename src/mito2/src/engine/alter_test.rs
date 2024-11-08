@@ -480,7 +480,6 @@ async fn test_alter_column_fulltext_options() {
         .await;
 
     let column_schemas = rows_schema(&request);
-    let region_dir = request.region_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -492,10 +491,55 @@ async fn test_alter_column_fulltext_options() {
     };
     put_rows(&engine, region_id, rows).await;
 
+    // Spawns a task to flush the engine.
+    let engine_cloned = engine.clone();
+    let flush_job = tokio::spawn(async move {
+        flush_region(&engine_cloned, region_id, None).await;
+    });
+    // Waits for flush begin.
+    listener.wait_flush_begin().await;
+
+    // Consumes the notify permit in the listener.
+    listener.wait_request_begin().await;
+
+    // Submits an alter request to the region. The region should add the request
+    // to the pending ddl request list.
     let request = alter_column_fulltext_options();
-    engine
-        .handle_request(region_id, RegionRequest::Alter(request))
+    let engine_cloned = engine.clone();
+    let alter_job = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(region_id, RegionRequest::Alter(request))
+            .await
+            .unwrap();
+    });
+    // Waits until the worker handles the alter request.
+    listener.wait_request_begin().await;
+
+    // Spawns two task to flush the engine. The flush scheduler should put them to the
+    // pending task list.
+    let engine_cloned = engine.clone();
+    let pending_flush_job = tokio::spawn(async move {
+        flush_region(&engine_cloned, region_id, None).await;
+    });
+    // Waits until the worker handles the flush request.
+    listener.wait_request_begin().await;
+
+    // Wake up flush.
+    listener.wake_flush();
+    // Wait for the flush job.
+    tokio::time::timeout(Duration::from_secs(5), flush_job)
         .await
+        .unwrap()
+        .unwrap();
+    // Wait for pending flush job.
+    tokio::time::timeout(Duration::from_secs(5), pending_flush_job)
+        .await
+        .unwrap()
+        .unwrap();
+    // Wait for the write job.
+    tokio::time::timeout(Duration::from_secs(5), alter_job)
+        .await
+        .unwrap()
         .unwrap();
 
     let expect_fulltext_options = FulltextOptions {
@@ -515,22 +559,5 @@ async fn test_alter_column_fulltext_options() {
         .unwrap();
 
     assert_eq!(expect_fulltext_options, current_fulltext_options);
-
-    check_region_version(&engine, region_id, 1, 3, 1, 3);
-
-    // Reopen region.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Open(RegionOpenRequest {
-                engine: String::new(),
-                region_dir,
-                options: HashMap::default(),
-                skip_wal_replay: false,
-            }),
-        )
-        .await
-        .unwrap();
     check_region_version(&engine, region_id, 1, 3, 1, 3);
 }
