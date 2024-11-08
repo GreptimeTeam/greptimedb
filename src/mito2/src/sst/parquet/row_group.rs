@@ -18,7 +18,6 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::{Buf, Bytes};
-use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{RowGroups, RowSelection};
 use parquet::arrow::ProjectionMask;
 use parquet::column::page::{PageIterator, PageReader};
@@ -28,133 +27,78 @@ use parquet::file::properties::DEFAULT_PAGE_SIZE;
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::file::serialized_reader::SerializedPageReader;
 use parquet::format::PageLocation;
-use store_api::storage::RegionId;
 use tokio::task::yield_now;
 
-use crate::cache::file_cache::{FileType, IndexKey};
-use crate::cache::{CacheManagerRef, PageKey, PageValue};
-use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
-use crate::sst::file::FileId;
-use crate::sst::parquet::helper::fetch_byte_ranges;
+use crate::cache::{PageKey, PageValue};
+use crate::metrics::READ_STAGE_FETCH_PAGES;
 use crate::sst::parquet::page_reader::RowGroupCachedReader;
+use crate::sst::parquet::reader::Location;
 
-enum Location<'a> {
-    Sst(Sst<'a>),
-    Memory(Bytes),
+struct RowGroupLocation<'a> {
+    file_location: &'a Location,
+    row_group_idx: usize,
 }
 
-impl<'a> Location<'a> {
-    async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        match self {
-            Location::Sst(sst) => sst.fetch_bytes(ranges).await,
-            Location::Memory(bytes) => Ok(ranges
-                .iter()
-                .map(|range| bytes.slice(range.start as usize..range.end as usize))
-                .collect()),
-        }
+impl<'a> RowGroupLocation<'a> {
+    async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> parquet::errors::Result<Vec<Bytes>> {
+        self.file_location.fetch_bytes(ranges).await
     }
 
     fn has_cache_manager(&self) -> bool {
-        match self {
-            Location::Sst(sst) => sst.cache_manager.is_some(),
-            Location::Memory(_) => false,
-        }
+        self.file_location.cache_manager().is_some()
     }
 
     fn get_cache(&self, col_idx: usize, compressed: bool) -> Option<Arc<PageValue>> {
-        let Location::Sst(sst) = self else {
+        let Location::Sst(sst) = &self.file_location else {
             return None;
         };
+        let cache = sst.cache_manager.as_ref()?;
+        let file_id = sst.file_handle.file_id();
+        let region_id = sst.file_handle.region_id();
         let page_key = if compressed {
-            PageKey::new_compressed(sst.region_id, sst.file_id, sst.row_group_idx, col_idx)
+            PageKey::new_compressed(region_id, file_id, self.row_group_idx, col_idx)
         } else {
-            PageKey::new_uncompressed(sst.region_id, sst.file_id, sst.row_group_idx, col_idx)
+            PageKey::new_uncompressed(region_id, file_id, self.row_group_idx, col_idx)
         };
-        sst.cache_manager.as_ref().unwrap().get_pages(&page_key)
+        cache.get_pages(&page_key)
     }
 
     fn put_compressed_to_cache(&self, col_idx: usize, data: Bytes) {
-        match self {
-            Location::Sst(sst) => {
-                if let Some(cache) = &sst.cache_manager {
-                    // For columns that have multiple uncompressed pages, we only cache the compressed page
-                    // to save memory.
-                    cache.put_pages(
-                        PageKey::new_compressed(
-                            sst.region_id,
-                            sst.file_id,
-                            sst.row_group_idx,
-                            col_idx,
-                        ),
-                        Arc::new(PageValue::new_compressed(data.clone())),
-                    );
-                }
-            }
-            Location::Memory(_) => {}
-        }
+        let Location::Sst(sst) = &self.file_location else {
+            return;
+        };
+        let Some(cache) = &sst.cache_manager else {
+            return;
+        };
+        // For columns that have multiple uncompressed pages, we only cache the compressed page
+        // to save memory.
+        cache.put_pages(
+            PageKey::new_compressed(
+                sst.file_handle.region_id(),
+                sst.file_handle.file_id(),
+                self.row_group_idx,
+                col_idx,
+            ),
+            Arc::new(PageValue::new_compressed(data.clone())),
+        );
     }
 
     fn put_uncompressed_to_cache(&self, col_idx: usize, data: Arc<PageValue>) {
-        match self {
-            Location::Sst(sst) => {
-                if let Some(cache) = &sst.cache_manager {
-                    cache.put_pages(
-                        PageKey::new_uncompressed(
-                            sst.region_id,
-                            sst.file_id,
-                            sst.row_group_idx,
-                            col_idx,
-                        ),
-                        data,
-                    );
-                }
-            }
-            Location::Memory(_) => {}
-        }
-    }
-}
-
-struct Sst<'a> {
-    region_id: RegionId,
-    file_id: FileId,
-    row_group_idx: usize,
-    file_path: &'a str,
-    /// Object store.
-    object_store: ObjectStore,
-    cache_manager: Option<CacheManagerRef>,
-}
-
-impl<'a> Sst<'a> {
-    /// Try to fetch data from WriteCache,
-    /// if not in WriteCache, fetch data from object store directly.
-    async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        let key = IndexKey::new(self.region_id, self.file_id, FileType::Parquet);
-        match self.fetch_ranges_from_write_cache(key, ranges).await {
-            Some(data) => Ok(data),
-            None => {
-                // Fetch data from object store.
-                let _timer = READ_STAGE_ELAPSED
-                    .with_label_values(&["cache_miss_read"])
-                    .start_timer();
-                let data = fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
-                    .await
-                    .map_err(|e| ParquetError::External(Box::new(e)))?;
-                Ok(data)
-            }
-        }
-    }
-
-    /// Fetches data from write cache.
-    /// Returns `None` if the data is not in the cache.
-    async fn fetch_ranges_from_write_cache(
-        &self,
-        key: IndexKey,
-        ranges: &[Range<u64>],
-    ) -> Option<Vec<Bytes>> {
-        if let Some(cache) = self.cache_manager.as_ref()?.write_cache() {
-            return cache.file_cache().read_ranges(key, ranges).await;
-        }
-        None
+        let Location::Sst(sst) = &self.file_location else {
+            return;
+        };
+        let Some(cache) = &sst.cache_manager else {
+            return;
+        };
+        cache.put_pages(
+            PageKey::new_uncompressed(
+                sst.file_handle.region_id(),
+                sst.file_handle.file_id(),
+                self.row_group_idx,
+                col_idx,
+            ),
+            data,
+        );
     }
 }
 
@@ -170,65 +114,31 @@ pub struct InMemoryRowGroup<'a> {
     /// These pages are uncompressed pages of a row group.
     /// `column_uncompressed_pages.len()` equals to `column_chunks.len()`.
     column_uncompressed_pages: Vec<Option<Arc<PageValue>>>,
-    location: Location<'a>,
+    location: RowGroupLocation<'a>,
 }
 
 impl<'a> InMemoryRowGroup<'a> {
-    pub fn create_memory(
+    pub fn create(
         row_group_idx: usize,
         parquet_meta: &'a ParquetMetaData,
-        bytes: Bytes,
+        file_location: &'a Location,
     ) -> Self {
         let metadata = parquet_meta.row_group(row_group_idx);
         let row_count = metadata.num_rows() as usize;
         let page_locations = parquet_meta
             .offset_index()
             .map(|x| x[row_group_idx].as_slice());
+
         Self {
             metadata,
             page_locations,
             column_chunks: vec![None; metadata.columns().len()],
             row_count,
             column_uncompressed_pages: vec![None; metadata.columns().len()],
-            location: Location::Memory(bytes),
-        }
-    }
-
-    /// Creates a new [InMemoryRowGroup] by `row_group_idx`.
-    ///
-    /// # Panics
-    /// Panics if the `row_group_idx` is invalid.
-    pub fn create_sst(
-        region_id: RegionId,
-        file_id: FileId,
-        parquet_meta: &'a ParquetMetaData,
-        row_group_idx: usize,
-        cache_manager: Option<CacheManagerRef>,
-        file_path: &'a str,
-        object_store: ObjectStore,
-    ) -> Self {
-        let metadata = parquet_meta.row_group(row_group_idx);
-        // `page_locations` is always `None` if we don't set
-        // [with_page_index()](https://docs.rs/parquet/latest/parquet/arrow/arrow_reader/struct.ArrowReaderOptions.html#method.with_page_index)
-        // to `true`.
-        let page_locations = parquet_meta
-            .offset_index()
-            .map(|x| x[row_group_idx].as_slice());
-
-        Self {
-            metadata,
-            row_count: metadata.num_rows() as usize,
-            column_chunks: vec![None; metadata.columns().len()],
-            page_locations,
-            column_uncompressed_pages: vec![None; metadata.columns().len()],
-            location: Location::Sst(Sst {
-                region_id,
-                file_id,
-                file_path,
+            location: RowGroupLocation {
                 row_group_idx,
-                object_store,
-                cache_manager,
-            }),
+                file_location,
+            },
         }
     }
 
@@ -532,6 +442,7 @@ mod tests {
     use parquet::arrow::ProjectionMask;
 
     use crate::sst::index::Indexer;
+    use crate::sst::parquet::reader::{Location, Memory};
     use crate::sst::parquet::row_group::InMemoryRowGroup;
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::sst::parquet::WriteOptions;
@@ -576,7 +487,11 @@ mod tests {
         let data = Bytes::from(tokio::fs::read(&path).await.unwrap());
         let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone()).unwrap();
         let parquet_metadata = builder.metadata();
-        let mut group = InMemoryRowGroup::create_memory(0, parquet_metadata, data);
+        let location = Location::Memory(Memory {
+            region_id: handle.region_id(),
+            data,
+        });
+        let mut group = InMemoryRowGroup::create(0, parquet_metadata, &location);
         group.fetch(&ProjectionMask::all(), None).await.unwrap();
         for col_idx in 0..group.metadata.num_columns() {
             assert!(
