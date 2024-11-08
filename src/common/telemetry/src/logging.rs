@@ -192,6 +192,7 @@ pub fn init_global_logging(
             if opts.log_format == LogFormat::Json {
                 Some(
                     Layer::new()
+                        .with_thread_ids(true)
                         .json()
                         .with_writer(writer)
                         .with_ansi(atty::is(atty::Stream::Stdout))
@@ -200,6 +201,7 @@ pub fn init_global_logging(
             } else {
                 Some(
                     Layer::new()
+                        .with_thread_ids(true)
                         .with_writer(writer)
                         .with_ansi(atty::is(atty::Stream::Stdout))
                         .boxed(),

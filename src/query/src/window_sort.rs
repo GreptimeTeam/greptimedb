@@ -432,6 +432,11 @@ impl WindowedSortStream {
                 }
                 Poll::Pending => {
                     self.pending = true;
+                    common_telemetry::info!(
+                        "[WindowedSortStream] Region {} Partition {} is pending",
+                        self.region_id,
+                        self.partition,
+                    );
                     return Poll::Pending;
                 }
             }
@@ -474,6 +479,11 @@ impl WindowedSortStream {
                 }
                 Poll::Pending => {
                     self.as_mut().pending = true;
+                    common_telemetry::info!(
+                        "[WindowedSortStream] Region {} Partition {} is pending",
+                        self.region_id,
+                        self.partition,
+                    );
                     return Poll::Pending;
                 }
             };
