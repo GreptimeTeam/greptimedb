@@ -119,6 +119,7 @@ pub trait OpenTelemetryProtocolHandler: LogHandler {
     async fn traces(
         &self,
         request: ExportTraceServiceRequest,
+        table_name: String,
         ctx: QueryContextRef,
     ) -> Result<Output>;
 
