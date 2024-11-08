@@ -669,42 +669,34 @@ impl RegionMetadataBuilder {
             if column_meta.column_schema.name == column_name {
                 ensure!(
                     column_meta.column_schema.data_type.is_string(),
-                    SetFulltextOptionsSnafu {
-                        column_name: column_name.to_string(),
-                        reason: format!(
-                            "column {} is not a string type, but {:?}",
-                            column_name, column_meta.column_schema.data_type
-                        ),
+                    InvalidColumnOptionSnafu {
+                        column_name,
+                        msg: format!(
+                            "expect a string type, but got {}",
+                            column_meta.column_schema.data_type
+                        )
                     }
                 );
 
-                let current_fulltext_options =
-                    column_meta.column_schema.fulltext_options().map_err(|e| {
-                        SetFulltextOptionsSnafu {
-                            column_name: column_name.clone(),
-                            reason: e.to_string(),
-                        }
-                        .build()
+                let current_fulltext_options = column_meta
+                    .column_schema
+                    .fulltext_options()
+                    .context(SetFulltextOptionsSnafu {
+                        column_name: column_name.clone(),
                     })?;
 
-                // Don't allow to change fulltext options if it is already enabled.
-                if !(current_fulltext_options.is_some_and(|o| o.enable) && options.enable) {
+                // Don't allow to enable fulltext options if it is already enabled.
+                if current_fulltext_options.is_some_and(|o| o.enable) && options.enable {
+                    return InvalidColumnOptionSnafu {
+                        column_name,
+                        msg: "fulltext options is already enabled".to_string(),
+                    }
+                    .fail();
+                } else {
                     column_meta
                         .column_schema
                         .set_fulltext_options(&options)
-                        .map_err(|e| {
-                            SetFulltextOptionsSnafu {
-                                column_name: column_name.clone(),
-                                reason: e.to_string(),
-                            }
-                            .build()
-                        })?;
-                } else {
-                    return SetFulltextOptionsSnafu {
-                        column_name,
-                        reason: "fulltext options already enabled".to_string(),
-                    }
-                    .fail();
+                        .context(SetFulltextOptionsSnafu { column_name })?;
                 }
                 break;
             }
@@ -836,20 +828,26 @@ pub enum MetadataError {
         location: Location,
     },
 
-    #[snafu(display("Invalid change fulltext option request"))]
-    InvalidChangeFulltextOptionRequest {
+    #[snafu(display("Failed to decode protobuf"))]
+    DecodeProto {
+        #[snafu(source)]
+        error: prost::DecodeError,
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to set fulltext options for column {}, reason: {}",
-        column_name,
-        reason
-    ))]
+    #[snafu(display("Invalid column option, column name: {}, error: {}", column_name, msg))]
+    InvalidColumnOption {
+        column_name: String,
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to set fulltext options for column {}", column_name))]
     SetFulltextOptions {
         column_name: String,
-        reason: String,
+        source: datatypes::Error,
         #[snafu(implicit)]
         location: Location,
     },

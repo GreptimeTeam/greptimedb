@@ -11657,6 +11657,7 @@ dependencies = [
  "derive_builder 0.12.0",
  "futures",
  "humantime",
+ "prost 0.12.6",
  "serde",
  "serde_json",
  "snafu 0.8.5",

@@ -252,28 +252,21 @@ impl TableMeta {
 
         ensure!(
             column.data_type.is_string(),
-            error::SetFulltextOptionsSnafu {
-                column_name: column_name.to_string(),
-                reason: format!(
-                    "column {} is not a string type, but {:?}",
-                    column_name, column.data_type
-                ),
+            error::InvalidColumnOptionSnafu {
+                column_name,
+                msg: format!("expect a string type, but got {}", column.data_type)
             }
         );
 
-        let current_fulltext_options = column.fulltext_options().map_err(|e| {
-            error::SetFulltextOptionsSnafu {
-                column_name: column_name.to_string(),
-                reason: e.to_string(),
-            }
-            .build()
-        })?;
+        let current_fulltext_options = column
+            .fulltext_options()
+            .context(error::SetFulltextOptionsSnafu { column_name })?;
 
         ensure!(
             !(current_fulltext_options.is_some_and(|o| o.enable) && options.enable),
-            error::SetFulltextOptionsSnafu {
-                column_name: column_name.to_string(),
-                reason: "fulltext options already enabled".to_string(),
+            error::InvalidColumnOptionSnafu {
+                column_name,
+                msg: "fulltext options already enabled".to_string(),
             }
         );
 
@@ -283,13 +276,7 @@ impl TableMeta {
                 let mut new_column_schema = column_schema.clone();
                 new_column_schema
                     .set_fulltext_options(options)
-                    .map_err(|e| {
-                        error::SetFulltextOptionsSnafu {
-                            column_name: column_name.to_string(),
-                            reason: e.to_string(),
-                        }
-                        .build()
-                    })?;
+                    .context(error::SetFulltextOptionsSnafu { column_name })?;
                 columns.push(new_column_schema);
             } else {
                 columns.push(column_schema.clone());

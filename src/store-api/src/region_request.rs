@@ -29,12 +29,12 @@ pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::FulltextOptions;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, InvalidChangeFulltextOptionRequestSnafu, InvalidRawRegionRequestSnafu,
+    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
     InvalidRegionOptionChangeRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
     RegionMetadata, Result,
 };
@@ -538,8 +538,7 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 options: FulltextOptions {
                     enable: x.enable,
                     analyzer: as_fulltext_option(
-                        Analyzer::try_from(x.analyzer)
-                            .map_err(|_| InvalidChangeFulltextOptionRequestSnafu.build())?,
+                        Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
                     ),
                     case_sensitive: x.case_sensitive,
                 },
