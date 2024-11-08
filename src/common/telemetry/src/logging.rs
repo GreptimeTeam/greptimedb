@@ -230,13 +230,20 @@ pub fn init_global_logging(
             if opts.log_format == LogFormat::Json {
                 Some(
                     Layer::new()
+                        .with_thread_ids(true)
                         .json()
                         .with_writer(writer)
                         .with_ansi(false)
                         .boxed(),
                 )
             } else {
-                Some(Layer::new().with_writer(writer).with_ansi(false).boxed())
+                Some(
+                    Layer::new()
+                        .with_thread_ids(true)
+                        .with_writer(writer)
+                        .with_ansi(false)
+                        .boxed(),
+                )
             }
         } else {
             None
@@ -262,6 +269,7 @@ pub fn init_global_logging(
                 Some(
                     Layer::new()
                         .json()
+                        .with_thread_ids(true)
                         .with_writer(writer)
                         .with_ansi(false)
                         .with_filter(filter::LevelFilter::ERROR)
@@ -270,6 +278,7 @@ pub fn init_global_logging(
             } else {
                 Some(
                     Layer::new()
+                        .with_thread_ids(true)
                         .with_writer(writer)
                         .with_ansi(false)
                         .with_filter(filter::LevelFilter::ERROR)
