@@ -88,11 +88,13 @@ pub async fn traces(
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportTraceServiceResponse>> {
     let db = query_ctx.get_db_string();
-    let table_name = extract_table_name_from_header(
+    let table_name = extract_string_value_from_header(
         &header,
         GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
-        TRACE_TABLE_NAME,
-    )?;
+        Some(TRACE_TABLE_NAME),
+    )?
+    // safety here, we provide default value for table_name
+    .unwrap();
     query_ctx.set_channel(Channel::Otlp);
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
@@ -120,27 +122,27 @@ fn parse_header_value_to_string(header: &HeaderValue) -> Result<String> {
     String::from_utf8(header.as_bytes().to_vec()).context(InvalidUtf8ValueSnafu)
 }
 
-fn parse_pipeline_header_value_to_string(
-    header: &HeaderValue,
-    header_name: &str,
-) -> StdResult<String, (StatusCode, String)> {
-    parse_header_value_to_string(header).map_err(|_| {
+fn extract_string_value_from_header(
+    headers: &HeaderMap,
+    header: &str,
+    default_table_name: Option<&str>,
+) -> Result<Option<String>> {
+    let table_name = headers.get(header);
+    match table_name {
+        Some(name) => parse_header_value_to_string(name).map(Some),
+        None => match default_table_name {
+            Some(name) => Ok(Some(name.to_string())),
+            None => Ok(None),
+        },
+    }
+}
+
+fn utf8_error(header_name: &str) -> impl Fn(error::Error) -> (StatusCode, String) + use<'_> {
+    move |_| {
         (
             StatusCode::BAD_REQUEST,
             format!("`{}` header is not valid UTF-8 string type.", header_name),
         )
-    })
-}
-
-fn extract_table_name_from_header(
-    headers: &HeaderMap,
-    header: &str,
-    default_table_name: &str,
-) -> Result<String> {
-    let table_name = headers.get(header);
-    match table_name {
-        Some(name) => parse_header_value_to_string(name),
-        None => Ok(default_table_name.to_string()),
     }
 }
 
@@ -152,28 +154,27 @@ where
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let pipeline_name = parts.headers.get(GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME);
-        let pipeline_version = parts.headers.get(GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME);
+        let headers = &parts.headers;
+        let pipeline_name =
+            extract_string_value_from_header(headers, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME, None)
+                .map_err(utf8_error(GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME))?;
+        let pipeline_version = extract_string_value_from_header(
+            headers,
+            GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
+            None,
+        )
+        .map_err(utf8_error(GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME))?;
         match (pipeline_name, pipeline_version) {
             (Some(name), Some(version)) => Ok(PipelineInfo {
-                pipeline_name: Some(parse_pipeline_header_value_to_string(
-                    name,
-                    GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
-                )?),
-                pipeline_version: Some(parse_pipeline_header_value_to_string(
-                    version,
-                    GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
-                )?),
+                pipeline_name: Some(name),
+                pipeline_version: Some(version),
             }),
             (None, _) => Ok(PipelineInfo {
                 pipeline_name: None,
                 pipeline_version: None,
             }),
             (Some(name), None) => Ok(PipelineInfo {
-                pipeline_name: Some(parse_pipeline_header_value_to_string(
-                    name,
-                    GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
-                )?),
+                pipeline_name: Some(name),
                 pipeline_version: None,
             }),
         }
@@ -192,19 +193,16 @@ where
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let table_name = parts.headers.get(GREPTIME_LOG_TABLE_NAME_HEADER_NAME);
+        let table_name = extract_string_value_from_header(
+            &parts.headers,
+            GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
+            Some(LOG_TABLE_NAME),
+        )
+        .map_err(utf8_error(GREPTIME_LOG_TABLE_NAME_HEADER_NAME))?
+        // safety here, we provide default value for table_name
+        .unwrap();
 
-        match table_name {
-            Some(name) => Ok(TableInfo {
-                table_name: parse_pipeline_header_value_to_string(
-                    name,
-                    GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
-                )?,
-            }),
-            None => Ok(TableInfo {
-                table_name: LOG_TABLE_NAME.to_string(),
-            }),
-        }
+        Ok(TableInfo { table_name })
     }
 }
 
@@ -218,18 +216,19 @@ where
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let select = parts.headers.get(GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME);
+        let select = extract_string_value_from_header(
+            &parts.headers,
+            GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME,
+            None,
+        )
+        .map_err(utf8_error(GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME))?;
 
         match select {
             Some(name) => {
-                let select_header = parse_pipeline_header_value_to_string(
-                    name,
-                    GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME,
-                )?;
-                if select_header.is_empty() {
+                if name.is_empty() {
                     Ok(SelectInfoWrapper(Default::default()))
                 } else {
-                    Ok(SelectInfoWrapper(SelectInfo::from(select_header)))
+                    Ok(SelectInfoWrapper(SelectInfo::from(name)))
                 }
             }
             None => Ok(SelectInfoWrapper(Default::default())),
