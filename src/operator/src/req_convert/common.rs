@@ -236,6 +236,7 @@ fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
             interval_month_day_nano_values
         ),
         (Decimal128, Decimal128Value, decimal128_values),
+        (Vector, BinaryValue, binary_values),
     );
 
     Ok(())

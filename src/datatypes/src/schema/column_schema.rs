@@ -23,7 +23,6 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error, Result};
 use crate::schema::constraint::ColumnDefaultConstraint;
 use crate::schema::TYPE_KEY;
-use crate::types::JSON_TYPE_NAME;
 use crate::value::Value;
 use crate::vectors::VectorRef;
 
@@ -266,17 +265,33 @@ impl ColumnSchema {
     }
 }
 
+/// Column extended type set in column schema's metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColumnExtType {
+    /// Json type.
+    Json,
+
+    /// Vector type with dimension.
+    Vector(u32),
+}
+
 impl TryFrom<&Field> for ColumnSchema {
     type Error = Error;
 
     fn try_from(field: &Field) -> Result<ColumnSchema> {
         let mut data_type = ConcreteDataType::try_from(field.data_type())?;
         // Override the data type if it is specified in the metadata.
-        if field.metadata().contains_key(TYPE_KEY) {
-            data_type = match field.metadata().get(TYPE_KEY).unwrap().as_str() {
-                JSON_TYPE_NAME => ConcreteDataType::json_datatype(),
-                _ => data_type,
-            };
+        if let Some(json) = field.metadata().get(TYPE_KEY) {
+            let extype = serde_json::from_str::<ColumnExtType>(json)
+                .context(error::DeserializeSnafu { json })?;
+            match extype {
+                ColumnExtType::Json => {
+                    data_type = ConcreteDataType::json_datatype();
+                }
+                ColumnExtType::Vector(dim) => {
+                    data_type = ConcreteDataType::vector_datatype(dim);
+                }
+            }
         }
         let mut metadata = field.metadata().clone();
         let default_constraint = match metadata.remove(DEFAULT_CONSTRAINT_KEY) {

@@ -35,6 +35,7 @@ use pgwire::api::Type;
 use pgwire::error::{PgWireError, PgWireResult};
 use session::context::QueryContextRef;
 use session::session_config::PGByteaOutputValue;
+use sql::statements::vector_type_value_to_string;
 
 use self::bytea::{EscapeOutputBytea, HexOutputBytea};
 use self::datetime::{StylingDate, StylingDateTime};
@@ -364,6 +365,24 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<String>>>>()?;
             builder.encode_field(&array)
         }
+        &ConcreteDataType::Vector(d) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Binary(v) => {
+                        let s = vector_type_value_to_string(v, d.dim)
+                            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                        Ok(Some(s))
+                    }
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected vector",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<String>>>>()?;
+            builder.encode_field(&array)
+        }
         _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
             err_msg: format!(
                 "cannot write array type {:?} in postgres protocol: unimplemented",
@@ -395,6 +414,11 @@ pub(super) fn encode_value(
         Value::String(v) => builder.encode_field(&v.as_utf8()),
         Value::Binary(v) => match datatype {
             ConcreteDataType::Json(_) => builder.encode_field(&jsonb::to_string(v)),
+            ConcreteDataType::Vector(d) => {
+                let s = vector_type_value_to_string(v, d.dim)
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                builder.encode_field(&s)
+            }
             _ => {
                 let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
                 match *bytea_output {
@@ -499,6 +523,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             &ConcreteDataType::Json(_) => Ok(Type::JSON_ARRAY),
             &ConcreteDataType::Duration(_)
             | &ConcreteDataType::Dictionary(_)
+            | &ConcreteDataType::Vector(_)
             | &ConcreteDataType::List(_) => server_error::UnsupportedDataTypeSnafu {
                 data_type: origin,
                 reason: "not implemented",
@@ -512,6 +537,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             }
             .fail()
         }
+        &ConcreteDataType::Vector(_) => Ok(Type::FLOAT4_ARRAY),
     }
 }
 

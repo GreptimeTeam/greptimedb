@@ -28,6 +28,7 @@ mod primitive_type;
 mod string_type;
 mod time_type;
 mod timestamp_type;
+mod vector_type;
 
 pub use binary_type::BinaryType;
 pub use boolean_type::BooleanType;
@@ -58,3 +59,4 @@ pub use timestamp_type::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, TimestampType,
 };
+pub use vector_type::VectorType;

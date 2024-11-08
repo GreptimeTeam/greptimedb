@@ -21,11 +21,14 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
+use column_schema::ColumnExtType;
 use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
-use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
-use crate::prelude::DataType;
+use crate::error::{
+    self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result, SerializeSnafu,
+};
+use crate::prelude::ConcreteDataType;
 pub use crate::schema::column_schema::{
     ColumnSchema, FulltextAnalyzer, FulltextOptions, Metadata, COMMENT_KEY, FULLTEXT_KEY,
     TIME_INDEX_KEY,
@@ -261,9 +264,15 @@ fn collect_fields(column_schemas: &[ColumnSchema]) -> Result<FieldsAndIndices> {
         }
         let mut field = Field::try_from(column_schema)?;
 
-        // Json column performs the same as binary column in Arrow, so we need to mark it
-        if column_schema.data_type.is_json() {
-            let metadata = HashMap::from([(TYPE_KEY.to_string(), column_schema.data_type.name())]);
+        // Column with type Json or Vector performs the same as binary column in Arrow, so we need to mark it
+        let extype = match column_schema.data_type {
+            ConcreteDataType::Json(_) => Some(ColumnExtType::Json),
+            ConcreteDataType::Vector(d) => Some(ColumnExtType::Vector(d.dim)),
+            _ => None,
+        };
+        if let Some(extype) = extype {
+            let extype = serde_json::to_string(&extype).context(SerializeSnafu)?;
+            let metadata = HashMap::from([(TYPE_KEY.to_string(), extype)]);
             field = field.with_metadata(metadata);
         }
         fields.push(field);

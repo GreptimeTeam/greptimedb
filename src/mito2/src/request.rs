@@ -369,22 +369,37 @@ pub(crate) fn validate_proto_value(
     column_schema: &ColumnSchema,
 ) -> Result<()> {
     if let Some(value_type) = proto_value_type(value) {
+        let column_type = ColumnDataType::try_from(column_schema.datatype).map_err(|_| {
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "column {} has unknown type {}",
+                    column_schema.column_name, column_schema.datatype
+                ),
+            }
+            .build()
+        })?;
         ensure!(
-            value_type as i32 == column_schema.datatype,
+            proto_value_type_match(column_type, value_type),
             InvalidRequestSnafu {
                 region_id,
                 reason: format!(
                     "value has type {:?}, but column {} has type {:?}({})",
-                    value_type,
-                    column_schema.column_name,
-                    ColumnDataType::try_from(column_schema.datatype),
-                    column_schema.datatype,
+                    value_type, column_schema.column_name, column_type, column_schema.datatype,
                 ),
             }
         );
     }
 
     Ok(())
+}
+
+fn proto_value_type_match(column_type: ColumnDataType, value_type: ColumnDataType) -> bool {
+    match (column_type, value_type) {
+        (ct, vt) if ct == vt => true,
+        (ColumnDataType::Vector, ColumnDataType::Binary) => true,
+        _ => false,
+    }
 }
 
 /// Oneshot output result sender.

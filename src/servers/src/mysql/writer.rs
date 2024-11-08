@@ -27,9 +27,10 @@ use opensrv_mysql::{
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use sql::statements::vector_type_value_to_string;
 use tokio::io::AsyncWrite;
 
-use crate::error::{self, Error, Result};
+use crate::error::{self, ConvertSqlValueSnafu, Error, Result};
 use crate::metrics::*;
 
 /// Try to write multiple output to the writer if possible.
@@ -168,7 +169,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                                 &mut row_writer,
                                 &record_batch,
                                 query_context.clone(),
-                                &column_def,
+                                &query_result.schema,
                             )
                             .await?
                         }
@@ -192,10 +193,10 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         row_writer: &mut RowWriter<'_, W>,
         recordbatch: &RecordBatch,
         query_context: QueryContextRef,
-        column_def: &[Column],
+        schema: &SchemaRef,
     ) -> Result<()> {
         for row in recordbatch.rows() {
-            for (value, column) in row.into_iter().zip(column_def.iter()) {
+            for (value, column) in row.into_iter().zip(schema.column_schemas().iter()) {
                 match value {
                     Value::Null => row_writer.write_col(None::<u8>)?,
                     Value::Boolean(v) => row_writer.write_col(v as i8)?,
@@ -210,9 +211,14 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Float32(v) => row_writer.write_col(v.0)?,
                     Value::Float64(v) => row_writer.write_col(v.0)?,
                     Value::String(v) => row_writer.write_col(v.as_utf8())?,
-                    Value::Binary(v) => match column.coltype {
-                        ColumnType::MYSQL_TYPE_JSON => {
+                    Value::Binary(v) => match column.data_type {
+                        ConcreteDataType::Json(_) => {
                             row_writer.write_col(jsonb::to_string(&v))?;
+                        }
+                        ConcreteDataType::Vector(d) => {
+                            let s = vector_type_value_to_string(&v, d.dim)
+                                .context(ConvertSqlValueSnafu)?;
+                            row_writer.write_col(s)?;
                         }
                         _ => {
                             row_writer.write_col(v.deref())?;
@@ -295,6 +301,7 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Duration(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Decimal128(_) => Ok(ColumnType::MYSQL_TYPE_DECIMAL),
         ConcreteDataType::Json(_) => Ok(ColumnType::MYSQL_TYPE_JSON),
+        ConcreteDataType::Vector(_) => Ok(ColumnType::MYSQL_TYPE_TYPED_ARRAY),
         _ => error::UnsupportedDataTypeSnafu {
             data_type,
             reason: "not implemented",

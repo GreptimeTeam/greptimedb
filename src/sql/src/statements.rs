@@ -45,7 +45,7 @@ use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use datatypes::types::{cast, TimestampType};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use snafu::{ensure, OptionExt, ResultExt};
-use sqlparser::ast::{ExactNumberInfo, UnaryOperator};
+use sqlparser::ast::{ExactNumberInfo, Ident, ObjectName, UnaryOperator};
 
 use crate::ast::{
     ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, TimezoneInfo,
@@ -60,6 +60,8 @@ use crate::error::{
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
 pub use crate::statements::transform::{get_data_type_by_alias_name, transform_statements};
+
+const VECTOR_TYPE_NAME: &str = "VECTOR";
 
 fn parse_string_to_value(
     column_name: &str,
@@ -134,6 +136,7 @@ fn parse_string_to_value(
                 .fail()
             }
         }
+        ConcreteDataType::Vector(d) => parse_string_to_vector_type_value(&s, d.dim),
         _ => {
             unreachable!()
         }
@@ -596,6 +599,20 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             }
         },
         SqlDataType::JSON => Ok(ConcreteDataType::json_datatype()),
+        // Vector type
+        SqlDataType::Custom(name, d)
+            if name.0.as_slice().len() == 1
+                && name.0.as_slice()[0].value.to_ascii_uppercase() == VECTOR_TYPE_NAME
+                && d.len() == 1 =>
+        {
+            let dim = d[0].parse().map_err(|e| {
+                error::ParseSqlValueSnafu {
+                    msg: format!("Failed to parse vector dimension: {}", e),
+                }
+                .build()
+            })?;
+            Ok(ConcreteDataType::vector_datatype(dim))
+        }
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -633,6 +650,10 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
             ExactNumberInfo::PrecisionAndScale(d.precision() as u64, d.scale() as u64),
         )),
         ConcreteDataType::Json(_) => Ok(SqlDataType::JSON),
+        ConcreteDataType::Vector(v) => Ok(SqlDataType::Custom(
+            ObjectName(vec![Ident::new(VECTOR_TYPE_NAME)]),
+            vec![v.dim.to_string()],
+        )),
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
@@ -656,6 +677,82 @@ pub fn sql_location_to_grpc_add_column_location(
         }),
         None => None,
     }
+}
+
+/// Converts a vector type value to string
+/// for example: [1.0, 2.0, 3.0] -> "[1.0,2.0,3.0]"
+pub fn vector_type_value_to_string(val: &[u8], dim: u32) -> Result<String> {
+    if dim as usize * std::mem::size_of::<f32>() != val.len() {
+        return InvalidSqlValueSnafu {
+            value: format!("{val:?}"),
+        }
+        .fail();
+    }
+
+    let elements = unsafe {
+        std::slice::from_raw_parts(
+            val.as_ptr() as *const f32,
+            val.len() / std::mem::size_of::<f32>(),
+        )
+    };
+
+    let mut s = String::from("[");
+    for (i, e) in elements.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&e.to_string());
+    }
+    s.push(']');
+    Ok(s)
+}
+
+/// Parses a string to a vector type value
+/// Valid input format: "[1.0,2.0,3.0]", "[1.0, 2.0, 3.0]"
+pub fn parse_string_to_vector_type_value(s: &str, dim: u32) -> Result<Value> {
+    // Trim the brackets
+    let trimmed = s.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return ParseSqlValueSnafu {
+            msg: format!("Failed to parse {s} to Vector value: not properly enclosed in brackets"),
+        }
+        .fail();
+    }
+    // Remove the brackets
+    let content = &trimmed[1..trimmed.len() - 1];
+
+    let elements = content
+        .split(',')
+        .map(|s| {
+            s.trim().parse::<f32>().map_err(|_| {
+                ParseSqlValueSnafu {
+                    msg: format!(
+                        "Failed to parse {s} to Vector value: elements are not all float32"
+                    ),
+                }
+                .build()
+            })
+        })
+        .collect::<Result<Vec<f32>>>()?;
+
+    // Check dimension
+    if elements.len() != dim as usize {
+        return ParseSqlValueSnafu {
+            msg: format!("Failed to parse {s} to Vector value: wrong dimension"),
+        }
+        .fail();
+    }
+
+    // Convert Vec<f32> to Vec<u8>
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            elements.as_ptr() as *const u8,
+            elements.len() * std::mem::size_of::<f32>(),
+        )
+        .to_vec()
+    };
+
+    Ok(Value::Binary(bytes.into()))
 }
 
 #[cfg(test)]
@@ -1468,6 +1565,7 @@ mod tests {
                     ])
                     .into(),
                 ),
+                vector_options: None,
             },
         };
 
