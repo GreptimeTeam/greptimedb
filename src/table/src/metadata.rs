@@ -1427,7 +1427,10 @@ mod tests {
             .builder_with_alter_kind("my_table", &alter_kind, false)
             .err()
             .unwrap();
-        assert_eq!("Failed to set fulltext options for column col1, reason: column col1 is not a string type, but Int32(Int32Type)", err.to_string());
+        assert_eq!(
+            "Invalid column option, column name: col1, error: expect a string type, but got Int32",
+            err.to_string()
+        );
 
         // Add a string column and make it fulltext indexed
         let new_meta = add_columns_to_meta_with_location(&meta);

@@ -138,7 +138,7 @@ SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');
 
-Error: 1004(InvalidArguments), Failed to set fulltext options for column message, reason: fulltext options already enabled
+Error: 1004(InvalidArguments), Invalid column option, column name: message, error: fulltext options already enabled
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(enable = 'false');
 
@@ -171,7 +171,7 @@ Error: 1002(Unexpected), Invalid fulltext option: no, expected: 'true' | 'false'
 
 ALTER TABLE test MODIFY COLUMN time SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');
 
-Error: 1004(InvalidArguments), Failed to set fulltext options for column time, reason: column time is not a string type, but Timestamp(Millisecond(TimestampMillisecondType))
+Error: 1004(InvalidArguments), Invalid column option, column name: time, error: expect a string type, but got TimestampMillisecond
 
 DROP TABLE test;
 
