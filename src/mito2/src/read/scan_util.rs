@@ -21,15 +21,18 @@ use async_stream::try_stream;
 use common_telemetry::debug;
 use futures::Stream;
 use prometheus::IntGauge;
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 
-use crate::error::Result;
+use crate::error::{Result, TimeoutSnafu};
 use crate::metrics::SCAN_PARTITION;
 use crate::read::range::RowGroupIndex;
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::reader::ReaderMetrics;
+
+const BUILD_RANGES_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 
 struct PartitionMetricsInner {
     region_id: RegionId,
@@ -190,9 +193,30 @@ pub(crate) fn scan_file_ranges(
                 index,
             );
         }
-        let ranges = stream_ctx
-            .build_file_ranges(index, read_type, &mut reader_metrics)
-            .await?;
+        let ranges = tokio::time::timeout(
+            BUILD_RANGES_TIMEOUT,
+            stream_ctx.build_file_ranges(index, read_type, &mut reader_metrics),
+        )
+        .await
+        .with_context(|_| TimeoutSnafu {
+            msg: format!(
+                "build file ranges for {}, partition: {}",
+                stream_ctx.input.mapper.metadata().region_id,
+                partition,
+            ),
+        })
+        .inspect_err(|e| {
+            common_telemetry::error!(
+                e; "Thread: {:?}, Scan file ranges build ranges timeout, region_id: {}, partition: {}, index: {:?}",
+                std::thread::current().id(),
+                stream_ctx.input.mapper.metadata().region_id,
+                partition,
+                index,
+            );
+        })??;
+        // let ranges = stream_ctx
+        //     .build_file_ranges(index, read_type, &mut reader_metrics)
+        //     .await?;
         part_metrics.inc_num_file_ranges(ranges.len());
         if read_type == "unordered_scan_files" {
             common_telemetry::debug!(

@@ -110,6 +110,7 @@ impl WindowedSortPhysicalRule {
                     };
 
                     let windowed_sort_exec = WindowedSortExec::try_new(
+                        scanner_info.region_id,
                         first_sort_expr,
                         sort_exec.fetch(),
                         scanner_info.partition_ranges,

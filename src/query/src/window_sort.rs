@@ -46,6 +46,7 @@ use futures::Stream;
 use itertools::Itertools;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
+use store_api::storage::RegionId;
 
 use crate::error::{QueryExecutionSnafu, Result};
 
@@ -65,6 +66,7 @@ use crate::error::{QueryExecutionSnafu, Result};
 
 #[derive(Debug, Clone)]
 pub struct WindowedSortExec {
+    region_id: RegionId,
     /// Physical sort expressions(that is, sort by timestamp)
     expression: PhysicalSortExpr,
     /// Optional number of rows to fetch. Stops producing rows after this fetch
@@ -111,6 +113,7 @@ fn check_partition_range_monotonicity(
 
 impl WindowedSortExec {
     pub fn try_new(
+        region_id: RegionId,
         expression: PhysicalSortExpr,
         fetch: Option<usize>,
         ranges: Vec<Vec<PartitionRange>>,
@@ -143,6 +146,7 @@ impl WindowedSortExec {
         );
 
         Ok(Self {
+            region_id,
             expression,
             fetch,
             ranges,
@@ -165,6 +169,7 @@ impl WindowedSortExec {
             self.input.execute(partition, context.clone())?;
 
         let df_stream = Box::pin(WindowedSortStream::new(
+            self.region_id,
             context,
             self,
             input_stream,
@@ -217,6 +222,7 @@ impl ExecutionPlan for WindowedSortExec {
             internal_err!("No children found")?
         };
         let new = Self::try_new(
+            self.region_id,
             self.expression.clone(),
             self.fetch,
             self.ranges.clone(),
@@ -291,10 +297,14 @@ pub struct WindowedSortStream {
     ranges: Vec<PartitionRange>,
     /// Execution metrics
     metrics: BaselineMetrics,
+    pending: bool,
+    region_id: RegionId,
+    partition: usize,
 }
 
 impl WindowedSortStream {
     pub fn new(
+        region_id: RegionId,
         context: Arc<TaskContext>,
         exec: &WindowedSortExec,
         input: DfSendableRecordBatchStream,
@@ -318,6 +328,9 @@ impl WindowedSortStream {
             all_avail_working_range: exec.all_avail_working_range[partition].clone(),
             ranges: exec.ranges[partition].clone(),
             metrics: BaselineMetrics::new(&exec.metrics, partition),
+            pending: false,
+            region_id,
+            partition,
         }
     }
 }
@@ -418,6 +431,7 @@ impl WindowedSortStream {
                     continue;
                 }
                 Poll::Pending => {
+                    self.pending = true;
                     return Poll::Pending;
                 }
             }
@@ -458,7 +472,10 @@ impl WindowedSortStream {
                     self.is_terminated = true;
                     None
                 }
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    self.as_mut().pending = true;
+                    return Poll::Pending;
+                }
             };
 
             let Some(SortedRunSet {
@@ -673,6 +690,15 @@ impl Stream for WindowedSortStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
+        if self.pending {
+            common_telemetry::info!(
+                "[WindowedSortStream] Region {} Partition {} poll from pending",
+                self.region_id,
+                self.partition,
+            );
+            self.as_mut().pending = false;
+        }
+
         let result = self.as_mut().poll_next_inner(cx);
         self.metrics.record_poll(result)
     }
@@ -2526,6 +2552,7 @@ mod test {
             let mock_input = MockInputExec::new(batches, self.schema.clone());
 
             let exec = WindowedSortExec::try_new(
+                RegionId::new(0, 0),
                 self.expression.clone(),
                 self.fetch,
                 vec![ranges],

@@ -213,6 +213,7 @@ struct PartSortStream {
     cur_part_idx: usize,
     evaluating_batch: Option<DfRecordBatch>,
     metrics: BaselineMetrics,
+    pending: bool,
 }
 
 impl PartSortStream {
@@ -244,6 +245,7 @@ impl PartSortStream {
             cur_part_idx: 0,
             evaluating_batch: None,
             metrics: BaselineMetrics::new(&sort.metrics, partition),
+            pending: false,
         }
     }
 }
@@ -556,6 +558,16 @@ impl PartSortStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
+        if self.pending {
+            common_telemetry::info!(
+                "[PartSortStream] Region {} Partition {} part index {} poll from pending",
+                self.region_id,
+                self.partition,
+                self.cur_part_idx,
+            );
+            self.as_mut().pending = false;
+        }
+
         loop {
             // no more input, sort the buffer and return
             if self.input_complete {
@@ -600,7 +612,16 @@ impl PartSortStream {
                     continue;
                 }
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    self.as_mut().pending = true;
+                    common_telemetry::info!(
+                        "[PartSortStream] Region {} Partition {} part index {} is pending",
+                        self.region_id,
+                        self.partition,
+                        self.cur_part_idx,
+                    );
+                    return Poll::Pending;
+                }
             }
         }
     }
