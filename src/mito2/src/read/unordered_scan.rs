@@ -31,7 +31,9 @@ use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties}
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
+use crate::read::scan_util::{
+    scan_file_ranges_with_builder, scan_mem_ranges, PartitionMetrics, RangeBuilder,
+};
 use crate::read::{Batch, ScannerMetrics};
 
 /// Scans a region without providing any output ordering guarantee.
@@ -84,6 +86,7 @@ impl UnorderedScan {
         stream_ctx: Arc<StreamContext>,
         part_range_id: usize,
         part_metrics: PartitionMetrics,
+        range_builder: Arc<RangeBuilder>,
     ) -> impl Stream<Item = Result<Batch>> {
         stream! {
             // Gets range meta.
@@ -95,7 +98,7 @@ impl UnorderedScan {
                         yield batch;
                     }
                 } else {
-                    let stream = scan_file_ranges(stream_ctx.clone(), part_metrics.clone(), *index, "unordered_scan_files");
+                    let stream = scan_file_ranges_with_builder(stream_ctx.clone(), part_metrics.clone(), *index, "unordered_scan_files", range_builder.clone());
                     for await batch in stream {
                         yield batch;
                     }
@@ -136,6 +139,7 @@ impl UnorderedScan {
             part_metrics.on_first_poll();
 
             let cache = &stream_ctx.input.cache_manager;
+            let range_builder = Arc::new(RangeBuilder::default());
             // Scans each part.
             for part_range in part_ranges {
                 let mut metrics = ScannerMetrics::default();
@@ -149,6 +153,7 @@ impl UnorderedScan {
                     stream_ctx.clone(),
                     part_range.identifier,
                     part_metrics.clone(),
+                    range_builder.clone(),
                 );
                 for await batch in stream {
                     let batch = batch.map_err(BoxedError::new).context(ExternalSnafu)?;

@@ -20,13 +20,17 @@ use std::time::{Duration, Instant};
 use async_stream::try_stream;
 use common_telemetry::debug;
 use futures::Stream;
+use prometheus::IntGauge;
+use smallvec::SmallVec;
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::read::range::RowGroupIndex;
-use crate::read::scan_region::StreamContext;
+use crate::read::scan_region::{FileRangeBuilder, ScanInput, StreamContext};
 use crate::read::{Batch, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
+use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::ReaderMetrics;
 
 struct PartitionMetricsInner {
@@ -164,6 +168,113 @@ pub(crate) fn scan_file_ranges(
             let build_reader_start = Instant::now();
             let reader = range.reader(None).await?;
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
+            let compat_batch = range.compat_batch();
+            let mut source = Source::PruneReader(reader);
+            while let Some(mut batch) = source.next_batch().await? {
+                if let Some(compact_batch) = compat_batch {
+                    batch = compact_batch.compat_batch(batch)?;
+                }
+                yield batch;
+            }
+            if let Source::PruneReader(mut reader) = source {
+                reader_metrics.merge_from(reader.metrics());
+            }
+        }
+
+        // Reports metrics.
+        reader_metrics.observe_rows(read_type);
+        part_metrics.merge_reader_metrics(&reader_metrics);
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct RangeBuilder {
+    inner: Mutex<Option<(usize, Arc<FileRangeBuilder>)>>,
+}
+
+impl RangeBuilder {
+    fn get_builder(&self, index: usize) -> Option<Arc<FileRangeBuilder>> {
+        let inner = self.inner.lock().unwrap();
+        let x = inner.as_ref()?;
+        if x.0 == index {
+            Some(x.1.clone())
+        } else {
+            None
+        }
+    }
+
+    fn set_builder(&self, index: usize, builder: Arc<FileRangeBuilder>) {
+        let mut inner = self.inner.lock().unwrap();
+        *inner = Some((index, builder));
+    }
+
+    pub(crate) async fn build_file_ranges(
+        &self,
+        input: &ScanInput,
+        index: RowGroupIndex,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<SmallVec<[FileRange; 2]>> {
+        let mut ranges = SmallVec::new();
+        let file_index = index.index - input.num_memtables();
+        match self.get_builder(index.index) {
+            Some(builder) => {
+                builder.build_ranges(index.row_group_index, &mut ranges);
+                Ok(ranges)
+            }
+            None => {
+                // Init builder.
+                let builder = input.prune_file(file_index, reader_metrics).await?;
+                let builder = Arc::new(builder);
+                builder.build_ranges(index.row_group_index, &mut ranges);
+                self.set_builder(index.index, builder);
+                Ok(ranges)
+            }
+        }
+    }
+}
+
+/// Scans file ranges at `index`.
+pub(crate) fn scan_file_ranges_with_builder(
+    stream_ctx: Arc<StreamContext>,
+    part_metrics: PartitionMetrics,
+    index: RowGroupIndex,
+    read_type: &'static str,
+    range_builder: Arc<RangeBuilder>,
+) -> impl Stream<Item = Result<Batch>> {
+    try_stream! {
+        let mut reader_metrics = ReaderMetrics::default();
+        // let ranges = tokio::time::timeout(
+        //     BUILD_RANGES_TIMEOUT,
+        //     stream_ctx.build_file_ranges(index, read_type, &mut reader_metrics),
+        // )
+        // .await
+        // .with_context(|_| TimeoutSnafu {
+        //     msg: format!(
+        //         "build file ranges for {}, partition: {}",
+        //         stream_ctx.input.mapper.metadata().region_id,
+        //         partition,
+        //     ),
+        // })
+        // .inspect_err(|e| {
+        //     common_telemetry::error!(
+        //         e; "Thread: {:?}, Scan file ranges build ranges timeout, region_id: {}, partition: {}, index: {:?}",
+        //         std::thread::current().id(),
+        //         stream_ctx.input.mapper.metadata().region_id,
+        //         partition,
+        //         index,
+        //     );
+        // })??;
+        let ranges = range_builder.build_file_ranges(&stream_ctx.input, index, &mut reader_metrics).await?;
+        // let ranges = stream_ctx
+        //     .build_file_ranges(index, read_type, &mut reader_metrics)
+        //     .await?;
+        part_metrics.inc_num_file_ranges(ranges.len());
+
+        for range in ranges {
+            let build_reader_start = Instant::now();
+            let reader = range.reader(None).await?;
+            let build_cost = build_reader_start.elapsed();
+            part_metrics.inc_build_reader_cost(build_cost);
             let compat_batch = range.compat_batch();
             let mut source = Source::PruneReader(reader);
             while let Some(mut batch) = source.next_batch().await? {

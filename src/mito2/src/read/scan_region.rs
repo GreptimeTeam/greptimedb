@@ -646,7 +646,7 @@ impl ScanInput {
     }
 
     /// Prunes a file to scan and returns the builder to build readers.
-    async fn prune_file(
+    pub(crate) async fn prune_file(
         &self,
         file_index: usize,
         reader_metrics: &mut ReaderMetrics,
@@ -919,7 +919,7 @@ impl RangeBuilderList {
 
 /// Builder to create file ranges.
 #[derive(Default)]
-struct FileRangeBuilder {
+pub(crate) struct FileRangeBuilder {
     /// Context for the file.
     /// None indicates nothing to read.
     context: Option<FileRangeContextRef>,
@@ -931,7 +931,7 @@ struct FileRangeBuilder {
 impl FileRangeBuilder {
     /// Builds file ranges to read.
     /// Negative `row_group_index` indicates all row groups.
-    fn build_ranges(&self, row_group_index: i64, ranges: &mut SmallVec<[FileRange; 2]>) {
+    pub(crate) fn build_ranges(&self, row_group_index: i64, ranges: &mut SmallVec<[FileRange; 2]>) {
         let Some(context) = self.context.clone() else {
             return;
         };
