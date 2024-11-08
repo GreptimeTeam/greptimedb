@@ -22,7 +22,6 @@ use common_telemetry::debug;
 use futures::Stream;
 use prometheus::IntGauge;
 use store_api::storage::RegionId;
-use tokio::task::yield_now;
 
 use crate::error::Result;
 use crate::metrics::SCAN_PARTITION;
@@ -195,10 +194,6 @@ pub(crate) fn scan_file_ranges(
             .build_file_ranges(index, read_type, &mut reader_metrics)
             .await?;
         part_metrics.inc_num_file_ranges(ranges.len());
-
-        // Notify other partitions.
-        yield_now().await;
-
         if read_type == "unordered_scan_files" {
             common_telemetry::debug!(
                 "[DEBUG_SCAN] Thread: {:?}, Scan file ranges build ranges end, region_id: {}, partition: {}, index: {:?}, ranges: {}",
