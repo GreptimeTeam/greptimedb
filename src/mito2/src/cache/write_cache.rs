@@ -500,7 +500,7 @@ mod tests {
         let write_parquet_metadata = sst_info.file_metadata.unwrap();
 
         // Read metadata from write cache
-        let builder = ParquetReaderBuilder::new(data_home, handle.clone(), mock_store.clone())
+        let builder = ParquetReaderBuilder::new_sst(data_home, handle.clone(), mock_store.clone())
             .cache(Some(cache_manager.clone()));
         let reader = builder.build().await.unwrap();
 

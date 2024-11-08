@@ -33,13 +33,15 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
 use object_store::ObjectStore;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
+use parquet::arrow::arrow_reader::{
+    ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder, RowSelection,
+};
 use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, RegionId};
 use table::predicate::Predicate;
 
 use crate::cache::CacheManagerRef;
@@ -69,12 +71,11 @@ use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
 
 /// Parquet SST reader builder.
 pub struct ParquetReaderBuilder {
-    /// SST directory.
-    file_dir: String,
-    file_handle: FileHandle,
-    object_store: ObjectStore,
+    /// Location of Parquet file.
+    location: Location,
     /// Predicate to push down.
     predicate: Option<Predicate>,
+
     /// Time range to filter.
     time_range: Option<TimestampRange>,
     /// Metadata of columns to read.
@@ -82,8 +83,6 @@ pub struct ParquetReaderBuilder {
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
     projection: Option<Vec<ColumnId>>,
-    /// Manager that caches SST data.
-    cache_manager: Option<CacheManagerRef>,
     /// Index appliers.
     inverted_index_applier: Option<InvertedIndexApplierRef>,
     fulltext_index_applier: Option<FulltextIndexApplierRef>,
@@ -94,20 +93,37 @@ pub struct ParquetReaderBuilder {
 }
 
 impl ParquetReaderBuilder {
+    /// Returns a new [ParquetReaderBuilder] to read specific Parquet file in memory.
+    pub fn new_memory(region_id: RegionId, data: Bytes) -> ParquetReaderBuilder {
+        ParquetReaderBuilder {
+            location: Location::Memory(Memory { region_id, data }),
+            predicate: None,
+            time_range: None,
+            projection: None,
+            inverted_index_applier: None,
+            fulltext_index_applier: None,
+            expected_metadata: None,
+        }
+    }
+
     /// Returns a new [ParquetReaderBuilder] to read specific SST.
-    pub fn new(
+    pub fn new_sst(
         file_dir: String,
         file_handle: FileHandle,
         object_store: ObjectStore,
     ) -> ParquetReaderBuilder {
+        let file_path = file_handle.file_path(&file_dir);
         ParquetReaderBuilder {
-            file_dir,
-            file_handle,
-            object_store,
+            location: Location::Sst(Sst {
+                file_path,
+                file_handle,
+                object_store,
+                cache_manager: None,
+            }),
             predicate: None,
             time_range: None,
             projection: None,
-            cache_manager: None,
+
             inverted_index_applier: None,
             fulltext_index_applier: None,
             expected_metadata: None,
@@ -140,7 +156,9 @@ impl ParquetReaderBuilder {
     /// Attaches the cache to the builder.
     #[must_use]
     pub fn cache(mut self, cache: Option<CacheManagerRef>) -> ParquetReaderBuilder {
-        self.cache_manager = cache;
+        if let Location::Sst(sst) = &mut self.location {
+            sst.cache_manager = cache;
+        }
         self
     }
 
@@ -189,15 +207,13 @@ impl ParquetReaderBuilder {
         metrics: &mut ReaderMetrics,
     ) -> Result<(FileRangeContext, RowGroupMap)> {
         let start = Instant::now();
-
-        let file_path = self.file_handle.file_path(&self.file_dir);
-        let file_size = self.file_handle.meta_ref().file_size;
+        let file_path = self.location.file_path();
         // Loads parquet metadata of the file.
-        let parquet_meta = self.read_parquet_metadata(&file_path, file_size).await?;
+        let parquet_meta = self.location.read_parquet_metadata().await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         // Gets the metadata stored in the SST.
-        let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
+        let region_meta = Arc::new(Self::get_region_metadata(file_path, key_value_meta)?);
         let read_format = if let Some(column_ids) = &self.projection {
             ReadFormat::new(region_meta.clone(), column_ids.iter().copied())
         } else {
@@ -223,7 +239,7 @@ impl ParquetReaderBuilder {
         let hint = Some(read_format.arrow_schema().fields());
         let field_levels =
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
-                .context(ReadParquetSnafu { path: &file_path })?;
+                .context(ReadParquetSnafu { path: file_path })?;
 
         let row_groups = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
@@ -233,12 +249,7 @@ impl ParquetReaderBuilder {
             parquet_meta,
             projection: projection_mask,
             field_levels,
-            location: Location::Sst(Sst {
-                file_handle: self.file_handle.clone(),
-                file_path,
-                object_store: self.object_store.clone(),
-                cache_manager: self.cache_manager.clone(),
-            }),
+            location: self.location.clone(),
         };
 
         let mut filters = if let Some(predicate) = &self.predicate {
@@ -303,41 +314,6 @@ impl ParquetReaderBuilder {
         RegionMetadata::from_json(json).context(InvalidMetadataSnafu)
     }
 
-    /// Reads parquet metadata of specific file.
-    async fn read_parquet_metadata(
-        &self,
-        file_path: &str,
-        file_size: u64,
-    ) -> Result<Arc<ParquetMetaData>> {
-        let _t = READ_STAGE_ELAPSED
-            .with_label_values(&["read_parquet_metadata"])
-            .start_timer();
-
-        let region_id = self.file_handle.region_id();
-        let file_id = self.file_handle.file_id();
-        // Tries to get from global cache.
-        if let Some(manager) = &self.cache_manager {
-            if let Some(metadata) = manager.get_parquet_meta_data(region_id, file_id).await {
-                return Ok(metadata);
-            }
-        }
-
-        // Cache miss, load metadata directly.
-        let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
-        let metadata = metadata_loader.load().await?;
-        let metadata = Arc::new(metadata);
-        // Cache the metadata.
-        if let Some(cache) = &self.cache_manager {
-            cache.put_parquet_meta_data(
-                self.file_handle.region_id(),
-                self.file_handle.file_id(),
-                metadata.clone(),
-            );
-        }
-
-        Ok(metadata)
-    }
-
     /// Computes row groups to read, along with their respective row selections.
     async fn row_groups_to_read(
         &self,
@@ -394,24 +370,24 @@ impl ParquetReaderBuilder {
         let Some(index_applier) = &self.fulltext_index_applier else {
             return false;
         };
-        if !self.file_handle.meta_ref().fulltext_index_available() {
+        if !self.location.fulltext_index_available() {
             return false;
         }
 
-        let apply_res = match index_applier.apply(self.file_handle.file_id()).await {
+        let apply_res = match index_applier.apply(self.location.file_id()).await {
             Ok(res) => res,
             Err(err) => {
                 if cfg!(any(test, feature = "test")) {
                     panic!(
                         "Failed to apply full-text index, region_id: {}, file_id: {}, err: {}",
-                        self.file_handle.region_id(),
-                        self.file_handle.file_id(),
+                        self.location.region_id(),
+                        self.location.file_id(),
                         err
                     );
                 } else {
                     warn!(
                         err; "Failed to apply full-text index, region_id: {}, file_id: {}",
-                        self.file_handle.region_id(), self.file_handle.file_id()
+                        self.location.region_id(), self.location.file_id()
                     );
                 }
 
@@ -475,24 +451,24 @@ impl ParquetReaderBuilder {
             return false;
         };
 
-        if !self.file_handle.meta_ref().inverted_index_available() {
+        if !self.location.inverted_index_available() {
             return false;
         }
 
-        let apply_output = match index_applier.apply(self.file_handle.file_id()).await {
+        let apply_output = match index_applier.apply(self.location.file_id()).await {
             Ok(output) => output,
             Err(err) => {
                 if cfg!(any(test, feature = "test")) {
                     panic!(
                         "Failed to apply inverted index, region_id: {}, file_id: {}, err: {}",
-                        self.file_handle.region_id(),
-                        self.file_handle.file_id(),
+                        self.location.region_id(),
+                        self.location.file_id(),
                         err
                     );
                 } else {
                     warn!(
                         err; "Failed to apply inverted index, region_id: {}, file_id: {}",
-                        self.file_handle.region_id(), self.file_handle.file_id()
+                        self.location.region_id(), self.location.file_id()
                     );
                 }
 
@@ -832,12 +808,39 @@ impl ReaderMetrics {
     }
 }
 
-pub enum Location {
+#[derive(Clone)]
+enum Location {
     Sst(Sst),
-    Memory(Bytes),
+    Memory(Memory),
 }
 
 impl Location {
+    pub(crate) fn inverted_index_available(&self) -> bool {
+        match self {
+            Location::Sst(sst) => sst.file_handle.meta_ref().inverted_index_available(),
+            Location::Memory(_) => {
+                // Currently we don't support inverted index for memtable parquets.
+                false
+            }
+        }
+    }
+
+    pub(crate) fn fulltext_index_available(&self) -> bool {
+        match self {
+            Location::Sst(sst) => sst.file_handle.meta_ref().fulltext_index_available(),
+            Location::Memory(_) => {
+                // Currently we don't support fulltext index for memtable parquets.
+                false
+            }
+        }
+    }
+
+    pub(crate) fn region_id(&self) -> RegionId {
+        match self {
+            Location::Sst(sst) => sst.file_handle.region_id(),
+            Location::Memory(memory) => memory.region_id,
+        }
+    }
     /// Path of the file to read.
     pub(crate) fn file_path(&self) -> &str {
         match self {
@@ -860,8 +863,28 @@ impl Location {
             Location::Memory(_) => &None,
         }
     }
+
+    pub async fn read_parquet_metadata(&self) -> Result<Arc<ParquetMetaData>> {
+        match self {
+            Location::Sst(sst) => sst.read_parquet_metadata().await,
+            Location::Memory(memory) => {
+                let builder =
+                    ParquetRecordBatchReaderBuilder::try_new(memory.data.clone()).unwrap();
+                Ok(builder.metadata().clone())
+            }
+        }
+    }
 }
 
+#[derive(Clone)]
+struct Memory {
+    /// Region for the memory Parquet file
+    region_id: RegionId,
+    /// Data for the memory Parquety file.
+    data: Bytes,
+}
+
+#[derive(Clone)]
 struct Sst {
     /// SST file to read.
     ///
@@ -873,6 +896,39 @@ struct Sst {
     object_store: ObjectStore,
     /// Cache.
     cache_manager: Option<CacheManagerRef>,
+}
+
+impl Sst {
+    /// Reads parquet metadata of specific file.
+    async fn read_parquet_metadata(&self) -> error::Result<Arc<ParquetMetaData>> {
+        let _t = READ_STAGE_ELAPSED
+            .with_label_values(&["read_parquet_metadata"])
+            .start_timer();
+        let file_size = self.file_handle.size();
+        let region_id = self.file_handle.region_id();
+        let file_id = self.file_handle.file_id();
+        // Tries to get from global cache.
+        if let Some(manager) = &self.cache_manager {
+            if let Some(metadata) = manager.get_parquet_meta_data(region_id, file_id).await {
+                return Ok(metadata);
+            }
+        }
+
+        // Cache miss, load metadata directly.
+        let metadata_loader =
+            MetadataLoader::new(self.object_store.clone(), &self.file_path, file_size);
+        let metadata = metadata_loader.load().await?;
+        let metadata = Arc::new(metadata);
+        // Cache the metadata.
+        if let Some(cache) = &self.cache_manager {
+            cache.put_parquet_meta_data(
+                self.file_handle.region_id(),
+                self.file_handle.file_id(),
+                metadata.clone(),
+            );
+        }
+        Ok(metadata)
+    }
 }
 
 /// Builder to build a [ParquetRecordBatchReader] for a row group from file.
@@ -926,9 +982,11 @@ impl RowGroupReaderBuilder {
                 &file_path,
                 object_store.clone(),
             ),
-            Location::Memory(bytes) => {
-                InMemoryRowGroup::create_memory(row_group_idx, &self.parquet_meta, bytes.clone())
-            }
+            Location::Memory(memory) => InMemoryRowGroup::create_memory(
+                row_group_idx,
+                &self.parquet_meta,
+                memory.data.clone(),
+            ),
         };
 
         // Fetches data into memory.

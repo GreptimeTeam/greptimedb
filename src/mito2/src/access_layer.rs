@@ -110,7 +110,7 @@ impl AccessLayer {
 
     /// Returns a reader builder for specific `file`.
     pub(crate) fn read_sst(&self, file: FileHandle) -> ParquetReaderBuilder {
-        ParquetReaderBuilder::new(self.region_dir.clone(), file, self.object_store.clone())
+        ParquetReaderBuilder::new_sst(self.region_dir.clone(), file, self.object_store.clone())
     }
 
     /// Writes a SST with specific `file_id` and `metadata` to the layer.

@@ -81,6 +81,7 @@ pub struct SstInfo {
 mod tests {
     use std::sync::Arc;
 
+    use bytes::Bytes;
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{BinaryExpr, Expr, Operator};
@@ -96,9 +97,10 @@ mod tests {
 
     use super::*;
     use crate::cache::{CacheManager, PageKey};
+    use crate::sst::file::FileHandle;
     use crate::sst::index::Indexer;
     use crate::sst::parquet::format::WriteFormat;
-    use crate::sst::parquet::reader::ParquetReaderBuilder;
+    use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder};
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::sst::DEFAULT_WRITE_CONCURRENCY;
     use crate::test_util::sst_util::{
@@ -108,6 +110,25 @@ mod tests {
     use crate::test_util::{check_reader_result, TestEnv};
 
     const FILE_DIR: &str = "/";
+
+    async fn build_mem_parquet_reader(
+        env: TestEnv,
+        handle: FileHandle,
+        predicate: Option<Predicate>,
+    ) -> ParquetReader {
+        let buf = env
+            .data_home()
+            .to_path_buf()
+            .join("data")
+            .join(handle.file_path("."));
+        let data = Bytes::from(tokio::fs::read(buf).await.unwrap());
+        let mem_reader = ParquetReaderBuilder::new_memory(handle.region_id(), data)
+            .predicate(predicate)
+            .build()
+            .await
+            .unwrap();
+        mem_reader
+    }
 
     #[tokio::test]
     async fn test_write_read() {
@@ -148,10 +169,23 @@ mod tests {
             info.time_range
         );
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder =
+            ParquetReaderBuilder::new_sst(FILE_DIR.to_string(), handle.clone(), object_store);
         let mut reader = builder.build().await.unwrap();
         check_reader_result(
             &mut reader,
+            &[
+                new_batch_by_range(&["a", "d"], 0, 50),
+                new_batch_by_range(&["a", "d"], 50, 60),
+                new_batch_by_range(&["b", "f"], 0, 40),
+                new_batch_by_range(&["b", "h"], 100, 150),
+                new_batch_by_range(&["b", "h"], 150, 200),
+            ],
+        )
+        .await;
+
+        check_reader_result(
+            &mut build_mem_parquet_reader(env, handle, None).await,
             &[
                 new_batch_by_range(&["a", "d"], 0, 50),
                 new_batch_by_range(&["a", "d"], 50, 60),
@@ -200,8 +234,9 @@ mod tests {
                 .page_cache_size(64 * 1024 * 1024)
                 .build(),
         ));
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
-            .cache(cache.clone());
+        let builder =
+            ParquetReaderBuilder::new_sst(FILE_DIR.to_string(), handle.clone(), object_store)
+                .cache(cache.clone());
         for _ in 0..3 {
             let mut reader = builder.build().await.unwrap();
             check_reader_result(
@@ -265,11 +300,14 @@ mod tests {
         let writer_metadata = sst_info.file_metadata.unwrap();
 
         // read the sst file metadata
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder =
+            ParquetReaderBuilder::new_sst(FILE_DIR.to_string(), handle.clone(), object_store);
         let reader = builder.build().await.unwrap();
         let reader_metadata = reader.parquet_metadata();
+        assert_parquet_metadata_eq(writer_metadata.clone(), reader_metadata);
 
-        assert_parquet_metadata_eq(writer_metadata, reader_metadata)
+        let mem_reader = build_mem_parquet_reader(env, handle, None).await;
+        assert_parquet_metadata_eq(writer_metadata, mem_reader.parquet_metadata());
     }
 
     #[tokio::test]
@@ -312,11 +350,21 @@ mod tests {
             right: Box::new(Expr::Literal(ScalarValue::Utf8(Some("a".to_string())))),
         })]));
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
-            .predicate(predicate);
+        let builder =
+            ParquetReaderBuilder::new_sst(FILE_DIR.to_string(), handle.clone(), object_store)
+                .predicate(predicate.clone());
         let mut reader = builder.build().await.unwrap();
         check_reader_result(
             &mut reader,
+            &[
+                new_batch_by_range(&["a", "d"], 0, 50),
+                new_batch_by_range(&["a", "d"], 50, 60),
+            ],
+        )
+        .await;
+
+        check_reader_result(
+            &mut build_mem_parquet_reader(env, handle, predicate).await,
             &[
                 new_batch_by_range(&["a", "d"], 0, 50),
                 new_batch_by_range(&["a", "d"], 50, 60),
@@ -355,9 +403,16 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder =
+            ParquetReaderBuilder::new_sst(FILE_DIR.to_string(), handle.clone(), object_store);
         let mut reader = builder.build().await.unwrap();
         check_reader_result(&mut reader, &[new_batch_by_range(&["a", "z"], 200, 230)]).await;
+
+        check_reader_result(
+            &mut build_mem_parquet_reader(env, handle, None).await,
+            &[new_batch_by_range(&["a", "z"], 200, 230)],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -401,10 +456,16 @@ mod tests {
             right: Box::new(Expr::Literal(ScalarValue::UInt64(Some(150)))),
         })]));
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
-            .predicate(predicate);
+        let builder =
+            ParquetReaderBuilder::new_sst(FILE_DIR.to_string(), handle.clone(), object_store)
+                .predicate(predicate.clone());
         let mut reader = builder.build().await.unwrap();
         check_reader_result(&mut reader, &[new_batch_by_range(&["b", "h"], 150, 200)]).await;
+        check_reader_result(
+            &mut build_mem_parquet_reader(env, handle, predicate).await,
+            &[new_batch_by_range(&["b", "h"], 150, 200)],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -484,10 +545,20 @@ mod tests {
         writer.write(&result).await.unwrap();
         writer.close().await.unwrap();
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder =
+            ParquetReaderBuilder::new_sst(FILE_DIR.to_string(), handle.clone(), object_store);
         let mut reader = builder.build().await.unwrap();
         check_reader_result(
             &mut reader,
+            &[
+                new_batch_with_binary(&["a"], 0, 50),
+                new_batch_with_binary(&["a"], 50, 60),
+            ],
+        )
+        .await;
+
+        check_reader_result(
+            &mut build_mem_parquet_reader(env, handle, None).await,
             &[
                 new_batch_with_binary(&["a"], 0, 50),
                 new_batch_with_binary(&["a"], 50, 60),
