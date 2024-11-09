@@ -20,13 +20,13 @@ use common_config::Configurable;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
+use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, DEFAULT_OTLP_ENDPOINT};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use file_engine::config::EngineConfig;
 use frontend::frontend::FrontendOptions;
-use frontend::service_config::datanode::DatanodeClientOptions;
 use meta_client::MetaClientOptions;
 use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
@@ -126,10 +126,11 @@ fn test_load_frontend_example_config() {
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
-            datanode: frontend::service_config::DatanodeOptions {
-                client: DatanodeClientOptions {
+            datanode: DatanodeClientOptions {
+                client: ClientOptions {
                     connect_timeout: Duration::from_secs(10),
                     tcp_nodelay: true,
+                    ..Default::default()
                 },
             },
             export_metrics: ExportMetricsOption {
@@ -166,8 +167,8 @@ fn test_load_metasrv_example_config() {
                 },
                 ..Default::default()
             },
-            datanode: meta_srv::metasrv::DatanodeOptions {
-                client: meta_srv::metasrv::DatanodeClientOptions {
+            datanode: DatanodeClientOptions {
+                client: ClientOptions {
                     timeout: Duration::from_secs(10),
                     connect_timeout: Duration::from_secs(10),
                     tcp_nodelay: true,
