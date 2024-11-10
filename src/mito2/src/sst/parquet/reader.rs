@@ -877,7 +877,7 @@ impl SimpleFilterContext {
     ///
     /// Returns None if the column to filter doesn't exist in the SST metadata or the
     /// expected metadata.
-    fn new_opt(
+    pub(crate) fn new_opt(
         sst_meta: &RegionMetadataRef,
         expected_meta: Option<&RegionMetadata>,
         expr: &Expr,

@@ -155,7 +155,7 @@ impl RowGroupReaderVirtual for BulkPartVirt {
     }
 
     fn read_format(&self) -> &ReadFormat {
-        &self.context.read_format()
+        self.context.read_format()
     }
 }
 
