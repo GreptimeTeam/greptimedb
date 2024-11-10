@@ -16,12 +16,20 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use parquet::arrow::arrow_reader::RowSelection;
-use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowGroups, RowSelection};
+use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
+use parquet::column::page::{PageIterator, PageReader};
+use parquet::errors::ParquetError;
 use parquet::file::metadata::ParquetMetaData;
+use parquet::file::reader::SerializedPageReader;
+use snafu::ResultExt;
 
 use crate::error;
-use crate::sst::parquet::row_group::{ColumnChunkData, RowGroupBase};
+use crate::error::ReadDataPartSnafu;
+use crate::sst::parquet::format::ReadFormat;
+use crate::sst::parquet::page_reader::RowGroupCachedReader;
+use crate::sst::parquet::row_group::{ColumnChunkIterator, RowGroupBase};
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 /// Helper for reading specific row group inside Memtable Parquet parts.
 // This is similar to [mito2::sst::parquet::row_group::InMemoryRowGroup] since
@@ -57,18 +65,14 @@ impl<'a> MemtableRowGroupReader<'a> {
     }
 
     /// Fetches column pages from memory file.
-    pub(crate) fn fetch(
-        &mut self,
-        projection: &ProjectionMask,
-        selection: Option<&RowSelection>,
-    ) -> error::Result<()> {
+    pub(crate) fn fetch(&mut self, projection: &ProjectionMask, selection: Option<&RowSelection>) {
         if let Some((selection, page_locations)) = selection.zip(self.base.page_locations) {
             // Selection provided.
             let (fetch_ranges, page_start_offsets) =
                 self.base
                     .calc_sparse_read_ranges(projection, page_locations, selection);
             if fetch_ranges.is_empty() {
-                return Ok(());
+                return;
             }
             let chunk_data = self.fetch_bytes(&fetch_ranges);
 
@@ -78,13 +82,11 @@ impl<'a> MemtableRowGroupReader<'a> {
             let fetch_ranges = self.base.calc_dense_read_ranges(projection);
             if fetch_ranges.is_empty() {
                 // Nothing to fetch.
-                return Ok(());
+                return;
             }
             let chunk_data = self.fetch_bytes(&fetch_ranges);
             self.base.assign_dense_chunk(projection, chunk_data);
         }
-
-        Ok(())
     }
 
     fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Vec<Bytes> {
@@ -92,5 +94,87 @@ impl<'a> MemtableRowGroupReader<'a> {
             .iter()
             .map(|range| self.bytes.slice(range.start as usize..range.end as usize))
             .collect()
+    }
+
+    /// Creates a page reader to read column at `i`.
+    fn column_page_reader(&self, i: usize) -> parquet::errors::Result<Box<dyn PageReader>> {
+        if let Some(cached_pages) = &self.base.column_uncompressed_pages[i] {
+            debug_assert!(!cached_pages.row_group.is_empty());
+            // Hits the row group level page cache.
+            return Ok(Box::new(RowGroupCachedReader::new(&cached_pages.row_group)));
+        }
+
+        let page_reader = match &self.base.column_chunks[i] {
+            None => {
+                return Err(ParquetError::General(format!(
+                    "Invalid column index {i}, column was not fetched"
+                )))
+            }
+            Some(data) => {
+                let page_locations = self.base.page_locations.map(|index| index[i].clone());
+                SerializedPageReader::new(
+                    data.clone(),
+                    self.base.metadata.column(i),
+                    self.base.row_count,
+                    page_locations,
+                )?
+            }
+        };
+
+        // This column don't cache uncompressed pages.
+        Ok(Box::new(page_reader))
+    }
+}
+
+impl<'a> RowGroups for MemtableRowGroupReader<'a> {
+    fn num_rows(&self) -> usize {
+        self.base.row_count
+    }
+
+    fn column_chunks(&self, i: usize) -> parquet::errors::Result<Box<dyn PageIterator>> {
+        Ok(Box::new(ColumnChunkIterator {
+            reader: Some(self.column_page_reader(i)),
+        }))
+    }
+}
+
+pub(crate) struct MemtableRowGroupReaderBuilder {
+    read_format: ReadFormat,
+    projection: ProjectionMask,
+    parquet_metadata: Arc<ParquetMetaData>,
+    field_levels: FieldLevels,
+    bytes: Bytes,
+}
+
+impl MemtableRowGroupReaderBuilder {
+    /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx` from memory.
+    pub(crate) async fn build_parquet_reader(
+        &self,
+        row_group_idx: usize,
+        row_selection: Option<RowSelection>,
+    ) -> error::Result<ParquetRecordBatchReader> {
+        let parquet_schema_desc = self.parquet_metadata.file_metadata().schema_descr();
+        let hint = Some(self.read_format.arrow_schema().fields());
+        let field_levels =
+            parquet_to_arrow_field_levels(parquet_schema_desc, self.projection.clone(), hint)
+                .context(ReadDataPartSnafu)?;
+
+        let mut row_group = MemtableRowGroupReader::create(
+            row_group_idx,
+            &self.parquet_metadata,
+            self.bytes.clone(),
+        );
+        // Fetches data from memory part. Currently, row selection is not supported.
+        row_group.fetch(&self.projection, row_selection.as_ref());
+
+        // Builds the parquet reader.
+        // Now the row selection is None.
+        ParquetRecordBatchReader::try_new_with_row_groups(
+            &field_levels,
+            &row_group,
+            DEFAULT_READ_BATCH_SIZE,
+            row_selection,
+        )
+        .context(ReadDataPartSnafu)
     }
 }
