@@ -887,8 +887,8 @@ mod tests {
         let mutations = key_values
             .into_iter()
             .map(|(k0, k1, (start, end), sequence)| {
-                let ts = (start..end).into_iter();
-                let v1 = (start..end).into_iter().map(|_| None);
+                let ts = (start..end);
+                let v1 = (start..end).map(|_| None);
                 build_key_values_with_ts_seq_values(&metadata, k0.to_string(), k1, ts, v1, sequence)
                     .mutation
             })

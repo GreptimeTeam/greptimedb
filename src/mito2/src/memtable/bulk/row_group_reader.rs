@@ -130,7 +130,7 @@ impl<'a> MemtableRowGroupPageFetcher<'a> {
     }
 }
 
-impl<'a> RowGroups for MemtableRowGroupPageFetcher<'a> {
+impl RowGroups for MemtableRowGroupPageFetcher<'_> {
     fn num_rows(&self) -> usize {
         self.base.row_count
     }
