@@ -29,6 +29,7 @@ use crate::memtable::{
 
 #[allow(unused)]
 pub(crate) mod part;
+mod row_group_reader;
 
 #[derive(Debug)]
 pub struct BulkMemtable {

@@ -38,17 +38,17 @@ use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::page_reader::RowGroupCachedReader;
 
-pub struct RowGroupBase<'a> {
-    metadata: &'a RowGroupMetaData,
-    page_locations: Option<&'a [Vec<PageLocation>]>,
+pub(crate) struct RowGroupBase<'a> {
+    pub(crate) metadata: &'a RowGroupMetaData,
+    pub(crate) page_locations: Option<&'a [Vec<PageLocation>]>,
     /// Compressed page of each column.
-    column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
-    row_count: usize,
+    pub(crate) column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
+    pub(crate) row_count: usize,
     /// Row group level cached pages for each column.
     ///
     /// These pages are uncompressed pages of a row group.
     /// `column_uncompressed_pages.len()` equals to `column_chunks.len()`.
-    column_uncompressed_pages: Vec<Option<Arc<PageValue>>>,
+    pub(crate) column_uncompressed_pages: Vec<Option<Arc<PageValue>>>,
 }
 
 impl<'a> RowGroupBase<'a> {
