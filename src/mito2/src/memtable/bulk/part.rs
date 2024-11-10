@@ -42,6 +42,7 @@ use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
 use crate::error::{ComputeArrowSnafu, EncodeMemtableSnafu, NewRecordBatchSnafu, Result};
+use crate::memtable::bulk::part_reader::{BulkIterContext, BulkPartIter};
 use crate::memtable::key_values::KeyValuesRef;
 use crate::memtable::BoxedBatchIterator;
 use crate::row_converter::{McmpRowCodec, RowCodec};
@@ -69,16 +70,27 @@ impl BulkPart {
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator> {
-        let read_format = self.read_format(&projection);
+        let read_format = self.build_read_format(&projection);
+
+        // use predicate to find row groups to read.
         let row_groups_to_read = if let Some(predicate) = predicate.as_ref() {
             self.row_groups_to_read(&read_format, predicate)
         } else {
             (0..self.metadata.parquet_metadata.num_row_groups()).collect()
         };
-        todo!()
+
+        let context = Arc::new(BulkIterContext { read_format });
+
+        let iter = BulkPartIter::try_new(
+            context,
+            row_groups_to_read,
+            self.metadata.parquet_metadata.clone(),
+            self.data.clone(),
+        )?;
+        Ok(Box::new(iter) as BoxedBatchIterator)
     }
 
-    fn read_format(&self, projection: &Option<&[ColumnId]>) -> ReadFormat {
+    fn build_read_format(&self, projection: &Option<&[ColumnId]>) -> ReadFormat {
         let region_metadata = self.metadata.region_metadata.clone();
         let read_format = if let Some(column_ids) = &projection {
             ReadFormat::new(region_metadata, column_ids.iter().copied())
@@ -97,7 +109,11 @@ impl BulkPart {
     }
 
     /// Prunes row groups by stats.
-    fn row_groups_to_read(&self, read_format: &ReadFormat, predicate: &Predicate) -> Vec<usize> {
+    fn row_groups_to_read(
+        &self,
+        read_format: &ReadFormat,
+        predicate: &Predicate,
+    ) -> VecDeque<usize> {
         let region_meta = read_format.metadata();
         let row_groups = self.metadata.parquet_metadata.row_groups();
         // expected_metadata is set to None since we always expect region metadata of memtable is up-to-date.
@@ -112,7 +128,7 @@ impl BulkPart {
                 }
                 Some(row_group)
             })
-            .collect::<Vec<_>>()
+            .collect::<VecDeque<_>>()
     }
 }
 
@@ -132,18 +148,28 @@ pub struct BulkPartMeta {
 
 pub struct BulkPartEncoder {
     metadata: RegionMetadataRef,
-    arrow_schema: SchemaRef,
     pk_encoder: McmpRowCodec,
     dedup: bool,
 }
 
 impl BulkPartEncoder {
+    pub(crate) fn new(metadata: RegionMetadataRef, dedup: bool) -> BulkPartEncoder {
+        let codec = McmpRowCodec::new_with_primary_keys(&metadata);
+        Self {
+            metadata,
+            pk_encoder: codec,
+            dedup,
+        }
+    }
+}
+
+impl BulkPartEncoder {
     /// Encodes mutations to a [BulkPart], returns true if encoded data has been written to `dest`.
-    fn encode_mutations(&self, mutations: &[Mutation], dest: &mut BulkPart) -> Result<bool> {
+    fn encode_mutations(&self, mutations: &[Mutation]) -> Result<Option<BulkPart>> {
         let Some((arrow_record_batch, min_ts, max_ts)) =
             mutations_to_record_batch(mutations, &self.metadata, &self.pk_encoder, false)?
         else {
-            return Ok(false);
+            return Ok(None);
         };
 
         let mut buf = Vec::with_capacity(4096);
@@ -160,15 +186,16 @@ impl BulkPartEncoder {
         let buf = Bytes::from(buf);
         let parquet_metadata = load_metadata(&buf)?;
 
-        dest.data = buf;
-        dest.metadata = BulkPartMeta {
-            num_rows: arrow_record_batch.num_rows(),
-            max_timestamp: max_ts,
-            min_timestamp: min_ts,
-            parquet_metadata,
-            region_metadata: self.metadata.clone(),
-        };
-        Ok(true)
+        Ok(Some(BulkPart {
+            data: buf,
+            metadata: BulkPartMeta {
+                num_rows: arrow_record_batch.num_rows(),
+                max_timestamp: max_ts,
+                min_timestamp: min_ts,
+                parquet_metadata,
+                region_metadata: self.metadata.clone(),
+            },
+        }))
     }
 }
 
@@ -744,5 +771,62 @@ mod tests {
             (0, 0),
             false,
         );
+    }
+
+    fn encode(input: &[MutationInput]) -> BulkPart {
+        let metadata = metadata_for_test();
+        let mutations = input
+            .iter()
+            .map(|m| {
+                build_key_values_with_ts_seq_values(
+                    &metadata,
+                    m.k0.to_string(),
+                    m.k1,
+                    m.timestamps.iter().copied(),
+                    m.v0.iter().copied(),
+                    m.sequence,
+                )
+                .mutation
+            })
+            .collect::<Vec<_>>();
+        let encoder = BulkPartEncoder::new(metadata, true);
+        encoder.encode_mutations(&mutations).unwrap().unwrap()
+    }
+
+    #[test]
+    fn test_write_and_read_part() {
+        let part = encode(&[
+            MutationInput {
+                k0: "a",
+                k1: 0,
+                timestamps: &[0],
+                v0: &[Some(0.1)],
+                sequence: 0,
+            },
+            MutationInput {
+                k0: "b",
+                k1: 0,
+                timestamps: &[0],
+                v0: &[Some(0.0)],
+                sequence: 0,
+            },
+            MutationInput {
+                k0: "a",
+                k1: 0,
+                timestamps: &[0],
+                v0: &[Some(0.2)],
+                sequence: 1,
+            },
+        ]);
+
+        let projection = &[1];
+        let mut reader = part.read(Some(projection), None).unwrap();
+
+        let mut total_rows_read = 0;
+        for res in reader {
+            let batch = res.unwrap();
+            total_rows_read += batch.num_rows();
+        }
+        assert_eq!(3, total_rows_read);
     }
 }

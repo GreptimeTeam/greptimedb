@@ -729,6 +729,14 @@ pub enum Error {
         error: parquet::errors::ParquetError,
     },
 
+    #[snafu(display("Failed to read row group in memtable"))]
+    DecodeArrowRowGroup {
+        #[snafu(source)]
+        error: ArrowError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid region options, {}", reason))]
     InvalidRegionOptions {
         reason: String,
@@ -1031,6 +1039,7 @@ impl ErrorExt for Error {
             RegionBusy { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
+            DecodeArrowRowGroup { .. } => StatusCode::Internal,
         }
     }
 
