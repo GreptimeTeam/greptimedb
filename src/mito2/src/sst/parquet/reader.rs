@@ -1151,7 +1151,7 @@ impl RowGroupReaderVirtual for FileRangeVirt {
     }
 }
 
-pub type RowGroupReader = RowGroupReaderBase<FileRangeVirt>;
+pub(crate) type RowGroupReader = RowGroupReaderBase<FileRangeVirt>;
 
 impl RowGroupReader {
     /// Creates a new reader from file range.
@@ -1166,7 +1166,7 @@ impl RowGroupReader {
 }
 
 /// Reader to read a row group of a parquet file.
-pub struct RowGroupReaderBase<T> {
+pub(crate) struct RowGroupReaderBase<T> {
     /// Virtual parts of [RowGroupReader] so adapts to different underlying implementation.
     virt: T,
     /// Inner parquet reader.
