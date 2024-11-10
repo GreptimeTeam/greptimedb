@@ -63,10 +63,13 @@ impl<'a> MemtableRowGroupReader<'a> {
         selection: Option<&RowSelection>,
     ) -> error::Result<()> {
         if let Some((selection, page_locations)) = selection.zip(self.base.page_locations) {
+            // Selection provided.
             let (fetch_ranges, page_start_offsets) =
                 self.base
                     .calc_sparse_read_ranges(projection, page_locations, selection);
-
+            if fetch_ranges.is_empty() {
+                return Ok(());
+            }
             let chunk_data = self.fetch_bytes(&fetch_ranges);
 
             self.base
@@ -78,30 +81,7 @@ impl<'a> MemtableRowGroupReader<'a> {
                 return Ok(());
             }
             let chunk_data = self.fetch_bytes(&fetch_ranges);
-
-            let mut chunk_data = chunk_data.into_iter();
-            for (idx, (chunk, row_group_pages)) in self
-                .base
-                .column_chunks
-                .iter_mut()
-                .zip(&self.base.column_uncompressed_pages)
-                .enumerate()
-            {
-                if chunk.is_some() || !projection.leaf_included(idx) || row_group_pages.is_some() {
-                    continue;
-                }
-
-                // Get the fetched page.
-                let Some(data) = chunk_data.next() else {
-                    continue;
-                };
-
-                let column = self.base.metadata.column(idx);
-                *chunk = Some(Arc::new(ColumnChunkData::Dense {
-                    offset: column.byte_range().0 as usize,
-                    data,
-                }));
-            }
+            self.base.assign_dense_chunk(projection, chunk_data);
         }
 
         Ok(())
