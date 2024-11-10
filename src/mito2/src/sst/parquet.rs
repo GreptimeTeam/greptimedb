@@ -27,7 +27,7 @@ pub(crate) mod file_range;
 pub(crate) mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
-mod page_reader;
+pub(crate) mod page_reader;
 pub mod reader;
 pub mod row_group;
 mod row_selection;

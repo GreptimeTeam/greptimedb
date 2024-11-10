@@ -715,6 +715,8 @@ pub enum Error {
 
     #[snafu(display("Failed to iter data part"))]
     ReadDataPart {
+        #[snafu(implicit)]
+        location: Location,
         #[snafu(source)]
         error: parquet::errors::ParquetError,
     },

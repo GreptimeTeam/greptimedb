@@ -479,8 +479,8 @@ impl ChunkReader for ColumnChunkData {
 }
 
 /// Implements [`PageIterator`] for a single column chunk, yielding a single [`PageReader`]
-struct ColumnChunkIterator {
-    reader: Option<Result<Box<dyn PageReader>>>,
+pub(crate) struct ColumnChunkIterator {
+    pub(crate) reader: Option<Result<Box<dyn PageReader>>>,
 }
 
 impl Iterator for ColumnChunkIterator {
