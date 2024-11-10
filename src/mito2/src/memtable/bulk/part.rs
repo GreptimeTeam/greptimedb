@@ -13,10 +13,12 @@
 // limitations under the License.
 
 //! Bulk part encoder/decoder.
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use api::v1::Mutation;
+use bytes::Bytes;
 use common_time::timestamp::TimeUnit;
 use datafusion::arrow::array::{TimestampNanosecondArray, UInt64Builder};
 use datatypes::arrow;
@@ -26,54 +28,106 @@ use datatypes::arrow::array::{
     UInt8Builder,
 };
 use datatypes::arrow::compute::TakeOptions;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, SchemaRef};
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
-use datatypes::types::TimestampType;
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::arrow::ArrowWriter;
 use parquet::data_type::AsBytes;
+use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::ColumnId;
+use table::predicate::Predicate;
 
 use crate::error::{ComputeArrowSnafu, EncodeMemtableSnafu, NewRecordBatchSnafu, Result};
 use crate::memtable::key_values::KeyValuesRef;
-use crate::read::Batch;
+use crate::memtable::BoxedBatchIterator;
 use crate::row_converter::{McmpRowCodec, RowCodec};
-use crate::sst::parquet::format::PrimaryKeyArray;
+use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
+use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::to_sst_arrow_schema;
 
 #[derive(Debug)]
 pub struct BulkPart {
-    data: Vec<u8>,
+    data: Bytes,
     metadata: BulkPartMeta,
 }
 
 impl BulkPart {
-    pub fn new(data: Vec<u8>, metadata: BulkPartMeta) -> Self {
+    pub fn new(data: Bytes, metadata: BulkPartMeta) -> Self {
         Self { data, metadata }
     }
 
     pub(crate) fn metadata(&self) -> &BulkPartMeta {
         &self.metadata
     }
+
+    pub(crate) fn read(
+        &self,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+    ) -> Result<BoxedBatchIterator> {
+        let read_format = self.read_format(&projection);
+        let row_groups_to_read = if let Some(predicate) = predicate.as_ref() {
+            self.row_groups_to_read(&read_format, predicate)
+        } else {
+            (0..self.metadata.parquet_metadata.num_row_groups()).collect()
+        };
+        todo!()
+    }
+
+    fn read_format(&self, projection: &Option<&[ColumnId]>) -> ReadFormat {
+        let region_metadata = self.metadata.region_metadata.clone();
+        let read_format = if let Some(column_ids) = &projection {
+            ReadFormat::new(region_metadata, column_ids.iter().copied())
+        } else {
+            // No projection, lists all column ids to read.
+            ReadFormat::new(
+                region_metadata.clone(),
+                region_metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id),
+            )
+        };
+
+        read_format
+    }
+
+    /// Prunes row groups by stats.
+    fn row_groups_to_read(&self, read_format: &ReadFormat, predicate: &Predicate) -> Vec<usize> {
+        let region_meta = read_format.metadata();
+        let row_groups = self.metadata.parquet_metadata.row_groups();
+        // expected_metadata is set to None since we always expect region metadata of memtable is up-to-date.
+        let stats = RowGroupPruningStats::new(row_groups, read_format, None);
+        predicate
+            .prune_with_stats(&stats, region_meta.schema.arrow_schema())
+            .iter()
+            .zip(0..self.metadata.parquet_metadata.num_row_groups())
+            .filter_map(|(selected, row_group)| {
+                if !*selected {
+                    return None;
+                }
+                Some(row_group)
+            })
+            .collect::<Vec<_>>()
+    }
 }
 
 #[derive(Debug)]
 pub struct BulkPartMeta {
+    /// Total rows in part.
     pub num_rows: usize,
+    /// Max timestamp in part.
     pub max_timestamp: i64,
+    /// Min timestamp in part.
     pub min_timestamp: i64,
-}
-
-impl Default for BulkPartMeta {
-    fn default() -> Self {
-        Self {
-            num_rows: 0,
-            max_timestamp: i64::MIN,
-            min_timestamp: i64::MAX,
-        }
-    }
+    /// Part file metadata.
+    pub parquet_metadata: Arc<ParquetMetaData>,
+    /// Part region schema.
+    pub region_metadata: RegionMetadataRef,
 }
 
 pub struct BulkPartEncoder {
@@ -92,28 +146,39 @@ impl BulkPartEncoder {
             return Ok(false);
         };
 
+        let mut buf = Vec::with_capacity(4096);
         let arrow_schema = arrow_record_batch.schema();
         {
-            let mut writer = ArrowWriter::try_new(&mut dest.data, arrow_schema, None)
-                .context(EncodeMemtableSnafu)?;
+            let mut writer =
+                ArrowWriter::try_new(&mut buf, arrow_schema, None).context(EncodeMemtableSnafu)?;
             writer
                 .write(&arrow_record_batch)
                 .context(EncodeMemtableSnafu)?;
             let _metadata = writer.finish().context(EncodeMemtableSnafu)?;
         }
 
+        let buf = Bytes::from(buf);
+        let parquet_metadata = load_metadata(&buf)?;
+
+        dest.data = buf;
         dest.metadata = BulkPartMeta {
             num_rows: arrow_record_batch.num_rows(),
             max_timestamp: max_ts,
             min_timestamp: min_ts,
+            parquet_metadata,
+            region_metadata: self.metadata.clone(),
         };
         Ok(true)
     }
+}
 
-    /// Decodes [BulkPart] to [Batch]es.
-    fn decode_to_batches(&self, _part: &BulkPart, _dest: &mut VecDeque<Batch>) -> Result<()> {
-        todo!()
-    }
+/// Loads metadata.
+fn load_metadata(buf: &Bytes) -> Result<Arc<ParquetMetaData>> {
+    let options = ArrowReaderOptions::new()
+        .with_page_index(true)
+        .with_skip_arrow_metadata(true);
+    let metadata = ArrowReaderMetadata::load(buf, options).expect("todo");
+    Ok(metadata.metadata().clone())
 }
 
 /// Converts mutations to record batches.
