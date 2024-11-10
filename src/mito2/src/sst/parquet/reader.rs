@@ -1122,6 +1122,8 @@ impl ParquetReader {
     }
 }
 
+/// RowGroupReaderVirtual represents the fields that cannot be shared
+/// between different `RowGroupReader`s.
 pub(crate) trait RowGroupReaderVirtual: Send {
     fn map_result(
         &self,
@@ -1151,6 +1153,7 @@ impl RowGroupReaderVirtual for FileRangeVirt {
     }
 }
 
+/// [RowGroupReader] that reads from [FileRange].
 pub(crate) type RowGroupReader = RowGroupReaderBase<FileRangeVirt>;
 
 impl RowGroupReader {
@@ -1196,6 +1199,7 @@ where
         &self.metrics
     }
 
+    /// Gets [ReadFormat] of underlying reader.
     pub(crate) fn read_format(&self) -> &ReadFormat {
         self.virt.read_format()
     }
@@ -1205,6 +1209,7 @@ where
         self.virt.map_result(self.reader.next().transpose())
     }
 
+    /// Returns the next [Batch].
     pub(crate) fn next_inner(&mut self) -> Result<Option<Batch>> {
         let scan_start = Instant::now();
         if let Some(batch) = self.batches.pop_front() {
