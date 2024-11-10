@@ -28,6 +28,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{Expr, Operator};
+use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
@@ -1118,10 +1119,53 @@ impl ParquetReader {
     }
 }
 
-/// Reader to read a row group of a parquet file.
-pub struct RowGroupReader {
+pub(crate) trait RowGroupReaderVirtual: Send {
+    fn map_result(
+        &self,
+        result: std::result::Result<Option<RecordBatch>, ArrowError>,
+    ) -> Result<Option<RecordBatch>>;
+
+    fn read_format(&self) -> &ReadFormat;
+}
+
+pub(crate) struct FileRangeVirt {
     /// Context for file ranges.
-    context: FileRangeContextRef,
+    pub(crate) context: FileRangeContextRef,
+}
+
+impl RowGroupReaderVirtual for FileRangeVirt {
+    fn map_result(
+        &self,
+        result: std::result::Result<Option<RecordBatch>, ArrowError>,
+    ) -> Result<Option<RecordBatch>> {
+        result.context(ArrowReaderSnafu {
+            path: self.context.file_path(),
+        })
+    }
+
+    fn read_format(&self) -> &ReadFormat {
+        self.context.read_format()
+    }
+}
+
+pub type RowGroupReader = RowGroupReaderBase<FileRangeVirt>;
+
+impl RowGroupReader {
+    /// Creates a new reader from file range.
+    pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
+        Self {
+            virt: FileRangeVirt { context },
+            reader,
+            batches: VecDeque::new(),
+            metrics: ReaderMetrics::default(),
+        }
+    }
+}
+
+/// Reader to read a row group of a parquet file.
+pub struct RowGroupReaderBase<T> {
+    /// Virtual parts of [RowGroupReader] so adapts to different underlying implementation.
+    virt: T,
     /// Inner parquet reader.
     reader: ParquetRecordBatchReader,
     /// Buffered batches to return.
@@ -1130,11 +1174,14 @@ pub struct RowGroupReader {
     metrics: ReaderMetrics,
 }
 
-impl RowGroupReader {
+impl<T> RowGroupReaderBase<T>
+where
+    T: RowGroupReaderVirtual,
+{
     /// Creates a new reader.
-    pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
+    pub(crate) fn create(virt: T, reader: ParquetRecordBatchReader) -> Self {
         Self {
-            context,
+            virt,
             reader,
             batches: VecDeque::new(),
             metrics: ReaderMetrics::default(),
@@ -1145,21 +1192,17 @@ impl RowGroupReader {
     pub(crate) fn metrics(&self) -> &ReaderMetrics {
         &self.metrics
     }
-    pub(crate) fn context(&self) -> &FileRangeContextRef {
-        &self.context
+
+    pub(crate) fn read_format(&self) -> &ReadFormat {
+        self.virt.read_format()
     }
 
     /// Tries to fetch next [RecordBatch] from the reader.
     fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
-        self.reader.next().transpose().context(ArrowReaderSnafu {
-            path: self.context.file_path(),
-        })
+        self.virt.map_result(self.reader.next().transpose())
     }
-}
 
-#[async_trait::async_trait]
-impl BatchReader for RowGroupReader {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+    pub(crate) fn next_inner(&mut self) -> Result<Option<Batch>> {
         let scan_start = Instant::now();
         if let Some(batch) = self.batches.pop_front() {
             self.metrics.num_rows += batch.num_rows();
@@ -1175,7 +1218,7 @@ impl BatchReader for RowGroupReader {
             };
             self.metrics.num_record_batches += 1;
 
-            self.context
+            self.virt
                 .read_format()
                 .convert_record_batch(&record_batch, &mut self.batches)?;
             self.metrics.num_batches += self.batches.len();
@@ -1184,6 +1227,16 @@ impl BatchReader for RowGroupReader {
         self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
         self.metrics.scan_cost += scan_start.elapsed();
         Ok(batch)
+    }
+}
+
+#[async_trait::async_trait]
+impl<T> BatchReader for RowGroupReaderBase<T>
+where
+    T: RowGroupReaderVirtual,
+{
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        self.next_inner()
     }
 }
 
