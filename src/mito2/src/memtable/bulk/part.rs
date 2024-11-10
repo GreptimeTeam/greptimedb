@@ -46,7 +46,9 @@ use crate::memtable::bulk::part_reader::{BulkIterContext, BulkPartIter};
 use crate::memtable::key_values::KeyValuesRef;
 use crate::memtable::BoxedBatchIterator;
 use crate::row_converter::{McmpRowCodec, RowCodec};
+use crate::sst::parquet::file_range::RangeBase;
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
+use crate::sst::parquet::reader::SimpleFilterContext;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::to_sst_arrow_schema;
 
@@ -79,7 +81,27 @@ impl BulkPart {
             (0..self.metadata.parquet_metadata.num_row_groups()).collect()
         };
 
-        let context = Arc::new(BulkIterContext { read_format });
+        let mut filters = if let Some(predicate) = predicate {
+            predicate
+                .exprs()
+                .iter()
+                .filter_map(|expr| {
+                    SimpleFilterContext::new_opt(&self.metadata.region_metadata, None, expr)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
+        //todo(hl): looks like memtable range/iter does not pass time range related parameters.
+        let context = Arc::new(BulkIterContext {
+            base: RangeBase {
+                filters,
+                read_format,
+                codec: McmpRowCodec::new_with_primary_keys(&self.metadata.region_metadata),
+                // we don't need to compat batch since all batch in memtable have the same schema.
+                compat_batch: None,
+            },
+        });
 
         let iter = BulkPartIter::try_new(
             context,
