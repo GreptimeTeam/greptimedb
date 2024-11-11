@@ -29,6 +29,15 @@ async fn test_last_row(append_mode: bool) {
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
 
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
     let request = CreateRequestBuilder::new()
         .insert_option("append_mode", &append_mode.to_string())
         .build();

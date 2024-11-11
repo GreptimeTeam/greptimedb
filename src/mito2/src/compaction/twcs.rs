@@ -212,8 +212,9 @@ impl Picker for TwcsPicker {
     fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
         let region_id = compaction_region.region_id;
         let levels = compaction_region.current_version.ssts.levels();
-        let ttl = compaction_region.current_version.options.ttl;
-        let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
+
+        let expired_ssts =
+            get_expired_ssts(levels, compaction_region.ttl, Timestamp::current_millis());
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
             // here we mark expired SSTs as compacting to avoid them being picked.
@@ -297,6 +298,9 @@ fn assign_to_windows<'a>(
     let mut windows: HashMap<i64, Window> = HashMap::new();
     // Iterates all files and assign to time windows according to max timestamp
     for f in files {
+        if f.compacting() {
+            continue;
+        }
         let (_, end) = f.time_range();
         let time_window = end
             .convert_to(TimeUnit::Second)
@@ -441,6 +445,21 @@ mod tests {
             files[2],
             windows.get(&12).unwrap().files.first().unwrap().file_id()
         );
+    }
+
+    #[test]
+    fn test_assign_compacting_to_windows() {
+        let files = [
+            new_file_handle(FileId::random(), 0, 999, 0),
+            new_file_handle(FileId::random(), 0, 999, 0),
+            new_file_handle(FileId::random(), 0, 999, 0),
+            new_file_handle(FileId::random(), 0, 999, 0),
+            new_file_handle(FileId::random(), 0, 999, 0),
+        ];
+        files[0].set_compacting(true);
+        files[2].set_compacting(true);
+        let windows = assign_to_windows(files.iter(), 3);
+        assert_eq!(3, windows.get(&0).unwrap().files.len());
     }
 
     /// (Window value, overlapping, files' time ranges in window)

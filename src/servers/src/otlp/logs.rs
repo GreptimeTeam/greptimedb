@@ -29,10 +29,12 @@ use pipeline::{Array, Map, PipelineWay, SchemaInfo, SelectInfo, Value as Pipelin
 use snafu::{ensure, ResultExt};
 
 use super::trace::attributes::OtlpAnyValue;
+use super::utils::{bytes_to_hex_string, key_value_to_jsonb};
 use crate::error::{
     IncompatibleSchemaSnafu, OpenTelemetryLogSnafu, Result, UnsupportedJsonDataTypeForTagSnafu,
 };
-use crate::otlp::trace::span::bytes_to_hex_string;
+
+pub const LOG_TABLE_NAME: &str = "opentelemetry_logs";
 
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
 ///
@@ -770,43 +772,6 @@ fn key_value_to_map(key_values: Vec<KeyValue>) -> BTreeMap<String, PipelineValue
         map.insert(kv.key.clone(), value);
     }
     map
-}
-
-fn any_value_to_jsonb(value: any_value::Value) -> JsonbValue<'static> {
-    match value {
-        any_value::Value::StringValue(s) => JsonbValue::String(s.into()),
-        any_value::Value::IntValue(i) => JsonbValue::Number(JsonbNumber::Int64(i)),
-        any_value::Value::DoubleValue(d) => JsonbValue::Number(JsonbNumber::Float64(d)),
-        any_value::Value::BoolValue(b) => JsonbValue::Bool(b),
-        any_value::Value::ArrayValue(a) => {
-            let values = a
-                .values
-                .into_iter()
-                .map(|v| match v.value {
-                    Some(value) => any_value_to_jsonb(value),
-                    None => JsonbValue::Null,
-                })
-                .collect();
-            JsonbValue::Array(values)
-        }
-        any_value::Value::KvlistValue(kv) => key_value_to_jsonb(kv.values),
-        any_value::Value::BytesValue(b) => JsonbValue::String(bytes_to_hex_string(&b).into()),
-    }
-}
-
-fn key_value_to_jsonb(key_values: Vec<KeyValue>) -> JsonbValue<'static> {
-    let mut map = BTreeMap::new();
-    for kv in key_values {
-        let value = match kv.value {
-            Some(value) => match value.value {
-                Some(value) => any_value_to_jsonb(value),
-                None => JsonbValue::Null,
-            },
-            None => JsonbValue::Null,
-        };
-        map.insert(kv.key.clone(), value);
-    }
-    JsonbValue::Object(map)
 }
 
 fn log_body_to_string(body: &AnyValue) -> String {

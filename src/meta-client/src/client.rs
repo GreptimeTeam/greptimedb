@@ -21,6 +21,8 @@ mod cluster;
 mod store;
 mod util;
 
+use std::sync::Arc;
+
 use api::v1::meta::{ProcedureDetailResponse, Role};
 use cluster::Client as ClusterClient;
 use common_error::ext::BoxedError;
@@ -30,7 +32,8 @@ use common_meta::cluster::{
 };
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
-use common_meta::error::{self as meta_error, Result as MetaResult};
+use common_meta::error::{self as meta_error, ExternalSnafu, Result as MetaResult};
+use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
     MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
@@ -40,8 +43,10 @@ use common_meta::rpc::store::{
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
+use common_meta::rpc::KeyValue;
 use common_meta::ClusterId;
 use common_telemetry::info;
+use futures::TryStreamExt;
 use heartbeat::Client as HeartbeatClient;
 use procedure::Client as ProcedureClient;
 use snafu::{OptionExt, ResultExt};
@@ -314,16 +319,15 @@ impl ClusterInfo for MetaClient {
     }
 
     async fn list_region_stats(&self) -> Result<Vec<RegionStat>> {
-        let cluster_client = self.cluster_client()?;
+        let cluster_kv_backend = Arc::new(self.cluster_client()?);
         let range_prefix = DatanodeStatKey::key_prefix_with_cluster_id(self.id.0);
         let req = RangeRequest::new().with_prefix(range_prefix);
-        let mut datanode_stats = cluster_client
-            .range(req)
-            .await?
-            .kvs
-            .into_iter()
-            .map(|kv| DatanodeStatValue::try_from(kv.value).context(ConvertMetaRequestSnafu))
-            .collect::<Result<Vec<_>>>()?;
+        let stream = PaginationStream::new(cluster_kv_backend, req, 256, Arc::new(decode_stats))
+            .into_stream();
+        let mut datanode_stats = stream
+            .try_collect::<Vec<_>>()
+            .await
+            .context(ConvertMetaResponseSnafu)?;
         let region_stats = datanode_stats
             .iter_mut()
             .flat_map(|datanode_stat| {
@@ -334,6 +338,12 @@ impl ClusterInfo for MetaClient {
 
         Ok(region_stats)
     }
+}
+
+fn decode_stats(kv: KeyValue) -> MetaResult<DatanodeStatValue> {
+    DatanodeStatValue::try_from(kv.value)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)
 }
 
 impl MetaClient {

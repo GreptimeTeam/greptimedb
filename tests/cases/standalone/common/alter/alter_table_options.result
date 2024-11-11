@@ -1,10 +1,32 @@
-CREATE TABLE ato(i INTEGER, j TIMESTAMP TIME INDEX);
+CREATE TABLE ato(i INTEGER, j TIMESTAMP TIME INDEX, PRIMARY KEY(i));
 
 Affected Rows: 0
+
+INSERT INTO ato VALUES(1, now()), (2, now());
+
+Affected Rows: 2
+
+SELECT i FROM ato;
+
++---+
+| i |
++---+
+| 1 |
+| 2 |
++---+
 
 ALTER TABLE ato SET 'ttl'='1d';
 
 Affected Rows: 0
+
+SELECT i FROM ato;
+
++---+
+| i |
++---+
+| 1 |
+| 2 |
++---+
 
 SHOW CREATE TABLE ato;
 
@@ -14,7 +36,8 @@ SHOW CREATE TABLE ato;
 | ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
 |       |   "i" INT NULL,                    |
 |       |   "j" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX ("j")                 |
+|       |   TIME INDEX ("j"),                |
+|       |   PRIMARY KEY ("i")                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |
@@ -27,6 +50,15 @@ ALTER TABLE ato SET 'ttl'='2d';
 
 Affected Rows: 0
 
+SELECT i FROM ato;
+
++---+
+| i |
++---+
+| 1 |
+| 2 |
++---+
+
 SHOW CREATE TABLE ato;
 
 +-------+------------------------------------+
@@ -35,7 +67,8 @@ SHOW CREATE TABLE ato;
 | ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
 |       |   "i" INT NULL,                    |
 |       |   "j" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX ("j")                 |
+|       |   TIME INDEX ("j"),                |
+|       |   PRIMARY KEY ("i")                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |
@@ -48,6 +81,15 @@ ALTER TABLE ato SET 'ttl'=NULL;
 
 Affected Rows: 0
 
+SELECT i FROM ato;
+
++---+
+| i |
++---+
+| 1 |
+| 2 |
++---+
+
 SHOW CREATE TABLE ato;
 
 +-------+------------------------------------+
@@ -56,14 +98,15 @@ SHOW CREATE TABLE ato;
 | ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
 |       |   "i" INT NULL,                    |
 |       |   "j" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX ("j")                 |
+|       |   TIME INDEX ("j"),                |
+|       |   PRIMARY KEY ("i")                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |
 |       |                                    |
 +-------+------------------------------------+
 
-ALTER TABLE ato SET 'ttl'='0d';
+ALTER TABLE ato SET 'ttl'='1s';
 
 Affected Rows: 0
 
@@ -75,12 +118,24 @@ SHOW CREATE TABLE ato;
 | ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
 |       |   "i" INT NULL,                    |
 |       |   "j" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX ("j")                 |
+|       |   TIME INDEX ("j"),                |
+|       |   PRIMARY KEY ("i")                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |
-|       |                                    |
+|       | WITH(                              |
+|       |   ttl = '1s'                       |
+|       | )                                  |
 +-------+------------------------------------+
+
+SELECT i FROM ato;
+
++---+
+| i |
++---+
+| 1 |
+| 2 |
++---+
 
 DROP TABLE ato;
 

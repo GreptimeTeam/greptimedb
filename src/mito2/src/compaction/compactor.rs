@@ -16,7 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::region::compact_request;
-use common_telemetry::info;
+use common_meta::key::SchemaMetadataManagerRef;
+use common_telemetry::{info, warn};
 use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -27,7 +28,7 @@ use store_api::storage::RegionId;
 use crate::access_layer::{AccessLayer, AccessLayerRef, OperationType, SstWriteRequest};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{new_picker, PickerOutput};
-use crate::compaction::CompactionSstReaderBuilder;
+use crate::compaction::{find_ttl, CompactionSstReaderBuilder};
 use crate::config::MitoConfig;
 use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
@@ -62,6 +63,7 @@ pub struct CompactionRegion {
     pub(crate) manifest_ctx: Arc<ManifestContext>,
     pub(crate) current_version: VersionRef,
     pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
+    pub(crate) ttl: Option<Duration>,
 }
 
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
@@ -78,6 +80,7 @@ pub async fn open_compaction_region(
     req: &OpenCompactionRegionRequest,
     mito_config: &MitoConfig,
     object_store_manager: ObjectStoreManagerRef,
+    schema_metadata_manager: SchemaMetadataManagerRef,
 ) -> Result<CompactionRegion> {
     let object_store = {
         let name = &req.region_options.storage;
@@ -169,6 +172,16 @@ pub async fn open_compaction_region(
         Arc::new(version)
     };
 
+    let ttl = find_ttl(
+        req.region_id.table_id(),
+        current_version.options.ttl,
+        &schema_metadata_manager,
+    )
+    .await
+    .unwrap_or_else(|e| {
+        warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
+        None
+    });
     Ok(CompactionRegion {
         region_id: req.region_id,
         region_options: req.region_options.clone(),
@@ -180,6 +193,7 @@ pub async fn open_compaction_region(
         manifest_ctx,
         current_version,
         file_purger: Some(file_purger),
+        ttl,
     })
 }
 

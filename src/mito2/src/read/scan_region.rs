@@ -393,29 +393,20 @@ impl ScanRegion {
             .and_then(|c| c.index_cache())
             .cloned();
 
-        // TODO(zhongzc): currently we only index tag columns, need to support field columns.
-        let ignore_column_ids = &self
-            .version
-            .options
-            .index_options
-            .inverted_index
-            .ignore_column_ids;
-        let indexed_column_ids = self
-            .version
-            .metadata
-            .primary_key
-            .iter()
-            .filter(|id| !ignore_column_ids.contains(id))
-            .copied()
-            .collect::<HashSet<_>>();
-
         InvertedIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
             file_cache,
             index_cache,
             self.version.metadata.as_ref(),
-            indexed_column_ids,
+            self.version.metadata.inverted_indexed_column_ids(
+                self.version
+                    .options
+                    .index_options
+                    .inverted_index
+                    .ignore_column_ids
+                    .iter(),
+            ),
             self.access_layer.puffin_manager_factory().clone(),
         )
         .build(&self.request.filters)

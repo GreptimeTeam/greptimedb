@@ -36,6 +36,7 @@ datatypes.workspace = true
 file-engine.workspace = true
 futures = "0.3"
 futures-util.workspace = true
+jsonb.workspace = true
 lazy_static.workspace = true
 meta-client.workspace = true
 meter-core.workspace = true

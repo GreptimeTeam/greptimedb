@@ -178,6 +178,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Partition manager not found, it's not expected."))]
+    PartitionManagerNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to find table partitions"))]
     FindPartitions { source: partition::error::Error },
 
@@ -301,6 +307,7 @@ impl ErrorExt for Error {
             | Error::CastManager { .. }
             | Error::Json { .. }
             | Error::GetInformationExtension { .. }
+            | Error::PartitionManagerNotFound { .. }
             | Error::ProcedureIdNotFound { .. } => StatusCode::Unexpected,
 
             Error::ViewPlanColumnsChanged { .. } => StatusCode::InvalidArguments,

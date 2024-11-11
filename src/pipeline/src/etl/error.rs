@@ -570,6 +570,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Parse json path error"))]
+    JsonPathParse {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: jsonpath_rust::JsonPathParserError,
+    },
+    #[snafu(display("Json path result index not number"))]
+    JsonPathParseResultIndex {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -16,6 +16,7 @@ use std::fmt::{Debug, Display};
 
 use api::v1;
 use common_query::AddColumnLocation;
+use itertools::Itertools;
 use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -68,7 +69,7 @@ pub enum AlterTableOperation {
         column_name: Ident,
         target_type: DataType,
     },
-    /// `MODIFY <table attrs key> = <table attr value>`
+    /// `SET <table attrs key> = <table attr value>`
     ChangeTableOptions { options: Vec<ChangeTableOption> },
     /// `DROP COLUMN <name>`
     DropColumn { name: Ident },
@@ -101,9 +102,19 @@ impl Display for AlterTableOperation {
                 write!(f, r#"MODIFY COLUMN {column_name} {target_type}"#)
             }
             AlterTableOperation::ChangeTableOptions { options } => {
-                for ChangeTableOption { key, value } in options {
-                    write!(f, r#"MODIFY '{key}'='{value}', "#)?;
-                }
+                let kvs = options
+                    .iter()
+                    .map(|ChangeTableOption { key, value }| {
+                        if !value.is_empty() {
+                            format!("'{key}'='{value}'")
+                        } else {
+                            format!("'{key}'=NULL")
+                        }
+                    })
+                    .join(",");
+
+                write!(f, "SET {kvs}")?;
+
                 Ok(())
             }
         }

@@ -19,6 +19,7 @@ pub mod dissect;
 pub mod epoch;
 pub mod gsub;
 pub mod join;
+pub mod json_path;
 pub mod letter;
 pub mod regex;
 pub mod timestamp;
@@ -34,6 +35,7 @@ use epoch::{EpochProcessor, EpochProcessorBuilder};
 use gsub::{GsubProcessor, GsubProcessorBuilder};
 use itertools::Itertools;
 use join::{JoinProcessor, JoinProcessorBuilder};
+use json_path::{JsonPathProcessor, JsonPathProcessorBuilder};
 use letter::{LetterProcessor, LetterProcessorBuilder};
 use regex::{RegexProcessor, RegexProcessorBuilder};
 use snafu::{OptionExt, ResultExt};
@@ -56,6 +58,8 @@ const PATTERN_NAME: &str = "pattern";
 const PATTERNS_NAME: &str = "patterns";
 const SEPARATOR_NAME: &str = "separator";
 const TARGET_FIELDS_NAME: &str = "target_fields";
+const JSON_PATH_NAME: &str = "json_path";
+const JSON_PATH_RESULT_INDEX_NAME: &str = "result_index";
 
 // const IF_NAME: &str = "if";
 // const IGNORE_FAILURE_NAME: &str = "ignore_failure";
@@ -94,6 +98,7 @@ pub enum ProcessorKind {
     UrlEncoding(UrlEncodingProcessor),
     Epoch(EpochProcessor),
     Date(DateProcessor),
+    JsonPath(JsonPathProcessor),
 }
 
 /// ProcessorBuilder trait defines the interface for all processor builders
@@ -122,6 +127,7 @@ pub enum ProcessorBuilders {
     UrlEncoding(UrlEncodingProcessorBuilder),
     Epoch(EpochProcessorBuilder),
     Date(DateProcessorBuilder),
+    JsonPath(JsonPathProcessorBuilder),
 }
 
 #[derive(Debug, Default)]
@@ -265,6 +271,9 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorBuilders> {
         }
         urlencoding::PROCESSOR_URL_ENCODING => {
             ProcessorBuilders::UrlEncoding(UrlEncodingProcessorBuilder::try_from(value)?)
+        }
+        json_path::PROCESSOR_JSON_PATH => {
+            ProcessorBuilders::JsonPath(json_path::JsonPathProcessorBuilder::try_from(value)?)
         }
         _ => return UnsupportedProcessorSnafu { processor: str_key }.fail(),
     };

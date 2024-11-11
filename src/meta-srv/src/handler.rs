@@ -478,6 +478,11 @@ pub struct HeartbeatHandlerGroupBuilder {
     /// The handler to handle region lease.
     region_lease_handler: Option<RegionLeaseHandler>,
 
+    /// The factor that determines how often statistics should be flushed,
+    /// based on the number of received heartbeats. When the number of heartbeats
+    /// reaches this factor, a flush operation is triggered.
+    flush_stats_factor: Option<usize>,
+
     /// The plugins.
     plugins: Option<Plugins>,
 
@@ -493,6 +498,7 @@ impl HeartbeatHandlerGroupBuilder {
         Self {
             region_failure_handler: None,
             region_lease_handler: None,
+            flush_stats_factor: None,
             plugins: None,
             pushers,
             handlers: vec![],
@@ -507,6 +513,12 @@ impl HeartbeatHandlerGroupBuilder {
     /// Sets the [`RegionFailureHandler`].
     pub fn with_region_failure_handler(mut self, handler: Option<RegionFailureHandler>) -> Self {
         self.region_failure_handler = handler;
+        self
+    }
+
+    /// Sets the flush stats factor.
+    pub fn with_flush_stats_factor(mut self, flush_stats_factor: Option<usize>) -> Self {
+        self.flush_stats_factor = flush_stats_factor;
         self
     }
 
@@ -550,7 +562,7 @@ impl HeartbeatHandlerGroupBuilder {
         if let Some(publish_heartbeat_handler) = publish_heartbeat_handler {
             self.add_handler_last(publish_heartbeat_handler);
         }
-        self.add_handler_last(CollectStatsHandler::default());
+        self.add_handler_last(CollectStatsHandler::new(self.flush_stats_factor));
 
         self
     }

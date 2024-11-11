@@ -462,5 +462,15 @@ mod tests {
             .convert_binary_to_json()
             .unwrap_err();
         assert_matches!(error, error::Error::InvalidJson { .. });
+
+        // corrupted jsonb
+        let jsonb = jsonb::parse_value("{\"hello\": \"world\"}".as_bytes())
+            .unwrap()
+            .to_vec();
+        let corrupted_jsonb = jsonb[0..jsonb.len() - 1].to_vec();
+        let error = BinaryVector::from(vec![corrupted_jsonb])
+            .convert_binary_to_json()
+            .unwrap_err();
+        assert_matches!(error, error::Error::InvalidJson { .. });
     }
 }

@@ -353,6 +353,28 @@ mod tests {
     }
 
     #[test]
+    fn test_assign_compacting_files_to_windows() {
+        let picker = WindowedCompactionPicker::new(Some(HOUR / 1000));
+        let files = vec![
+            (FileId::random(), 0, 2 * HOUR - 1, 0),
+            (FileId::random(), HOUR, HOUR * 3 - 1, 0),
+        ];
+        let version = build_version(&files, Some(Duration::from_millis(3 * HOUR as u64)));
+        version.ssts.levels()[0]
+            .files()
+            .for_each(|f| f.set_compacting(true));
+        let (outputs, expired_ssts, window_seconds) = picker.pick_inner(
+            RegionId::new(0, 0),
+            &version,
+            Timestamp::new_millisecond(HOUR * 3),
+        );
+
+        assert!(expired_ssts.is_empty());
+        assert_eq!(HOUR / 1000, window_seconds);
+        assert!(outputs.is_empty());
+    }
+
+    #[test]
     fn test_file_time_bucket_span() {
         assert_eq!(
             vec![(i64::MIN, i64::MIN + 8),],

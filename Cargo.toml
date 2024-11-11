@@ -125,7 +125,7 @@ greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", r
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
-jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "46ad50fc71cf75afbf98eec455f7892a6387c1fc", default-features = false }
+jsonb = { git = "https://github.com/CookiePieWw/jsonb.git", rev = "ed2d4f8575419ed434a4ae09dee18ca900915d9c", default-features = false }
 lazy_static = "1.4"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "a10facb353b41460eeb98578868ebf19c2084fac" }
 mockall = "0.11.4"
@@ -261,6 +261,8 @@ tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls" }
 # This is commented, since we are not using aws-lc-sys, if we need to use it, we need to uncomment this line or use a release after this commit, or it wouldn't compile with gcc < 8.1
 # see https://github.com/aws/aws-lc-rs/pull/526
 # aws-lc-sys = { git ="https://github.com/aws/aws-lc-rs", rev = "556558441e3494af4b156ae95ebc07ebc2fd38aa" }
+# Apply a fix for pprof for unaligned pointer access
+pprof = { git = "https://github.com/GreptimeTeam/pprof-rs", rev = "1bd1e21" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"

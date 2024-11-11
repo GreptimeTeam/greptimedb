@@ -19,6 +19,7 @@ use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DataFusionResult;
@@ -67,9 +68,11 @@ impl WindowedSortPhysicalRule {
             .transform_down(|plan| {
                 if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
                     // TODO: support multiple expr in windowed sort
-                    if !sort_exec.preserve_partitioning() || sort_exec.expr().len() != 1 {
+                    if sort_exec.expr().len() != 1 {
                         return Ok(Transformed::no(plan));
                     }
+
+                    let preserve_partitioning = sort_exec.preserve_partitioning();
 
                     let Some(scanner_info) = fetch_partition_range(sort_exec.input().clone())?
                     else {
@@ -111,11 +114,23 @@ impl WindowedSortPhysicalRule {
                         new_input,
                     )?;
 
-                    return Ok(Transformed {
-                        data: Arc::new(windowed_sort_exec),
-                        transformed: true,
-                        tnr: datafusion_common::tree_node::TreeNodeRecursion::Stop,
-                    });
+                    if !preserve_partitioning {
+                        let order_preserving_merge = SortPreservingMergeExec::new(
+                            sort_exec.expr().to_vec(),
+                            Arc::new(windowed_sort_exec),
+                        );
+                        return Ok(Transformed {
+                            data: Arc::new(order_preserving_merge),
+                            transformed: true,
+                            tnr: datafusion_common::tree_node::TreeNodeRecursion::Stop,
+                        });
+                    } else {
+                        return Ok(Transformed {
+                            data: Arc::new(windowed_sort_exec),
+                            transformed: true,
+                            tnr: datafusion_common::tree_node::TreeNodeRecursion::Stop,
+                        });
+                    }
                 }
 
                 Ok(Transformed::no(plan))
@@ -126,6 +141,7 @@ impl WindowedSortPhysicalRule {
     }
 }
 
+#[derive(Debug)]
 struct ScannerInfo {
     partition_ranges: Vec<Vec<PartitionRange>>,
     time_index: String,
@@ -136,16 +152,20 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
     let mut partition_ranges = None;
     let mut time_index = None;
     let mut tag_columns = None;
+    let mut is_batch_coalesced = false;
 
     input.transform_up(|plan| {
         // Unappliable case, reset the state.
         if plan.as_any().is::<RepartitionExec>()
-            || plan.as_any().is::<CoalesceBatchesExec>()
             || plan.as_any().is::<CoalescePartitionsExec>()
             || plan.as_any().is::<SortExec>()
             || plan.as_any().is::<WindowedSortExec>()
         {
             partition_ranges = None;
+        }
+
+        if plan.as_any().is::<CoalesceBatchesExec>() {
+            is_batch_coalesced = true;
         }
 
         if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
@@ -154,7 +174,9 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             tag_columns = Some(region_scan_exec.tag_columns());
 
             // set distinguish_partition_ranges to true, this is an incorrect workaround
-            region_scan_exec.with_distinguish_partition_range(true);
+            if !is_batch_coalesced {
+                region_scan_exec.with_distinguish_partition_range(true);
+            }
         }
 
         Ok(Transformed::no(plan))

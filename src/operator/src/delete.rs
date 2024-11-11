@@ -35,6 +35,7 @@ use crate::error::{
     MissingTimeIndexColumnSnafu, RequestDeletesSnafu, Result, TableNotFoundSnafu,
 };
 use crate::region_req_factory::RegionRequestFactory;
+use crate::req_convert::common::preprocess_row_delete_requests;
 use crate::req_convert::delete::{ColumnToRow, RowToRegion, TableToRegion};
 
 pub struct Deleter {
@@ -72,6 +73,7 @@ impl Deleter {
         mut requests: RowDeleteRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
+        preprocess_row_delete_requests(&mut requests.deletes)?;
         // remove empty requests
         requests.deletes.retain(|req| {
             req.rows

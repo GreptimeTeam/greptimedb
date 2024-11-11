@@ -76,6 +76,16 @@ async fn test_parallel_scan() {
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().build();
     let region_dir = request.region_dir.clone();
 

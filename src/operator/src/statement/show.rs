@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_error::ext::BoxedError;
+use common_meta::key::schema_name::SchemaNameKey;
 use common_query::Output;
 use common_telemetry::tracing;
 use partition::manager::PartitionInfo;
@@ -33,7 +34,7 @@ use table::TableRef;
 
 use crate::error::{
     self, CatalogSnafu, ExecuteStatementSnafu, ExternalSnafu, FindViewInfoSnafu, InvalidSqlSnafu,
-    Result, ViewInfoNotFoundSnafu, ViewNotFoundSnafu,
+    Result, TableMetadataManagerSnafu, ViewInfoNotFoundSnafu, ViewNotFoundSnafu,
 };
 use crate::statement::StatementExecutor;
 
@@ -118,6 +119,16 @@ impl StatementExecutor {
             .fail();
         }
 
+        let schema_options = self
+            .table_metadata_manager
+            .schema_manager()
+            .get(SchemaNameKey {
+                catalog: &table_name.catalog_name,
+                schema: &table_name.schema_name,
+            })
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
         let partitions = self
             .partition_manager
             .find_table_partitions(table.table_info().table_id())
@@ -128,7 +139,8 @@ impl StatementExecutor {
 
         let partitions = create_partitions_stmt(partitions)?;
 
-        query::sql::show_create_table(table, partitions, query_ctx).context(ExecuteStatementSnafu)
+        query::sql::show_create_table(table, schema_options, partitions, query_ctx)
+            .context(ExecuteStatementSnafu)
     }
 
     #[tracing::instrument(skip_all)]

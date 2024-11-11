@@ -54,4 +54,7 @@ pub type DatanodeId = u64;
 // The id of the flownode.
 pub type FlownodeId = u64;
 
+/// Schema options.
+pub type SchemaOptions = key::schema_name::SchemaNameValue;
+
 pub use instruction::RegionIdent;

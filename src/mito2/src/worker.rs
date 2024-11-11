@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::Plugins;
+use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
@@ -132,6 +133,7 @@ impl WorkerGroup {
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
@@ -191,6 +193,7 @@ impl WorkerGroup {
                     flush_sender: flush_sender.clone(),
                     flush_receiver: flush_receiver.clone(),
                     plugins: plugins.clone(),
+                    schema_metadata_manager: schema_metadata_manager.clone(),
                 }
                 .start()
             })
@@ -273,6 +276,7 @@ impl WorkerGroup {
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
+        schema_metadata_manager: SchemaMetadataManagerRef,
         time_provider: TimeProviderRef,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
@@ -329,6 +333,7 @@ impl WorkerGroup {
                     flush_sender: flush_sender.clone(),
                     flush_receiver: flush_receiver.clone(),
                     plugins: Plugins::new(),
+                    schema_metadata_manager: schema_metadata_manager.clone(),
                 }
                 .start()
             })
@@ -405,6 +410,7 @@ struct WorkerStarter<S> {
     /// Watch channel receiver to wait for background flush job.
     flush_receiver: watch::Receiver<()>,
     plugins: Plugins,
+    schema_metadata_manager: SchemaMetadataManagerRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -455,6 +461,7 @@ impl<S: LogStore> WorkerStarter<S> {
             stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&id_string]),
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
+            schema_metadata_manager: self.schema_metadata_manager,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -645,6 +652,8 @@ struct RegionWorkerLoop<S> {
     region_count: IntGauge,
     /// Queues for region edit requests.
     region_edit_queues: RegionEditQueues,
+    /// Database level metadata manager.
+    schema_metadata_manager: SchemaMetadataManagerRef,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

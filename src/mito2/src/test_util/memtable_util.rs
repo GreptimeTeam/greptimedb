@@ -34,8 +34,8 @@ use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
 use crate::memtable::{
-    BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder, MemtableId,
-    MemtableRange, MemtableRef, MemtableStats,
+    BoxedBatchIterator, BulkPart, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRange,
+    MemtableRef, MemtableStats,
 };
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 

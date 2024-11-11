@@ -14,8 +14,6 @@
 
 use std::fmt::Display;
 
-use api::v1::value::ValueData;
-use api::v1::ColumnDataType;
 use common_time::timestamp::Timestamp;
 use itertools::Itertools;
 use opentelemetry_proto::tonic::common::v1::{InstrumentationScope, KeyValue};
@@ -24,6 +22,7 @@ use opentelemetry_proto::tonic::trace::v1::{Span, Status};
 use serde::Serialize;
 
 use super::attributes::Attributes;
+use crate::otlp::utils::bytes_to_hex_string;
 
 #[derive(Debug, Clone)]
 pub struct TraceSpan {
@@ -47,8 +46,6 @@ pub struct TraceSpan {
     pub span_links: SpanLinks,       // TODO(yuanbohan): List in the future
     pub start_in_nanosecond: u64,    // this is also the Timestamp Index
     pub end_in_nanosecond: u64,
-
-    pub uplifted_span_attributes: Vec<(String, ColumnDataType, ValueData)>,
 }
 
 pub type TraceSpans = Vec<TraceSpan>;
@@ -72,6 +69,30 @@ impl From<Link> for SpanLink {
     }
 }
 
+impl From<SpanLink> for jsonb::Value<'static> {
+    fn from(value: SpanLink) -> jsonb::Value<'static> {
+        jsonb::Value::Object(
+            vec![
+                (
+                    "trace_id".to_string(),
+                    jsonb::Value::String(value.trace_id.into()),
+                ),
+                (
+                    "span_id".to_string(),
+                    jsonb::Value::String(value.span_id.into()),
+                ),
+                (
+                    "trace_state".to_string(),
+                    jsonb::Value::String(value.trace_state.into()),
+                ),
+                ("attributes".to_string(), value.attributes.into()),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SpanLinks(Vec<SpanLink>);
 
@@ -79,6 +100,12 @@ impl From<Vec<Link>> for SpanLinks {
     fn from(value: Vec<Link>) -> Self {
         let links = value.into_iter().map(SpanLink::from).collect_vec();
         Self(links)
+    }
+}
+
+impl From<SpanLinks> for jsonb::Value<'static> {
+    fn from(value: SpanLinks) -> jsonb::Value<'static> {
+        jsonb::Value::Array(value.0.into_iter().map(Into::into).collect())
     }
 }
 
@@ -115,6 +142,20 @@ impl From<Event> for SpanEvent {
     }
 }
 
+impl From<SpanEvent> for jsonb::Value<'static> {
+    fn from(value: SpanEvent) -> jsonb::Value<'static> {
+        jsonb::Value::Object(
+            vec![
+                ("name".to_string(), jsonb::Value::String(value.name.into())),
+                ("time".to_string(), jsonb::Value::String(value.time.into())),
+                ("attributes".to_string(), value.attributes.into()),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SpanEvents(Vec<SpanEvent>);
 
@@ -122,6 +163,12 @@ impl From<Vec<Event>> for SpanEvents {
     fn from(value: Vec<Event>) -> Self {
         let events = value.into_iter().map(SpanEvent::from).collect_vec();
         Self(events)
+    }
+}
+
+impl From<SpanEvents> for jsonb::Value<'static> {
+    fn from(value: SpanEvents) -> jsonb::Value<'static> {
+        jsonb::Value::Array(value.0.into_iter().map(Into::into).collect())
     }
 }
 
@@ -142,8 +189,8 @@ impl SpanEvents {
 }
 
 pub fn parse_span(
-    resource_attrs: Vec<KeyValue>,
-    scope: InstrumentationScope,
+    resource_attrs: &[KeyValue],
+    scope: &InstrumentationScope,
     span: Span,
 ) -> TraceSpan {
     let (span_status_code, span_status_message) = status_to_string(&span.status);
@@ -156,9 +203,9 @@ pub fn parse_span(
         resource_attributes: Attributes::from(resource_attrs),
         trace_state: span.trace_state,
 
-        scope_name: scope.name,
-        scope_version: scope.version,
-        scope_attributes: Attributes::from(scope.attributes),
+        scope_name: scope.name.clone(),
+        scope_version: scope.version.clone(),
+        scope_attributes: Attributes::from(scope.attributes.clone()),
 
         span_name: span.name,
         span_kind,
@@ -170,13 +217,7 @@ pub fn parse_span(
 
         start_in_nanosecond: span.start_time_unix_nano,
         end_in_nanosecond: span.end_time_unix_nano,
-
-        uplifted_span_attributes: vec![],
     }
-}
-
-pub fn bytes_to_hex_string(bs: &[u8]) -> String {
-    bs.iter().map(|b| format!("{:02x}", b)).join("")
 }
 
 pub fn status_to_string(status: &Option<Status>) -> (String, String) {

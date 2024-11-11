@@ -22,7 +22,7 @@ use crate::metasrv::SelectTarget;
 use crate::selector::SelectorOptions;
 
 /// According to the `opts`, choose peers from the `weight_array` through `weighted_choose`.
-pub fn choose_peers<W>(opts: &SelectorOptions, weighted_choose: &mut W) -> Result<Vec<Peer>>
+pub fn choose_items<W>(opts: &SelectorOptions, weighted_choose: &mut W) -> Result<Vec<Peer>>
 where
     W: WeightedChoose<Peer>,
 {
@@ -36,20 +36,36 @@ where
         }
     );
 
-    if opts.allow_duplication {
-        (0..min_required_items)
-            .map(|_| weighted_choose.choose_one())
-            .collect::<Result<_>>()
-    } else {
-        let weight_array_len = weighted_choose.len();
+    if min_required_items == 1 {
+        // fast path
+        return Ok(vec![weighted_choose.choose_one()?]);
+    }
 
-        // When opts.allow_duplication is false, we need to check that the length of the weighted array is greater than
-        // or equal to min_required_items, otherwise it may cause an infinite loop.
+    let available_count = weighted_choose.len();
+
+    if opts.allow_duplication {
+        // Calculate how many complete rounds of `available_count` items to select,
+        // plus any additional items needed after complete rounds.
+        let complete_batches = min_required_items / available_count;
+        let leftover_items = min_required_items % available_count;
+        if complete_batches == 0 {
+            return weighted_choose.choose_multiple(leftover_items);
+        }
+
+        let mut result = Vec::with_capacity(min_required_items);
+        for _ in 0..complete_batches {
+            result.extend(weighted_choose.choose_multiple(available_count)?);
+        }
+        result.extend(weighted_choose.choose_multiple(leftover_items)?);
+
+        Ok(result)
+    } else {
+        // Ensure the available items are sufficient when duplication is not allowed.
         ensure!(
-            weight_array_len >= min_required_items,
+            available_count >= min_required_items,
             error::NoEnoughAvailableNodeSnafu {
                 required: min_required_items,
-                available: weight_array_len,
+                available: available_count,
                 select_target: SelectTarget::Datanode
             }
         );
@@ -64,7 +80,7 @@ mod tests {
 
     use common_meta::peer::Peer;
 
-    use crate::selector::common::choose_peers;
+    use crate::selector::common::choose_items;
     use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
     use crate::selector::SelectorOptions;
 
@@ -115,7 +131,7 @@ mod tests {
             };
 
             let selected_peers: HashSet<_> =
-                choose_peers(&opts, &mut RandomWeightedChoose::new(weight_array.clone()))
+                choose_items(&opts, &mut RandomWeightedChoose::new(weight_array.clone()))
                     .unwrap()
                     .into_iter()
                     .collect();
@@ -129,7 +145,7 @@ mod tests {
         };
 
         let selected_result =
-            choose_peers(&opts, &mut RandomWeightedChoose::new(weight_array.clone()));
+            choose_items(&opts, &mut RandomWeightedChoose::new(weight_array.clone()));
         assert!(selected_result.is_err());
 
         for i in 1..=50 {
@@ -139,7 +155,7 @@ mod tests {
             };
 
             let selected_peers =
-                choose_peers(&opts, &mut RandomWeightedChoose::new(weight_array.clone())).unwrap();
+                choose_items(&opts, &mut RandomWeightedChoose::new(weight_array.clone())).unwrap();
 
             assert_eq!(i, selected_peers.len());
         }

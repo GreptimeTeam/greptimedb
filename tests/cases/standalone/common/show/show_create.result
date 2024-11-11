@@ -200,3 +200,73 @@ show create table information_schema.columns;
 
 Error: 1001(Unsupported), Show create table only for base table. greptime.information_schema.columns is TEMPORARY
 
+CREATE TABLE "specify_invereted_index_cols" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  "val" DOUBLE NULL,
+  "host" STRING NULL,
+  "job" STRING NULL,
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("host", "job"),
+  INVERTED INDEX ("job")
+);
+
+Affected Rows: 0
+
+show create table specify_invereted_index_cols;
+
++------------------------------+-------------------------------------------------------------+
+| Table                        | Create Table                                                |
++------------------------------+-------------------------------------------------------------+
+| specify_invereted_index_cols | CREATE TABLE IF NOT EXISTS "specify_invereted_index_cols" ( |
+|                              |   "ts" TIMESTAMP(3) NOT NULL,                               |
+|                              |   "val" DOUBLE NULL,                                        |
+|                              |   "host" STRING NULL,                                       |
+|                              |   "job" STRING NULL,                                        |
+|                              |   TIME INDEX ("ts"),                                        |
+|                              |   PRIMARY KEY ("host", "job"),                              |
+|                              |   INVERTED INDEX ("job")                                    |
+|                              | )                                                           |
+|                              |                                                             |
+|                              | ENGINE=mito                                                 |
+|                              |                                                             |
++------------------------------+-------------------------------------------------------------+
+
+drop table specify_invereted_index_cols;
+
+Affected Rows: 0
+
+CREATE TABLE "specify_empty_invereted_index_cols" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  "val" DOUBLE NULL,
+  "host" STRING NULL,
+  "job" STRING NULL,
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("host", "job"),
+  INVERTED INDEX ()
+);
+
+Affected Rows: 0
+
+show create table specify_empty_invereted_index_cols;
+
++------------------------------------+-------------------------------------------------------------------+
+| Table                              | Create Table                                                      |
++------------------------------------+-------------------------------------------------------------------+
+| specify_empty_invereted_index_cols | CREATE TABLE IF NOT EXISTS "specify_empty_invereted_index_cols" ( |
+|                                    |   "ts" TIMESTAMP(3) NOT NULL,                                     |
+|                                    |   "val" DOUBLE NULL,                                              |
+|                                    |   "host" STRING NULL,                                             |
+|                                    |   "job" STRING NULL,                                              |
+|                                    |   TIME INDEX ("ts"),                                              |
+|                                    |   PRIMARY KEY ("host", "job"),                                    |
+|                                    |   INVERTED INDEX ()                                               |
+|                                    | )                                                                 |
+|                                    |                                                                   |
+|                                    | ENGINE=mito                                                       |
+|                                    |                                                                   |
++------------------------------------+-------------------------------------------------------------------+
+
+drop table specify_empty_invereted_index_cols;
+
+Affected Rows: 0
+

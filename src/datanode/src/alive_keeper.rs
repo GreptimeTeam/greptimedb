@@ -427,7 +427,8 @@ mod test {
         common_telemetry::init_default_ut_logging();
         let mut region_server = mock_region_server();
         let mut engine_env = TestEnv::with_prefix("region-alive-keeper");
-        let engine = Arc::new(engine_env.create_engine(MitoConfig::default()).await);
+        let engine = engine_env.create_engine(MitoConfig::default()).await;
+        let engine = Arc::new(engine);
         region_server.register_engine(engine.clone());
 
         let alive_keeper = Arc::new(RegionAliveKeeper::new(region_server.clone(), 100));

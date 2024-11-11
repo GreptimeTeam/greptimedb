@@ -14,10 +14,11 @@
 
 use std::collections::HashSet;
 
+use api::v1::column_data_type_extension::TypeExt;
 use api::v1::column_def::contains_fulltext;
 use api::v1::{
     AddColumn, AddColumns, Column, ColumnDataType, ColumnDataTypeExtension, ColumnDef,
-    ColumnOptions, ColumnSchema, CreateTableExpr, SemanticType,
+    ColumnOptions, ColumnSchema, CreateTableExpr, JsonTypeExtension, SemanticType,
 };
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -25,8 +26,9 @@ use table::metadata::TableId;
 use table::table_reference::TableReference;
 
 use crate::error::{
-    DuplicatedColumnNameSnafu, DuplicatedTimestampColumnSnafu, InvalidFulltextColumnTypeSnafu,
-    MissingTimestampColumnSnafu, Result, UnknownColumnDataTypeSnafu,
+    self, DuplicatedColumnNameSnafu, DuplicatedTimestampColumnSnafu,
+    InvalidFulltextColumnTypeSnafu, MissingTimestampColumnSnafu, Result,
+    UnknownColumnDataTypeSnafu,
 };
 pub struct ColumnExpr<'a> {
     pub column_name: &'a str,
@@ -70,6 +72,28 @@ impl<'a> From<&'a ColumnSchema> for ColumnExpr<'a> {
             options: &schema.options,
         }
     }
+}
+
+fn infer_column_datatype(
+    datatype: i32,
+    datatype_extension: &Option<ColumnDataTypeExtension>,
+) -> Result<ColumnDataType> {
+    let column_type =
+        ColumnDataType::try_from(datatype).context(UnknownColumnDataTypeSnafu { datatype })?;
+
+    if matches!(&column_type, ColumnDataType::Binary) {
+        if let Some(ext) = datatype_extension {
+            let type_ext = ext
+                .type_ext
+                .as_ref()
+                .context(error::MissingFieldSnafu { field: "type_ext" })?;
+            if *type_ext == TypeExt::JsonType(JsonTypeExtension::JsonBinary.into()) {
+                return Ok(ColumnDataType::Json);
+            }
+        }
+    }
+
+    Ok(column_type)
 }
 
 pub fn build_create_table_expr(
@@ -124,8 +148,7 @@ pub fn build_create_table_expr(
             _ => {}
         }
 
-        let column_type =
-            ColumnDataType::try_from(datatype).context(UnknownColumnDataTypeSnafu { datatype })?;
+        let column_type = infer_column_datatype(datatype, datatype_extension)?;
 
         ensure!(
             !contains_fulltext(options) || column_type == ColumnDataType::String,

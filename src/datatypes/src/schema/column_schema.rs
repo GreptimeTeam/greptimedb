@@ -36,7 +36,8 @@ pub const COMMENT_KEY: &str = "greptime:storage:comment";
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 /// Key used to store fulltext options in arrow field's metadata.
 pub const FULLTEXT_KEY: &str = "greptime:fulltext";
-
+/// Key used to store whether the column has inverted index in arrow field's metadata.
+pub const INVERTED_INDEX_KEY: &str = "greptime:inverted_index";
 /// Schema of a column, used as an immutable struct.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnSchema {
@@ -132,6 +133,24 @@ impl ColumnSchema {
             let _ = self.metadata.remove(TIME_INDEX_KEY);
         }
         self
+    }
+
+    pub fn set_inverted_index(mut self, value: bool) -> Self {
+        let _ = self
+            .metadata
+            .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
+        self
+    }
+
+    pub fn is_inverted_indexed(&self) -> bool {
+        self.metadata
+            .get(INVERTED_INDEX_KEY)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    pub fn has_inverted_index_key(&self) -> bool {
+        self.metadata.contains_key(INVERTED_INDEX_KEY)
     }
 
     /// Set default constraint.
