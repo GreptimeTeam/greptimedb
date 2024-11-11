@@ -28,4 +28,3 @@ pub use parsers::create_parser::{
     COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, ENGINE, MAXVALUE,
 };
 pub use parsers::tql_parser::TQL;
-pub use statements::create::TIME_INDEX;

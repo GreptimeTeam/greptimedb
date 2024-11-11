@@ -20,7 +20,7 @@ use itertools::Itertools;
 use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::ast::{ColumnDef, Ident, ObjectName, TableConstraint, Value as SqlValue};
+use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
 use crate::error::{FulltextInvalidOptionSnafu, Result};
 use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
@@ -52,31 +52,34 @@ macro_rules! format_list_comma {
 }
 
 fn format_table_constraint(constraints: &[TableConstraint]) -> String {
-    constraints
-        .iter()
-        .map(|c| {
-            if is_time_index(c) {
-                let TableConstraint::Unique { columns, .. } = c else {
-                    unreachable!()
-                };
-
-                format_indent!("{}TIME INDEX ({})", format_list_comma!(columns))
-            } else {
-                format_indent!(c)
-            }
-        })
-        .join(LINE_SEP)
+    constraints.iter().map(|c| format_indent!(c)).join(LINE_SEP)
 }
 
-/// Time index name, used in table constraints.
-pub const TIME_INDEX: &str = "__time_index";
+/// Table constraint for create table statement.
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+pub enum TableConstraint {
+    /// Primary key constraint.
+    PrimaryKey { columns: Vec<Ident> },
+    /// Time index constraint.
+    TimeIndex { column: Ident },
+    /// Inverted index constraint.
+    InvertedIndex { columns: Vec<Ident> },
+}
 
-#[inline]
-pub fn is_time_index(constraint: &TableConstraint) -> bool {
-    matches!(constraint, TableConstraint::Unique {
-        name: Some(name),
-        ..
-    }  if name.value == TIME_INDEX)
+impl Display for TableConstraint {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TableConstraint::PrimaryKey { columns } => {
+                write!(f, "PRIMARY KEY ({})", format_list_comma!(columns))
+            }
+            TableConstraint::TimeIndex { column } => {
+                write!(f, "TIME INDEX ({})", column)
+            }
+            TableConstraint::InvertedIndex { columns } => {
+                write!(f, "INVERTED INDEX ({})", format_list_comma!(columns))
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
