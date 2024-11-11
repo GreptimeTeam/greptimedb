@@ -29,7 +29,7 @@ pub const CURRENT_TIMESTAMP_FN: &str = "current_timestamp()";
 pub const NOW_FN: &str = "now()";
 
 /// Column's default constraint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ColumnDefaultConstraint {
     // A function invocation
     // TODO(dennis): we save the function expression here, maybe use a struct in future.
