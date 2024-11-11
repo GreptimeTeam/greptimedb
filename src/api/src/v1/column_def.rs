@@ -16,8 +16,7 @@ use std::collections::HashMap;
 
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, COMMENT_KEY,
-    FULLTEXT_KEY,
-    INVERTED_INDEX_KEY,
+    FULLTEXT_KEY, INVERTED_INDEX_KEY,
 };
 use greptime_proto::v1::Analyzer;
 use snafu::ResultExt;
