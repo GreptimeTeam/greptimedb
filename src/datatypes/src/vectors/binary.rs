@@ -23,6 +23,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
+use crate::types::parse_string_to_vector_type_value;
 use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
@@ -63,6 +64,27 @@ impl BinaryVector {
                 None
             };
             vector.push(jsonb);
+        }
+        Ok(BinaryVector::from(vector))
+    }
+
+    pub fn convert_binary_to_vector(&self, dim: u32) -> Result<BinaryVector> {
+        let arrow_array = self.to_arrow_array();
+        let mut vector = vec![];
+        for binary in arrow_array
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap()
+            .iter()
+        {
+            let v = if let Some(binary) = binary {
+                let s = String::from_utf8_lossy(binary);
+                let v = parse_string_to_vector_type_value(&s, dim)?;
+                Some(v)
+            } else {
+                None
+            };
+            vector.push(v);
         }
         Ok(BinaryVector::from(vector))
     }

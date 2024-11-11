@@ -556,7 +556,7 @@ pub enum Error {
     },
     #[snafu(display("Convert SQL value error"))]
     ConvertSqlValue {
-        source: sql::error::Error,
+        source: datatypes::error::Error,
         #[snafu(implicit)]
         location: Location,
     },

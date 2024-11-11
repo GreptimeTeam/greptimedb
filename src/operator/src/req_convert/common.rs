@@ -265,12 +265,7 @@ pub fn column_schema(
 ) -> Result<Vec<ColumnSchema>> {
     columns
         .iter()
-        .map(|(column_name, vector)| {
-            let (datatype, datatype_extension) =
-                ColumnDataTypeWrapper::try_from(vector.data_type().clone())
-                    .context(ColumnDataTypeSnafu)?
-                    .to_parts();
-
+        .map(|(column_name, _vector)| {
             let column_schema = table_info
                 .meta
                 .schema
@@ -278,6 +273,11 @@ pub fn column_schema(
                 .context(ColumnNotFoundSnafu {
                     msg: format!("unable to find column {column_name} in table schema"),
                 })?;
+
+            let (datatype, datatype_extension) =
+                ColumnDataTypeWrapper::try_from(column_schema.data_type.clone())
+                    .context(ColumnDataTypeSnafu)?
+                    .to_parts();
 
             Ok(ColumnSchema {
                 column_name: column_name.clone(),

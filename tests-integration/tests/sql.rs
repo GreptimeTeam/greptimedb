@@ -165,7 +165,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .unwrap();
 
     sqlx::query(
-        "create table demo(i bigint, ts timestamp time index default current_timestamp, d date default null, dt datetime default null, b blob default null, j json default null)",
+        "create table demo(i bigint, ts timestamp time index default current_timestamp, d date default null, dt datetime default null, b blob default null, j json default null, v vector(3) default null)",
     )
     .execute(&pool)
     .await
@@ -178,7 +178,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         let hello = format!("hello{i}");
         let bytes = hello.as_bytes();
-        let jsons = serde_json::json!({
+        let json = serde_json::json!({
             "code": i,
             "success": true,
             "payload": {
@@ -189,19 +189,21 @@ pub async fn test_mysql_crud(store_type: StorageType) {
                 "homepage": null
             }
         });
-        sqlx::query("insert into demo values(?, ?, ?, ?, ?, ?)")
+        let vector = "[1,2,3]";
+        sqlx::query("insert into demo values(?, ?, ?, ?, ?, ?, ?)")
             .bind(i)
             .bind(i)
             .bind(d)
             .bind(dt)
             .bind(bytes)
-            .bind(jsons)
+            .bind(json)
+            .bind(vector)
             .execute(&pool)
             .await
             .unwrap();
     }
 
-    let rows = sqlx::query("select i, d, dt, b, j from demo")
+    let rows = sqlx::query("select i, d, dt, b, j, v from demo")
         .fetch_all(&pool)
         .await
         .unwrap();
@@ -213,6 +215,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let dt: DateTime<Utc> = row.get("dt");
         let bytes: Vec<u8> = row.get("b");
         let json: serde_json::Value = row.get("j");
+        let vector: String = row.get("v");
         assert_eq!(ret, i as i64);
         let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         assert_eq!(expected_d, d);
@@ -239,6 +242,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
             }
         });
         assert_eq!(json, expected_j);
+        assert_eq!(vector, "[1,2,3]");
     }
 
     let rows = sqlx::query("select i from demo where i=?")

@@ -59,4 +59,4 @@ pub use timestamp_type::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, TimestampType,
 };
-pub use vector_type::VectorType;
+pub use vector_type::{parse_string_to_vector_type_value, vector_type_value_to_string, VectorType};

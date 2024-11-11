@@ -196,6 +196,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid Vector: {}", msg))]
+    InvalidVector {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Value exceeds the precision {} bound", precision))]
     ValueExceedsPrecision {
         precision: u8,
@@ -209,6 +216,13 @@ pub enum Error {
     ConvertArrowArrayToScalars {
         #[snafu(source)]
         error: datafusion_common::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse extended type in metadata: {}", value))]
+    ParseExtendedType {
+        value: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -230,7 +244,8 @@ impl ErrorExt for Error {
             | DuplicateMeta { .. }
             | InvalidTimestampPrecision { .. }
             | InvalidPrecisionOrScale { .. }
-            | InvalidJson { .. } => StatusCode::InvalidArguments,
+            | InvalidJson { .. }
+            | InvalidVector { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
             | CastType { .. }
@@ -245,7 +260,8 @@ impl ErrorExt for Error {
             | ProjectArrowSchema { .. }
             | ToScalarValue { .. }
             | TryFromValue { .. }
-            | ConvertArrowArrayToScalars { .. } => StatusCode::Internal,
+            | ConvertArrowArrayToScalars { .. }
+            | ParseExtendedType { .. } => StatusCode::Internal,
         }
     }
 

@@ -21,13 +21,13 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::{debug, error};
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
+use datatypes::types::vector_type_value_to_string;
 use futures::StreamExt;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
-use sql::statements::vector_type_value_to_string;
 use tokio::io::AsyncWrite;
 
 use crate::error::{self, ConvertSqlValueSnafu, Error, Result};
@@ -301,7 +301,7 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Duration(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Decimal128(_) => Ok(ColumnType::MYSQL_TYPE_DECIMAL),
         ConcreteDataType::Json(_) => Ok(ColumnType::MYSQL_TYPE_JSON),
-        ConcreteDataType::Vector(_) => Ok(ColumnType::MYSQL_TYPE_TYPED_ARRAY),
+        ConcreteDataType::Vector(_) => Ok(ColumnType::MYSQL_TYPE_STRING),
         _ => error::UnsupportedDataTypeSnafu {
             data_type,
             reason: "not implemented",

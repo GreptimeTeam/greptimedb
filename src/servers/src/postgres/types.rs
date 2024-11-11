@@ -27,7 +27,7 @@ use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
-use datatypes::types::{IntervalType, TimestampType};
+use datatypes::types::{vector_type_value_to_string, IntervalType, TimestampType};
 use datatypes::value::ListValue;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
@@ -35,7 +35,6 @@ use pgwire::api::Type;
 use pgwire::error::{PgWireError, PgWireResult};
 use session::context::QueryContextRef;
 use session::session_config::PGByteaOutputValue;
-use sql::statements::vector_type_value_to_string;
 
 use self::bytea::{EscapeOutputBytea, HexOutputBytea};
 use self::datetime::{StylingDate, StylingDateTime};

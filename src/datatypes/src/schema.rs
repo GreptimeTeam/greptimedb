@@ -25,9 +25,7 @@ use column_schema::ColumnExtType;
 use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
-use crate::error::{
-    self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result, SerializeSnafu,
-};
+use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
 use crate::prelude::ConcreteDataType;
 pub use crate::schema::column_schema::{
     ColumnSchema, FulltextAnalyzer, FulltextOptions, Metadata, COMMENT_KEY, FULLTEXT_KEY,
@@ -271,8 +269,7 @@ fn collect_fields(column_schemas: &[ColumnSchema]) -> Result<FieldsAndIndices> {
             _ => None,
         };
         if let Some(extype) = extype {
-            let extype = serde_json::to_string(&extype).context(SerializeSnafu)?;
-            let metadata = HashMap::from([(TYPE_KEY.to_string(), extype)]);
+            let metadata = HashMap::from([(TYPE_KEY.to_string(), extype.to_string())]);
             field = field.with_metadata(metadata);
         }
         fields.push(field);

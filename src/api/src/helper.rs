@@ -888,10 +888,7 @@ pub fn is_column_type_value_eq(
     ColumnDataTypeWrapper::try_new(type_value, type_extension)
         .map(|wrapper| {
             let datatype = ConcreteDataType::from(wrapper);
-            (datatype == *expect_type)
-            // Json type leverage binary type in pb, so this is valid.
-                || (datatype == ConcreteDataType::binary_datatype()
-                    && *expect_type == ConcreteDataType::json_datatype())
+            expect_type == &datatype
         })
         .unwrap_or(false)
 }
