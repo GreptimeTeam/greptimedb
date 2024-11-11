@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common_telemetry::{error, info};
 use snafu::{OptionExt, ResultExt};
@@ -92,18 +92,27 @@ impl MetricEngineInner {
 
         let metadata_region_id = to_metadata_region_id(physical_region_id);
         let mut columns_to_add = vec![];
+        // columns that already exist in physical region
+        let mut existing_columns = vec![];
+
+        let pre_existing_physical_columns = self
+            .data_region
+            .physical_columns(physical_region_id)
+            .await?;
+
+        let pre_exist_names = pre_existing_physical_columns
+            .iter()
+            .map(|col| col.column_schema.name.clone())
+            .collect::<HashSet<_>>();
+
+        // check pre-existing physical columns so if any columns to add is already exist,
+        // we can skip it in physical alter operation
+        // (but still need to update them in logical alter operation)
         for col in &columns {
-            if self
-                .metadata_region
-                .column_semantic_type(
-                    metadata_region_id,
-                    logical_region_id,
-                    &col.column_metadata.column_schema.name,
-                )
-                .await?
-                .is_none()
-            {
+            if !pre_exist_names.contains(&col.column_metadata.column_schema.name) {
                 columns_to_add.push(col.column_metadata.clone());
+            } else {
+                existing_columns.push(col.column_metadata.clone());
             }
         }
 
@@ -111,17 +120,36 @@ impl MetricEngineInner {
         let data_region_id = to_data_region_id(physical_region_id);
         self.add_columns_to_physical_data_region(
             data_region_id,
-            metadata_region_id,
             logical_region_id,
-            columns_to_add,
+            &mut columns_to_add,
         )
         .await?;
 
+        // check physical region id again, since it may have been altered and column ids might be different than
+        // the one we have
+        let after_alter_phy_table = self
+            .data_region
+            .physical_columns(physical_region_id)
+            .await?;
+        let after_alter_cols = after_alter_phy_table
+            .iter()
+            .map(|col| (col.column_schema.name.clone(), col.clone()))
+            .collect::<HashMap<_, _>>();
+
         // register columns to logical region
+        // we need to use modfied column metadata from physical region, since it may have been altered(especialy column id)
         for col in columns {
-            self.metadata_region
-                .add_column(metadata_region_id, logical_region_id, &col.column_metadata)
-                .await?;
+            if let Some(metadata) = after_alter_cols.get(&col.column_metadata.column_schema.name) {
+                self.metadata_region
+                    .add_column(metadata_region_id, logical_region_id, metadata)
+                    .await?;
+            } else {
+                // TODO(discord9): consider make this a hard error?
+                error!(
+                    "Column {} is not found in physical region",
+                    col.column_metadata.column_schema.name
+                );
+            }
         }
 
         // invalid logical column cache

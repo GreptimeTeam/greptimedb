@@ -212,11 +212,17 @@ impl MetricEngineInner {
 
             self.add_columns_to_physical_data_region(
                 data_region_id,
-                metadata_region_id,
                 logical_region_id,
-                new_columns,
+                &mut new_columns,
             )
             .await?;
+
+            // register columns to metadata region
+            for col in &new_columns {
+                self.metadata_region
+                    .add_column(metadata_region_id, logical_region_id, col)
+                    .await?;
+            }
         }
 
         // register logical region to metadata region
@@ -260,26 +266,24 @@ impl MetricEngineInner {
         Ok(data_region_id)
     }
 
-    /// Execute corresponding alter requests to mito region. New added columns' [ColumnMetadata] will be
-    /// cloned into `added_columns`.
+    /// Execute corresponding alter requests to mito region. After calling this, `new_columns` will be assign a new column id
+    /// which should be correct if the following requirements are met:
+    ///
+    /// # NOTE
+    ///
+    /// `new_columns` MUST NOT pre-exist in the physical region. Or the results will be wrong column id for the new columns.
+    ///
+    /// TODO(discord9): change this to actually return the actually added physical columns
     pub(crate) async fn add_columns_to_physical_data_region(
         &self,
         data_region_id: RegionId,
-        metadata_region_id: RegionId,
         logical_region_id: RegionId,
-        mut new_columns: Vec<ColumnMetadata>,
+        mut new_columns: &mut [ColumnMetadata],
     ) -> Result<()> {
         // alter data region
         self.data_region
             .add_columns(data_region_id, &mut new_columns)
             .await?;
-
-        // register columns to metadata region
-        for col in &new_columns {
-            self.metadata_region
-                .add_column(metadata_region_id, logical_region_id, col)
-                .await?;
-        }
 
         // safety: previous step has checked this
         self.state.write().unwrap().add_physical_columns(
@@ -290,6 +294,23 @@ impl MetricEngineInner {
         );
         info!("Create region {logical_region_id} leads to adding columns {new_columns:?} to physical region {data_region_id}");
         PHYSICAL_COLUMN_COUNT.add(new_columns.len() as _);
+
+        // correct the column id
+        let after_alter_physical_schema = self.data_region.physical_columns(data_region_id).await?;
+        let after_alter_physical_schema_map = after_alter_physical_schema
+            .into_iter()
+            .map(|metadata| (metadata.column_schema.name.clone(), metadata))
+            .collect::<HashMap<_, _>>();
+
+        for col in new_columns.iter_mut() {
+            let column_metadata = after_alter_physical_schema_map
+                .get(&col.column_schema.name)
+                .with_context(|| ColumnNotFoundSnafu {
+                    name: &col.column_schema.name,
+                    region_id: data_region_id,
+                })?;
+            *col = column_metadata.clone();
+        }
 
         Ok(())
     }

@@ -211,6 +211,7 @@ impl MetadataRegion {
     }
 
     /// Check if the given column exists. Return the semantic type if exists.
+    #[allow(unused)]
     pub async fn column_semantic_type(
         &self,
         physical_region_id: RegionId,

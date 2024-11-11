@@ -150,6 +150,7 @@ impl DataRegion {
             })
             .collect::<Result<_>>()?;
 
+        info!("Adding (Column id assigned) columns {new_columns:?} to region {region_id:?}");
         // assemble alter request
         let alter_request = RegionRequest::Alter(RegionAlterRequest {
             schema_version: version,
