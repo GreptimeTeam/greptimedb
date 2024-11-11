@@ -26,6 +26,7 @@ mod handle_open;
 mod handle_truncate;
 mod handle_write;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -579,7 +580,7 @@ type RequestBuffer = Vec<WorkerRequest>;
 #[derive(Default)]
 pub(crate) struct StalledRequests {
     /// Stalled requests.
-    pub(crate) requests: Vec<SenderWriteRequest>,
+    pub(crate) requests: HashMap<RegionId, Vec<SenderWriteRequest>>,
     /// Estimated size of all stalled requests.
     pub(crate) estimated_size: usize,
 }
@@ -591,8 +592,38 @@ impl StalledRequests {
             .iter()
             .map(|req| req.request.estimated_size())
             .sum();
-        self.requests.append(requests);
+        for req in requests.drain(..) {
+            self.requests
+                .entry(req.request.region_id)
+                .or_default()
+                .push(req);
+        }
+
         self.estimated_size += size;
+    }
+
+    /// Pushes a stalled request to the buffer.
+    pub(crate) fn push(&mut self, req: SenderWriteRequest) {
+        let size = req.request.estimated_size();
+        self.requests
+            .entry(req.request.region_id)
+            .or_default()
+            .push(req);
+        self.estimated_size += size;
+    }
+
+    /// Removes stalled requests of specific region.
+    pub(crate) fn remove(&mut self, region_id: &RegionId) -> Vec<SenderWriteRequest> {
+        if let Some(requests) = self.requests.remove(region_id) {
+            let size: usize = requests
+                .iter()
+                .map(|req| req.request.estimated_size())
+                .sum();
+            self.estimated_size -= size;
+            requests
+        } else {
+            vec![]
+        }
     }
 }
 
@@ -854,7 +885,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
-            BackgroundNotify::RegionChange(req) => self.handle_manifest_region_change_result(req),
+            BackgroundNotify::RegionChange(req) => {
+                self.handle_manifest_region_change_result(req).await
+            }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
         }
     }

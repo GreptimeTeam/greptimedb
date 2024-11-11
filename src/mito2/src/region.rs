@@ -550,6 +550,26 @@ impl RegionMap {
         Ok(region)
     }
 
+    /// Gets region by region id.
+    ///
+    /// Calls the callback if the region does not exist.
+    pub(crate) fn get_region_or<F: OnFailure>(
+        &self,
+        region_id: RegionId,
+        cb: &mut F,
+    ) -> Option<MitoRegionRef> {
+        match self
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })
+        {
+            Ok(region) => Some(region),
+            Err(e) => {
+                cb.on_failure(e);
+                None
+            }
+        }
+    }
+
     /// Gets writable region by region id.
     ///
     /// Calls the callback if the region does not exist or is readonly.

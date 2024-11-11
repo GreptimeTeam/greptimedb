@@ -19,6 +19,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use common_telemetry::{info, warn};
+use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -74,7 +75,7 @@ impl RegionEditQueue {
     }
 }
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles region edit request.
     pub(crate) async fn handle_region_edit(&mut self, request: RegionEditRequest) {
         let region_id = request.region_id;
@@ -265,10 +266,14 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// Handles region change result.
-    pub(crate) fn handle_manifest_region_change_result(&self, change_result: RegionChangeResult) {
+    pub(crate) async fn handle_manifest_region_change_result(
+        &mut self,
+        change_result: RegionChangeResult,
+    ) {
         let region = match self.regions.get_region(change_result.region_id) {
             Some(region) => region,
             None => {
+                self.reject_region_stalled_requests(&change_result.region_id);
                 change_result.sender.send(
                     RegionNotFoundSnafu {
                         region_id: change_result.region_id,
@@ -294,6 +299,9 @@ impl<S> RegionWorkerLoop<S> {
 
         // Sets the region as writable.
         region.switch_state_to_writable(RegionLeaderState::Altering);
+        // Handles the stalled requests.
+        self.handle_region_stalled_requests(&change_result.region_id)
+            .await;
 
         change_result.sender.send(change_result.result.map(|_| 0));
     }
