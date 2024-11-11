@@ -137,7 +137,7 @@ impl MetricEngineInner {
             .collect::<HashMap<_, _>>();
 
         // register columns to logical region
-        // we need to use modfied column metadata from physical region, since it may have been altered(especialy column id)
+        // we need to use modified column metadata from physical region, since it may have been altered(especially column id)
         for col in columns {
             if let Some(metadata) = after_alter_cols.get(&col.column_metadata.column_schema.name) {
                 self.metadata_region

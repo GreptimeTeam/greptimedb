@@ -278,11 +278,11 @@ impl MetricEngineInner {
         &self,
         data_region_id: RegionId,
         logical_region_id: RegionId,
-        mut new_columns: &mut [ColumnMetadata],
+        new_columns: &mut [ColumnMetadata],
     ) -> Result<()> {
         // alter data region
         self.data_region
-            .add_columns(data_region_id, &mut new_columns)
+            .add_columns(data_region_id, new_columns)
             .await?;
 
         // safety: previous step has checked this
