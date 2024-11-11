@@ -189,8 +189,6 @@ impl MysqlInstanceShim {
             dummy_params(param_num)?
         };
 
-        debug_assert_eq!(params.len(), param_num - 1);
-
         let columns = schema
             .as_ref()
             .map(|schema| {
