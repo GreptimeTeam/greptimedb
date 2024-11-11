@@ -66,23 +66,22 @@ impl<R: RangeReader> RangeReader for PartialReader<R> {
     }
 
     async fn read_vec(&mut self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
-        let absolute_ranges: Vec<Range<u64>> = ranges
+        let absolute_ranges = ranges
             .iter()
             .map(|range| {
                 let start = self.offset + range.start;
-                let end = (self.offset + range.end).min(self.offset + self.size);
-                start..end
-            })
-            .collect();
 
-        for range in &absolute_ranges {
-            if range.start >= self.offset + self.size {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "Start of range is out of bounds",
-                ));
-            }
-        }
+                if start >= self.offset + self.size {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Start of range is out of bounds",
+                    ));
+                }
+
+                let end = (self.offset + range.end).min(self.offset + self.size);
+                Ok(start..end)
+            })
+            .collect::<io::Result<Vec<_>>>()?;
 
         let results = self.source.read_vec(&absolute_ranges).await?;
         if let Some(last_range) = absolute_ranges.last() {
