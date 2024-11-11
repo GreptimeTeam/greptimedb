@@ -18,6 +18,7 @@ use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
 use api::v1::OpType;
+use common_telemetry::debug;
 use snafu::ensure;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
@@ -139,6 +140,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
     /// Rejects a specific region's stalled requests.
     pub(crate) fn reject_region_stalled_requests(&mut self, region_id: &RegionId) {
+        debug!("Rejects stalled requests for region {}", region_id);
         let requests = self.stalled_requests.remove(region_id);
         self.stalled_count.sub(requests.len() as i64);
         reject_write_requests(requests);
@@ -146,6 +148,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
     /// Handles a specific region's stalled requests.
     pub(crate) async fn handle_region_stalled_requests(&mut self, region_id: &RegionId) {
+        debug!("Handles stalled requests for region {}", region_id);
         let requests = self.stalled_requests.remove(region_id);
         self.stalled_count.sub(requests.len() as i64);
         self.handle_write_requests(requests, true).await;
@@ -192,6 +195,10 @@ impl<S> RegionWorkerLoop<S> {
                         e.insert(region_ctx);
                     }
                     RegionRoleState::Leader(RegionLeaderState::Altering) => {
+                        debug!(
+                            "Region {} is altering, add request to pending writes",
+                            region.region_id
+                        );
                         self.stalled_count.add(1);
                         self.stalled_requests.push(sender_req);
                         continue;

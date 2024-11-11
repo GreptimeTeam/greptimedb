@@ -31,7 +31,7 @@ use store_api::region_request::{
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
-use crate::engine::listener::AlterFlushListener;
+use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
 use crate::engine::MitoEngine;
 use crate::test_util::{
     build_rows, build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder,
@@ -571,4 +571,71 @@ async fn test_alter_column_fulltext_options() {
         .unwrap();
     check_fulltext_options(&engine, &expect_fulltext_options);
     check_region_version(&engine, region_id, 1, 3, 1, 3);
+}
+
+#[tokio::test]
+async fn test_write_stall_on_altering() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new();
+    let listener = Arc::new(NotifyRegionChangeResultListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let engine_cloned = engine.clone();
+    let alter_job = tokio::spawn(async move {
+        let request = add_tag1();
+        engine_cloned
+            .handle_request(region_id, RegionRequest::Alter(request))
+            .await
+            .unwrap();
+    });
+
+    let column_schemas_cloned = column_schemas.clone();
+    let engine_cloned = engine.clone();
+    let put_job = tokio::spawn(async move {
+        let rows = Rows {
+            schema: column_schemas_cloned,
+            rows: build_rows(0, 3),
+        };
+        put_rows(&engine_cloned, region_id, rows).await;
+    });
+
+    listener.wake_notify();
+    alter_job.await.unwrap();
+    put_job.await.unwrap();
+
+    let expected = "\
++-------+-------+---------+---------------------+
+| tag_1 | tag_0 | field_0 | ts                  |
++-------+-------+---------+---------------------+
+|       | 0     | 0.0     | 1970-01-01T00:00:00 |
+|       | 1     | 1.0     | 1970-01-01T00:00:01 |
+|       | 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+-------+---------+---------------------+";
+    let request = ScanRequest::default();
+    let scanner = engine.scanner(region_id, request).unwrap();
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }

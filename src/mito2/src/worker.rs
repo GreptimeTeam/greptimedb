@@ -1029,6 +1029,15 @@ impl WorkerListener {
             listener.on_compaction_scheduled(_region_id);
         }
     }
+
+    pub(crate) async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_notify_region_change_result_begin(_region_id)
+                .await;
+        }
+    }
 }
 
 #[cfg(test)]

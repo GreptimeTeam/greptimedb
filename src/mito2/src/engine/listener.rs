@@ -70,6 +70,9 @@ pub trait EventListener: Send + Sync {
 
     /// Notifies the listener that the compaction is scheduled.
     fn on_compaction_scheduled(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener that region starts to send a region change result to worker.
+    async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {}
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
@@ -272,5 +275,28 @@ impl EventListener for AlterFlushListener {
         info!("receive {} request", request_num);
 
         self.request_begin_notify.notify_one();
+    }
+}
+
+#[derive(Default)]
+pub struct NotifyRegionChangeResultListener {
+    notify: Notify,
+}
+
+impl NotifyRegionChangeResultListener {
+    /// Continue to sending region change result.
+    pub fn wake_notify(&self) {
+        self.notify.notify_one();
+    }
+}
+
+#[async_trait]
+impl EventListener for NotifyRegionChangeResultListener {
+    async fn on_notify_region_change_result_begin(&self, region_id: RegionId) {
+        info!(
+            "Wait on notify to start notify region change result for region {}",
+            region_id
+        );
+        self.notify.notified().await;
     }
 }

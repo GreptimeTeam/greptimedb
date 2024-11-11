@@ -234,7 +234,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             sender.send(Err(e));
             return;
         }
-
+        let listener = self.listener.clone();
         let request_sender = self.sender.clone();
         // Now the region is in altering state.
         common_runtime::spawn_global(async move {
@@ -255,6 +255,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     new_meta,
                 }),
             };
+            listener
+                .on_notify_region_change_result_begin(region.region_id)
+                .await;
 
             if let Err(res) = request_sender.send(notify).await {
                 warn!(
