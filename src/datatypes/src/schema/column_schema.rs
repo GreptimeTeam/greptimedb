@@ -145,7 +145,7 @@ impl ColumnSchema {
     pub fn is_inverted_indexed(&self) -> bool {
         self.metadata
             .get(INVERTED_INDEX_KEY)
-            .map(|v| v.to_ascii_lowercase() == "true")
+            .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
     }
 

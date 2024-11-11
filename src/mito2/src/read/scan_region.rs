@@ -27,7 +27,7 @@ use datafusion_expr::utils::expr_to_columns;
 use parquet::arrow::arrow_reader::RowSelection;
 use smallvec::SmallVec;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
-use store_api::storage::{ColumnId, ScanRequest, TimeSeriesRowSelector};
+use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;

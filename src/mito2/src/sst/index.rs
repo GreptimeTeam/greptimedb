@@ -20,7 +20,6 @@ pub(crate) mod puffin_manager;
 mod statistics;
 mod store;
 
-use std::collections::HashSet;
 use std::num::NonZeroUsize;
 
 use common_telemetry::{debug, warn};

@@ -326,9 +326,9 @@ impl RegionMetadata {
     /// Gets the column ids to be indexed by inverted index.
     ///
     /// If there is no column with inverted index key, it will use primary key columns.
-    pub fn inverted_indexed_column_ids(
+    pub fn inverted_indexed_column_ids<'a>(
         &self,
-        ignore_column_ids: impl Iterator<Item = &ColumnId>,
+        ignore_column_ids: impl Iterator<Item = &'a ColumnId>,
     ) -> HashSet<ColumnId> {
         // Default to use primary key columns as inverted index columns.
         let pk_as_inverted_index = !self
