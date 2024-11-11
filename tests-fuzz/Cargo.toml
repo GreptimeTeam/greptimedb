@@ -30,6 +30,7 @@ datatypes = { workspace = true }
 derive_builder = { workspace = true }
 dotenv = "0.15"
 futures = { workspace = true }
+greptime-proto.workspace = true
 humantime = { workspace = true }
 k8s-openapi = { version = "0.22", features = ["v1_30"] }
 kube = { version = "0.92", features = [
@@ -43,6 +44,8 @@ libfuzzer-sys = "0.4"
 nix = { version = "0.28", features = ["process", "signal"], optional = true }
 partition = { workspace = true }
 paste.workspace = true
+prometheus.workspace = true
+prost.workspace = true
 rand = { workspace = true }
 rand_chacha = "0.9"
 reqwest = { workspace = true }
@@ -50,6 +53,7 @@ schemars = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
+servers.workspace = true
 snafu = { workspace = true }
 sql = { workspace = true }
 sqlparser.workspace = true
@@ -84,6 +88,13 @@ bench = false
 doc = false
 
 [[bin]]
+name = "fuzz_concurr_prom_remote_write"
+path = "targets/fuzz_concurr_prom_remote_write.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
 name = "fuzz_insert_logical_table"
 path = "targets/fuzz_insert_logical_table.rs"
 test = false
@@ -93,6 +104,13 @@ doc = false
 [[bin]]
 name = "fuzz_alter_table"
 path = "targets/ddl/fuzz_alter_table.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_concurr_alter_table"
+path = "targets/fuzz_concurr_alter_table.rs"
 test = false
 bench = false
 doc = false
