@@ -23,5 +23,5 @@ tokio.workspace = true
 zeroize = { version = "1.6", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
-toml.workspace = true
 common-test-util.workspace = true
+toml.workspace = true
