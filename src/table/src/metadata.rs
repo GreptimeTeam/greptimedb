@@ -270,7 +270,7 @@ impl TableMeta {
             }
         );
 
-        let mut columns = vec![];
+        let mut columns = Vec::with_capacity(table_schema.column_schemas().len());
         for column_schema in table_schema.column_schemas() {
             if column_schema.name == column_name {
                 let mut new_column_schema = column_schema.clone();

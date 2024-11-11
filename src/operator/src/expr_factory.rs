@@ -538,8 +538,8 @@ pub(crate) fn to_alter_expr(
             column_name: column_name.value.to_string(),
             enable: options.enable,
             analyzer: match options.analyzer {
-                FulltextAnalyzer::English => Analyzer::English as i32,
-                FulltextAnalyzer::Chinese => Analyzer::Chinese as i32,
+                FulltextAnalyzer::English => Analyzer::English.into(),
+                FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
             },
             case_sensitive: options.case_sensitive,
         }),

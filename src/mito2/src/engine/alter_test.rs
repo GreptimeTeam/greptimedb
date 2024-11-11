@@ -480,6 +480,7 @@ async fn test_alter_column_fulltext_options() {
         .await;
 
     let column_schemas = rows_schema(&request);
+    let region_dir = request.region_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -527,37 +528,47 @@ async fn test_alter_column_fulltext_options() {
     // Wake up flush.
     listener.wake_flush();
     // Wait for the flush job.
-    tokio::time::timeout(Duration::from_secs(5), flush_job)
-        .await
-        .unwrap()
-        .unwrap();
+    flush_job.await.unwrap();
     // Wait for pending flush job.
-    tokio::time::timeout(Duration::from_secs(5), pending_flush_job)
-        .await
-        .unwrap()
-        .unwrap();
+    pending_flush_job.await.unwrap();
     // Wait for the write job.
-    tokio::time::timeout(Duration::from_secs(5), alter_job)
-        .await
-        .unwrap()
-        .unwrap();
+    alter_job.await.unwrap();
 
     let expect_fulltext_options = FulltextOptions {
         enable: true,
         analyzer: FulltextAnalyzer::English,
         case_sensitive: false,
     };
-    let current_fulltext_options = engine
-        .get_region(region_id)
-        .unwrap()
-        .metadata()
-        .column_by_name("tag_0")
-        .unwrap()
-        .column_schema
-        .fulltext_options()
-        .unwrap()
-        .unwrap();
+    let check_fulltext_options = |engine: &MitoEngine, expected: &FulltextOptions| {
+        let current_fulltext_options = engine
+            .get_region(region_id)
+            .unwrap()
+            .metadata()
+            .column_by_name("tag_0")
+            .unwrap()
+            .column_schema
+            .fulltext_options()
+            .unwrap()
+            .unwrap();
+        assert_eq!(*expected, current_fulltext_options);
+    };
+    check_fulltext_options(&engine, &expect_fulltext_options);
+    check_region_version(&engine, region_id, 1, 3, 1, 3);
 
-    assert_eq!(expect_fulltext_options, current_fulltext_options);
+    // Reopen region.
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                region_dir,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+            }),
+        )
+        .await
+        .unwrap();
+    check_fulltext_options(&engine, &expect_fulltext_options);
     check_region_version(&engine, region_id, 1, 3, 1, 3);
 }
