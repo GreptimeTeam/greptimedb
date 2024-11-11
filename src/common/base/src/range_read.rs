@@ -123,6 +123,9 @@ impl<R: RangeReader + 'static> AsyncReadAdapter<R> {
     }
 }
 
+/// The maximum size per read for the inner reader in `AsyncReadAdapter`.
+const MAX_SIZE_PER_READ: usize = 8 * 1024 * 1024; // 8MB
+
 impl<R: RangeReader + 'static> AsyncRead for AsyncReadAdapter<R> {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -144,7 +147,8 @@ impl<R: RangeReader + 'static> AsyncRead for AsyncReadAdapter<R> {
         }
 
         if this.read_fut.is_none() {
-            let range = *this.position..*this.content_length;
+            let size = (*this.content_length - *this.position).min(MAX_SIZE_PER_READ as u64);
+            let range = *this.position..(*this.position + size);
             let inner = this.inner.clone();
             let fut = async move {
                 let mut inner = inner.lock().await;
@@ -244,5 +248,52 @@ impl RangeReader for FileReader {
         self.position = range.end;
 
         Ok(Bytes::from(buf))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_test_util::temp_dir::create_named_temp_file;
+    use futures::io::AsyncReadExt as _;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_async_read_adapter() {
+        let data = b"hello world";
+        let reader = Vec::from(data);
+        let mut adapter = AsyncReadAdapter::new(reader).await.unwrap();
+
+        let mut buf = Vec::new();
+        adapter.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, data);
+    }
+
+    #[tokio::test]
+    async fn test_async_read_adapter_large() {
+        let data = (0..20 * 1024 * 1024).map(|i| i as u8).collect::<Vec<u8>>();
+        let mut adapter = AsyncReadAdapter::new(data.clone()).await.unwrap();
+
+        let mut buf = Vec::new();
+        adapter.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, data);
+    }
+
+    #[tokio::test]
+    async fn test_file_reader() {
+        let file = create_named_temp_file();
+        let path = file.path();
+        let data = b"hello world";
+        tokio::fs::write(path, data).await.unwrap();
+
+        let mut reader = FileReader::new(path).await.unwrap();
+        let metadata = reader.metadata().await.unwrap();
+        assert_eq!(metadata.content_length, data.len() as u64);
+
+        let bytes = reader.read(0..metadata.content_length).await.unwrap();
+        assert_eq!(&*bytes, data);
+
+        let bytes = reader.read(0..5).await.unwrap();
+        assert_eq!(&*bytes, &data[..5]);
     }
 }
