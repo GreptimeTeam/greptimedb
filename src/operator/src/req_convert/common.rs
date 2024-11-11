@@ -25,6 +25,7 @@ use api::v1::{
     RowDeleteRequest, RowInsertRequest, Rows, SemanticType, Value,
 };
 use common_base::BitVec;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::VectorRef;
 use snafu::prelude::*;
 use snafu::ResultExt;
@@ -53,6 +54,7 @@ fn encode_string_to_jsonb_binary(value_data: ValueData) -> Result<ValueData> {
 /// Prepares row insertion requests by converting any JSON values to binary JSONB format.
 pub fn preprocess_row_insert_requests(requests: &mut Vec<RowInsertRequest>) -> Result<()> {
     for request in requests {
+        validate_rows(&request.rows)?;
         prepare_rows(&mut request.rows)?;
     }
 
@@ -62,6 +64,7 @@ pub fn preprocess_row_insert_requests(requests: &mut Vec<RowInsertRequest>) -> R
 /// Prepares row deletion requests by converting any JSON values to binary JSONB format.
 pub fn preprocess_row_delete_requests(requests: &mut Vec<RowDeleteRequest>) -> Result<()> {
     for request in requests {
+        validate_rows(&request.rows)?;
         prepare_rows(&mut request.rows)?;
     }
 
@@ -97,6 +100,58 @@ fn prepare_rows(rows: &mut Option<Rows>) -> Result<()> {
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+fn validate_rows(rows: &Option<Rows>) -> Result<()> {
+    let Some(rows) = rows else {
+        return Ok(());
+    };
+
+    for (col_idx, schema) in rows.schema.iter().enumerate() {
+        let column_type =
+            ColumnDataTypeWrapper::try_new(schema.datatype, schema.datatype_extension.clone())
+                .context(ColumnDataTypeSnafu)?
+                .into();
+
+        let ConcreteDataType::Vector(d) = column_type else {
+            return Ok(());
+        };
+
+        for row in &rows.rows {
+            let value = &row.values[col_idx].value_data;
+            if let Some(data) = value {
+                validate_vector_col(data, d.dim)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_vector_col(data: &ValueData, dim: u32) -> Result<()> {
+    let data = match data {
+        ValueData::BinaryValue(data) => data,
+        _ => {
+            return InvalidInsertRequestSnafu {
+                reason: "Expecting binary data for vector column.".to_string(),
+            }
+            .fail();
+        }
+    };
+
+    let expected_len = dim as usize * std::mem::size_of::<f32>();
+    if data.len() != expected_len {
+        return InvalidInsertRequestSnafu {
+            reason: format!(
+                "Expecting {} bytes of data for vector column, but got {}.",
+                expected_len,
+                data.len()
+            ),
+        }
+        .fail();
     }
 
     Ok(())
@@ -441,5 +496,38 @@ mod tests {
         }];
         let row_count = 3;
         assert!(columns_to_rows(columns, row_count).is_err());
+    }
+
+    #[test]
+    fn test_validate_vector_row_success() {
+        let data = ValueData::BinaryValue(vec![0; 4]);
+        let dim = 1;
+        assert!(validate_vector_col(&data, dim).is_ok());
+
+        let data = ValueData::BinaryValue(vec![0; 8]);
+        let dim = 2;
+        assert!(validate_vector_col(&data, dim).is_ok());
+
+        let data = ValueData::BinaryValue(vec![0; 12]);
+        let dim = 3;
+        assert!(validate_vector_col(&data, dim).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vector_row_fail_wrong_type() {
+        let data = ValueData::I32Value(42);
+        let dim = 1;
+        assert!(validate_vector_col(&data, dim).is_err());
+    }
+
+    #[test]
+    fn test_validate_vector_row_fail_wrong_length() {
+        let data = ValueData::BinaryValue(vec![0; 8]);
+        let dim = 1;
+        assert!(validate_vector_col(&data, dim).is_err());
+
+        let data = ValueData::BinaryValue(vec![0; 4]);
+        let dim = 2;
+        assert!(validate_vector_col(&data, dim).is_err());
     }
 }

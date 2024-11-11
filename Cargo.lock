@@ -12351,6 +12351,7 @@ dependencies = [
  "frontend",
  "futures",
  "futures-util",
+ "hex",
  "itertools 0.10.5",
  "meta-client",
  "meta-srv",

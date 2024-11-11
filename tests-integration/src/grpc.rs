@@ -17,14 +17,16 @@ mod test {
     use std::collections::HashMap;
 
     use api::v1::column::Values;
+    use api::v1::column_data_type_extension::TypeExt;
     use api::v1::ddl_request::Expr as DdlExpr;
     use api::v1::greptime_request::Request;
     use api::v1::query_request::Query;
     use api::v1::region::QueryRequest as RegionQueryRequest;
     use api::v1::{
-        alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-        CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DeleteRequests,
-        DropTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
+        alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType,
+        ColumnDataTypeExtension, ColumnDef, CreateDatabaseExpr, CreateTableExpr, DdlRequest,
+        DeleteRequest, DeleteRequests, DropTableExpr, InsertRequest, InsertRequests, QueryRequest,
+        SemanticType, VectorTypeExtension,
     };
     use client::OutputData;
     use common_catalog::consts::MITO_ENGINE;
@@ -204,6 +206,7 @@ CREATE TABLE {table_name} (
     a INT,
     b STRING,
     c JSON,
+    d VECTOR(3),
     ts TIMESTAMP,
     TIME INDEX (ts),
     PRIMARY KEY (a, b, c)
@@ -352,6 +355,27 @@ CREATE TABLE {table_name} (
             r#"{ "id": 15, "transactions": [{ "amount": 500, "date": "2024-01-01" }, { "amount": -200, "date": "2024-02-01" }] }"#.to_string(),
             r#"{ "id": 16, "transactions": [{ "amount": 500, "date": "2024-01-01" }] }"#.to_string(),
         ];
+        let vector_values = [
+            [1.0f32, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+            [10.0, 11.0, 12.0],
+            [13.0, 14.0, 15.0],
+            [16.0, 17.0, 18.0],
+            [19.0, 20.0, 21.0],
+            [22.0, 23.0, 24.0],
+            [25.0, 26.0, 27.0],
+            [28.0, 29.0, 30.0],
+            [31.0, 32.0, 33.0],
+            [34.0, 35.0, 36.0],
+            [37.0, 38.0, 39.0],
+            [40.0, 41.0, 42.0],
+            [43.0, 44.0, 45.0],
+            [46.0, 47.0, 48.0],
+        ]
+        .iter()
+        .map(|x| x.iter().flat_map(|&f| f.to_le_bytes()).collect::<Vec<u8>>())
+        .collect::<Vec<_>>();
 
         let insert = InsertRequest {
             table_name: table_name.to_string(),
@@ -391,6 +415,19 @@ CREATE TABLE {table_name} (
                     ..Default::default()
                 },
                 Column {
+                    column_name: "d".to_string(),
+                    values: Some(Values {
+                        binary_values: vector_values.clone(),
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Field as i32,
+                    datatype: ColumnDataType::Vector as i32,
+                    datatype_extension: Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: 3 })),
+                    }),
+                    ..Default::default()
+                },
+                Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
                         timestamp_millisecond_values,
@@ -414,7 +451,7 @@ CREATE TABLE {table_name} (
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(format!(
-                "SELECT ts, a, b, json_to_string(c) as c FROM {table_name} ORDER BY ts"
+                "SELECT ts, a, b, json_to_string(c) as c, d FROM {table_name} ORDER BY ts"
             ))),
         });
         let output = query(instance, request.clone()).await;
@@ -422,29 +459,53 @@ CREATE TABLE {table_name} (
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = r#"+---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+
-| ts                  | a  | b                 | c                                                                                                 |
-+---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+
-| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 | {"active":true,"age":30,"id":1,"name":"Alice"}                                                    |
-| 2023-01-01T07:26:13 | 2  | ts: 1672557973000 | {"active":false,"balance":1234.56,"id":2,"name":"Bob"}                                            |
-| 2023-01-01T07:26:14 | 3  | ts: 1672557974000 | {"age":28,"id":3,"tags":["rust","testing","json"]}                                                |
-| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 | {"id":4,"metadata":{"created_at":"2024-10-30T12:00:00Z","status":"inactive"}}                     |
-| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 | {"id":5,"name":null,"phone":"+1234567890"}                                                        |
-| 2023-01-01T07:26:17 |    | ts: 1672557977000 | {"active":true,"height":5.9,"id":6,"weight":72.5}                                                 |
-| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 | {"age":29,"id":7,"languages":["English","Spanish"]}                                               |
-| 2023-01-01T07:26:19 | 12 | ts: 1672557979000 | {"contact":{"email":"hank@example.com","phone":"+0987654321"},"id":8}                             |
-| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 | {"id":9,"preferences":{"notifications":true,"theme":"dark"}}                                      |
-| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 | {"active":false,"id":10,"scores":[88,92,76]}                                                      |
-| 2023-01-01T07:26:22 | 22 | ts: 1672557982000 | {"birthday":"1996-07-20","id":11,"location":{"city":"New York","zip":"10001"}}                    |
-| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 | {"id":12,"subscription":{"expires":"2025-01-01","type":"premium"}}                                |
-| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 | {"active":true,"id":13,"settings":{"brightness":0.6,"volume":0.8}}                                |
-| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 | {"id":14,"notes":["first note","second note"],"priority":1}                                       |
-| 2023-01-01T07:26:26 | 52 | ts: 1672557986000 | {"id":15,"transactions":[{"amount":500,"date":"2024-01-01"},{"amount":-200,"date":"2024-02-01"}]} |
-| 2023-01-01T07:26:27 | 53 | ts: 1672557987000 | {"id":16,"transactions":[{"amount":500,"date":"2024-01-01"}]}                                     |
-+---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+"#;
-        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+        let expected = r#"+---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+--------------------------+
+| ts                  | a  | b                 | c                                                                                                 | d                        |
++---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+--------------------------+
+| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 | {"active":true,"age":30,"id":1,"name":"Alice"}                                                    | 0000803f0000004000004040 |
+| 2023-01-01T07:26:13 | 2  | ts: 1672557973000 | {"active":false,"balance":1234.56,"id":2,"name":"Bob"}                                            | 000080400000a0400000c040 |
+| 2023-01-01T07:26:14 | 3  | ts: 1672557974000 | {"age":28,"id":3,"tags":["rust","testing","json"]}                                                | 0000e0400000004100001041 |
+| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 | {"id":4,"metadata":{"created_at":"2024-10-30T12:00:00Z","status":"inactive"}}                     | 000020410000304100004041 |
+| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 | {"id":5,"name":null,"phone":"+1234567890"}                                                        | 000050410000604100007041 |
+| 2023-01-01T07:26:17 |    | ts: 1672557977000 | {"active":true,"height":5.9,"id":6,"weight":72.5}                                                 | 000080410000884100009041 |
+| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 | {"age":29,"id":7,"languages":["English","Spanish"]}                                               | 000098410000a0410000a841 |
+| 2023-01-01T07:26:19 | 12 | ts: 1672557979000 | {"contact":{"email":"hank@example.com","phone":"+0987654321"},"id":8}                             | 0000b0410000b8410000c041 |
+| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 | {"id":9,"preferences":{"notifications":true,"theme":"dark"}}                                      | 0000c8410000d0410000d841 |
+| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 | {"active":false,"id":10,"scores":[88,92,76]}                                                      | 0000e0410000e8410000f041 |
+| 2023-01-01T07:26:22 | 22 | ts: 1672557982000 | {"birthday":"1996-07-20","id":11,"location":{"city":"New York","zip":"10001"}}                    | 0000f8410000004200000442 |
+| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 | {"id":12,"subscription":{"expires":"2025-01-01","type":"premium"}}                                | 0000084200000c4200001042 |
+| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 | {"active":true,"id":13,"settings":{"brightness":0.6,"volume":0.8}}                                | 000014420000184200001c42 |
+| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 | {"id":14,"notes":["first note","second note"],"priority":1}                                       | 000020420000244200002842 |
+| 2023-01-01T07:26:26 | 52 | ts: 1672557986000 | {"id":15,"transactions":[{"amount":500,"date":"2024-01-01"},{"amount":-200,"date":"2024-02-01"}]} | 00002c420000304200003442 |
+| 2023-01-01T07:26:27 | 53 | ts: 1672557987000 | {"id":16,"transactions":[{"amount":500,"date":"2024-01-01"}]}                                     | 0000384200003c4200004042 |
++---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+--------------------------+"#;
+        similar_asserts::assert_eq!(recordbatches.pretty_print().unwrap(), expected);
 
-        let new_grpc_delete_request = |a, b, c, ts, row_count| DeleteRequest {
+        // Checks if the encoded vector values are as expected.
+        let hex_repr_of_vector_values = vector_values.iter().map(hex::encode).collect::<Vec<_>>();
+        assert_eq!(
+            hex_repr_of_vector_values,
+            vec![
+                "0000803f0000004000004040",
+                "000080400000a0400000c040",
+                "0000e0400000004100001041",
+                "000020410000304100004041",
+                "000050410000604100007041",
+                "000080410000884100009041",
+                "000098410000a0410000a841",
+                "0000b0410000b8410000c041",
+                "0000c8410000d0410000d841",
+                "0000e0410000e8410000f041",
+                "0000f8410000004200000442",
+                "0000084200000c4200001042",
+                "000014420000184200001c42",
+                "000020420000244200002842",
+                "00002c420000304200003442",
+                "0000384200003c4200004042",
+            ]
+        );
+
+        let new_grpc_delete_request = |a, b, c, d, ts, row_count| DeleteRequest {
             table_name: table_name.to_string(),
             key_columns: vec![
                 Column {
@@ -478,6 +539,19 @@ CREATE TABLE {table_name} (
                     ..Default::default()
                 },
                 Column {
+                    column_name: "d".to_string(),
+                    values: Some(Values {
+                        binary_values: d,
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Field as i32,
+                    datatype: ColumnDataType::Vector as i32,
+                    datatype_extension: Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: 3 })),
+                    }),
+                    ..Default::default()
+                },
+                Column {
                     column_name: "ts".to_string(),
                     semantic_type: SemanticType::Timestamp as i32,
                     values: Some(Values {
@@ -504,6 +578,12 @@ CREATE TABLE {table_name} (
                 r#"{ "id": 11, "birthday": "1996-07-20", "location": { "city": "New York", "zip": "10001" } }"#.to_string(),
                 r#"{ "id": 15, "transactions": [{ "amount": 500, "date": "2024-01-01" }, { "amount": -200, "date": "2024-02-01" }] }"#.to_string(),
             ],
+            vec![
+                [4.0f32, 5.0, 6.0].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>(),
+                [22.0f32, 23.0, 24.0].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>(),
+                [31.0f32, 32.0, 33.0].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>(),
+                [43.0f32, 44.0, 45.0].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>(),
+            ],
             vec![1672557973000, 1672557979000, 1672557982000, 1672557986000],
             4,
         );
@@ -517,6 +597,16 @@ CREATE TABLE {table_name} (
                 r#"{ "id": 3, "tags": ["rust", "testing", "json"], "age": 28 }"#.to_string(),
                 r#"{ "id": 16, "transactions": [{ "amount": 500, "date": "2024-01-01" }] }"#
                     .to_string(),
+            ],
+            vec![
+                [7.0f32, 8.0, 9.0]
+                    .iter()
+                    .flat_map(|f| f.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+                [46.0f32, 47.0, 48.0]
+                    .iter()
+                    .flat_map(|f| f.to_le_bytes())
+                    .collect::<Vec<u8>>(),
             ],
             vec![1672557974000, 1672557987000],
             2,
@@ -535,20 +625,20 @@ CREATE TABLE {table_name} (
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = r#"+---------------------+----+-------------------+-------------------------------------------------------------------------------+
-| ts                  | a  | b                 | c                                                                             |
-+---------------------+----+-------------------+-------------------------------------------------------------------------------+
-| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 | {"active":true,"age":30,"id":1,"name":"Alice"}                                |
-| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 | {"id":4,"metadata":{"created_at":"2024-10-30T12:00:00Z","status":"inactive"}} |
-| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 | {"id":5,"name":null,"phone":"+1234567890"}                                    |
-| 2023-01-01T07:26:17 |    | ts: 1672557977000 | {"active":true,"height":5.9,"id":6,"weight":72.5}                             |
-| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 | {"age":29,"id":7,"languages":["English","Spanish"]}                           |
-| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 | {"id":9,"preferences":{"notifications":true,"theme":"dark"}}                  |
-| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 | {"active":false,"id":10,"scores":[88,92,76]}                                  |
-| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 | {"id":12,"subscription":{"expires":"2025-01-01","type":"premium"}}            |
-| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 | {"active":true,"id":13,"settings":{"brightness":0.6,"volume":0.8}}            |
-| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 | {"id":14,"notes":["first note","second note"],"priority":1}                   |
-+---------------------+----+-------------------+-------------------------------------------------------------------------------+"#;
+        let expected = r#"+---------------------+----+-------------------+-------------------------------------------------------------------------------+--------------------------+
+| ts                  | a  | b                 | c                                                                             | d                        |
++---------------------+----+-------------------+-------------------------------------------------------------------------------+--------------------------+
+| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 | {"active":true,"age":30,"id":1,"name":"Alice"}                                | 0000803f0000004000004040 |
+| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 | {"id":4,"metadata":{"created_at":"2024-10-30T12:00:00Z","status":"inactive"}} | 000020410000304100004041 |
+| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 | {"id":5,"name":null,"phone":"+1234567890"}                                    | 000050410000604100007041 |
+| 2023-01-01T07:26:17 |    | ts: 1672557977000 | {"active":true,"height":5.9,"id":6,"weight":72.5}                             | 000080410000884100009041 |
+| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 | {"age":29,"id":7,"languages":["English","Spanish"]}                           | 000098410000a0410000a841 |
+| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 | {"id":9,"preferences":{"notifications":true,"theme":"dark"}}                  | 0000c8410000d0410000d841 |
+| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 | {"active":false,"id":10,"scores":[88,92,76]}                                  | 0000e0410000e8410000f041 |
+| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 | {"id":12,"subscription":{"expires":"2025-01-01","type":"premium"}}            | 0000084200000c4200001042 |
+| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 | {"active":true,"id":13,"settings":{"brightness":0.6,"volume":0.8}}            | 000014420000184200001c42 |
+| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 | {"id":14,"notes":["first note","second note"],"priority":1}                   | 000020420000244200002842 |
++---------------------+----+-------------------+-------------------------------------------------------------------------------+--------------------------+"#;
         similar_asserts::assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 
