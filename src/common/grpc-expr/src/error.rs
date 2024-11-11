@@ -130,6 +130,8 @@ pub enum Error {
     InvalidChangeFulltextOptionRequest {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
+        error: prost::DecodeError,
     },
 }
 

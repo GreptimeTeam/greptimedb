@@ -23,10 +23,14 @@ use sqlparser::tokenizer::Token;
 
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
-use crate::parsers::utils::validate_column_fulltext_option;
+use crate::parsers::utils::validate_column_fulltext_create_option;
 use crate::statements::alter::{AlterTable, AlterTableOperation, ChangeTableOption};
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
+
+fn validate_column_fulltext_alter_option(key: &str) -> bool {
+    key == COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE || validate_column_fulltext_create_option(key)
+}
 
 impl ParserContext<'_> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
@@ -164,8 +168,7 @@ impl ParserContext<'_> {
 
             for key in options.keys() {
                 ensure!(
-                    key.to_ascii_lowercase().as_str() == COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE
-                        || validate_column_fulltext_option(key.to_ascii_lowercase().as_str()),
+                    validate_column_fulltext_alter_option(key),
                     InvalidColumnOptionSnafu {
                         name: column_name.to_string(),
                         msg: format!("invalid FULLTEXT option: {key}"),

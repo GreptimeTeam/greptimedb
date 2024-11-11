@@ -36,7 +36,7 @@ use crate::error::{
     SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{ParserContext, FLOW};
-use crate::parsers::utils::validate_column_fulltext_option;
+use crate::parsers::utils::validate_column_fulltext_create_option;
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
     CreateTableLike, CreateView, Partitions, TableConstraint,
@@ -696,7 +696,7 @@ impl<'a> ParserContext<'a> {
 
             for key in options.keys() {
                 ensure!(
-                    validate_column_fulltext_option(key),
+                    validate_column_fulltext_create_option(key),
                     InvalidColumnOptionSnafu {
                         name: column_name.to_string(),
                         msg: format!("invalid FULLTEXT option: {key}"),

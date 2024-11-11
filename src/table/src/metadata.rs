@@ -254,7 +254,7 @@ impl TableMeta {
             column.data_type.is_string(),
             error::InvalidColumnOptionSnafu {
                 column_name,
-                msg: "FULLTEXT index only supports string type".to_string(),
+                msg: "FULLTEXT index only supports string type",
             }
         );
 
@@ -266,7 +266,7 @@ impl TableMeta {
             !(current_fulltext_options.is_some_and(|o| o.enable) && options.enable),
             error::InvalidColumnOptionSnafu {
                 column_name,
-                msg: "FULLTEXT index options already enabled".to_string(),
+                msg: "FULLTEXT index options already enabled",
             }
         );
 

@@ -112,7 +112,7 @@ impl ContextProvider for StubContextProvider {
     }
 }
 
-pub fn validate_column_fulltext_option(key: &str) -> bool {
+pub fn validate_column_fulltext_create_option(key: &str) -> bool {
     [
         COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
         COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,

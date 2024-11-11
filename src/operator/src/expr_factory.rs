@@ -535,7 +535,7 @@ pub(crate) fn to_alter_expr(
             column_name,
             options,
         } => Kind::ChangeColumnFulltext(ChangeColumnFulltext {
-            column_name: column_name.value.to_string(),
+            column_name: column_name.value,
             enable: options.enable,
             analyzer: match options.analyzer {
                 FulltextAnalyzer::English => Analyzer::English.into(),

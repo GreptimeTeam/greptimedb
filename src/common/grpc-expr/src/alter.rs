@@ -105,12 +105,12 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
                 .context(InvalidChangeTableOptionRequestSnafu)?,
         },
         Kind::ChangeColumnFulltext(c) => AlterKind::ChangeColumnFulltext {
-            column_name: c.column_name.clone(),
+            column_name: c.column_name,
             options: FulltextOptions {
                 enable: c.enable,
                 analyzer: as_fulltext_option(
                     Analyzer::try_from(c.analyzer)
-                        .map_err(|_| InvalidChangeFulltextOptionRequestSnafu.build())?,
+                        .context(InvalidChangeFulltextOptionRequestSnafu)?,
                 ),
                 case_sensitive: c.case_sensitive,
             },

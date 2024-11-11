@@ -388,7 +388,7 @@ impl fmt::Display for FulltextOptions {
 }
 
 impl TryFrom<HashMap<String, String>> for FulltextOptions {
-    type Error = crate::error::Error;
+    type Error = Error;
 
     fn try_from(options: HashMap<String, String>) -> Result<Self> {
         let mut fulltext_options = FulltextOptions {

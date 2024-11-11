@@ -485,7 +485,7 @@ impl AlterKind {
             })?;
 
         ensure!(
-            column.column_schema.data_type == ConcreteDataType::string_datatype(),
+            column.column_schema.data_type.is_string(),
             InvalidRegionRequestSnafu {
                 region_id: metadata.region_id,
                 err: format!(
