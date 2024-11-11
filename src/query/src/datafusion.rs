@@ -18,7 +18,7 @@ mod error;
 mod planner;
 
 use std::any::Any;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -35,7 +35,6 @@ use common_telemetry::tracing;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WriteOp};
 use datatypes::prelude::VectorRef;
@@ -290,45 +289,6 @@ impl DatafusionQueryEngine {
         {
             analyzed_plan.clone()
         } else {
-            struct TableSourceSchema {}
-            impl datafusion_common::tree_node::TreeNodeVisitor<'_> for TableSourceSchema {
-                type Node = LogicalPlan;
-                fn f_down(
-                    &mut self,
-                    node: &Self::Node,
-                ) -> datafusion_common::Result<datafusion_common::tree_node::TreeNodeRecursion>
-                {
-                    if let LogicalPlan::TableScan(table_scan) = node {
-                        let schema = table_scan.source.schema();
-
-                        // found field in outter schema but not in inner schema
-                        let outer_fields: BTreeSet<_> =
-                            table_scan.projected_schema.fields().into_iter().collect();
-                        let inner_fields = schema.fields().iter().collect::<BTreeSet<_>>();
-
-                        let diff = outer_fields
-                            .difference(&inner_fields)
-                            .collect::<BTreeSet<_>>();
-                        if !diff.is_empty() {
-                            common_telemetry::error!("TableScan.source.schema: {:?}", &schema);
-                            common_telemetry::error!(
-                                "Projected==table_source?: {:?}",
-                                schema.as_ref() == table_scan.projected_schema.as_arrow()
-                            );
-                            common_telemetry::error!("logical - phy: {:?}", diff);
-                            common_telemetry::error!(
-                                "phy - logical: {:?}",
-                                inner_fields
-                                    .difference(&outer_fields)
-                                    .collect::<BTreeSet<_>>()
-                            );
-                        }
-                    }
-                    Ok(TreeNodeRecursion::Continue)
-                }
-            }
-            let mut table_source_schema = TableSourceSchema {};
-            analyzed_plan.visit(&mut table_source_schema).unwrap();
             state
                 .optimizer()
                 .optimize(analyzed_plan, state, |_, _| {})
