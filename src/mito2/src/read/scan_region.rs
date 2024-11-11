@@ -399,7 +399,14 @@ impl ScanRegion {
             file_cache,
             index_cache,
             self.version.metadata.as_ref(),
-            self.build_inverted_indexed_column_ids(),
+            self.version.metadata.inverted_indexed_column_ids(
+                self.version
+                    .options
+                    .index_options
+                    .inverted_index
+                    .ignore_column_ids
+                    .iter(),
+            ),
             self.access_layer.puffin_manager_factory().clone(),
         )
         .build(&self.request.filters)
@@ -426,45 +433,6 @@ impl ScanRegion {
         .ok()
         .flatten()
         .map(Arc::new)
-    }
-
-    fn build_inverted_indexed_column_ids(&self) -> HashSet<ColumnId> {
-        // Default to use primary key columns as inverted index columns.
-        let pk_as_inverted_index = !self
-            .version
-            .metadata
-            .column_metadatas
-            .iter()
-            .any(|c| c.column_schema.has_inverted_index_key());
-
-        let mut inverted_index: HashSet<_> = if pk_as_inverted_index {
-            self.version
-                .metadata
-                .primary_key_columns()
-                .map(|c| c.column_id)
-                .collect()
-        } else {
-            self.version
-                .metadata
-                .column_metadatas
-                .iter()
-                .filter(|column| column.column_schema.is_inverted_indexed())
-                .map(|column| column.column_id)
-                .collect()
-        };
-
-        let ignore_column_ids = &self
-            .version
-            .options
-            .index_options
-            .inverted_index
-            .ignore_column_ids;
-
-        for ignored in ignore_column_ids {
-            inverted_index.remove(ignored);
-        }
-
-        inverted_index
     }
 }
 

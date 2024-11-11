@@ -219,7 +219,9 @@ impl<'a> IndexerBuilder<'a> {
             self.intermediate_manager.clone(),
             self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
-            self.inverted_indexed_column_ids(),
+            self.metadata.inverted_indexed_column_ids(
+                self.index_options.inverted_index.ignore_column_ids.iter(),
+            ),
         );
 
         Some(indexer)
@@ -276,35 +278,6 @@ impl<'a> IndexerBuilder<'a> {
         }
 
         None
-    }
-
-    fn inverted_indexed_column_ids(&self) -> HashSet<ColumnId> {
-        // Default to use primary key columns as inverted index columns.
-        let pk_as_inverted_index = !self
-            .metadata
-            .column_metadatas
-            .iter()
-            .any(|c| c.column_schema.has_inverted_index_key());
-
-        let mut inverted_index: HashSet<_> = if pk_as_inverted_index {
-            self.metadata
-                .primary_key_columns()
-                .map(|c| c.column_id)
-                .collect()
-        } else {
-            self.metadata
-                .column_metadatas
-                .iter()
-                .filter(|column| column.column_schema.is_inverted_indexed())
-                .map(|column| column.column_id)
-                .collect()
-        };
-
-        for ignored in &self.index_options.inverted_index.ignore_column_ids {
-            inverted_index.remove(ignored);
-        }
-
-        inverted_index
     }
 }
 
