@@ -34,7 +34,7 @@ use rand_chacha::ChaChaRng;
 use servers::prom_store::snappy_compress;
 use snafu::ResultExt;
 use sqlx::{MySql, Pool};
-use tests_fuzz::error::{self, ExternalSnafu, Result, SendPromRemoteRequestSnafu};
+use tests_fuzz::error::{self, ExternalSnafu, Result, SendPromRemoteRequestSnafu, UnexpectedSnafu};
 use tests_fuzz::fake::{
     random_capitalize_map, uppercase_and_keyword_backtick_map, MappedGenerator, WordGenerator,
 };
@@ -177,6 +177,110 @@ fn generate_prom_metrics_write_reqs<R: Rng + 'static>(
     })
 }
 
+/// first write for auto create logical table, second for alter for same name ones
+fn gen_same_name_case<R: Rng + 'static>(
+    input: FuzzInput,
+    rng: &mut R,
+    timestamp: &mut i64,
+) -> Result<Vec<remote::WriteRequest>> {
+    let timeseries_1 = vec![
+        TimeSeries {
+            labels: vec![Label {
+                name: "__name__".to_string(),
+                value: "t1".to_string(),
+            }],
+            samples: vec![Sample {
+                timestamp: *timestamp,
+                value: 0.0,
+            }],
+            exemplars: vec![],
+        },
+        TimeSeries {
+            labels: vec![Label {
+                name: "__name__".to_string(),
+                value: "t2".to_string(),
+            }],
+            samples: vec![Sample {
+                timestamp: *timestamp,
+                value: 0.0,
+            }],
+            exemplars: vec![],
+        },
+    ];
+
+    let timeseries_2 = vec![
+        TimeSeries {
+            labels: vec![
+                Label {
+                    name: "__name__".to_string(),
+                    value: "t1".to_string(),
+                },
+                Label {
+                    name: "at".to_string(),
+                    value: "loc_1".to_string(),
+                },
+            ],
+            samples: vec![Sample {
+                timestamp: *timestamp,
+                value: 0.0,
+            }],
+            exemplars: vec![],
+        },
+        TimeSeries {
+            labels: vec![
+                Label {
+                    name: "__name__".to_string(),
+                    value: "t2".to_string(),
+                },
+                Label {
+                    name: "at".to_string(),
+                    value: "loc_2".to_string(),
+                },
+            ],
+            samples: vec![Sample {
+                timestamp: *timestamp,
+                value: 0.0,
+            }],
+            exemplars: vec![],
+        },
+    ];
+    Ok(vec![timeseries_1, timeseries_2]
+        .into_iter()
+        .map(|ts| remote::WriteRequest {
+            timeseries: ts,
+            metadata: vec![],
+        })
+        .collect())
+}
+
+async fn wait_for_proc(ctx: &FuzzContext) -> Result<()> {
+    let check_done_sql = "SELECT * FROM INFORMATION_SCHEMA.PROCEDURE_INFO WHERE status!='Done';";
+    let mut proc_retry_times = 0;
+    loop {
+        let res = sqlx::query(check_done_sql)
+            .fetch_all(&ctx.greptime)
+            .await
+            .unwrap();
+        // all alter procedures are done
+        if res.is_empty() {
+            break;
+        } else {
+            info!("Waiting for alter procedures to complete...\n\n");
+            info!("{} in-progress procedures", res.len());
+            proc_retry_times += 1;
+            if proc_retry_times > 5 {
+                common_telemetry::error!("Procedure execute fail, results: {res:?}");
+                UnexpectedSnafu {
+                    violated: "Procedure execution timeout",
+                }
+                .fail()?;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+    Ok(())
+}
+
 async fn execute_insert(ctx: FuzzContext, input: FuzzInput, http: String) -> Result<()> {
     info!("input: {input:?}");
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
@@ -194,6 +298,39 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput, http: String) -> Res
     let mut table_used_col_labels = Default::default();
     let mut timestamp = 42;
     let mut concurrent_writes = Vec::new();
+
+    // first a simple case
+    for write_req in gen_same_name_case(input, &mut rng, &mut timestamp)? {
+        let client = client.clone();
+        let endpoint = endpoint.clone();
+        let body = snappy_compress(&write_req.encode_to_vec())
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        client
+            .post(endpoint.as_str())
+            .header("X-Prometheus-Remote-Write-Version", "0.1.0")
+            .header("Content-Type", "application/x-protobuf")
+            .body(body)
+            .send()
+            .await
+            .context(SendPromRemoteRequestSnafu)?;
+    }
+
+    wait_for_proc(&ctx).await?;
+
+    let selects = vec![
+        "SELECT * FROM greptime_metrics.t1;",
+        "SELECT * FROM greptime_metrics.t2;",
+        "SELECT * FROM greptime_metrics.greptime_physical_table;",
+    ];
+    for select in selects {
+        let _res = sqlx::query(select)
+            .fetch_all(&ctx.greptime)
+            .await
+            .context(error::ExecuteQuerySnafu { sql: select })?;
+    }
+    info!("Small testcases done");
+
     for _ in 0..input.concurr_writes {
         let write_req = generate_prom_metrics_write_reqs(
             input,
@@ -225,22 +362,8 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput, http: String) -> Res
     }
     join_and_err(join_set).await?;
     info!("All write requests are sent, wait for alter procdure to complete...\n\n");
-    let check_done_sql = "SELECT * FROM INFORMATION_SCHEMA.PROCEDURE_INFO WHERE status!='Done';";
 
-    loop {
-        let res = sqlx::query(check_done_sql)
-            .fetch_all(&ctx.greptime)
-            .await
-            .unwrap();
-        // all alter procedures are done
-        if res.is_empty() {
-            break;
-        } else {
-            info!("Waiting for alter procedures to complete...\n\n");
-            info!("Not done procedures: {res:?}\n\n");
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-    }
+    wait_for_proc(&ctx).await?;
 
     info!("All alter procedures are done, check if all tables are oked...\n\n");
 
