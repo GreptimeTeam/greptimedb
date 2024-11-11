@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 
@@ -62,6 +62,28 @@ pub struct ColumnSchema {
     is_time_index: bool,
     default_constraint: Option<ColumnDefaultConstraint>,
     metadata: Metadata,
+}
+
+impl PartialOrd for ColumnSchema {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ColumnSchema {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.name
+            .cmp(&other.name)
+            .then_with(|| self.data_type.cmp(&other.data_type))
+            .then_with(|| self.is_nullable.cmp(&other.is_nullable))
+            .then_with(|| self.is_time_index.cmp(&other.is_time_index))
+            .then_with(|| self.default_constraint.cmp(&other.default_constraint))
+            .then_with(|| {
+                let left = BTreeMap::from_iter(self.metadata.iter());
+                let right = BTreeMap::from_iter(other.metadata.iter());
+                left.cmp(&right)
+            })
+    }
 }
 
 impl fmt::Debug for ColumnSchema {

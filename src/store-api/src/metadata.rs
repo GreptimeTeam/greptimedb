@@ -44,7 +44,7 @@ use crate::storage::{ColumnId, RegionId};
 pub type Result<T> = std::result::Result<T, MetadataError>;
 
 /// Metadata of a column.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ColumnMetadata {
     /// Schema of this column. Is the same as `column_schema` in [SchemaRef].
     pub column_schema: ColumnSchema,
