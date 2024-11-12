@@ -94,6 +94,7 @@ impl BulkPart {
         } else {
             vec![]
         };
+
         //todo(hl): looks like memtable range/iter does not pass time range related parameters.
         let context = Arc::new(BulkIterContext {
             base: RangeBase {
@@ -911,14 +912,32 @@ mod tests {
     #[test]
     fn test_prune_row_groups() {
         let part = prepare(vec![
-            ("a", 0, (0, 50), 1),
-            ("a", 1, (0, 50), 1),
+            ("a", 0, (0, 40), 1),
+            ("a", 1, (0, 60), 1),
             ("b", 0, (0, 100), 2),
             ("b", 1, (100, 180), 3),
             ("b", 1, (180, 210), 4),
         ]);
 
         check_prune_row_group(&part, None, 310);
+
+        check_prune_row_group(
+            &part,
+            Some(Predicate::new(vec![
+                datafusion_expr::col("k0").eq(datafusion_expr::lit("a")),
+                datafusion_expr::col("k1").eq(datafusion_expr::lit(0u32)),
+            ])),
+            40,
+        );
+
+        check_prune_row_group(
+            &part,
+            Some(Predicate::new(vec![
+                datafusion_expr::col("k0").eq(datafusion_expr::lit("a")),
+                datafusion_expr::col("k1").eq(datafusion_expr::lit(1u32)),
+            ])),
+            60,
+        );
 
         check_prune_row_group(
             &part,
@@ -935,6 +954,15 @@ mod tests {
                 datafusion_expr::col("k1").eq(datafusion_expr::lit(0u32)),
             ])),
             100,
+        );
+
+        /// Predicates over field column can do precise filtering.
+        check_prune_row_group(
+            &part,
+            Some(Predicate::new(vec![
+                datafusion_expr::col("v0").eq(datafusion_expr::lit(150i64))
+            ])),
+            1,
         );
     }
 }
