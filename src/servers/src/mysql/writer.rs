@@ -21,7 +21,7 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::{debug, error};
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
-use datatypes::types::vector_type_value_to_string;
+use datatypes::types::{json_type_value_to_string, vector_type_value_to_string};
 use futures::StreamExt;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
@@ -212,8 +212,10 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Float64(v) => row_writer.write_col(v.0)?,
                     Value::String(v) => row_writer.write_col(v.as_utf8())?,
                     Value::Binary(v) => match column.data_type {
-                        ConcreteDataType::Json(_) => {
-                            row_writer.write_col(jsonb::to_string(&v))?;
+                        ConcreteDataType::Json(j) => {
+                            let s = json_type_value_to_string(&v, &j.format)
+                                .context(ConvertSqlValueSnafu)?;
+                            row_writer.write_col(s)?;
                         }
                         ConcreteDataType::Vector(d) => {
                             let s = vector_type_value_to_string(&v, d.dim)

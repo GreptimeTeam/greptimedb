@@ -268,7 +268,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::UInt64(_) => ColumnDataType::Uint64,
             ConcreteDataType::Float32(_) => ColumnDataType::Float32,
             ConcreteDataType::Float64(_) => ColumnDataType::Float64,
-            ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => ColumnDataType::Binary,
+            ConcreteDataType::Binary(_) => ColumnDataType::Binary,
             ConcreteDataType::String(_) => ColumnDataType::String,
             ConcreteDataType::Date(_) => ColumnDataType::Date,
             ConcreteDataType::DateTime(_) => ColumnDataType::Datetime,
@@ -290,6 +290,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 IntervalType::MonthDayNano(_) => ColumnDataType::IntervalMonthDayNano,
             },
             ConcreteDataType::Decimal128(_) => ColumnDataType::Decimal128,
+            ConcreteDataType::Json(_) => ColumnDataType::Json,
             ConcreteDataType::Vector(_) => ColumnDataType::Vector,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
@@ -309,16 +310,9 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                         })),
                     })
             }
-            ColumnDataType::Binary => {
-                if datatype == ConcreteDataType::json_datatype() {
-                    // Json is the same as  binary in proto. The extension marks the binary in proto is actually a json.
-                    Some(ColumnDataTypeExtension {
-                        type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-                    })
-                } else {
-                    None
-                }
-            }
+            ColumnDataType::Json => datatype.as_json().map(|_| ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+            }),
             ColumnDataType::Vector => {
                 datatype
                     .as_vector()

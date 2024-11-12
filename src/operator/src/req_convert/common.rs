@@ -90,7 +90,7 @@ fn prepare_rows(rows: &mut Option<Rows>) -> Result<()> {
             column.datatype_extension = Some(ColumnDataTypeExtension {
                 type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
             });
-            column.datatype = ColumnDataType::Binary.into();
+            column.datatype = ColumnDataType::Json.into();
         }
 
         for idx in &indexes {
