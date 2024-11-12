@@ -145,10 +145,9 @@ impl MetricEngineInner {
                     .add_column(metadata_region_id, logical_region_id, metadata)
                     .await?;
             } else {
-                // TODO(discord9): consider make this a hard error?
                 error!(
-                    "Column {} not found after altering physical region",
-                    col.column_metadata.column_schema.name
+                    "Column {} not found after altering physical region {:?}",
+                    col.column_metadata.column_schema.name, data_region_id
                 );
 
                 ColumnNotFoundAfterAlterSnafu {

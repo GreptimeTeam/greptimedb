@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use common_time::Timestamp;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -302,6 +302,7 @@ impl MetricEngineInner {
             .map(|metadata| (metadata.column_schema.name.clone(), metadata))
             .collect::<HashMap<_, _>>();
 
+        // check to make sure column ids are not mismatched
         for col in new_columns.iter_mut() {
             let column_metadata = after_alter_physical_schema_map
                 .get(&col.column_schema.name)
@@ -309,7 +310,16 @@ impl MetricEngineInner {
                     name: &col.column_schema.name,
                     region_id: data_region_id,
                 })?;
-            *col = column_metadata.clone();
+            if col != column_metadata {
+                warn!(
+                    "Add already existing columns with different column metadata to physical region({:?}): new column={:?}, old column={:?}", 
+                    data_region_id,
+                    col,
+                    column_metadata
+                );
+                // update to correct metadata
+                *col = column_metadata.clone();
+            }
         }
 
         Ok(())
