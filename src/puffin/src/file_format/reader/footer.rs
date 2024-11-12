@@ -14,7 +14,7 @@
 
 use std::io::{self, Cursor, SeekFrom};
 
-use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
+use common_base::range_read::RangeReader;
 use snafu::{ensure, ResultExt};
 
 use crate::error::{
@@ -72,24 +72,20 @@ impl<R: io::Read + io::Seek> FooterParser<R> {
     }
 }
 
-impl<R: AsyncRead + AsyncSeek + Unpin> FooterParser<R> {
+impl<R: RangeReader> FooterParser<R> {
     /// Parses the footer from the IO source in a asynchronous manner.
     pub async fn parse_async(&mut self) -> Result<FileMetadata> {
         let mut parser = StageParser::new(self.file_size);
 
         let mut buf = vec![];
         while let Some(byte_to_read) = parser.next_to_read() {
+            buf.clear();
+            let range = byte_to_read.offset..byte_to_read.offset + byte_to_read.size;
             self.source
-                .seek(SeekFrom::Start(byte_to_read.offset))
+                .read_into(range, &mut buf)
                 .await
-                .context(SeekSnafu)?;
-            let size = byte_to_read.size as usize;
-
-            buf.resize(size, 0);
-            let buf = &mut buf[..size];
-
-            self.source.read_exact(buf).await.context(ReadSnafu)?;
-            parser.consume_bytes(buf)?;
+                .context(ReadSnafu)?;
+            parser.consume_bytes(&buf)?;
         }
 
         parser.finish()
