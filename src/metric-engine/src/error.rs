@@ -181,6 +181,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Column {} not found after alter", column_name))]
+    ColumnNotFoundAfterAlter {
+        column_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid region metadata"))]
     InvalidMetadata {
         source: store_api::metadata::MetadataError,
@@ -251,7 +258,8 @@ impl ErrorExt for Error {
             | SerializeColumnMetadata { .. }
             | DecodeColumnValue { .. }
             | ParseRegionId { .. }
-            | InvalidMetadata { .. } => StatusCode::Unexpected,
+            | InvalidMetadata { .. }
+            | ColumnNotFoundAfterAlter { .. } => StatusCode::Unexpected,
 
             PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
                 StatusCode::RegionNotFound

@@ -23,7 +23,8 @@ use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
+    ColumnNotFoundAfterAlterSnafu, ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu, Result,
+    SerializeColumnMetadataSnafu,
 };
 use crate::metrics::FORBIDDEN_OPERATION_COUNT;
 use crate::utils::{to_data_region_id, to_metadata_region_id};
@@ -146,9 +147,14 @@ impl MetricEngineInner {
             } else {
                 // TODO(discord9): consider make this a hard error?
                 error!(
-                    "Column {} is not found in physical region",
+                    "Column {} not found after altering physical region",
                     col.column_metadata.column_schema.name
                 );
+
+                ColumnNotFoundAfterAlterSnafu {
+                    column_name: col.column_metadata.column_schema.name.clone(),
+                }
+                .fail()?;
             }
         }
 
