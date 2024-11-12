@@ -14,6 +14,8 @@
 
 //! Implementation of retrieving logical region's region metadata.
 
+use std::collections::HashMap;
+
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::RegionId;
 
@@ -46,23 +48,36 @@ impl MetricEngineInner {
             .read_lock_logical_region(logical_region_id)
             .await;
         // Load logical and physical columns, and intersect them to get logical column metadata.
-        let mut logical_column_metadata = self
+        let logical_column_metadata = self
             .metadata_region
             .logical_columns(physical_region_id, logical_region_id)
             .await?
             .into_iter()
             .map(|(_, column_metadata)| column_metadata)
             .collect::<Vec<_>>();
-        // Sort columns on column name to ensure the order
-        logical_column_metadata
-            .sort_unstable_by(|c1, c2| c1.column_schema.name.cmp(&c2.column_schema.name));
-        // Update cache
-        self.state
-            .write()
-            .unwrap()
-            .add_logical_columns(logical_region_id, logical_column_metadata.clone());
 
-        Ok(logical_column_metadata)
+        // Update cache
+        let mut mutable_state = self.state.write().unwrap();
+        // Merge with existing cached columns.
+        let existing_columns = mutable_state
+            .logical_columns()
+            .get(&logical_region_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter();
+        let mut dedup_columns = logical_column_metadata
+            .into_iter()
+            .chain(existing_columns)
+            .map(|c| (c.column_id, c))
+            .collect::<HashMap<_, _>>()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        // Sort columns on column name to ensure the order
+        dedup_columns.sort_unstable_by(|c1, c2| c1.column_schema.name.cmp(&c2.column_schema.name));
+        mutable_state.set_logical_columns(logical_region_id, dedup_columns.clone());
+
+        Ok(dedup_columns)
     }
 
     /// Load logical column names of a logical region.

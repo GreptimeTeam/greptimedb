@@ -19,9 +19,10 @@ use std::str::FromStr;
 use arrow::datatypes::Field;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
+use sqlparser_derive::{Visit, VisitMut};
 
 use crate::data_type::{ConcreteDataType, DataType};
-use crate::error::{self, Error, ParseExtendedTypeSnafu, Result};
+use crate::error::{self, Error, InvalidFulltextOptionSnafu, ParseExtendedTypeSnafu, Result};
 use crate::schema::constraint::ColumnDefaultConstraint;
 use crate::schema::TYPE_KEY;
 use crate::value::Value;
@@ -36,6 +37,13 @@ pub const COMMENT_KEY: &str = "greptime:storage:comment";
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 /// Key used to store fulltext options in arrow field's metadata.
 pub const FULLTEXT_KEY: &str = "greptime:fulltext";
+/// Key used to store whether the column has inverted index in arrow field's metadata.
+pub const INVERTED_INDEX_KEY: &str = "greptime:inverted_index";
+
+/// Keys used in fulltext options
+pub const COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE: &str = "enable";
+pub const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
+pub const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
 
 /// Schema of a column, used as an immutable struct.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +140,24 @@ impl ColumnSchema {
             let _ = self.metadata.remove(TIME_INDEX_KEY);
         }
         self
+    }
+
+    pub fn set_inverted_index(mut self, value: bool) -> Self {
+        let _ = self
+            .metadata
+            .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
+        self
+    }
+
+    pub fn is_inverted_indexed(&self) -> bool {
+        self.metadata
+            .get(INVERTED_INDEX_KEY)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    pub fn has_inverted_index_key(&self) -> bool {
+        self.metadata.contains_key(INVERTED_INDEX_KEY)
     }
 
     /// Set default constraint.
@@ -264,6 +290,14 @@ impl ColumnSchema {
         );
         Ok(self)
     }
+
+    pub fn set_fulltext_options(&mut self, options: &FulltextOptions) -> Result<()> {
+        self.metadata.insert(
+            FULLTEXT_KEY.to_string(),
+            serde_json::to_string(options).context(error::SerializeSnafu)?,
+        );
+        Ok(())
+    }
 }
 
 /// Column extended type set in column schema's metadata.
@@ -368,7 +402,7 @@ impl TryFrom<&ColumnSchema> for Field {
 }
 
 /// Fulltext options for a column.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
 #[serde(rename_all = "kebab-case")]
 pub struct FulltextOptions {
     /// Whether the fulltext index is enabled.
@@ -381,8 +415,71 @@ pub struct FulltextOptions {
     pub case_sensitive: bool,
 }
 
+impl fmt::Display for FulltextOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "enable={}", self.enable)?;
+        if self.enable {
+            write!(f, ", analyzer={}", self.analyzer)?;
+            write!(f, ", case_sensitive={}", self.case_sensitive)?;
+        }
+        Ok(())
+    }
+}
+
+impl TryFrom<HashMap<String, String>> for FulltextOptions {
+    type Error = Error;
+
+    fn try_from(options: HashMap<String, String>) -> Result<Self> {
+        let mut fulltext_options = FulltextOptions {
+            enable: true,
+            ..Default::default()
+        };
+
+        if let Some(enable) = options.get(COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE) {
+            match enable.to_ascii_lowercase().as_str() {
+                "true" => fulltext_options.enable = true,
+                "false" => fulltext_options.enable = false,
+                _ => {
+                    return InvalidFulltextOptionSnafu {
+                        msg: format!("{enable}, expected: 'true' | 'false'"),
+                    }
+                    .fail();
+                }
+            }
+        };
+
+        if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
+            match analyzer.to_ascii_lowercase().as_str() {
+                "english" => fulltext_options.analyzer = FulltextAnalyzer::English,
+                "chinese" => fulltext_options.analyzer = FulltextAnalyzer::Chinese,
+                _ => {
+                    return InvalidFulltextOptionSnafu {
+                        msg: format!("{analyzer}, expected: 'English' | 'Chinese'"),
+                    }
+                    .fail();
+                }
+            }
+        };
+
+        if let Some(case_sensitive) = options.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
+            match case_sensitive.to_ascii_lowercase().as_str() {
+                "true" => fulltext_options.case_sensitive = true,
+                "false" => fulltext_options.case_sensitive = false,
+                _ => {
+                    return InvalidFulltextOptionSnafu {
+                        msg: format!("{case_sensitive}, expected: 'true' | 'false'"),
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        Ok(fulltext_options)
+    }
+}
+
 /// Fulltext analyzer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
 pub enum FulltextAnalyzer {
     #[default]
     English,

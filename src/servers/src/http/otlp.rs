@@ -24,6 +24,7 @@ use axum::response::IntoResponse;
 use axum::{async_trait, Extension};
 use bytes::Bytes;
 use common_telemetry::tracing;
+use http::HeaderMap;
 use opentelemetry_proto::tonic::collector::logs::v1::{
     ExportLogsServiceRequest, ExportLogsServiceResponse,
 };
@@ -41,11 +42,13 @@ use snafu::prelude::*;
 
 use super::header::constants::GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME;
 use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
-use crate::error::{self, PipelineSnafu, Result};
+use crate::error::{self, InvalidUtf8ValueSnafu, PipelineSnafu, Result};
 use crate::http::header::constants::{
     GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME, GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
-    GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
+    GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
 };
+use crate::otlp::logs::LOG_TABLE_NAME;
+use crate::otlp::trace::TRACE_TABLE_NAME;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
 #[axum_macros::debug_handler]
@@ -80,10 +83,18 @@ pub async fn metrics(
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "traces"))]
 pub async fn traces(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
+    header: HeaderMap,
     Extension(mut query_ctx): Extension<QueryContext>,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportTraceServiceResponse>> {
     let db = query_ctx.get_db_string();
+    let table_name = extract_string_value_from_header(
+        &header,
+        GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
+        Some(TRACE_TABLE_NAME),
+    )?
+    // safety here, we provide default value for table_name
+    .unwrap();
     query_ctx.set_channel(Channel::Otlp);
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
@@ -92,7 +103,7 @@ pub async fn traces(
     let request =
         ExportTraceServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
     handler
-        .traces(request, query_ctx)
+        .traces(request, table_name, query_ctx)
         .await
         .map(|o| OtlpResponse {
             resp_body: ExportTraceServiceResponse {
@@ -107,17 +118,31 @@ pub struct PipelineInfo {
     pub pipeline_version: Option<String>,
 }
 
-fn pipeline_header_error(
-    header: &HeaderValue,
-    key: &str,
-) -> StdResult<String, (http::StatusCode, String)> {
-    let header_utf8 = str::from_utf8(header.as_bytes());
-    match header_utf8 {
-        Ok(s) => Ok(s.to_string()),
-        Err(_) => Err((
+fn parse_header_value_to_string(header: &HeaderValue) -> Result<String> {
+    String::from_utf8(header.as_bytes().to_vec()).context(InvalidUtf8ValueSnafu)
+}
+
+fn extract_string_value_from_header(
+    headers: &HeaderMap,
+    header: &str,
+    default_table_name: Option<&str>,
+) -> Result<Option<String>> {
+    let table_name = headers.get(header);
+    match table_name {
+        Some(name) => parse_header_value_to_string(name).map(Some),
+        None => match default_table_name {
+            Some(name) => Ok(Some(name.to_string())),
+            None => Ok(None),
+        },
+    }
+}
+
+fn utf8_error(header_name: &str) -> impl Fn(error::Error) -> (StatusCode, String) + use<'_> {
+    move |_| {
+        (
             StatusCode::BAD_REQUEST,
-            format!("`{}` header is not valid UTF-8 string type.", key),
-        )),
+            format!("`{}` header is not valid UTF-8 string type.", header_name),
+        )
     }
 }
 
@@ -129,28 +154,27 @@ where
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let pipeline_name = parts.headers.get(GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME);
-        let pipeline_version = parts.headers.get(GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME);
+        let headers = &parts.headers;
+        let pipeline_name =
+            extract_string_value_from_header(headers, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME, None)
+                .map_err(utf8_error(GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME))?;
+        let pipeline_version = extract_string_value_from_header(
+            headers,
+            GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
+            None,
+        )
+        .map_err(utf8_error(GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME))?;
         match (pipeline_name, pipeline_version) {
             (Some(name), Some(version)) => Ok(PipelineInfo {
-                pipeline_name: Some(pipeline_header_error(
-                    name,
-                    GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
-                )?),
-                pipeline_version: Some(pipeline_header_error(
-                    version,
-                    GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
-                )?),
+                pipeline_name: Some(name),
+                pipeline_version: Some(version),
             }),
             (None, _) => Ok(PipelineInfo {
                 pipeline_name: None,
                 pipeline_version: None,
             }),
             (Some(name), None) => Ok(PipelineInfo {
-                pipeline_name: Some(pipeline_header_error(
-                    name,
-                    GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
-                )?),
+                pipeline_name: Some(name),
                 pipeline_version: None,
             }),
         }
@@ -169,16 +193,16 @@ where
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let table_name = parts.headers.get(GREPTIME_LOG_TABLE_NAME_HEADER_NAME);
+        let table_name = extract_string_value_from_header(
+            &parts.headers,
+            GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
+            Some(LOG_TABLE_NAME),
+        )
+        .map_err(utf8_error(GREPTIME_LOG_TABLE_NAME_HEADER_NAME))?
+        // safety here, we provide default value for table_name
+        .unwrap();
 
-        match table_name {
-            Some(name) => Ok(TableInfo {
-                table_name: pipeline_header_error(name, GREPTIME_LOG_TABLE_NAME_HEADER_NAME)?,
-            }),
-            None => Ok(TableInfo {
-                table_name: "opentelemetry_logs".to_string(),
-            }),
-        }
+        Ok(TableInfo { table_name })
     }
 }
 
@@ -192,16 +216,19 @@ where
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let select = parts.headers.get(GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME);
+        let select = extract_string_value_from_header(
+            &parts.headers,
+            GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME,
+            None,
+        )
+        .map_err(utf8_error(GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME))?;
 
         match select {
             Some(name) => {
-                let select_header =
-                    pipeline_header_error(name, GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME)?;
-                if select_header.is_empty() {
+                if name.is_empty() {
                     Ok(SelectInfoWrapper(Default::default()))
                 } else {
-                    Ok(SelectInfoWrapper(SelectInfo::from(select_header)))
+                    Ok(SelectInfoWrapper(SelectInfo::from(name)))
                 }
             }
             None => Ok(SelectInfoWrapper(Default::default())),

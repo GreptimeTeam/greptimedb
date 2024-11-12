@@ -12,19 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
-use datatypes::schema::{FulltextAnalyzer, FulltextOptions};
+use datatypes::schema::FulltextOptions;
 use itertools::Itertools;
+use snafu::ResultExt;
 use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::ast::{ColumnDef, Ident, ObjectName, TableConstraint, Value as SqlValue};
-use crate::error::{FulltextInvalidOptionSnafu, Result};
+use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
+use crate::error::{Result, SetFulltextOptionSnafu};
 use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
-use crate::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
@@ -53,31 +54,34 @@ macro_rules! format_list_comma {
 }
 
 fn format_table_constraint(constraints: &[TableConstraint]) -> String {
-    constraints
-        .iter()
-        .map(|c| {
-            if is_time_index(c) {
-                let TableConstraint::Unique { columns, .. } = c else {
-                    unreachable!()
-                };
-
-                format_indent!("{}TIME INDEX ({})", format_list_comma!(columns))
-            } else {
-                format_indent!(c)
-            }
-        })
-        .join(LINE_SEP)
+    constraints.iter().map(|c| format_indent!(c)).join(LINE_SEP)
 }
 
-/// Time index name, used in table constraints.
-pub const TIME_INDEX: &str = "__time_index";
+/// Table constraint for create table statement.
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+pub enum TableConstraint {
+    /// Primary key constraint.
+    PrimaryKey { columns: Vec<Ident> },
+    /// Time index constraint.
+    TimeIndex { column: Ident },
+    /// Inverted index constraint.
+    InvertedIndex { columns: Vec<Ident> },
+}
 
-#[inline]
-pub fn is_time_index(constraint: &TableConstraint) -> bool {
-    matches!(constraint, TableConstraint::Unique {
-        name: Some(name),
-        ..
-    }  if name.value == TIME_INDEX)
+impl Display for TableConstraint {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TableConstraint::PrimaryKey { columns } => {
+                write!(f, "PRIMARY KEY ({})", format_list_comma!(columns))
+            }
+            TableConstraint::TimeIndex { column } => {
+                write!(f, "TIME INDEX ({})", column)
+            }
+            TableConstraint::InvertedIndex { columns } => {
+                write!(f, "INVERTED INDEX ({})", format_list_comma!(columns))
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
@@ -163,36 +167,8 @@ impl ColumnExtensions {
             return Ok(None);
         };
 
-        let mut fulltext = FulltextOptions {
-            enable: true,
-            ..Default::default()
-        };
-        if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
-            match analyzer.to_ascii_lowercase().as_str() {
-                "english" => fulltext.analyzer = FulltextAnalyzer::English,
-                "chinese" => fulltext.analyzer = FulltextAnalyzer::Chinese,
-                _ => {
-                    return FulltextInvalidOptionSnafu {
-                        msg: format!("{analyzer}, expected: 'English' | 'Chinese'"),
-                    }
-                    .fail();
-                }
-            }
-        }
-        if let Some(case_sensitive) = options.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
-            match case_sensitive.to_ascii_lowercase().as_str() {
-                "true" => fulltext.case_sensitive = true,
-                "false" => fulltext.case_sensitive = false,
-                _ => {
-                    return FulltextInvalidOptionSnafu {
-                        msg: format!("{case_sensitive}, expected: 'true' | 'false'"),
-                    }
-                    .fail();
-                }
-            }
-        }
-
-        Ok(Some(fulltext))
+        let options: HashMap<String, String> = options.clone().into_map();
+        Ok(Some(options.try_into().context(SetFulltextOptionSnafu)?))
     }
 }
 

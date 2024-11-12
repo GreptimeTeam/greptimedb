@@ -17,18 +17,17 @@
 use std::collections::HashMap;
 
 use common_meta::SchemaOptions;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef, COMMENT_KEY};
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnSchema, SchemaRef, COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
+    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COMMENT_KEY,
+};
 use humantime::format_duration;
 use snafu::ResultExt;
-use sql::ast::{
-    ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName, TableConstraint,
-};
+use sql::ast::{ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName};
 use sql::dialect::GreptimeDbDialect;
 use sql::parser::ParserContext;
-use sql::statements::create::{Column, ColumnExtensions, CreateTable, TIME_INDEX};
+use sql::statements::create::{Column, ColumnExtensions, CreateTable, TableConstraint};
 use sql::statements::{self, OptionMap};
-use sql::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
-use sqlparser::ast::KeyOrIndexDisplay;
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY};
@@ -140,14 +139,8 @@ fn create_table_constraints(
     let mut constraints = Vec::with_capacity(2);
     if let Some(timestamp_column) = schema.timestamp_column() {
         let column_name = &timestamp_column.name;
-        constraints.push(TableConstraint::Unique {
-            name: Some(TIME_INDEX.into()),
-            columns: vec![Ident::with_quote(quote_style, column_name)],
-            characteristics: None,
-            index_name: None,
-            index_type_display: KeyOrIndexDisplay::None,
-            index_type: None,
-            index_options: vec![],
+        constraints.push(TableConstraint::TimeIndex {
+            column: Ident::with_quote(quote_style, column_name),
         });
     }
     if !table_meta.primary_key_indices.is_empty() {
@@ -162,13 +155,22 @@ fn create_table_constraints(
                 }
             })
             .collect();
-        constraints.push(TableConstraint::PrimaryKey {
-            name: None,
-            columns,
-            characteristics: None,
-            index_name: None,
-            index_type: None,
-            index_options: vec![],
+        constraints.push(TableConstraint::PrimaryKey { columns });
+    }
+
+    let inverted_index_set = schema
+        .column_schemas()
+        .iter()
+        .any(|c| c.has_inverted_index_key());
+    if inverted_index_set {
+        let inverted_index_cols = schema
+            .column_schemas()
+            .iter()
+            .filter(|c| c.is_inverted_indexed())
+            .map(|c| Ident::with_quote(quote_style, &c.name))
+            .collect::<Vec<_>>();
+        constraints.push(TableConstraint::InvertedIndex {
+            columns: inverted_index_cols,
         });
     }
 
@@ -229,7 +231,8 @@ mod tests {
     fn test_show_create_table_sql() {
         let schema = vec![
             ColumnSchema::new("id", ConcreteDataType::uint32_datatype(), true),
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true)
+                .set_inverted_index(true),
             ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("disk", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("msg", ConcreteDataType::string_datatype(), true)
@@ -295,7 +298,8 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
   "msg" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'false'),
   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(),
   TIME INDEX ("ts"),
-  PRIMARY KEY ("id", "host")
+  PRIMARY KEY ("id", "host"),
+  INVERTED INDEX ("host")
 )
 ENGINE=mito
 "#,

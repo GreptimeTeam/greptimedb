@@ -18,15 +18,16 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, ChangeTableOptions,
-    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropColumn, DropColumns, ExpireAfter, RenameTable, SemanticType, TableName,
+    AddColumn, AddColumns, AlterExpr, Analyzer, ChangeColumnFulltext, ChangeColumnType,
+    ChangeColumnTypes, ChangeTableOptions, ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr,
+    CreateTableExpr, CreateViewExpr, DropColumn, DropColumns, ExpireAfter, RenameTable,
+    SemanticType, TableName,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
-use datatypes::schema::{ColumnSchema, COMMENT_KEY};
+use datatypes::schema::{ColumnSchema, FulltextAnalyzer, COMMENT_KEY};
 use file_engine::FileOptions;
 use query::sql::{
     check_file_to_table_schema_compatibility, file_column_schemas_to_table,
@@ -35,10 +36,10 @@ use query::sql::{
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::{ColumnOption, TableConstraint};
+use sql::ast::ColumnOption;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::create::{
-    Column as SqlColumn, CreateExternalTable, CreateFlow, CreateTable, CreateView, TIME_INDEX,
+    Column as SqlColumn, CreateExternalTable, CreateFlow, CreateTable, CreateView, TableConstraint,
 };
 use sql::statements::{
     column_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
@@ -130,8 +131,14 @@ pub(crate) async fn create_external_expr(
         // expanded form
         let time_index = find_time_index(&create.constraints)?;
         let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
-        let column_schemas =
-            columns_to_column_schemas(&create.columns, &time_index, Some(&query_ctx.timezone()))?;
+        let inverted_index_cols = find_inverted_index_cols(&create.columns, &create.constraints)?;
+        let column_schemas = columns_to_column_schemas(
+            &create.columns,
+            &time_index,
+            &inverted_index_cols,
+            &primary_keys,
+            Some(&query_ctx.timezone()),
+        )?;
         (time_index, primary_keys, column_schemas)
     } else {
         // inferred form
@@ -186,6 +193,7 @@ pub fn create_to_expr(
     );
 
     let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
+    let inverted_index_cols = find_inverted_index_cols(&create.columns, &create.constraints)?;
 
     let expr = CreateTableExpr {
         catalog_name,
@@ -196,6 +204,7 @@ pub fn create_to_expr(
             &create.columns,
             &time_index,
             &primary_keys,
+            &inverted_index_cols,
             Some(&query_ctx.timezone()),
         )?,
         time_index,
@@ -304,9 +313,9 @@ fn find_primary_keys(
     let constraints_pk = constraints
         .iter()
         .filter_map(|constraint| match constraint {
-            TableConstraint::PrimaryKey {
-                name: _, columns, ..
-            } => Some(columns.iter().map(|ident| ident.value.clone())),
+            TableConstraint::PrimaryKey { columns, .. } => {
+                Some(columns.iter().map(|ident| ident.value.clone()))
+            }
             _ => None,
         })
         .flatten()
@@ -329,20 +338,9 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
     let time_index = constraints
         .iter()
         .filter_map(|constraint| match constraint {
-            TableConstraint::Unique {
-                name: Some(name),
-                columns,
-                ..
-            } => {
-                if name.value == TIME_INDEX {
-                    Some(columns.iter().map(|ident| &ident.value))
-                } else {
-                    None
-                }
-            }
+            TableConstraint::TimeIndex { column, .. } => Some(&column.value),
             _ => None,
         })
-        .flatten()
         .collect::<Vec<&String>>();
     ensure!(
         time_index.len() == 1,
@@ -353,25 +351,70 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
     Ok(time_index.first().unwrap().to_string())
 }
 
+/// Finds the inverted index columns from the constraints. If no inverted index
+/// columns are provided in the constraints, return `None`.
+fn find_inverted_index_cols(
+    columns: &[SqlColumn],
+    constraints: &[TableConstraint],
+) -> Result<Option<Vec<String>>> {
+    let inverted_index_cols = constraints.iter().find_map(|constraint| {
+        if let TableConstraint::InvertedIndex { columns } = constraint {
+            Some(
+                columns
+                    .iter()
+                    .map(|ident| ident.value.clone())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        }
+    });
+
+    let Some(inverted_index_cols) = inverted_index_cols else {
+        return Ok(None);
+    };
+
+    for col in &inverted_index_cols {
+        if !columns.iter().any(|c| c.name().value == *col) {
+            return InvalidSqlSnafu {
+                err_msg: format!("inverted index column `{}` not found in column list", col),
+            }
+            .fail();
+        }
+    }
+
+    Ok(Some(inverted_index_cols))
+}
+
 fn columns_to_expr(
     column_defs: &[SqlColumn],
     time_index: &str,
     primary_keys: &[String],
+    invereted_index_cols: &Option<Vec<String>>,
     timezone: Option<&Timezone>,
 ) -> Result<Vec<api::v1::ColumnDef>> {
-    let column_schemas = columns_to_column_schemas(column_defs, time_index, timezone)?;
+    let column_schemas = columns_to_column_schemas(
+        column_defs,
+        time_index,
+        invereted_index_cols,
+        primary_keys,
+        timezone,
+    )?;
     column_schemas_to_defs(column_schemas, primary_keys)
 }
 
 fn columns_to_column_schemas(
     columns: &[SqlColumn],
     time_index: &str,
+    invereted_index_cols: &Option<Vec<String>>,
+    primary_keys: &[String],
     timezone: Option<&Timezone>,
 ) -> Result<Vec<ColumnSchema>> {
     columns
         .iter()
         .map(|c| {
-            column_to_schema(c, c.name().to_string() == time_index, timezone).context(ParseSqlSnafu)
+            column_to_schema(c, time_index, invereted_index_cols, primary_keys, timezone)
+                .context(ParseSqlSnafu)
         })
         .collect::<Result<Vec<ColumnSchema>>>()
 }
@@ -488,6 +531,18 @@ pub(crate) fn to_alter_expr(
                 change_table_options: options.into_iter().map(Into::into).collect(),
             })
         }
+        AlterTableOperation::ChangeColumnFulltext {
+            column_name,
+            options,
+        } => Kind::ChangeColumnFulltext(ChangeColumnFulltext {
+            column_name: column_name.value,
+            enable: options.enable,
+            analyzer: match options.analyzer {
+                FulltextAnalyzer::English => Analyzer::English.into(),
+                FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
+            },
+            case_sensitive: options.case_sensitive,
+        }),
     };
 
     Ok(AlterExpr {

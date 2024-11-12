@@ -459,9 +459,13 @@ pub fn has_primary_key_option(column_def: &ColumnDef) -> bool {
 /// Create a `ColumnSchema` from `Column`.
 pub fn column_to_schema(
     column: &Column,
-    is_time_index: bool,
+    time_index: &str,
+    invereted_index_cols: &Option<Vec<String>>,
+    primary_keys: &[String],
     timezone: Option<&Timezone>,
 ) -> Result<ColumnSchema> {
+    let is_time_index = column.name().value == time_index;
+
     let is_nullable = column
         .options()
         .iter()
@@ -479,6 +483,20 @@ pub fn column_to_schema(
         .context(error::InvalidDefaultSnafu {
             column: &column.name().value,
         })?;
+
+    // To keep compatibility,
+    // 1. if inverted index columns is not set, leave it empty meaning primary key columns will be used
+    // 2. if inverted index columns is set and non-empty, set selected columns to be inverted indexed
+    // 3. if inverted index columns is set and empty, set primary key columns to be non-inverted indexed explicitly
+    if let Some(inverted_index_cols) = invereted_index_cols {
+        if inverted_index_cols.is_empty() {
+            if primary_keys.contains(&column.name().value) {
+                column_schema = column_schema.set_inverted_index(false);
+            }
+        } else if inverted_index_cols.contains(&column.name().value) {
+            column_schema = column_schema.set_inverted_index(true);
+        }
+    }
 
     if let Some(ColumnOption::Comment(c)) = column.options().iter().find_map(|o| {
         if matches!(o.option, ColumnOption::Comment(_)) {
@@ -690,7 +708,9 @@ mod tests {
     use api::v1::ColumnDataType;
     use common_time::timestamp::TimeUnit;
     use common_time::timezone::set_default_timezone;
-    use datatypes::schema::FulltextAnalyzer;
+    use datatypes::schema::{
+        FulltextAnalyzer, COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+    };
     use datatypes::types::BooleanType;
     use datatypes::value::OrderedFloat;
 
@@ -698,7 +718,6 @@ mod tests {
     use crate::ast::TimezoneInfo;
     use crate::statements::create::ColumnExtensions;
     use crate::statements::ColumnOption;
-    use crate::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
         assert_eq!(
@@ -1369,7 +1388,7 @@ mod tests {
             extensions: ColumnExtensions::default(),
         };
 
-        let column_schema = column_to_schema(&column_def, false, None).unwrap();
+        let column_schema = column_to_schema(&column_def, "ts", &None, &[], None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1379,7 +1398,7 @@ mod tests {
         assert!(column_schema.is_nullable());
         assert!(!column_schema.is_time_index());
 
-        let column_schema = column_to_schema(&column_def, true, None).unwrap();
+        let column_schema = column_to_schema(&column_def, "col", &None, &[], None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1408,7 +1427,7 @@ mod tests {
             extensions: ColumnExtensions::default(),
         };
 
-        let column_schema = column_to_schema(&column_def, false, None).unwrap();
+        let column_schema = column_to_schema(&column_def, "ts", &None, &[], None).unwrap();
 
         assert_eq!("col2", column_schema.name);
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
@@ -1442,7 +1461,9 @@ mod tests {
 
         let column_schema = column_to_schema(
             &column,
-            false,
+            "ts",
+            &None,
+            &[],
             Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
         )
         .unwrap();
@@ -1461,7 +1482,7 @@ mod tests {
         );
 
         // without timezone
-        let column_schema = column_to_schema(&column, false, None).unwrap();
+        let column_schema = column_to_schema(&column, "ts", &None, &[], None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1504,7 +1525,7 @@ mod tests {
             },
         };
 
-        let column_schema = column_to_schema(&column, false, None).unwrap();
+        let column_schema = column_to_schema(&column, "ts", &None, &[], None).unwrap();
         assert_eq!("col", column_schema.name);
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
         let fulltext_options = column_schema.fulltext_options().unwrap().unwrap();

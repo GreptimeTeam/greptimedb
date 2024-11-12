@@ -13,9 +13,13 @@
 // limitations under the License.
 
 use std::io;
+use std::ops::Range;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use async_trait::async_trait;
+use bytes::{BufMut, Bytes};
+use common_base::range_read::{Metadata, RangeReader};
 use futures::{AsyncRead, AsyncSeek, AsyncWrite};
 use object_store::ObjectStore;
 use pin_project::pin_project;
@@ -49,6 +53,22 @@ impl InstrumentedStore {
     pub fn with_write_buffer_size(mut self, write_buffer_size: Option<usize>) -> Self {
         self.write_buffer_size = write_buffer_size.filter(|&size| size > 0);
         self
+    }
+
+    /// Returns an [`InstrumentedRangeReader`] for the given path.
+    /// Metrics like the number of bytes read are recorded using the provided `IntCounter`.
+    pub async fn range_reader<'a>(
+        &self,
+        path: &str,
+        read_byte_count: &'a IntCounter,
+        read_count: &'a IntCounter,
+    ) -> Result<InstrumentedRangeReader<'a>> {
+        Ok(InstrumentedRangeReader {
+            store: self.object_store.clone(),
+            path: path.to_string(),
+            read_byte_count,
+            read_count,
+        })
     }
 
     /// Returns an [`InstrumentedAsyncRead`] for the given path.
@@ -233,6 +253,56 @@ impl<W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<'_, W> 
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.project().inner.poll_close(cx)
+    }
+}
+
+/// Implements `RangeReader` for `ObjectStore` and record metrics.
+pub(crate) struct InstrumentedRangeReader<'a> {
+    store: ObjectStore,
+    path: String,
+    read_byte_count: &'a IntCounter,
+    read_count: &'a IntCounter,
+}
+
+#[async_trait]
+impl RangeReader for InstrumentedRangeReader<'_> {
+    async fn metadata(&mut self) -> io::Result<Metadata> {
+        let stat = self.store.stat(&self.path).await?;
+        Ok(Metadata {
+            content_length: stat.content_length(),
+        })
+    }
+
+    async fn read(&mut self, range: Range<u64>) -> io::Result<Bytes> {
+        let buf = self.store.reader(&self.path).await?.read(range).await?;
+        self.read_byte_count.inc_by(buf.len() as _);
+        self.read_count.inc_by(1);
+        Ok(buf.to_bytes())
+    }
+
+    async fn read_into(
+        &mut self,
+        range: Range<u64>,
+        buf: &mut (impl BufMut + Send),
+    ) -> io::Result<()> {
+        let reader = self.store.reader(&self.path).await?;
+        let size = reader.read_into(buf, range).await?;
+        self.read_byte_count.inc_by(size as _);
+        self.read_count.inc_by(1);
+        Ok(())
+    }
+
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+        let bufs = self
+            .store
+            .reader(&self.path)
+            .await?
+            .fetch(ranges.to_owned())
+            .await?;
+        let total_size: usize = bufs.iter().map(|buf| buf.len()).sum();
+        self.read_byte_count.inc_by(total_size as _);
+        self.read_count.inc_by(1);
+        Ok(bufs.into_iter().map(|buf| buf.to_bytes()).collect())
     }
 }
 

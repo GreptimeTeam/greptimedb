@@ -24,7 +24,6 @@ use pipeline::PipelineWay;
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
-use servers::otlp::plugin::TraceParserRef;
 use servers::query_handler::OpenTelemetryProtocolHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -64,6 +63,7 @@ impl OpenTelemetryProtocolHandler for Instance {
     async fn traces(
         &self,
         request: ExportTraceServiceRequest,
+        table_name: String,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
         self.plugins
@@ -77,13 +77,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
-        let (table_name, spans) = match self.plugins.get::<TraceParserRef>() {
-            Some(parser) => (parser.table_name(), parser.parse(request)),
-            None => (
-                otlp::trace::TRACE_TABLE_NAME.to_string(),
-                otlp::trace::parse(request),
-            ),
-        };
+        let spans = otlp::trace::parse(request);
 
         let (requests, rows) = otlp::trace::to_grpc_insert_requests(table_name, spans)?;
 

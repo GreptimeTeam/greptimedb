@@ -16,6 +16,7 @@ use std::fmt::{Debug, Display};
 
 use api::v1;
 use common_query::AddColumnLocation;
+use datatypes::schema::FulltextOptions;
 use itertools::Itertools;
 use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
@@ -75,6 +76,11 @@ pub enum AlterTableOperation {
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
     RenameTable { new_table_name: String },
+    /// `MODIFY COLUMN <column_name> SET FULLTEXT [WITH <options>]`
+    ChangeColumnFulltext {
+        column_name: Ident,
+        options: FulltextOptions,
+    },
 }
 
 impl Display for AlterTableOperation {
@@ -117,6 +123,13 @@ impl Display for AlterTableOperation {
 
                 Ok(())
             }
+            AlterTableOperation::ChangeColumnFulltext {
+                column_name,
+                options,
+            } => write!(
+                f,
+                r#"MODIFY COLUMN {column_name} SET FULLTEXT WITH({options})"#,
+            ),
         }
     }
 }
@@ -222,6 +235,27 @@ ALTER TABLE monitor DROP COLUMN load_15"#,
                 assert_eq!(
                     r#"
 ALTER TABLE monitor RENAME monitor_new"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(enable='true',analyzer='English',case_sensitive='false')";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::Alter { .. });
+
+        match &stmts[0] {
+            Statement::Alter(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(enable=true, analyzer=English, case_sensitive=false)"#,
                     &new_sql
                 );
             }

@@ -12,16 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use common_query::AddColumnLocation;
-use snafu::ResultExt;
+use datatypes::schema::COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE;
+use snafu::{ensure, ResultExt};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::Token;
 
-use crate::error::{self, Result};
+use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
+use crate::parsers::utils::validate_column_fulltext_create_option;
 use crate::statements::alter::{AlterTable, AlterTableOperation, ChangeTableOption};
 use crate::statements::statement::Statement;
+use crate::util::parse_option_string;
+
+fn validate_column_fulltext_alter_option(key: &str) -> bool {
+    key == COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE || validate_column_fulltext_create_option(key)
+}
 
 impl ParserContext<'_> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
@@ -143,12 +152,41 @@ impl ParserContext<'_> {
                 .parse_identifier(false)
                 .context(error::SyntaxSnafu)?,
         );
-        let target_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
 
-        Ok(AlterTableOperation::ChangeColumnType {
-            column_name,
-            target_type,
-        })
+        if self.parser.parse_keyword(Keyword::SET) {
+            self.parser
+                .expect_keyword(Keyword::FULLTEXT)
+                .context(error::SyntaxSnafu)?;
+
+            let options = self
+                .parser
+                .parse_options(Keyword::WITH)
+                .context(error::SyntaxSnafu)?
+                .into_iter()
+                .map(parse_option_string)
+                .collect::<Result<HashMap<String, String>>>()?;
+
+            for key in options.keys() {
+                ensure!(
+                    validate_column_fulltext_alter_option(key),
+                    InvalidColumnOptionSnafu {
+                        name: column_name.to_string(),
+                        msg: format!("invalid FULLTEXT option: {key}"),
+                    }
+                );
+            }
+
+            Ok(AlterTableOperation::ChangeColumnFulltext {
+                column_name,
+                options: options.try_into().context(SetFulltextOptionSnafu)?,
+            })
+        } else {
+            let target_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
+            Ok(AlterTableOperation::ChangeColumnType {
+                column_name,
+                target_type,
+            })
+        }
     }
 }
 
@@ -173,6 +211,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use common_error::ext::ErrorExt;
+    use datatypes::schema::{FulltextAnalyzer, FulltextOptions};
     use sqlparser::ast::{ColumnOption, DataType};
 
     use super::*;
@@ -514,5 +553,59 @@ mod tests {
             ParseOptions::default(),
         )
         .unwrap_err();
+    }
+
+    #[test]
+    fn test_parse_alter_column_fulltext() {
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT WITH(enable='true',analyzer='English',case_sensitive='false')";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        assert_eq!(1, result.len());
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::Alter { .. });
+        match statement {
+            Statement::Alter(alter_table) => {
+                assert_eq!("test_table", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_matches!(
+                    alter_operation,
+                    AlterTableOperation::ChangeColumnFulltext { .. }
+                );
+                match alter_operation {
+                    AlterTableOperation::ChangeColumnFulltext {
+                        column_name,
+                        options,
+                    } => {
+                        assert_eq!("a", column_name.value);
+                        assert_eq!(
+                            FulltextOptions {
+                                enable: true,
+                                analyzer: FulltextAnalyzer::English,
+                                case_sensitive: false
+                            },
+                            *options
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        let invalid_sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT WITH('abcd'='true')";
+        let result = ParserContext::create_with_dialect(
+            invalid_sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap_err();
+        let err = result.to_string();
+        assert_eq!(
+            err,
+            "Invalid column option, column name: a, error: invalid FULLTEXT option: abcd"
+        );
     }
 }

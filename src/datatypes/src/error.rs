@@ -226,6 +226,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Invalid fulltext option: {}", msg))]
+    InvalidFulltextOption {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -245,7 +251,8 @@ impl ErrorExt for Error {
             | InvalidTimestampPrecision { .. }
             | InvalidPrecisionOrScale { .. }
             | InvalidJson { .. }
-            | InvalidVector { .. } => StatusCode::InvalidArguments,
+            | InvalidVector { .. }
+            | InvalidFulltextOption { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
             | CastType { .. }

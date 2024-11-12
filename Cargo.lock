@@ -1934,10 +1934,13 @@ dependencies = [
  "bytes",
  "common-error",
  "common-macro",
+ "common-test-util",
  "futures",
  "paste",
+ "pin-project",
  "serde",
  "snafu 0.8.5",
+ "tokio",
  "toml 0.8.19",
  "zeroize",
 ]
@@ -3325,6 +3328,8 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.5",
+ "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
+ "sqlparser_derive 0.1.1",
 ]
 
 [[package]]
@@ -4578,7 +4583,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/zhongzc/greptime-proto.git?branch=zhongzc%2Fintro-vector-type#078e1bdc1a6b6b04b713cf18b18f08378afec7c2"
+source = "git+https://github.com/zhongzc/greptime-proto.git?branch=zhongzc%2Fintro-vector-type#5a5eef8f623975fe82fb07a4e93ae4e43998cdb9"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -8973,6 +8978,8 @@ dependencies = [
  "auto_impl",
  "base64 0.21.7",
  "bitflags 2.6.0",
+ "bytes",
+ "common-base",
  "common-error",
  "common-macro",
  "common-runtime",
@@ -11655,6 +11662,7 @@ dependencies = [
  "derive_builder 0.12.0",
  "futures",
  "humantime",
+ "prost 0.12.6",
  "serde",
  "serde_json",
  "snafu 0.8.5",

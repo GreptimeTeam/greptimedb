@@ -113,8 +113,6 @@ impl<R: RangeReader> InvertedIndeFooterReader<R> {
 
 #[cfg(test)]
 mod tests {
-    use common_base::range_read::RangeReaderAdapter;
-    use futures::io::Cursor;
     use prost::Message;
 
     use super::*;
@@ -141,10 +139,9 @@ mod tests {
             ..Default::default()
         };
 
-        let payload_buf = create_test_payload(meta);
+        let mut payload_buf = create_test_payload(meta);
         let blob_size = payload_buf.len() as u64;
-        let cursor = RangeReaderAdapter(Cursor::new(payload_buf));
-        let mut reader = InvertedIndeFooterReader::new(cursor, blob_size);
+        let mut reader = InvertedIndeFooterReader::new(&mut payload_buf, blob_size);
 
         let payload_size = reader.read_payload_size().await.unwrap();
         let metas = reader.read_payload(payload_size).await.unwrap();
@@ -164,8 +161,7 @@ mod tests {
         let mut payload_buf = create_test_payload(meta);
         payload_buf.push(0xff); // Add an extra byte to corrupt the footer
         let blob_size = payload_buf.len() as u64;
-        let cursor = RangeReaderAdapter(Cursor::new(payload_buf));
-        let mut reader = InvertedIndeFooterReader::new(cursor, blob_size);
+        let mut reader = InvertedIndeFooterReader::new(&mut payload_buf, blob_size);
 
         let payload_size_result = reader.read_payload_size().await;
         assert!(payload_size_result.is_err());
@@ -180,10 +176,9 @@ mod tests {
             ..Default::default()
         };
 
-        let payload_buf = create_test_payload(meta);
+        let mut payload_buf = create_test_payload(meta);
         let blob_size = payload_buf.len() as u64;
-        let cursor = RangeReaderAdapter(Cursor::new(payload_buf));
-        let mut reader = InvertedIndeFooterReader::new(cursor, blob_size);
+        let mut reader = InvertedIndeFooterReader::new(&mut payload_buf, blob_size);
 
         let payload_size = reader.read_payload_size().await.unwrap();
         let payload_result = reader.read_payload(payload_size).await;

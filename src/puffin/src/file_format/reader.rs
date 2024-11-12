@@ -16,6 +16,7 @@ mod file;
 mod footer;
 
 use async_trait::async_trait;
+use common_base::range_read::RangeReader;
 
 use crate::blob_metadata::BlobMetadata;
 use crate::error::Result;
@@ -38,7 +39,7 @@ pub trait SyncReader<'a> {
 /// `AsyncReader` defines an asynchronous reader for puffin data.
 #[async_trait]
 pub trait AsyncReader<'a> {
-    type Reader: futures::AsyncRead + futures::AsyncSeek;
+    type Reader: RangeReader;
 
     /// Fetches the FileMetadata.
     async fn metadata(&'a mut self) -> Result<FileMetadata>;

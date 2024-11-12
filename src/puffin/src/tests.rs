@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Cursor, Read};
+use std::vec;
 
+use common_base::range_read::{FileReader, RangeReader};
 use futures::io::Cursor as AsyncCursor;
-use futures::AsyncReadExt;
-use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::file_format::reader::{AsyncReader, PuffinFileReader, SyncReader};
 use crate::file_format::writer::{AsyncWriter, Blob, PuffinFileWriter, SyncWriter};
@@ -38,8 +38,8 @@ fn test_read_empty_puffin_sync() {
 async fn test_read_empty_puffin_async() {
     let path = "src/tests/resources/empty-puffin-uncompressed.puffin";
 
-    let file = tokio::fs::File::open(path).await.unwrap();
-    let mut reader = PuffinFileReader::new(file.compat());
+    let reader = FileReader::new(path).await.unwrap();
+    let mut reader = PuffinFileReader::new(reader);
     let metadata = reader.metadata().await.unwrap();
     assert_eq!(metadata.properties.len(), 0);
     assert_eq!(metadata.blobs.len(), 0);
@@ -84,8 +84,8 @@ fn test_sample_metric_data_puffin_sync() {
 async fn test_sample_metric_data_puffin_async() {
     let path = "src/tests/resources/sample-metric-data-uncompressed.puffin";
 
-    let file = tokio::fs::File::open(path).await.unwrap();
-    let mut reader = PuffinFileReader::new(file.compat());
+    let reader = FileReader::new(path).await.unwrap();
+    let mut reader = PuffinFileReader::new(reader);
     let metadata = reader.metadata().await.unwrap();
 
     assert_eq!(metadata.properties.len(), 1);
@@ -104,13 +104,11 @@ async fn test_sample_metric_data_puffin_async() {
     assert_eq!(metadata.blobs[1].length, 83);
 
     let mut some_blob = reader.blob_reader(&metadata.blobs[0]).unwrap();
-    let mut buf = String::new();
-    some_blob.read_to_string(&mut buf).await.unwrap();
-    assert_eq!(buf, "abcdefghi");
+    let buf = read_all_range(&mut some_blob).await;
+    assert_eq!(&buf, b"abcdefghi");
 
     let mut some_other_blob = reader.blob_reader(&metadata.blobs[1]).unwrap();
-    let mut buf = Vec::new();
-    some_other_blob.read_to_end(&mut buf).await.unwrap();
+    let buf = read_all_range(&mut some_other_blob).await;
     let expected = include_bytes!("tests/resources/sample-metric-data.blob");
     assert_eq!(buf, expected);
 }
@@ -162,8 +160,7 @@ async fn test_writer_reader_empty_async() {
         let written_bytes = writer.finish().await.unwrap();
         assert!(written_bytes > 0);
 
-        let mut buf = AsyncCursor::new(buf.into_inner());
-        let mut reader = PuffinFileReader::new(&mut buf);
+        let mut reader = PuffinFileReader::new(buf.into_inner());
         let metadata = reader.metadata().await.unwrap();
 
         assert_eq!(metadata.properties.len(), 1);
@@ -287,8 +284,7 @@ async fn test_writer_reader_async() {
         let written_bytes = writer.finish().await.unwrap();
         assert!(written_bytes > 0);
 
-        let mut buf = AsyncCursor::new(buf.into_inner());
-        let mut reader = PuffinFileReader::new(&mut buf);
+        let mut reader = PuffinFileReader::new(buf.into_inner());
         let metadata = reader.metadata().await.unwrap();
 
         assert_eq!(metadata.properties.len(), 1);
@@ -307,16 +303,20 @@ async fn test_writer_reader_async() {
         assert_eq!(metadata.blobs[1].length, 83);
 
         let mut some_blob = reader.blob_reader(&metadata.blobs[0]).unwrap();
-        let mut buf = Vec::new();
-        some_blob.read_to_end(&mut buf).await.unwrap();
+        let buf = read_all_range(&mut some_blob).await;
         assert_eq!(buf, blob1);
 
         let mut some_other_blob = reader.blob_reader(&metadata.blobs[1]).unwrap();
-        let mut buf = Vec::new();
-        some_other_blob.read_to_end(&mut buf).await.unwrap();
+        let buf = read_all_range(&mut some_other_blob).await;
         assert_eq!(buf, blob2);
     }
 
     test_writer_reader_async(false).await;
     test_writer_reader_async(true).await;
+}
+
+async fn read_all_range(reader: &mut impl RangeReader) -> Vec<u8> {
+    let m = reader.metadata().await.unwrap();
+    let buf = reader.read(0..m.content_length).await.unwrap();
+    buf.to_vec()
 }

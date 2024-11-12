@@ -20,7 +20,9 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
-use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{
+    ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder, SchemaRef,
+};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -203,6 +205,10 @@ impl TableMeta {
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::ChangeTableOptions { options } => self.change_table_options(options),
+            AlterKind::ChangeColumnFulltext {
+                column_name,
+                options,
+            } => self.change_column_fulltext_options(table_name, column_name, options),
         }
     }
 
@@ -225,6 +231,80 @@ impl TableMeta {
         builder.options(new_options);
 
         Ok(builder)
+    }
+
+    /// Creates a [TableMetaBuilder] with modified column fulltext options.
+    fn change_column_fulltext_options(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        options: &FulltextOptions,
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+
+        let column = &table_schema
+            .column_schema_by_name(column_name)
+            .with_context(|| error::ColumnNotExistsSnafu {
+                column_name,
+                table_name,
+            })?;
+
+        ensure!(
+            column.data_type.is_string(),
+            error::InvalidColumnOptionSnafu {
+                column_name,
+                msg: "FULLTEXT index only supports string type",
+            }
+        );
+
+        let current_fulltext_options = column
+            .fulltext_options()
+            .context(error::SetFulltextOptionsSnafu { column_name })?;
+
+        ensure!(
+            !(current_fulltext_options.is_some_and(|o| o.enable) && options.enable),
+            error::InvalidColumnOptionSnafu {
+                column_name,
+                msg: "FULLTEXT index options already enabled",
+            }
+        );
+
+        let mut columns = Vec::with_capacity(table_schema.column_schemas().len());
+        for column_schema in table_schema.column_schemas() {
+            if column_schema.name == column_name {
+                let mut new_column_schema = column_schema.clone();
+                new_column_schema
+                    .set_fulltext_options(options)
+                    .context(error::SetFulltextOptionsSnafu { column_name })?;
+                columns.push(new_column_schema);
+            } else {
+                columns.push(column_schema.clone());
+            }
+        }
+
+        // TODO(CookiePieWw): This part for all alter table operations is similar. We can refactor it.
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            .version(table_schema.version() + 1);
+
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!(
+                "Table {table_name} cannot change fulltext options for column {column_name}",
+            ),
+        })?;
+
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
     }
 
     /// Allocate a new column for the table.
@@ -1326,5 +1406,59 @@ mod tests {
         );
         assert_eq!(&[0, 1], &new_meta.primary_key_indices[..]);
         assert_eq!(&[2, 3, 4], &new_meta.value_indices[..]);
+    }
+
+    #[test]
+    fn test_alter_column_fulltext_options() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::ChangeColumnFulltext {
+            column_name: "col1".to_string(),
+            options: FulltextOptions::default(),
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .err()
+            .unwrap();
+        assert_eq!(
+            "Invalid column option, column name: col1, error: FULLTEXT index only supports string type",
+            err.to_string()
+        );
+
+        // Add a string column and make it fulltext indexed
+        let new_meta = add_columns_to_meta_with_location(&meta);
+        assert_eq!(meta.region_numbers, new_meta.region_numbers);
+
+        let alter_kind = AlterKind::ChangeColumnFulltext {
+            column_name: "my_tag_first".to_string(),
+            options: FulltextOptions {
+                enable: true,
+                analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                case_sensitive: true,
+            },
+        };
+        let new_meta = new_meta
+            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .unwrap()
+            .build()
+            .unwrap();
+        let column_schema = new_meta
+            .schema
+            .column_schema_by_name("my_tag_first")
+            .unwrap();
+        let fulltext_options = column_schema.fulltext_options().unwrap().unwrap();
+        assert!(fulltext_options.enable);
+        assert_eq!(
+            datatypes::schema::FulltextAnalyzer::Chinese,
+            fulltext_options.analyzer
+        );
+        assert!(fulltext_options.case_sensitive);
     }
 }

@@ -22,7 +22,8 @@ mod tests;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use futures::{AsyncRead, AsyncSeek};
+use common_base::range_read::RangeReader;
+use futures::AsyncRead;
 
 use crate::blob_metadata::CompressionCodec;
 use crate::error::Result;
@@ -94,7 +95,7 @@ pub trait PuffinReader {
 #[async_trait]
 #[auto_impl::auto_impl(Arc)]
 pub trait BlobGuard {
-    type Reader: AsyncRead + AsyncSeek + Unpin;
+    type Reader: RangeReader;
     async fn reader(&self) -> Result<Self::Reader>;
 }
 
