@@ -73,7 +73,7 @@ impl BulkPart {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> Result<BoxedBatchIterator> {
+    ) -> Result<Option<BoxedBatchIterator>> {
         let read_format = self.build_read_format(&projection);
 
         // use predicate to find row groups to read.
@@ -82,6 +82,11 @@ impl BulkPart {
         } else {
             (0..self.metadata.parquet_metadata.num_row_groups()).collect()
         };
+
+        if row_groups_to_read.is_empty() {
+            // All row groups are filtered.
+            return Ok(None);
+        }
 
         let mut filters = if let Some(predicate) = predicate {
             predicate
@@ -112,7 +117,7 @@ impl BulkPart {
             self.metadata.parquet_metadata.clone(),
             self.data.clone(),
         )?;
-        Ok(Box::new(iter) as BoxedBatchIterator)
+        Ok(Some(Box::new(iter) as BoxedBatchIterator))
     }
 
     fn build_read_format(&self, projection: &Option<&[ColumnId]>) -> ReadFormat {
@@ -511,6 +516,7 @@ fn binary_array_to_dictionary(input: &BinaryArray) -> Result<PrimaryKeyArray> {
 mod tests {
     use std::collections::VecDeque;
 
+    use datafusion_common::ScalarValue;
     use datatypes::prelude::{ScalarVector, Value};
     use datatypes::vectors::{Float64Vector, TimestampMillisecondVector};
 
@@ -860,7 +866,10 @@ mod tests {
         ]);
 
         let projection = &[4];
-        let mut reader = part.read(Some(projection), None).unwrap();
+        let mut reader = part
+            .read(Some(projection), None)
+            .unwrap()
+            .expect("expect at least one row group");
 
         let mut total_rows_read = 0;
         let mut field = vec![];
@@ -899,7 +908,10 @@ mod tests {
     }
 
     fn check_prune_row_group(part: &BulkPart, predicate: Option<Predicate>, expected_rows: usize) {
-        let mut reader = part.read(None, predicate).unwrap();
+        let mut reader = part
+            .read(None, predicate)
+            .unwrap()
+            .expect("expect at least one row group");
         let mut total_rows_read = 0;
         for res in reader {
             let batch = res.unwrap();
@@ -918,6 +930,16 @@ mod tests {
             ("b", 1, (100, 180), 3),
             ("b", 1, (180, 210), 4),
         ]);
+
+        assert!(part
+            .read(
+                None,
+                Some(Predicate::new(vec![datafusion_expr::col("ts").eq(
+                    datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None))
+                ),]))
+            )
+            .unwrap()
+            .is_none());
 
         check_prune_row_group(&part, None, 310);
 
