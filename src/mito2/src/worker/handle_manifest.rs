@@ -76,6 +76,50 @@ impl RegionEditQueue {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Handles region change result.
+    pub(crate) async fn handle_manifest_region_change_result(
+        &mut self,
+        change_result: RegionChangeResult,
+    ) {
+        let region = match self.regions.get_region(change_result.region_id) {
+            Some(region) => region,
+            None => {
+                self.reject_region_stalled_requests(&change_result.region_id);
+                change_result.sender.send(
+                    RegionNotFoundSnafu {
+                        region_id: change_result.region_id,
+                    }
+                    .fail(),
+                );
+                return;
+            }
+        };
+
+        if change_result.result.is_ok() {
+            // Apply the metadata to region's version.
+            region
+                .version_control
+                .alter_schema(change_result.new_meta, &region.memtable_builder);
+
+            info!(
+                "Region {} is altered, schema version is {}",
+                region.region_id,
+                region.metadata().schema_version
+            );
+        }
+
+        // Sets the region as writable.
+        region.switch_state_to_writable(RegionLeaderState::Altering);
+        // Sends the result.
+        change_result.sender.send(change_result.result.map(|_| 0));
+
+        // Handles the stalled requests.
+        self.handle_region_stalled_requests(&change_result.region_id)
+            .await;
+    }
+}
+
+impl<S> RegionWorkerLoop<S> {
     /// Handles region edit request.
     pub(crate) async fn handle_region_edit(&mut self, request: RegionEditRequest) {
         let region_id = request.region_id;
@@ -266,47 +310,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 );
             }
         });
-    }
-
-    /// Handles region change result.
-    pub(crate) async fn handle_manifest_region_change_result(
-        &mut self,
-        change_result: RegionChangeResult,
-    ) {
-        let region = match self.regions.get_region(change_result.region_id) {
-            Some(region) => region,
-            None => {
-                self.reject_region_stalled_requests(&change_result.region_id);
-                change_result.sender.send(
-                    RegionNotFoundSnafu {
-                        region_id: change_result.region_id,
-                    }
-                    .fail(),
-                );
-                return;
-            }
-        };
-
-        if change_result.result.is_ok() {
-            // Apply the metadata to region's version.
-            region
-                .version_control
-                .alter_schema(change_result.new_meta, &region.memtable_builder);
-
-            info!(
-                "Region {} is altered, schema version is {}",
-                region.region_id,
-                region.metadata().schema_version
-            );
-        }
-
-        // Sets the region as writable.
-        region.switch_state_to_writable(RegionLeaderState::Altering);
-        // Handles the stalled requests.
-        self.handle_region_stalled_requests(&change_result.region_id)
-            .await;
-
-        change_result.sender.send(change_result.result.map(|_| 0));
     }
 }
 

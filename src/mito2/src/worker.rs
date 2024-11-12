@@ -580,7 +580,7 @@ type RequestBuffer = Vec<WorkerRequest>;
 #[derive(Default)]
 pub(crate) struct StalledRequests {
     /// Stalled requests.
-    pub(crate) requests: HashMap<RegionId, Vec<SenderWriteRequest>>,
+    pub(crate) requests: HashMap<RegionId, (usize, Vec<SenderWriteRequest>)>,
     /// Estimated size of all stalled requests.
     pub(crate) estimated_size: usize,
 }
@@ -588,37 +588,24 @@ pub(crate) struct StalledRequests {
 impl StalledRequests {
     /// Appends stalled requests.
     pub(crate) fn append(&mut self, requests: &mut Vec<SenderWriteRequest>) {
-        let size: usize = requests
-            .iter()
-            .map(|req| req.request.estimated_size())
-            .sum();
         for req in requests.drain(..) {
-            self.requests
-                .entry(req.request.region_id)
-                .or_default()
-                .push(req);
+            self.estimated_size += self.push(req);
         }
-
-        self.estimated_size += size;
     }
 
     /// Pushes a stalled request to the buffer.
-    pub(crate) fn push(&mut self, req: SenderWriteRequest) {
-        let size = req.request.estimated_size();
-        self.requests
-            .entry(req.request.region_id)
-            .or_default()
-            .push(req);
-        self.estimated_size += size;
+    pub(crate) fn push(&mut self, req: SenderWriteRequest) -> usize {
+        let (size, requests) = self.requests.entry(req.request.region_id).or_default();
+        let req_size = req.request.estimated_size();
+
+        *size += req_size;
+        requests.push(req);
+        req_size
     }
 
     /// Removes stalled requests of specific region.
     pub(crate) fn remove(&mut self, region_id: &RegionId) -> Vec<SenderWriteRequest> {
-        if let Some(requests) = self.requests.remove(region_id) {
-            let size: usize = requests
-                .iter()
-                .map(|req| req.request.estimated_size())
-                .sum();
+        if let Some((size, requests)) = self.requests.remove(region_id) {
             self.estimated_size -= size;
             requests
         } else {

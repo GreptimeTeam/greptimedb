@@ -124,7 +124,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let stalled = std::mem::take(&mut self.stalled_requests);
         self.stalled_count.sub(stalled.requests.len() as i64);
         // We already stalled these requests, don't stall them again.
-        for (_, requests) in stalled.requests {
+        for (_, (_, requests)) in stalled.requests {
             self.handle_write_requests(requests, false).await;
         }
     }
@@ -133,7 +133,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) fn reject_stalled_requests(&mut self) {
         let stalled = std::mem::take(&mut self.stalled_requests);
         self.stalled_count.sub(stalled.requests.len() as i64);
-        for (_, requests) in stalled.requests {
+        for (_, (_, requests)) in stalled.requests {
             reject_write_requests(requests);
         }
     }
