@@ -117,12 +117,12 @@ datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev
 datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
 derive_builder = "0.12"
 dotenv = "0.15"
-etcd-client = { version = "0.13" }
+etcd-client = "0.13"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "75c5fb569183bb3d0fa1023df9c2214df722b9b1" }
-hex = { version = "0.4" }
+hex = "0.4"
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
@@ -152,7 +152,7 @@ raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
 ratelimit = "0.9"
 regex = "1.8"
-regex-automata = { version = "0.4" }
+regex-automata = "0.4"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
@@ -183,11 +183,11 @@ strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
 tokio = { version = "1.40", features = ["full"] }
 tokio-postgres = "0.7"
-tokio-stream = { version = "0.1" }
+tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
 tonic = { version = "0.11", features = ["tls", "gzip", "zstd"] }
-tower = { version = "0.4" }
+tower = "0.4"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
