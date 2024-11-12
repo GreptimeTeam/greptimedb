@@ -255,6 +255,7 @@ fn gen_same_name_case<R: Rng + 'static>(
 
 async fn wait_for_proc(ctx: &FuzzContext) -> Result<()> {
     let check_done_sql = "SELECT * FROM INFORMATION_SCHEMA.PROCEDURE_INFO WHERE status!='Done';";
+    let check_fail_sql = "SELECT * FROM INFORMATION_SCHEMA.PROCEDURE_INFO WHERE status='Failed';";
     let mut proc_retry_times = 0;
     loop {
         let res = sqlx::query(check_done_sql)
@@ -265,13 +266,26 @@ async fn wait_for_proc(ctx: &FuzzContext) -> Result<()> {
         if res.is_empty() {
             break;
         } else {
+            let failed = sqlx::query(check_fail_sql)
+                .fetch_all(&ctx.greptime)
+                .await
+                .unwrap();
+            if !failed.is_empty() {
+                common_telemetry::error!("Procedure execute fail, results: {failed:?}");
+                UnexpectedSnafu {
+                    violated: "Procedure failed",
+                }
+                .fail()?;
+            }
             info!("Waiting for alter procedures to complete...\n\n");
             info!("{} in-progress procedures", res.len());
             proc_retry_times += 1;
-            if proc_retry_times > 5 {
-                common_telemetry::error!("Procedure execute fail, results: {res:?}");
+            if proc_retry_times > 60 {
                 UnexpectedSnafu {
-                    violated: "Procedure execution timeout",
+                    violated: format!(
+                        "Too many retry, {} in-progress procedures: {res:?}",
+                        res.len()
+                    ),
                 }
                 .fail()?;
             }
