@@ -218,7 +218,7 @@ fn create_current_timestamp_vector(
 fn value_type_match(column_type: &ConcreteDataType, value_type: ConcreteDataType) -> bool {
     match (column_type, value_type) {
         (ct, vt) if ct.logical_type_id() == vt.logical_type_id() => true,
-        // Vector ans Json type is encoded as binary
+        // Vector and Json type is encoded as binary
         (ConcreteDataType::Vector(_) | ConcreteDataType::Json(_), ConcreteDataType::Binary(_)) => {
             true
         }

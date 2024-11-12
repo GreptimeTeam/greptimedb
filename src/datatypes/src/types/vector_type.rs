@@ -69,11 +69,12 @@ impl DataType for VectorType {
 /// Converts a vector type value to string
 /// for example: [1.0, 2.0, 3.0] -> "[1.0,2.0,3.0]"
 pub fn vector_type_value_to_string(val: &[u8], dim: u32) -> Result<String> {
-    if dim as usize * std::mem::size_of::<f32>() != val.len() {
+    let expected_len = dim as usize * std::mem::size_of::<f32>();
+    if val.len() != expected_len {
         return InvalidVectorSnafu {
             msg: format!(
                 "Failed to convert Vector value to string: wrong byte size, expected {}, got {}",
-                dim as usize * std::mem::size_of::<f32>(),
+                expected_len,
                 val.len()
             ),
         }
