@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_config::config::Configurable;
+use common_options::datanode::DatanodeClientOptions;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
@@ -22,8 +23,7 @@ use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 
 use crate::service_config::{
-    DatanodeOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
-    PromStoreOptions,
+    InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions, PromStoreOptions,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,7 +42,7 @@ pub struct FrontendOptions {
     pub otlp: OtlpOptions,
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
-    pub datanode: DatanodeOptions,
+    pub datanode: DatanodeClientOptions,
     pub user_provider: Option<String>,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
@@ -64,7 +64,7 @@ impl Default for FrontendOptions {
             otlp: OtlpOptions::default(),
             meta_client: None,
             logging: LoggingOptions::default(),
-            datanode: DatanodeOptions::default(),
+            datanode: DatanodeClientOptions::default(),
             user_provider: None,
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),

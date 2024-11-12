@@ -1840,6 +1840,7 @@ dependencies = [
  "common-grpc",
  "common-macro",
  "common-meta",
+ "common-options",
  "common-procedure",
  "common-query",
  "common-recordbatch",
@@ -2240,6 +2241,15 @@ dependencies = [
  "tonic 0.11.0",
  "typetag",
  "uuid",
+]
+
+[[package]]
+name = "common-options"
+version = "0.9.5"
+dependencies = [
+ "common-grpc",
+ "humantime-serde",
+ "serde",
 ]
 
 [[package]]
@@ -4178,6 +4188,7 @@ dependencies = [
  "common-grpc",
  "common-macro",
  "common-meta",
+ "common-options",
  "common-procedure",
  "common-query",
  "common-recordbatch",
@@ -6504,6 +6515,7 @@ dependencies = [
  "common-grpc",
  "common-macro",
  "common-meta",
+ "common-options",
  "common-procedure",
  "common-procedure-test",
  "common-runtime",

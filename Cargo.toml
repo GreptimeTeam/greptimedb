@@ -2,23 +2,25 @@
 members = [
     "src/api",
     "src/auth",
-    "src/catalog",
     "src/cache",
+    "src/catalog",
     "src/client",
     "src/cmd",
     "src/common/base",
     "src/common/catalog",
     "src/common/config",
     "src/common/datasource",
+    "src/common/decimal",
     "src/common/error",
     "src/common/frontend",
     "src/common/function",
-    "src/common/macro",
     "src/common/greptimedb-telemetry",
     "src/common/grpc",
     "src/common/grpc-expr",
+    "src/common/macro",
     "src/common/mem-prof",
     "src/common/meta",
+    "src/common/options",
     "src/common/plugins",
     "src/common/pprof",
     "src/common/procedure",
@@ -30,7 +32,6 @@ members = [
     "src/common/telemetry",
     "src/common/test-util",
     "src/common/time",
-    "src/common/decimal",
     "src/common/version",
     "src/common/wal",
     "src/datanode",
@@ -38,6 +39,7 @@ members = [
     "src/file-engine",
     "src/flow",
     "src/frontend",
+    "src/index",
     "src/log-store",
     "src/meta-client",
     "src/meta-srv",
@@ -57,7 +59,6 @@ members = [
     "src/sql",
     "src/store-api",
     "src/table",
-    "src/index",
     "tests-fuzz",
     "tests-integration",
     "tests/runner",
@@ -215,6 +216,7 @@ common-grpc-expr = { path = "src/common/grpc-expr" }
 common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
 common-meta = { path = "src/common/meta" }
+common-options = { path = "src/common/options" }
 common-plugins = { path = "src/common/plugins" }
 common-pprof = { path = "src/common/pprof" }
 common-procedure = { path = "src/common/procedure" }

@@ -1,0 +1,13 @@
+[package]
+name = "common-options"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common-grpc.workspace = true
+humantime-serde.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true
