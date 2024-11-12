@@ -771,6 +771,14 @@ mod tests {
             SqlDataType::Interval,
             ConcreteDataType::interval_month_day_nano_datatype(),
         );
+        check_type(SqlDataType::JSON, ConcreteDataType::json_datatype());
+        check_type(
+            SqlDataType::Custom(
+                ObjectName(vec![Ident::new(VECTOR_TYPE_NAME)]),
+                vec!["3".to_string()],
+            ),
+            ConcreteDataType::vector_datatype(3),
+        );
     }
 
     #[test]
@@ -1505,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_parse_placeholder_value() {
+    fn test_parse_placeholder_value() {
         assert!(sql_value_to_value(
             "test",
             &ConcreteDataType::string_datatype(),

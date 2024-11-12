@@ -80,6 +80,10 @@ pub fn vector_type_value_to_string(val: &[u8], dim: u32) -> Result<String> {
         .fail();
     }
 
+    if dim == 0 {
+        return Ok("[]".to_string());
+    }
+
     let elements = unsafe {
         std::slice::from_raw_parts(
             val.as_ptr() as *const f32,
@@ -110,7 +114,17 @@ pub fn parse_string_to_vector_type_value(s: &str, dim: u32) -> Result<Vec<u8>> {
         .fail();
     }
     // Remove the brackets
-    let content = &trimmed[1..trimmed.len() - 1];
+    let content = trimmed[1..trimmed.len() - 1].trim();
+
+    if content.is_empty() {
+        if dim != 0 {
+            return InvalidVectorSnafu {
+                msg: format!("Failed to parse {s} to Vector value: wrong dimension"),
+            }
+            .fail();
+        }
+        return Ok(vec![]);
+    }
 
     let elements = content
         .split(',')
@@ -144,4 +158,79 @@ pub fn parse_string_to_vector_type_value(s: &str, dim: u32) -> Result<Vec<u8>> {
     };
 
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_conversion_between_string_and_vector_type_value() {
+        let dim = 3;
+
+        let cases = [
+            ("[1.0,2.0,3]", "[1,2,3]"),
+            ("[0.0 , 0.0 , 0.0]", "[0,0,0]"),
+            ("[3.4028235e38, -3.4028235e38, 1.1754944e-38]", "[340282350000000000000000000000000000000,-340282350000000000000000000000000000000,0.000000000000000000000000000000000000011754944]"),
+        ];
+
+        for (s, expected) in cases.iter() {
+            let val = parse_string_to_vector_type_value(s, dim).unwrap();
+            let s = vector_type_value_to_string(&val, dim).unwrap();
+            assert_eq!(s, *expected);
+        }
+
+        let dim = 0;
+        let cases = [("[]", "[]"), ("[ ]", "[]"), ("[  ]", "[]")];
+        for (s, expected) in cases.iter() {
+            let val = parse_string_to_vector_type_value(s, dim).unwrap();
+            let s = vector_type_value_to_string(&val, dim).unwrap();
+            assert_eq!(s, *expected);
+        }
+    }
+
+    #[test]
+    fn test_vector_type_value_to_string_wrong_byte_size() {
+        let dim = 3;
+        let val = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        let res = vector_type_value_to_string(&val, dim);
+        assert!(res.is_err());
+
+        let dim = 0;
+        let val = vec![1];
+        let res = vector_type_value_to_string(&val, dim);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_parse_string_to_vector_type_value_not_properly_enclosed_in_brackets() {
+        let dim = 3;
+        let s = "1.0,2.0,3.0";
+        let res = parse_string_to_vector_type_value(s, dim);
+        assert!(res.is_err());
+
+        let s = "[1.0,2.0,3.0";
+        let res = parse_string_to_vector_type_value(s, dim);
+        assert!(res.is_err());
+
+        let s = "1.0,2.0,3.0]";
+        let res = parse_string_to_vector_type_value(s, dim);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_parse_string_to_vector_type_value_wrong_dimension() {
+        let dim = 3;
+        let s = "[1.0,2.0]";
+        let res = parse_string_to_vector_type_value(s, dim);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_parse_string_to_vector_type_value_elements_are_not_all_float32() {
+        let dim = 3;
+        let s = "[1.0,2.0,ah]";
+        let res = parse_string_to_vector_type_value(s, dim);
+        assert!(res.is_err());
+    }
 }
