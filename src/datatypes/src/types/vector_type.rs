@@ -128,8 +128,8 @@ pub fn parse_string_to_vector_type_value(s: &str, dim: u32) -> Result<Vec<u8>> {
 
     let elements = content
         .split(',')
-        .map(|s| {
-            s.trim().parse::<f32>().map_err(|_| {
+        .map(|e| {
+            e.trim().parse::<f32>().map_err(|_| {
                 InvalidVectorSnafu {
                     msg: format!(
                         "Failed to parse {s} to Vector value: elements are not all float32"

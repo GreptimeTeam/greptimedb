@@ -122,6 +122,7 @@ fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
 greptime-proto = { git = "https://github.com/zhongzc/greptime-proto.git", branch = "zhongzc/intro-vector-type" }
+hex = { version = "0.4" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
@@ -175,7 +176,6 @@ smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
 sysinfo = "0.30"
 # on branch v0.44.x
-hex = { version = "0.4" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "54a267ac89c09b11c0c88934690530807185d3e7", features = [
     "visitor",
 ] }

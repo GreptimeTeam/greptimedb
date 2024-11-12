@@ -241,6 +241,15 @@ impl ColumnDataTypeWrapper {
             }),
         }
     }
+
+    pub fn vector_datatype(dim: u32) -> Self {
+        ColumnDataTypeWrapper {
+            datatype: ColumnDataType::Vector,
+            datatype_ext: Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim })),
+            }),
+        }
+    }
 }
 
 impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
@@ -1175,6 +1184,10 @@ mod tests {
         let values = values_with_capacity(ColumnDataType::Decimal128, 2);
         let values = values.decimal128_values;
         assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::Vector, 2);
+        let values = values.binary_values;
+        assert_eq!(2, values.capacity());
     }
 
     #[test]
@@ -1262,7 +1275,11 @@ mod tests {
         assert_eq!(
             ConcreteDataType::decimal128_datatype(10, 2),
             ColumnDataTypeWrapper::decimal128_datatype(10, 2).into()
-        )
+        );
+        assert_eq!(
+            ConcreteDataType::vector_datatype(3),
+            ColumnDataTypeWrapper::vector_datatype(3).into()
+        );
     }
 
     #[test]
@@ -1357,6 +1374,10 @@ mod tests {
             ConcreteDataType::decimal128_datatype(10, 2)
                 .try_into()
                 .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper::vector_datatype(3),
+            ConcreteDataType::vector_datatype(3).try_into().unwrap()
         );
 
         let result: Result<ColumnDataTypeWrapper> = ConcreteDataType::null_datatype().try_into();

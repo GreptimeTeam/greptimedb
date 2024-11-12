@@ -611,6 +611,7 @@ mod tests {
                 ConcreteDataType::interval_day_time_datatype(),
                 ConcreteDataType::interval_month_day_nano_datatype(),
                 ConcreteDataType::decimal128_default_datatype(),
+                ConcreteDataType::vector_datatype(3),
             ],
             vec![
                 Value::Boolean(true),
@@ -635,6 +636,7 @@ mod tests {
                 Value::IntervalDayTime(IntervalDayTime::new(1, 15)),
                 Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 15)),
                 Value::Decimal128(Decimal128::from(16)),
+                Value::Binary(Bytes::from(vec![0; 12])),
             ],
         );
     }

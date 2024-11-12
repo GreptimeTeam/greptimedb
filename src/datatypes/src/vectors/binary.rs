@@ -78,9 +78,12 @@ impl BinaryVector {
             .iter()
         {
             let v = if let Some(binary) = binary {
-                let s = String::from_utf8_lossy(binary);
-                let v = parse_string_to_vector_type_value(&s, dim)?;
-                Some(v)
+                if let Ok(s) = String::from_utf8(binary.to_vec()) {
+                    let v = parse_string_to_vector_type_value(&s, dim)?;
+                    Some(v)
+                } else {
+                    Some(binary.to_vec())
+                }
             } else {
                 None
             };
@@ -494,5 +497,46 @@ mod tests {
             .convert_binary_to_json()
             .unwrap_err();
         assert_matches!(error, error::Error::InvalidJson { .. });
+    }
+
+    #[test]
+    fn test_binary_vector_conversion() {
+        let dim = 3;
+        let vector = BinaryVector::from(vec![
+            Some(b"[1,2,3]".to_vec()),
+            Some(b"[4,5,6]".to_vec()),
+            Some(b"[7,8,9]".to_vec()),
+            None,
+        ]);
+        let expected = BinaryVector::from(vec![
+            Some(
+                [1.0f32, 2.0, 3.0]
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+            ),
+            Some(
+                [4.0f32, 5.0, 6.0]
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+            ),
+            Some(
+                [7.0f32, 8.0, 9.0]
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+            ),
+            None,
+        ]);
+
+        let converted = vector.convert_binary_to_vector(dim).unwrap();
+        assert_eq!(converted.len(), expected.len());
+        for i in 0..3 {
+            assert_eq!(
+                converted.get_ref(i).as_binary().unwrap().unwrap(),
+                expected.get_ref(i).as_binary().unwrap().unwrap()
+            );
+        }
     }
 }
