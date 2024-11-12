@@ -1041,7 +1041,7 @@ dependencies = [
  "bitflags 2.6.0",
  "cexpr",
  "clang-sys",
- "itertools 0.11.0",
+ "itertools 0.10.5",
  "lazy_static",
  "lazycell",
  "log",
@@ -4583,7 +4583,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/zhongzc/greptime-proto.git?branch=zhongzc%2Fintro-vector-type#5a5eef8f623975fe82fb07a4e93ae4e43998cdb9"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=75c5fb569183bb3d0fa1023df9c2214df722b9b1#75c5fb569183bb3d0fa1023df9c2214df722b9b1"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -5079,7 +5079,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.5.7",
+ "socket2 0.4.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -8810,7 +8810,7 @@ checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
  "heck 0.5.0",
- "itertools 0.11.0",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -8862,7 +8862,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81bddcdb20abf9501610992b6759a4c888aef7d1a7247ef75e2404275ac24af1"
 dependencies = [
  "anyhow",
- "itertools 0.11.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.79",
