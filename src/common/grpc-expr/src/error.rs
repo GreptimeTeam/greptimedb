@@ -125,6 +125,14 @@ pub enum Error {
         #[snafu(source)]
         error: MetadataError,
     },
+
+    #[snafu(display("Invalid change fulltext option request"))]
+    InvalidChangeFulltextOptionRequest {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: prost::DecodeError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -148,7 +156,8 @@ impl ErrorExt for Error {
             Error::UnknownColumnDataType { .. } | Error::InvalidFulltextColumnType { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::InvalidChangeTableOptionRequest { .. } => StatusCode::InvalidArguments,
+            Error::InvalidChangeTableOptionRequest { .. }
+            | Error::InvalidChangeFulltextOptionRequest { .. } => StatusCode::InvalidArguments,
         }
     }
 

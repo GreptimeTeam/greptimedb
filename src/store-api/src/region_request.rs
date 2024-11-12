@@ -18,23 +18,25 @@ use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
-use api::v1::region::alter_request::Kind;
+use api::v1::column_def::as_fulltext_option;
 use api::v1::region::{
     alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, ChangeTableOption, Rows, SemanticType};
+use api::v1::{self, Analyzer, ChangeTableOption, Rows, SemanticType};
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::FulltextOptions;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionOptionChangeRequestSnafu,
-    InvalidRegionRequestSnafu, MetadataError, RegionMetadata, Result,
+    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
+    InvalidRegionOptionChangeRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
+    RegionMetadata, Result,
 };
 use crate::mito_engine_options::TTL_KEY;
 use crate::path_utils::region_dir;
@@ -395,6 +397,11 @@ pub enum AlterKind {
     },
     /// Change region options.
     ChangeRegionOptions { options: Vec<ChangeOption> },
+    /// Change fulltext index options.
+    ChangeColumnFulltext {
+        column_name: String,
+        options: FulltextOptions,
+    },
 }
 
 impl AlterKind {
@@ -419,6 +426,9 @@ impl AlterKind {
                 }
             }
             AlterKind::ChangeRegionOptions { .. } => {}
+            AlterKind::ChangeColumnFulltext { column_name, .. } => {
+                Self::validate_column_fulltext_option(column_name, metadata)?;
+            }
         }
         Ok(())
     }
@@ -441,6 +451,9 @@ impl AlterKind {
                 // todo: we need to check if ttl has ever changed.
                 true
             }
+            AlterKind::ChangeColumnFulltext { column_name, .. } => {
+                metadata.column_by_name(column_name).is_some()
+            }
         }
     }
 
@@ -456,6 +469,32 @@ impl AlterKind {
                 err: format!("column {} is not a field and could not be dropped", name),
             }
         );
+        Ok(())
+    }
+
+    /// Returns an error if the column to change fulltext index option is invalid.
+    fn validate_column_fulltext_option(
+        column_name: &String,
+        metadata: &RegionMetadata,
+    ) -> Result<()> {
+        let column = metadata
+            .column_by_name(column_name)
+            .context(InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!("column {} not found", column_name),
+            })?;
+
+        ensure!(
+            column.column_schema.data_type.is_string(),
+            InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!(
+                    "cannot change fulltext index options for non-string column {}",
+                    column_name
+                ),
+            }
+        );
+
         Ok(())
     }
 }
@@ -485,12 +524,24 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
             }
-            Kind::ChangeTableOptions(change_options) => AlterKind::ChangeRegionOptions {
-                options: change_options
-                    .change_table_options
-                    .iter()
-                    .map(TryFrom::try_from)
-                    .collect::<Result<Vec<_>>>()?,
+            alter_request::Kind::ChangeTableOptions(change_options) => {
+                AlterKind::ChangeRegionOptions {
+                    options: change_options
+                        .change_table_options
+                        .iter()
+                        .map(TryFrom::try_from)
+                        .collect::<Result<Vec<_>>>()?,
+                }
+            }
+            alter_request::Kind::ChangeColumnFulltext(x) => AlterKind::ChangeColumnFulltext {
+                column_name: x.column_name.clone(),
+                options: FulltextOptions {
+                    enable: x.enable,
+                    analyzer: as_fulltext_option(
+                        Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
+                    ),
+                    case_sensitive: x.case_sensitive,
+                },
             },
         };
 
@@ -743,7 +794,7 @@ mod tests {
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer};
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
@@ -1136,5 +1187,24 @@ mod tests {
         };
 
         assert!(create.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_change_column_fulltext_options() {
+        let kind = AlterKind::ChangeColumnFulltext {
+            column_name: "tag_0".to_string(),
+            options: FulltextOptions {
+                enable: true,
+                analyzer: FulltextAnalyzer::Chinese,
+                case_sensitive: false,
+            },
+        };
+        let request = RegionAlterRequest {
+            schema_version: 1,
+            kind,
+        };
+        let mut metadata = new_metadata();
+        metadata.schema_version = 1;
+        request.validate(&metadata).unwrap();
     }
 }

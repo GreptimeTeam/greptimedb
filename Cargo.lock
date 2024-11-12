@@ -3328,6 +3328,8 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.5",
+ "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
+ "sqlparser_derive 0.1.1",
 ]
 
 [[package]]
@@ -4581,7 +4583,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=255f87a3318ace3f88a67f76995a0e14910983f4#255f87a3318ace3f88a67f76995a0e14910983f4"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=67bb1d52bc1241972c368657e658592b1be7ead3#67bb1d52bc1241972c368657e658592b1be7ead3"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -11660,6 +11662,7 @@ dependencies = [
  "derive_builder 0.12.0",
  "futures",
  "humantime",
+ "prost 0.12.6",
  "serde",
  "serde_json",
  "snafu 0.8.5",

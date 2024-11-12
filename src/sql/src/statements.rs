@@ -684,7 +684,9 @@ mod tests {
     use api::v1::ColumnDataType;
     use common_time::timestamp::TimeUnit;
     use common_time::timezone::set_default_timezone;
-    use datatypes::schema::FulltextAnalyzer;
+    use datatypes::schema::{
+        FulltextAnalyzer, COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+    };
     use datatypes::types::BooleanType;
     use datatypes::value::OrderedFloat;
 
@@ -692,7 +694,6 @@ mod tests {
     use crate::ast::TimezoneInfo;
     use crate::statements::create::ColumnExtensions;
     use crate::statements::ColumnOption;
-    use crate::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
         assert_eq!(

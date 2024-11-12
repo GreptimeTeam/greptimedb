@@ -28,7 +28,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -553,6 +553,10 @@ impl RegionMetadataBuilder {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ChangeColumnTypes { columns } => self.change_column_types(columns),
+            AlterKind::ChangeColumnFulltext {
+                column_name,
+                options,
+            } => self.change_column_fulltext_options(column_name, options)?,
             AlterKind::ChangeRegionOptions { options: _ } => {
                 // nothing to be done with RegionMetadata
             }
@@ -654,6 +658,47 @@ impl RegionMetadataBuilder {
                 column_meta.column_schema.data_type = target_type;
             }
         }
+    }
+
+    fn change_column_fulltext_options(
+        &mut self,
+        column_name: String,
+        options: FulltextOptions,
+    ) -> Result<()> {
+        for column_meta in self.column_metadatas.iter_mut() {
+            if column_meta.column_schema.name == column_name {
+                ensure!(
+                    column_meta.column_schema.data_type.is_string(),
+                    InvalidColumnOptionSnafu {
+                        column_name,
+                        msg: "FULLTEXT index only supports string type".to_string(),
+                    }
+                );
+
+                let current_fulltext_options = column_meta
+                    .column_schema
+                    .fulltext_options()
+                    .context(SetFulltextOptionsSnafu {
+                        column_name: column_name.clone(),
+                    })?;
+
+                // Don't allow to enable fulltext options if it is already enabled.
+                if current_fulltext_options.is_some_and(|o| o.enable) && options.enable {
+                    return InvalidColumnOptionSnafu {
+                        column_name,
+                        msg: "FULLTEXT index options already enabled".to_string(),
+                    }
+                    .fail();
+                } else {
+                    column_meta
+                        .column_schema
+                        .set_fulltext_options(&options)
+                        .context(SetFulltextOptionsSnafu { column_name })?;
+                }
+                break;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -776,6 +821,30 @@ pub enum MetadataError {
     InvalidRegionOptionChangeRequest {
         key: String,
         value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode protobuf"))]
+    DecodeProto {
+        #[snafu(source)]
+        error: prost::DecodeError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid column option, column name: {}, error: {}", column_name, msg))]
+    InvalidColumnOption {
+        column_name: String,
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to set fulltext options for column {}", column_name))]
+    SetFulltextOptions {
+        column_name: String,
+        source: datatypes::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1211,6 +1280,32 @@ mod test {
             .column_schema
             .data_type;
         assert_eq!(ConcreteDataType::string_datatype(), *b_type);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::ChangeColumnFulltext {
+                column_name: "b".to_string(),
+                options: FulltextOptions {
+                    enable: true,
+                    analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                    case_sensitive: true,
+                },
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        let a_fulltext_options = metadata
+            .column_by_name("b")
+            .unwrap()
+            .column_schema
+            .fulltext_options()
+            .unwrap()
+            .unwrap();
+        assert!(a_fulltext_options.enable);
+        assert_eq!(
+            datatypes::schema::FulltextAnalyzer::Chinese,
+            a_fulltext_options.analyzer
+        );
+        assert!(a_fulltext_options.case_sensitive);
     }
 
     #[test]

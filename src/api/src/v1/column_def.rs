@@ -15,9 +15,10 @@
 use std::collections::HashMap;
 
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, COMMENT_KEY, FULLTEXT_KEY,
-    INVERTED_INDEX_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, COMMENT_KEY,
+    FULLTEXT_KEY, INVERTED_INDEX_KEY,
 };
+use greptime_proto::v1::Analyzer;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -102,6 +103,14 @@ pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<Column
     options.options.insert(FULLTEXT_GRPC_KEY.to_string(), v);
 
     Ok((!options.options.is_empty()).then_some(options))
+}
+
+/// Tries to construct a `FulltextAnalyzer` from the given analyzer.
+pub fn as_fulltext_option(analyzer: Analyzer) -> FulltextAnalyzer {
+    match analyzer {
+        Analyzer::English => FulltextAnalyzer::English,
+        Analyzer::Chinese => FulltextAnalyzer::Chinese,
+    }
 }
 
 #[cfg(test)]
