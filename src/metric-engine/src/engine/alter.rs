@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use common_telemetry::{error, info};
 use snafu::{OptionExt, ResultExt};
@@ -100,19 +100,22 @@ impl MetricEngineInner {
             .physical_columns(physical_region_id)
             .await?;
 
-        let pre_exist_names = pre_existing_physical_columns
+        let pre_exist_cols = pre_existing_physical_columns
             .iter()
-            .map(|col| col.column_schema.name.clone())
-            .collect::<HashSet<_>>();
+            .map(|col| (col.column_schema.name.as_str(), col))
+            .collect::<HashMap<_, _>>();
 
         // check pre-existing physical columns so if any columns to add is already exist,
         // we can skip it in physical alter operation
         // (but still need to update them in logical alter operation)
         for col in &columns {
-            if !pre_exist_names.contains(&col.column_metadata.column_schema.name) {
-                columns_to_add.push(col.column_metadata.clone());
+            if let Some(exist_column) =
+                pre_exist_cols.get(&col.column_metadata.column_schema.name.as_str())
+            {
+                // push the correct column schema with correct column id
+                existing_columns.push(*exist_column);
             } else {
-                existing_columns.push(col.column_metadata.clone());
+                columns_to_add.push(col.column_metadata.clone());
             }
         }
 
@@ -125,15 +128,11 @@ impl MetricEngineInner {
         )
         .await?;
 
-        // register columns to logical region
         // note here we don't use `columns` directly but concat `existing_columns` with `columns_to_add` to get correct metadata
         // about already existing columns
-        for metadata in existing_columns
-            .into_iter()
-            .chain(columns_to_add.into_iter())
-        {
+        for metadata in existing_columns.into_iter().chain(columns_to_add.iter()) {
             self.metadata_region
-                .add_column(metadata_region_id, logical_region_id, &metadata)
+                .add_column(metadata_region_id, logical_region_id, metadata)
                 .await?;
         }
 
