@@ -41,9 +41,8 @@ impl BulkIterContext {
 
 /// Iterator for reading data inside a bulk part.
 pub struct BulkPartIter {
-    context: BulkIterContextRef,
     row_groups_to_read: VecDeque<usize>,
-    current_reader: Option<MemtableRowGroupReader>,
+    current_reader: Option<PruneReader>,
     builder: MemtableRowGroupReaderBuilder,
 }
 
@@ -70,9 +69,9 @@ impl BulkPartIter {
         let init_reader = row_groups_to_read
             .pop_front()
             .map(|first_row_group| builder.build_row_group_reader(first_row_group, None))
-            .transpose()?;
+            .transpose()?
+            .map(|r| PruneReader::new(context, r));
         Ok(Self {
-            context,
             row_groups_to_read,
             current_reader: init_reader,
             builder,
@@ -80,31 +79,65 @@ impl BulkPartIter {
     }
 
     pub(crate) fn next_batch(&mut self) -> error::Result<Option<Batch>> {
-        //todo(hl): maybe we also need to support lastrow mode here.
-        if let Some(current) = &mut self.current_reader {
-            if let Some(batch) = current.next_inner()? {
-                if let Some(after_prune) = self.prune(batch)? {
-                    return Ok(Some(after_prune));
-                }
-            }
+        let Some(current) = &mut self.current_reader else {
+            // All row group exhausted.
+            return Ok(None);
+        };
+
+        if let Some(batch) = current.next_batch()? {
+            return Ok(Some(batch));
         }
 
-        // Previous row group finished, read next row group
+        // Previous row group exhausted, read next row group
         while let Some(next_row_group) = self.row_groups_to_read.pop_front() {
-            let mut next_reader = self.builder.build_row_group_reader(next_row_group, None)?;
+            current.reset(self.builder.build_row_group_reader(next_row_group, None)?);
+            if let Some(next_batch) = current.next_batch()? {
+                return Ok(Some(next_batch));
+            }
+        }
+        Ok(None)
+    }
+}
 
-            if let Some(next_batch) = next_reader.next_inner()?
-                && let Some(after_prune) = self.prune(next_batch)?
-            {
-                self.current_reader = Some(next_reader);
-                return Ok(Some(after_prune));
+impl Iterator for BulkPartIter {
+    type Item = error::Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_batch().transpose()
+    }
+}
+
+struct PruneReader {
+    context: BulkIterContextRef,
+    row_group_reader: MemtableRowGroupReader,
+}
+
+//todo(hl): maybe we also need to support lastrow mode here.
+impl PruneReader {
+    fn new(context: BulkIterContextRef, reader: MemtableRowGroupReader) -> Self {
+        Self {
+            context,
+            row_group_reader: reader,
+        }
+    }
+
+    /// Iterates current inner reader until exhausted.
+    fn next_batch(&mut self) -> error::Result<Option<Batch>> {
+        while let Some(b) = self.row_group_reader.next_inner()? {
+            match self.prune(b)? {
+                Some(b) => {
+                    return Ok(Some(b));
+                }
+                None => {
+                    continue;
+                }
             }
         }
         Ok(None)
     }
 
     /// Prunes batch according to filters.
-    fn prune(&self, batch: Batch) -> error::Result<Option<Batch>> {
+    fn prune(&mut self, batch: Batch) -> error::Result<Option<Batch>> {
         //todo(hl): add metrics.
 
         // fast path
@@ -122,12 +155,8 @@ impl BulkPartIter {
             Ok(None)
         }
     }
-}
 
-impl Iterator for BulkPartIter {
-    type Item = error::Result<Batch>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next_batch().transpose()
+    fn reset(&mut self, reader: MemtableRowGroupReader) {
+        self.row_group_reader = reader;
     }
 }
