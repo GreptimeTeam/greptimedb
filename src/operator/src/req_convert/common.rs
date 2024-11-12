@@ -378,7 +378,7 @@ fn semantic_type(table_info: &TableInfo, column: &str) -> Result<SemanticType> {
 #[cfg(test)]
 mod tests {
     use api::v1::column::Values;
-    use api::v1::SemanticType;
+    use api::v1::{SemanticType, VectorTypeExtension};
     use common_base::bit_vec::prelude::*;
 
     use super::*;
@@ -412,30 +412,57 @@ mod tests {
                 }),
                 ..Default::default()
             },
+            Column {
+                column_name: String::from("col3"),
+                datatype: ColumnDataType::Vector.into(),
+                semantic_type: SemanticType::Field.into(),
+                null_mask: vec![],
+                values: Some(Values {
+                    binary_values: vec![vec![0; 4], vec![1; 4], vec![2; 4]],
+                    ..Default::default()
+                }),
+                datatype_extension: Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: 1 })),
+                }),
+                ..Default::default()
+            },
         ];
         let row_count = 3;
 
         let result = columns_to_rows(columns, row_count);
         let rows = result.unwrap();
 
-        assert_eq!(rows.schema.len(), 2);
+        assert_eq!(rows.schema.len(), 3);
         assert_eq!(rows.schema[0].column_name, "col1");
         assert_eq!(rows.schema[0].datatype, ColumnDataType::Int32 as i32);
         assert_eq!(rows.schema[0].semantic_type, SemanticType::Field as i32);
         assert_eq!(rows.schema[1].column_name, "col2");
         assert_eq!(rows.schema[1].datatype, ColumnDataType::String as i32);
         assert_eq!(rows.schema[1].semantic_type, SemanticType::Tag as i32);
+        assert_eq!(rows.schema[2].column_name, "col3");
+        assert_eq!(rows.schema[2].datatype, ColumnDataType::Vector as i32);
+        assert_eq!(rows.schema[2].semantic_type, SemanticType::Field as i32);
+        assert_eq!(
+            rows.schema[2].datatype_extension,
+            Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: 1 }))
+            })
+        );
 
         assert_eq!(rows.rows.len(), 3);
 
-        assert_eq!(rows.rows[0].values.len(), 2);
+        assert_eq!(rows.rows[0].values.len(), 3);
         assert_eq!(rows.rows[0].values[0].value_data, None);
         assert_eq!(
             rows.rows[0].values[1].value_data,
             Some(ValueData::StringValue(String::from("value1")))
         );
+        assert_eq!(
+            rows.rows[0].values[2].value_data,
+            Some(ValueData::BinaryValue(vec![0; 4]))
+        );
 
-        assert_eq!(rows.rows[1].values.len(), 2);
+        assert_eq!(rows.rows[1].values.len(), 3);
         assert_eq!(
             rows.rows[1].values[0].value_data,
             Some(ValueData::I32Value(42))
@@ -444,12 +471,20 @@ mod tests {
             rows.rows[1].values[1].value_data,
             Some(ValueData::StringValue(String::from("value2")))
         );
+        assert_eq!(
+            rows.rows[1].values[2].value_data,
+            Some(ValueData::BinaryValue(vec![1; 4]))
+        );
 
-        assert_eq!(rows.rows[2].values.len(), 2);
+        assert_eq!(rows.rows[2].values.len(), 3);
         assert_eq!(rows.rows[2].values[0].value_data, None);
         assert_eq!(
             rows.rows[2].values[1].value_data,
             Some(ValueData::StringValue(String::from("value3")))
+        );
+        assert_eq!(
+            rows.rows[2].values[2].value_data,
+            Some(ValueData::BinaryValue(vec![2; 4]))
         );
 
         // wrong type
