@@ -23,8 +23,7 @@ use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    ColumnNotFoundAfterAlterSnafu, ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu, Result,
-    SerializeColumnMetadataSnafu,
+    ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
 };
 use crate::metrics::FORBIDDEN_OPERATION_COUNT;
 use crate::utils::{to_data_region_id, to_metadata_region_id};
@@ -126,35 +125,16 @@ impl MetricEngineInner {
         )
         .await?;
 
-        // check physical region id again, since it may have been altered and column ids might be different than
-        // the one we have
-        let after_alter_phy_table = self
-            .data_region
-            .physical_columns(physical_region_id)
-            .await?;
-        let after_alter_cols = after_alter_phy_table
-            .iter()
-            .map(|col| (col.column_schema.name.clone(), col.clone()))
-            .collect::<HashMap<_, _>>();
-
         // register columns to logical region
-        // we need to use modified column metadata from physical region, since it may have been altered(especially column id)
-        for col in columns {
-            if let Some(metadata) = after_alter_cols.get(&col.column_metadata.column_schema.name) {
-                self.metadata_region
-                    .add_column(metadata_region_id, logical_region_id, metadata)
-                    .await?;
-            } else {
-                error!(
-                    "Column {} not found after altering physical region {:?}",
-                    col.column_metadata.column_schema.name, data_region_id
-                );
-
-                ColumnNotFoundAfterAlterSnafu {
-                    column_name: col.column_metadata.column_schema.name.clone(),
-                }
-                .fail()?;
-            }
+        // note here we don't use `columns` directly but concat `existing_columns` with `columns_to_add` to get correct metadata
+        // about already existing columns
+        for metadata in existing_columns
+            .into_iter()
+            .chain(columns_to_add.into_iter())
+        {
+            self.metadata_region
+                .add_column(metadata_region_id, logical_region_id, &metadata)
+                .await?;
         }
 
         // invalid logical column cache

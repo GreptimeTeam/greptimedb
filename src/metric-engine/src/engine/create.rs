@@ -273,7 +273,6 @@ impl MetricEngineInner {
     ///
     /// `new_columns` MUST NOT pre-exist in the physical region. Or the results will be wrong column id for the new columns.
     ///
-    /// TODO(discord9): change this to actually return the actually added physical columns
     pub(crate) async fn add_columns_to_physical_data_region(
         &self,
         data_region_id: RegionId,
@@ -298,19 +297,20 @@ impl MetricEngineInner {
         // correct the column id
         let after_alter_physical_schema = self.data_region.physical_columns(data_region_id).await?;
         let after_alter_physical_schema_map = after_alter_physical_schema
-            .into_iter()
-            .map(|metadata| (metadata.column_schema.name.clone(), metadata))
+            .iter()
+            .map(|metadata| (metadata.column_schema.name.as_str(), metadata))
             .collect::<HashMap<_, _>>();
 
-        // check to make sure column ids are not mismatched
+        // double check to make sure column ids are not mismatched
+        // shouldn't be a expensive operation, given it only query for physical columns
         for col in new_columns.iter_mut() {
             let column_metadata = after_alter_physical_schema_map
-                .get(&col.column_schema.name)
+                .get(&col.column_schema.name.as_str())
                 .with_context(|| ColumnNotFoundSnafu {
                     name: &col.column_schema.name,
                     region_id: data_region_id,
                 })?;
-            if col != column_metadata {
+            if col != *column_metadata {
                 warn!(
                     "Add already existing columns with different column metadata to physical region({:?}): new column={:?}, old column={:?}", 
                     data_region_id,
@@ -318,7 +318,7 @@ impl MetricEngineInner {
                     column_metadata
                 );
                 // update to correct metadata
-                *col = column_metadata.clone();
+                *col = (*column_metadata).clone();
             }
         }
 

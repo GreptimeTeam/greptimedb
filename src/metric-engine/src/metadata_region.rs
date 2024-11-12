@@ -211,7 +211,7 @@ impl MetadataRegion {
     }
 
     /// Check if the given column exists. Return the semantic type if exists.
-    #[allow(unused)]
+    #[cfg(test)]
     pub async fn column_semantic_type(
         &self,
         physical_region_id: RegionId,
@@ -374,6 +374,7 @@ impl MetadataRegion {
 
     /// Retrieves the value associated with the given key in the specified region.
     /// Returns `Ok(None)` if the key is not found.
+    #[cfg(test)]
     pub async fn get(&self, region_id: RegionId, key: &str) -> Result<Option<String>> {
         let scan_req = Self::build_read_request(key);
         let record_batch_stream = self
