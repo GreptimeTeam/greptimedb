@@ -77,7 +77,7 @@ pub struct RegionStat {
     pub rcus: i64,
     /// The write capacity units during this period
     pub wcus: i64,
-    /// Approximate bytes of this region
+    /// Approximate disk bytes of this region, including sst, index, manifest and wal
     pub approximate_bytes: u64,
     /// The engine name.
     pub engine: String,
