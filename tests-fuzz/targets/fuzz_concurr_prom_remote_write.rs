@@ -179,8 +179,8 @@ fn generate_prom_metrics_write_reqs<R: Rng + 'static>(
 
 /// first write for auto create logical table, second for alter for same name ones
 fn gen_same_name_case<R: Rng + 'static>(
-    input: FuzzInput,
-    rng: &mut R,
+    _input: FuzzInput,
+    _rng: &mut R,
     timestamp: &mut i64,
 ) -> Result<Vec<remote::WriteRequest>> {
     let timeseries_1 = vec![
