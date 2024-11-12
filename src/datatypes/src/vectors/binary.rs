@@ -20,7 +20,7 @@ use snafu::ResultExt;
 
 use crate::arrow_array::{BinaryArray, MutableBinaryArray};
 use crate::data_type::ConcreteDataType;
-use crate::error::{self, Result};
+use crate::error::{self, InvalidVectorSnafu, Result};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::parse_string_to_vector_type_value;
@@ -78,11 +78,21 @@ impl BinaryVector {
             .iter()
         {
             let v = if let Some(binary) = binary {
+                let bytes_size = dim as usize * std::mem::size_of::<f32>();
                 if let Ok(s) = String::from_utf8(binary.to_vec()) {
                     let v = parse_string_to_vector_type_value(&s, dim)?;
                     Some(v)
-                } else {
+                } else if binary.len() == dim as usize * std::mem::size_of::<f32>() {
                     Some(binary.to_vec())
+                } else {
+                    return InvalidVectorSnafu {
+                        msg: format!(
+                            "Unexpected bytes size for vector value, expected {}, got {}",
+                            bytes_size,
+                            binary.len()
+                        ),
+                    }
+                    .fail();
                 }
             } else {
                 None
