@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use common_telemetry::{debug, info};
 use snafu::ResultExt;
-use store_api::logstore::LogStore;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::region_request::{AlterKind, ChangeOption, RegionAlterRequest};
 use store_api::storage::RegionId;
@@ -33,7 +32,7 @@ use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 
-impl<S: LogStore> RegionWorkerLoop<S> {
+impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_alter_request(
         &mut self,
         region_id: RegionId,

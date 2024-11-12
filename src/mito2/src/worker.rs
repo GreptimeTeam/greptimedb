@@ -589,18 +589,17 @@ impl StalledRequests {
     /// Appends stalled requests.
     pub(crate) fn append(&mut self, requests: &mut Vec<SenderWriteRequest>) {
         for req in requests.drain(..) {
-            self.estimated_size += self.push(req);
+            self.push(req);
         }
     }
 
     /// Pushes a stalled request to the buffer.
-    pub(crate) fn push(&mut self, req: SenderWriteRequest) -> usize {
+    pub(crate) fn push(&mut self, req: SenderWriteRequest) {
         let (size, requests) = self.requests.entry(req.request.region_id).or_default();
         let req_size = req.request.estimated_size();
-
         *size += req_size;
+        self.estimated_size += req_size;
         requests.push(req);
-        req_size
     }
 
     /// Removes stalled requests of specific region.
