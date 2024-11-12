@@ -30,6 +30,7 @@ use crate::statements::OptionMap;
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
 const INDENT: usize = 2;
+pub const VECTOR_OPT_DIM: &str = "dim";
 
 macro_rules! format_indent {
     ($fmt: expr, $arg: expr) => {
@@ -112,6 +113,8 @@ pub struct Column {
 pub struct ColumnExtensions {
     /// Fulltext options.
     pub fulltext_options: Option<OptionMap>,
+    /// Vector options.
+    pub vector_options: Option<OptionMap>,
 }
 
 impl Column {
@@ -138,6 +141,13 @@ impl Column {
 
 impl Display for Column {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(vector_options) = &self.extensions.vector_options {
+            if let Some(dim) = vector_options.get(VECTOR_OPT_DIM) {
+                write!(f, "{} VECTOR({})", self.column_def.name, dim)?;
+                return Ok(());
+            }
+        }
+
         write!(f, "{}", self.column_def)?;
         if let Some(fulltext_options) = &self.extensions.fulltext_options {
             if !fulltext_options.is_empty() {

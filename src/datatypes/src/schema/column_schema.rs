@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::str::FromStr;
 
 use arrow::datatypes::Field;
 use serde::{Deserialize, Serialize};
@@ -21,10 +22,9 @@ use snafu::{ensure, ResultExt};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::data_type::{ConcreteDataType, DataType};
-use crate::error::{self, Error, InvalidFulltextOptionSnafu, Result};
+use crate::error::{self, Error, InvalidFulltextOptionSnafu, ParseExtendedTypeSnafu, Result};
 use crate::schema::constraint::ColumnDefaultConstraint;
 use crate::schema::TYPE_KEY;
-use crate::types::JSON_TYPE_NAME;
 use crate::value::Value;
 use crate::vectors::VectorRef;
 
@@ -300,17 +300,57 @@ impl ColumnSchema {
     }
 }
 
+/// Column extended type set in column schema's metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColumnExtType {
+    /// Json type.
+    Json,
+
+    /// Vector type with dimension.
+    Vector(u32),
+}
+
+impl fmt::Display for ColumnExtType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ColumnExtType::Json => write!(f, "Json"),
+            ColumnExtType::Vector(dim) => write!(f, "Vector({})", dim),
+        }
+    }
+}
+
+impl FromStr for ColumnExtType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "Json" => Ok(ColumnExtType::Json),
+            _ if s.starts_with("Vector(") && s.ends_with(')') => s[7..s.len() - 1]
+                .parse::<u32>()
+                .map(ColumnExtType::Vector)
+                .map_err(|_| "Invalid dimension for Vector".to_string()),
+            _ => Err("Unknown variant".to_string()),
+        }
+    }
+}
+
 impl TryFrom<&Field> for ColumnSchema {
     type Error = Error;
 
     fn try_from(field: &Field) -> Result<ColumnSchema> {
         let mut data_type = ConcreteDataType::try_from(field.data_type())?;
         // Override the data type if it is specified in the metadata.
-        if field.metadata().contains_key(TYPE_KEY) {
-            data_type = match field.metadata().get(TYPE_KEY).unwrap().as_str() {
-                JSON_TYPE_NAME => ConcreteDataType::json_datatype(),
-                _ => data_type,
-            };
+        if let Some(s) = field.metadata().get(TYPE_KEY) {
+            let extype = ColumnExtType::from_str(s)
+                .map_err(|_| ParseExtendedTypeSnafu { value: s }.build())?;
+            match extype {
+                ColumnExtType::Json => {
+                    data_type = ConcreteDataType::json_datatype();
+                }
+                ColumnExtType::Vector(dim) => {
+                    data_type = ConcreteDataType::vector_datatype(dim);
+                }
+            }
         }
         let mut metadata = field.metadata().clone();
         let default_constraint = match metadata.remove(DEFAULT_CONSTRAINT_KEY) {
@@ -660,6 +700,25 @@ mod tests {
         assert_eq!(
             column_schema.metadata.get(TYPE_KEY).unwrap(),
             &ConcreteDataType::json_datatype().name()
+        );
+
+        let field = Field::new("test", ArrowDataType::Binary, true);
+        let field = field.with_metadata(Metadata::from([(
+            TYPE_KEY.to_string(),
+            ConcreteDataType::vector_datatype(3).name(),
+        )]));
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::vector_datatype(3),
+            column_schema.data_type
+        );
+        assert!(column_schema.is_nullable);
+        assert!(!column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert_eq!(
+            column_schema.metadata.get(TYPE_KEY).unwrap(),
+            &ConcreteDataType::vector_datatype(3).name()
         );
     }
 }

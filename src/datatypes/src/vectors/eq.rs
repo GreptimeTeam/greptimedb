@@ -80,7 +80,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
     match lhs.data_type() {
         Null(_) => true,
         Boolean(_) => is_vector_eq!(BooleanVector, lhs, rhs),
-        Binary(_) | Json(_) => is_vector_eq!(BinaryVector, lhs, rhs),
+        Binary(_) | Json(_) | Vector(_) => is_vector_eq!(BinaryVector, lhs, rhs),
         String(_) => is_vector_eq!(StringVector, lhs, rhs),
         Date(_) => is_vector_eq!(DateVector, lhs, rhs),
         DateTime(_) => is_vector_eq!(DateTimeVector, lhs, rhs),

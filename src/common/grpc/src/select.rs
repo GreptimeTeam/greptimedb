@@ -218,6 +218,12 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
             Decimal128Vector,
             decimal128_values,
             |x| { convert_to_pb_decimal128(x) }
+        ),
+        (
+            ConcreteDataType::Vector(_),
+            BinaryVector,
+            binary_values,
+            |x| { x.into() }
         )
     )
 }

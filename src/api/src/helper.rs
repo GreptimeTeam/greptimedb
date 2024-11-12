@@ -36,15 +36,14 @@ use datatypes::vectors::{
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt32Vector,
     UInt64Vector, VectorRef,
 };
-use greptime_proto::v1;
 use greptime_proto::v1::column_data_type_extension::TypeExt;
 use greptime_proto::v1::ddl_request::Expr;
 use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{
-    ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonTypeExtension, QueryRequest,
-    Row, SemanticType,
+    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonTypeExtension,
+    QueryRequest, Row, SemanticType, VectorTypeExtension,
 };
 use paste::paste;
 use snafu::prelude::*;
@@ -150,6 +149,17 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                     ConcreteDataType::decimal128_default_datatype()
                 }
             }
+            ColumnDataType::Vector => {
+                if let Some(TypeExt::VectorType(d)) = datatype_wrapper
+                    .datatype_ext
+                    .as_ref()
+                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref())
+                {
+                    ConcreteDataType::vector_datatype(d.dim)
+                } else {
+                    ConcreteDataType::vector_default_datatype()
+                }
+            }
         }
     }
 }
@@ -231,6 +241,15 @@ impl ColumnDataTypeWrapper {
             }),
         }
     }
+
+    pub fn vector_datatype(dim: u32) -> Self {
+        ColumnDataTypeWrapper {
+            datatype: ColumnDataType::Vector,
+            datatype_ext: Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim })),
+            }),
+        }
+    }
 }
 
 impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
@@ -271,6 +290,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 IntervalType::MonthDayNano(_) => ColumnDataType::IntervalMonthDayNano,
             },
             ConcreteDataType::Decimal128(_) => ColumnDataType::Decimal128,
+            ConcreteDataType::Vector(_) => ColumnDataType::Vector,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
             | ConcreteDataType::Dictionary(_)
@@ -298,6 +318,15 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 } else {
                     None
                 }
+            }
+            ColumnDataType::Vector => {
+                datatype
+                    .as_vector()
+                    .map(|vector_type| ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::VectorType(VectorTypeExtension {
+                            dim: vector_type.dim as _,
+                        })),
+                    })
             }
             _ => None,
         };
@@ -420,6 +449,10 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
         },
         ColumnDataType::Json => Values {
             string_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::Vector => Values {
+            binary_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
     }
@@ -673,6 +706,7 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
                 Decimal128::from_value_precision_scale(x.hi, x.lo, d.precision(), d.scale()).into()
             }),
         )),
+        ConcreteDataType::Vector(_) => Arc::new(BinaryVector::from_vec(values.binary_values)),
         ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
         | ConcreteDataType::Dictionary(_)
@@ -838,6 +872,7 @@ pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<
                 ))
             })
             .collect(),
+        ConcreteDataType::Vector(_) => values.binary_values.into_iter().map(|v| v.into()).collect(),
         ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
         | ConcreteDataType::Dictionary(_)
@@ -862,10 +897,7 @@ pub fn is_column_type_value_eq(
     ColumnDataTypeWrapper::try_new(type_value, type_extension)
         .map(|wrapper| {
             let datatype = ConcreteDataType::from(wrapper);
-            (datatype == *expect_type)
-            // Json type leverage binary type in pb, so this is valid.
-                || (datatype == ConcreteDataType::binary_datatype()
-                    && *expect_type == ConcreteDataType::json_datatype())
+            expect_type == &datatype
         })
         .unwrap_or(false)
 }
@@ -1152,6 +1184,10 @@ mod tests {
         let values = values_with_capacity(ColumnDataType::Decimal128, 2);
         let values = values.decimal128_values;
         assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::Vector, 2);
+        let values = values.binary_values;
+        assert_eq!(2, values.capacity());
     }
 
     #[test]
@@ -1239,7 +1275,11 @@ mod tests {
         assert_eq!(
             ConcreteDataType::decimal128_datatype(10, 2),
             ColumnDataTypeWrapper::decimal128_datatype(10, 2).into()
-        )
+        );
+        assert_eq!(
+            ConcreteDataType::vector_datatype(3),
+            ColumnDataTypeWrapper::vector_datatype(3).into()
+        );
     }
 
     #[test]
@@ -1334,6 +1374,10 @@ mod tests {
             ConcreteDataType::decimal128_datatype(10, 2)
                 .try_into()
                 .unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper::vector_datatype(3),
+            ConcreteDataType::vector_datatype(3).try_into().unwrap()
         );
 
         let result: Result<ColumnDataTypeWrapper> = ConcreteDataType::null_datatype().try_into();

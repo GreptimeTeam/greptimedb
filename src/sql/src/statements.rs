@@ -42,10 +42,10 @@ use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN};
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
-use datatypes::types::{cast, TimestampType};
+use datatypes::types::{cast, parse_string_to_vector_type_value, TimestampType};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use snafu::{ensure, OptionExt, ResultExt};
-use sqlparser::ast::{ExactNumberInfo, UnaryOperator};
+use sqlparser::ast::{ExactNumberInfo, Ident, ObjectName, UnaryOperator};
 
 use crate::ast::{
     ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, TimezoneInfo,
@@ -53,13 +53,15 @@ use crate::ast::{
 };
 use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
-    ConvertValueSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu,
+    ConvertValueSnafu, DatatypeSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu,
     ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu,
     TimestampOverflowSnafu, UnsupportedDefaultValueSnafu, UnsupportedUnaryOpSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
 pub use crate::statements::transform::{get_data_type_by_alias_name, transform_statements};
+
+const VECTOR_TYPE_NAME: &str = "VECTOR";
 
 fn parse_string_to_value(
     column_name: &str,
@@ -133,6 +135,10 @@ fn parse_string_to_value(
                 }
                 .fail()
             }
+        }
+        ConcreteDataType::Vector(d) => {
+            let v = parse_string_to_vector_type_value(&s, d.dim).context(DatatypeSnafu)?;
+            Ok(Value::Binary(v.into()))
         }
         _ => {
             unreachable!()
@@ -614,6 +620,20 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             }
         },
         SqlDataType::JSON => Ok(ConcreteDataType::json_datatype()),
+        // Vector type
+        SqlDataType::Custom(name, d)
+            if name.0.as_slice().len() == 1
+                && name.0.as_slice()[0].value.to_ascii_uppercase() == VECTOR_TYPE_NAME
+                && d.len() == 1 =>
+        {
+            let dim = d[0].parse().map_err(|e| {
+                error::ParseSqlValueSnafu {
+                    msg: format!("Failed to parse vector dimension: {}", e),
+                }
+                .build()
+            })?;
+            Ok(ConcreteDataType::vector_datatype(dim))
+        }
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -651,6 +671,10 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
             ExactNumberInfo::PrecisionAndScale(d.precision() as u64, d.scale() as u64),
         )),
         ConcreteDataType::Json(_) => Ok(SqlDataType::JSON),
+        ConcreteDataType::Vector(v) => Ok(SqlDataType::Custom(
+            ObjectName(vec![Ident::new(VECTOR_TYPE_NAME)]),
+            vec![v.dim.to_string()],
+        )),
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
@@ -765,6 +789,14 @@ mod tests {
         check_type(
             SqlDataType::Interval,
             ConcreteDataType::interval_month_day_nano_datatype(),
+        );
+        check_type(SqlDataType::JSON, ConcreteDataType::json_datatype());
+        check_type(
+            SqlDataType::Custom(
+                ObjectName(vec![Ident::new(VECTOR_TYPE_NAME)]),
+                vec!["3".to_string()],
+            ),
+            ConcreteDataType::vector_datatype(3),
         );
     }
 
@@ -1489,6 +1521,7 @@ mod tests {
                     ])
                     .into(),
                 ),
+                vector_options: None,
             },
         };
 
@@ -1501,7 +1534,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_parse_placeholder_value() {
+    fn test_parse_placeholder_value() {
         assert!(sql_value_to_value(
             "test",
             &ConcreteDataType::string_datatype(),

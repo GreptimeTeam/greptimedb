@@ -1,0 +1,41 @@
+CREATE TABLE t (ts TIMESTAMP TIME INDEX, v VECTOR(3));
+
+INSERT INTO t VALUES
+(1, "[1.0, 2.0, 3.0]"),
+(2, "[4.0, 5.0, 6.0]"),
+(3, "[7.0, 8.0, 9.0]");
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM t;
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM t;
+
+-- Unexpected dimension --
+INSERT INTO t VALUES
+(4, "[1.0]");
+
+-- Invalid vector value --
+INSERT INTO t VALUES
+(5, "1.0,2.0,3.0");
+
+-- Invalid vector value --
+INSERT INTO t VALUES
+(6, "[30h, 40s, 50m]");
+
+CREATE TABLE t2 (ts TIMESTAMP TIME INDEX, v VECTOR(3) DEFAULT '[1.0, 2.0, 3.0]');
+
+INSERT INTO t2 (ts) VALUES
+(1),
+(2),
+(3);
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM t2;
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM t2;
+
+DROP TABLE t;
+
+DROP TABLE t2;

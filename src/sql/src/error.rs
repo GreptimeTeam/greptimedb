@@ -325,6 +325,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Datatype error: {}", source))]
+    Datatype {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -363,6 +370,7 @@ impl ErrorExt for Error {
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
+            Datatype { source, .. } => source.status_code(),
             ConvertToDfStatement { .. } => StatusCode::Internal,
             ConvertSqlValue { .. } | ConvertValue { .. } => StatusCode::Unsupported,
 

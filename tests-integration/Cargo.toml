@@ -83,6 +83,7 @@ zstd.workspace = true
 [dev-dependencies]
 datafusion.workspace = true
 datafusion-expr.workspace = true
+hex.workspace = true
 itertools.workspace = true
 opentelemetry-proto.workspace = true
 partition.workspace = true

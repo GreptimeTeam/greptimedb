@@ -196,6 +196,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid Vector: {}", msg))]
+    InvalidVector {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Value exceeds the precision {} bound", precision))]
     ValueExceedsPrecision {
         precision: u8,
@@ -213,6 +220,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse extended type in metadata: {}", value))]
+    ParseExtendedType {
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Invalid fulltext option: {}", msg))]
     InvalidFulltextOption {
         msg: String,
@@ -238,6 +251,7 @@ impl ErrorExt for Error {
             | InvalidTimestampPrecision { .. }
             | InvalidPrecisionOrScale { .. }
             | InvalidJson { .. }
+            | InvalidVector { .. }
             | InvalidFulltextOption { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
@@ -253,7 +267,8 @@ impl ErrorExt for Error {
             | ProjectArrowSchema { .. }
             | ToScalarValue { .. }
             | TryFromValue { .. }
-            | ConvertArrowArrayToScalars { .. } => StatusCode::Internal,
+            | ConvertArrowArrayToScalars { .. }
+            | ParseExtendedType { .. } => StatusCode::Internal,
         }
     }
 

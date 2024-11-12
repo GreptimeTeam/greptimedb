@@ -39,7 +39,7 @@ use crate::parser::{ParserContext, FLOW};
 use crate::parsers::utils::validate_column_fulltext_create_option;
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
-    CreateTableLike, CreateView, Partitions, TableConstraint,
+    CreateTableLike, CreateView, Partitions, TableConstraint, VECTOR_OPT_DIM,
 };
 use crate::statements::statement::Statement;
 use crate::statements::{
@@ -668,6 +668,31 @@ impl<'a> ParserContext<'a> {
         column_type: &DataType,
         column_extensions: &mut ColumnExtensions,
     ) -> Result<bool> {
+        if let DataType::Custom(name, tokens) = column_type
+            && name.0.len() == 1
+            && &name.0[0].value.to_uppercase() == "VECTOR"
+        {
+            ensure!(
+                tokens.len() == 1,
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "VECTOR type should have dimension",
+                }
+            );
+
+            let dimension =
+                tokens[0]
+                    .parse::<u32>()
+                    .ok()
+                    .with_context(|| InvalidColumnOptionSnafu {
+                        name: column_name.to_string(),
+                        msg: "dimension should be a positive integer",
+                    })?;
+
+            let options = HashMap::from_iter([(VECTOR_OPT_DIM.to_string(), dimension.to_string())]);
+            column_extensions.vector_options = Some(options.into());
+        }
+
         if parser.parse_keyword(Keyword::FULLTEXT) {
             ensure!(
                 column_extensions.fulltext_options.is_none(),

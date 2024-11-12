@@ -562,6 +562,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Convert SQL value error"))]
+    ConvertSqlValue {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -674,6 +680,8 @@ impl ErrorExt for Error {
             ConvertScalarValue { source, .. } => source.status_code(),
 
             ToJson { .. } => StatusCode::Internal,
+
+            ConvertSqlValue { source, .. } => source.status_code(),
         }
     }
 
