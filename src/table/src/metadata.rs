@@ -26,6 +26,7 @@ use datatypes::schema::{
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS};
 use store_api::region_request::ChangeOption;
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
@@ -796,6 +797,14 @@ impl TableInfo {
     /// Returns the full table name in the form of `{catalog}.{schema}.{table}`.
     pub fn full_table_name(&self) -> String {
         common_catalog::format_full_table_name(&self.catalog_name, &self.schema_name, &self.name)
+    }
+
+    /// Returns true when the table is the metric engine's physical table.
+    pub fn is_physical_table(&self) -> bool {
+        self.meta
+            .options
+            .extra_options
+            .contains_key(PHYSICAL_TABLE_METADATA_KEY)
     }
 }
 

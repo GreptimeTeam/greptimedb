@@ -18,9 +18,7 @@ use common_telemetry::info;
 use mito2::engine::MITO_ENGINE_NAME;
 use object_store::util::join_dir;
 use snafu::ResultExt;
-use store_api::metric_engine_consts::{
-    DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR, PHYSICAL_TABLE_METADATA_KEY,
-};
+use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -46,9 +44,7 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: RegionOpenRequest,
     ) -> Result<AffectedRows> {
-        let is_opening_physical_region = request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY);
-
-        if is_opening_physical_region {
+        if request.is_physical_table() {
             // open physical region and recover states
             self.open_physical_region(region_id, request).await?;
             self.recover_states(region_id).await?;

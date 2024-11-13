@@ -38,6 +38,7 @@ use crate::metadata::{
     InvalidRegionOptionChangeRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
     RegionMetadata, Result,
 };
+use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::mito_engine_options::{
     TTL_KEY, TWCS_MAX_ACTIVE_WINDOW_FILES, TWCS_MAX_ACTIVE_WINDOW_RUNS,
     TWCS_MAX_INACTIVE_WINDOW_FILES, TWCS_MAX_INACTIVE_WINDOW_RUNS, TWCS_MAX_OUTPUT_FILE_SIZE,
@@ -306,6 +307,11 @@ impl RegionCreateRequest {
 
         Ok(())
     }
+
+    /// Returns true when the region belongs to the metric engine's physical table.
+    pub fn is_physical_table(&self) -> bool {
+        self.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -322,6 +328,13 @@ pub struct RegionOpenRequest {
     pub options: HashMap<String, String>,
     /// To skip replaying the WAL.
     pub skip_wal_replay: bool,
+}
+
+impl RegionOpenRequest {
+    /// Returns true when the region belongs to the metric engine's physical table.
+    pub fn is_physical_table(&self) -> bool {
+        self.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
+    }
 }
 
 /// Close region request.

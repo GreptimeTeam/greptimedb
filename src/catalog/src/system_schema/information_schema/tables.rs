@@ -259,21 +259,22 @@ impl InformationSchemaTablesBuilder {
                 let table_info = table.table_info();
 
                 // TODO(dennis): make it working for metric engine
-                let table_region_stats = if table_info.meta.engine == MITO_ENGINE {
-                    let region_ids = table_info
-                        .meta
-                        .region_numbers
-                        .iter()
-                        .map(|n| RegionId::new(table_info.ident.table_id, *n))
-                        .collect::<HashSet<_>>();
+                let table_region_stats =
+                    if table_info.meta.engine == MITO_ENGINE || table_info.is_physical_table() {
+                        let region_ids = table_info
+                            .meta
+                            .region_numbers
+                            .iter()
+                            .map(|n| RegionId::new(table_info.ident.table_id, *n))
+                            .collect::<HashSet<_>>();
 
-                    region_stats
-                        .iter()
-                        .filter(|stat| region_ids.contains(&stat.id))
-                        .collect::<Vec<_>>()
-                } else {
-                    vec![]
-                };
+                        region_stats
+                            .iter()
+                            .filter(|stat| region_ids.contains(&stat.id))
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![]
+                    };
 
                 self.add_table(
                     &predicates,

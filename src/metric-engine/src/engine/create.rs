@@ -31,7 +31,6 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME,
     METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
-    PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use store_api::region_engine::RegionEngine;
@@ -61,7 +60,7 @@ impl MetricEngineInner {
     ) -> Result<AffectedRows> {
         Self::verify_region_create_request(&request)?;
 
-        let result = if request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY) {
+        let result = if request.is_physical_table() {
             self.create_physical_region(region_id, request).await
         } else if request.options.contains_key(LOGICAL_TABLE_METADATA_KEY) {
             let physical_region_id = self.create_logical_region(region_id, request).await?;
@@ -355,12 +354,11 @@ impl MetricEngineInner {
 
         // check if required table option is present
         ensure!(
-            request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
-                || request.options.contains_key(LOGICAL_TABLE_METADATA_KEY),
+            request.is_physical_table() || request.options.contains_key(LOGICAL_TABLE_METADATA_KEY),
             MissingRegionOptionSnafu {}
         );
         ensure!(
-            !(request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
+            !(request.is_physical_table()
                 && request.options.contains_key(LOGICAL_TABLE_METADATA_KEY)),
             ConflictRegionOptionSnafu {}
         );
@@ -543,7 +541,7 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod test {
-    use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+    use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 
     use super::*;
     use crate::engine::MetricEngine;
