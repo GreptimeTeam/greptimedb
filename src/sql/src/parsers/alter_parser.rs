@@ -15,8 +15,9 @@
 use std::collections::HashMap;
 
 use common_query::AddColumnLocation;
-use datatypes::schema::COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE;
+use datatypes::schema::{FulltextOptions, COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE};
 use snafu::{ensure, ResultExt};
+use sqlparser::ast::Ident;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::Token;
@@ -27,10 +28,6 @@ use crate::parsers::utils::validate_column_fulltext_create_option;
 use crate::statements::alter::{AlterTable, AlterTableOperation, ChangeTableOption};
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
-
-fn validate_column_fulltext_alter_option(key: &str) -> bool {
-    key == COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE || validate_column_fulltext_create_option(key)
-}
 
 impl ParserContext<'_> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
@@ -153,40 +150,73 @@ impl ParserContext<'_> {
                 .context(error::SyntaxSnafu)?,
         );
 
-        if self.parser.parse_keyword(Keyword::SET) {
-            self.parser
-                .expect_keyword(Keyword::FULLTEXT)
-                .context(error::SyntaxSnafu)?;
+        match self.parser.peek_token().token {
+            Token::Word(w) => {
+                if w.value.eq_ignore_ascii_case("UNSET") {
+                    let _ = self.parser.next_token();
 
-            let options = self
-                .parser
-                .parse_options(Keyword::WITH)
-                .context(error::SyntaxSnafu)?
-                .into_iter()
-                .map(parse_option_string)
-                .collect::<Result<HashMap<String, String>>>()?;
+                    self.parser
+                        .expect_keyword(Keyword::FULLTEXT)
+                        .context(error::SyntaxSnafu)?;
 
-            for key in options.keys() {
-                ensure!(
-                    validate_column_fulltext_alter_option(key),
-                    InvalidColumnOptionSnafu {
-                        name: column_name.to_string(),
-                        msg: format!("invalid FULLTEXT option: {key}"),
-                    }
-                );
+                    Ok(AlterTableOperation::ChangeColumnFulltext {
+                        column_name,
+                        options: FulltextOptions {
+                            enable: false,
+                            ..Default::default()
+                        },
+                    })
+                } else if w.keyword == Keyword::SET {
+                    self.parse_alter_column_fulltext(column_name)
+                } else {
+                    let data_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
+                    Ok(AlterTableOperation::ChangeColumnType {
+                        column_name,
+                        target_type: data_type,
+                    })
+                }
             }
-
-            Ok(AlterTableOperation::ChangeColumnFulltext {
-                column_name,
-                options: options.try_into().context(SetFulltextOptionSnafu)?,
-            })
-        } else {
-            let target_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
-            Ok(AlterTableOperation::ChangeColumnType {
-                column_name,
-                target_type,
-            })
+            _ => self.expected(
+                "SET or UNSET or data type after MODIFY COLUMN",
+                self.parser.peek_token(),
+            )?,
         }
+    }
+
+    fn parse_alter_column_fulltext(&mut self, column_name: Ident) -> Result<AlterTableOperation> {
+        let _ = self.parser.next_token();
+
+        self.parser
+            .expect_keyword(Keyword::FULLTEXT)
+            .context(error::SyntaxSnafu)?;
+
+        let mut options = self
+            .parser
+            .parse_options(Keyword::WITH)
+            .context(error::SyntaxSnafu)?
+            .into_iter()
+            .map(parse_option_string)
+            .collect::<Result<HashMap<String, String>>>()?;
+
+        for key in options.keys() {
+            ensure!(
+                validate_column_fulltext_create_option(key),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: format!("invalid FULLTEXT option: {key}"),
+                }
+            );
+        }
+
+        options.insert(
+            COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE.to_string(),
+            "true".to_string(),
+        );
+
+        Ok(AlterTableOperation::ChangeColumnFulltext {
+            column_name,
+            options: options.try_into().context(SetFulltextOptionSnafu)?,
+        })
     }
 }
 
@@ -557,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_parse_alter_column_fulltext() {
-        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT WITH(enable='true',analyzer='English',case_sensitive='false')";
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT WITH(analyzer='English',case_sensitive='false')";
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -583,6 +613,43 @@ mod tests {
                         assert_eq!(
                             FulltextOptions {
                                 enable: true,
+                                analyzer: FulltextAnalyzer::English,
+                                case_sensitive: false
+                            },
+                            *options
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a UNSET FULLTEXT";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::Alter { .. });
+        match statement {
+            Statement::Alter(alter_table) => {
+                assert_eq!("test_table", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_matches!(
+                    alter_operation,
+                    AlterTableOperation::ChangeColumnFulltext { .. }
+                );
+                match alter_operation {
+                    AlterTableOperation::ChangeColumnFulltext {
+                        column_name,
+                        options,
+                    } => {
+                        assert_eq!("a", column_name.value);
+                        assert_eq!(
+                            FulltextOptions {
+                                enable: false,
                                 analyzer: FulltextAnalyzer::English,
                                 case_sensitive: false
                             },

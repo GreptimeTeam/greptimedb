@@ -94,7 +94,7 @@ SHOW CREATE TABLE test;
 |       | )                                                                                     |
 +-------+---------------------------------------------------------------------------------------+
 
-ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(enable = 'false');
+ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT;
 
 Affected Rows: 0
 
@@ -140,7 +140,7 @@ ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', c
 
 Error: 1004(InvalidArguments), Invalid column option, column name: message, error: FULLTEXT index options already enabled
 
-ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(enable = 'false');
+ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT;
 
 Affected Rows: 0
 
