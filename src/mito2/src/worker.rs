@@ -26,6 +26,7 @@ mod handle_open;
 mod handle_truncate;
 mod handle_write;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -579,7 +580,10 @@ type RequestBuffer = Vec<WorkerRequest>;
 #[derive(Default)]
 pub(crate) struct StalledRequests {
     /// Stalled requests.
-    pub(crate) requests: Vec<SenderWriteRequest>,
+    ///
+    /// Key: RegionId
+    /// Value: (estimated size, stalled requests)
+    pub(crate) requests: HashMap<RegionId, (usize, Vec<SenderWriteRequest>)>,
     /// Estimated size of all stalled requests.
     pub(crate) estimated_size: usize,
 }
@@ -587,12 +591,28 @@ pub(crate) struct StalledRequests {
 impl StalledRequests {
     /// Appends stalled requests.
     pub(crate) fn append(&mut self, requests: &mut Vec<SenderWriteRequest>) {
-        let size: usize = requests
-            .iter()
-            .map(|req| req.request.estimated_size())
-            .sum();
-        self.requests.append(requests);
-        self.estimated_size += size;
+        for req in requests.drain(..) {
+            self.push(req);
+        }
+    }
+
+    /// Pushes a stalled request to the buffer.
+    pub(crate) fn push(&mut self, req: SenderWriteRequest) {
+        let (size, requests) = self.requests.entry(req.request.region_id).or_default();
+        let req_size = req.request.estimated_size();
+        *size += req_size;
+        self.estimated_size += req_size;
+        requests.push(req);
+    }
+
+    /// Removes stalled requests of specific region.
+    pub(crate) fn remove(&mut self, region_id: &RegionId) -> Vec<SenderWriteRequest> {
+        if let Some((size, requests)) = self.requests.remove(region_id) {
+            self.estimated_size -= size;
+            requests
+        } else {
+            vec![]
+        }
     }
 }
 
@@ -854,7 +874,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
-            BackgroundNotify::RegionChange(req) => self.handle_manifest_region_change_result(req),
+            BackgroundNotify::RegionChange(req) => {
+                self.handle_manifest_region_change_result(req).await
+            }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
         }
     }
@@ -994,6 +1016,15 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_compaction_scheduled(_region_id);
+        }
+    }
+
+    pub(crate) async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_notify_region_change_result_begin(_region_id)
+                .await;
         }
     }
 }

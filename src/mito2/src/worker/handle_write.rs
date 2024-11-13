@@ -18,13 +18,15 @@ use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
 use api::v1::OpType;
+use common_telemetry::debug;
 use snafu::ensure;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidRequestSnafu, RejectWriteSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RegionLeaderStateSnafu, RejectWriteSnafu, Result};
 use crate::metrics::{WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED};
+use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
 use crate::worker::RegionWorkerLoop;
@@ -47,9 +49,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // The memory pressure is still too high, reject write requests.
             reject_write_requests(write_requests);
             // Also reject all stalled requests.
-            let stalled = std::mem::take(&mut self.stalled_requests);
-            self.stalled_count.sub(stalled.requests.len() as i64);
-            reject_write_requests(stalled.requests);
+            self.reject_stalled_requests();
             return;
         }
 
@@ -124,7 +124,34 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let stalled = std::mem::take(&mut self.stalled_requests);
         self.stalled_count.sub(stalled.requests.len() as i64);
         // We already stalled these requests, don't stall them again.
-        self.handle_write_requests(stalled.requests, false).await;
+        for (_, (_, requests)) in stalled.requests {
+            self.handle_write_requests(requests, false).await;
+        }
+    }
+
+    /// Rejects all stalled requests.
+    pub(crate) fn reject_stalled_requests(&mut self) {
+        let stalled = std::mem::take(&mut self.stalled_requests);
+        self.stalled_count.sub(stalled.requests.len() as i64);
+        for (_, (_, requests)) in stalled.requests {
+            reject_write_requests(requests);
+        }
+    }
+
+    /// Rejects a specific region's stalled requests.
+    pub(crate) fn reject_region_stalled_requests(&mut self, region_id: &RegionId) {
+        debug!("Rejects stalled requests for region {}", region_id);
+        let requests = self.stalled_requests.remove(region_id);
+        self.stalled_count.sub(requests.len() as i64);
+        reject_write_requests(requests);
+    }
+
+    /// Handles a specific region's stalled requests.
+    pub(crate) async fn handle_region_stalled_requests(&mut self, region_id: &RegionId) {
+        debug!("Handles stalled requests for region {}", region_id);
+        let requests = self.stalled_requests.remove(region_id);
+        self.stalled_count.sub(requests.len() as i64);
+        self.handle_write_requests(requests, true).await;
     }
 }
 
@@ -152,19 +179,43 @@ impl<S> RegionWorkerLoop<S> {
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
                 let Some(region) = self
                     .regions
-                    .writable_region_or(region_id, &mut sender_req.sender)
+                    .get_region_or(region_id, &mut sender_req.sender)
                 else {
-                    // No such region or the region is read only.
+                    // No such region.
                     continue;
                 };
+                match region.state() {
+                    RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                        let region_ctx = RegionWriteCtx::new(
+                            region.region_id,
+                            &region.version_control,
+                            region.provider.clone(),
+                        );
 
-                let region_ctx = RegionWriteCtx::new(
-                    region.region_id,
-                    &region.version_control,
-                    region.provider.clone(),
-                );
-
-                e.insert(region_ctx);
+                        e.insert(region_ctx);
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::Altering) => {
+                        debug!(
+                            "Region {} is altering, add request to pending writes",
+                            region.region_id
+                        );
+                        self.stalled_count.add(1);
+                        self.stalled_requests.push(sender_req);
+                        continue;
+                    }
+                    state => {
+                        // The region is not writable.
+                        sender_req.sender.send(
+                            RegionLeaderStateSnafu {
+                                region_id,
+                                state,
+                                expect: RegionLeaderState::Writable,
+                            }
+                            .fail(),
+                        );
+                        continue;
+                    }
+                }
             }
 
             // Safety: Now we ensure the region exists.
