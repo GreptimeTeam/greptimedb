@@ -26,6 +26,7 @@ use datatypes::schema::{
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS};
 use store_api::region_request::ChangeOption;
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
@@ -223,6 +224,21 @@ impl TableMeta {
                         new_options.ttl = None;
                     } else {
                         new_options.ttl = Some(*new_ttl);
+                    }
+                }
+                ChangeOption::Twsc(key, value) => {
+                    if !value.is_empty() {
+                        new_options
+                            .extra_options
+                            .insert(key.to_string(), value.to_string());
+                        // Ensure node restart correctly.
+                        new_options.extra_options.insert(
+                            COMPACTION_TYPE.to_string(),
+                            COMPACTION_TYPE_TWCS.to_string(),
+                        );
+                    } else {
+                        // Invalidate the previous change option if an empty value has been set.
+                        new_options.extra_options.remove(key.as_str());
                     }
                 }
             }
