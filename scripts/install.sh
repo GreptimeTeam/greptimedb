@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 
 set -ue
 
@@ -15,7 +15,7 @@ GITHUB_ORG=GreptimeTeam
 GITHUB_REPO=greptimedb
 BIN=greptime
 
-function get_os_type() {
+get_os_type() {
   os_type="$(uname -s)"
 
   case "$os_type" in
@@ -31,7 +31,7 @@ function get_os_type() {
   esac
 }
 
-function get_arch_type() {
+get_arch_type() {
   arch_type="$(uname -m)"
 
   case "$arch_type" in
@@ -53,7 +53,7 @@ function get_arch_type() {
   esac
 }
 
-function download_artifact() {
+download_artifact() {
   if [ -n "${OS_TYPE}" ] && [ -n "${ARCH_TYPE}" ]; then
     # Use the latest stable released version.
     # GitHub API reference: https://docs.github.com/en/rest/releases/releases?apiVersion=2022-11-28#get-the-latest-release.
