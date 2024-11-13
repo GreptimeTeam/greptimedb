@@ -299,7 +299,7 @@ impl FlowWorkerManager {
                                     )]);
                                 }
                                 if row.len() != proto_schema.len() {
-                                    InternalSnafu {
+                                    UnexpectedSnafu {
                                         reason: format!(
                                             "Flow output row length mismatch, expect {} got {}, the columns in schema are: {:?}",
                                             proto_schema.len(),

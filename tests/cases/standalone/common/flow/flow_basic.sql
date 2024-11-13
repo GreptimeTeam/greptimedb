@@ -666,10 +666,63 @@ CREATE FLOW calc_android_log_abnormal
 SINK TO android_log_abnormal
 AS
 SELECT
-    count(case when `log` like '%am_crash%' then 1 else 0 end) as crash,
-    count(case when `log` like '%FATAL EXCEPTION%' then 1 else 0 end) as fatal,
-    count(case when `log` like '%backtrace%' then 1 else 0 end) as backtrace,
-    count(case when `log` like '%am_anr%' then 1 else 0 end) as anr,
+    sum(case when `log` LIKE '%am_crash%' then 1 else 0 end) as crash,
+    sum(case when `log` LIKE '%FATAL EXCEPTION%' then 1 else 0 end) as fatal,
+    sum(case when `log` LIKE '%backtrace%' then 1 else 0 end) as backtrace,
+    sum(case when `log` LIKE '%am_anr%' then 1 else 0 end) as anr,
+    date_bin(INTERVAL '5 minutes', ts) as time_window,
+FROM android_log
+GROUP BY
+    time_window;
+
+INSERT INTO android_log values
+("am_crash", "2021-07-01 00:01:01.000"),
+("asas.backtrace.ssss", "2021-07-01 00:01:01.000");
+
+SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
+
+INSERT INTO android_log values
+("FATAL EXCEPTION", "2021-07-01 00:01:01.000"),
+("mamam_anraaaa", "2021-07-01 00:01:01.000");
+
+SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
+
+DROP FLOW calc_android_log_abnormal;
+
+DROP TABLE android_log_abnormal;
+
+DROP TABLE android_log;
+
+CREATE TABLE android_log (
+    `log` STRING,
+    ts TIMESTAMP(9),
+    TIME INDEX(ts)
+);
+
+CREATE TABLE android_log_abnormal (
+    crash BIGINT NULL,
+    fatal BIGINT NULL,
+    backtrace BIGINT NULL,
+    anr BIGINT NULL,
+    time_window TIMESTAMP(9) TIME INDEX,
+    update_at TIMESTAMP,
+);
+
+CREATE FLOW calc_android_log_abnormal
+SINK TO android_log_abnormal
+AS
+SELECT
+    regexp_like(`log`, '.*am_crash.*')
+FROM android_log;
+
+CREATE FLOW calc_android_log_abnormal
+SINK TO android_log_abnormal
+AS
+SELECT
+    sum(case when regexp_like(`log`, '.*am_crash.*') then 1 else 0 end) as crash,
+    sum(case when regexp_like(`log`, '.*FATAL EXCEPTION.*') then 1 else 0 end) as fatal,
+    sum(case when regexp_like(`log`, '.*backtrace.*') then 1 else 0 end) as backtrace,
+    sum(case when regexp_like(`log`, '.*am_anr.*') then 1 else 0 end) as anr,
     date_bin(INTERVAL '5 minutes', ts) as time_window,
 FROM android_log
 GROUP BY
@@ -679,3 +732,12 @@ INSERT INTO android_log values
 ("am_crash", "2021-07-01 00:01:01.000");
 
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
+
+INSERT INTO android_log values
+("FATAL EXCEPTION", "2021-07-01 00:01:01.000");
+
+DROP FLOW calc_android_log_abnormal;
+
+DROP TABLE android_log_abnormal;
+
+DROP TABLE android_log;
