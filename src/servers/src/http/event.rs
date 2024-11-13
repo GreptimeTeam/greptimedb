@@ -33,6 +33,7 @@ use bytes::Bytes;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
+use lazy_static::lazy_static;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::PipelineVersion;
@@ -62,6 +63,25 @@ use crate::query_handler::LogHandlerRef;
 
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
 const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
+
+lazy_static! {
+    static ref LOKI_INIT_SCHEMAS: Vec<ColumnSchema> = vec![
+        ColumnSchema {
+            column_name: "greptime_timestamp".to_string(),
+            datatype: ColumnDataType::TimestampNanosecond.into(),
+            semantic_type: SemanticType::Timestamp.into(),
+            datatype_extension: None,
+            options: None,
+        },
+        ColumnSchema {
+            column_name: "line".to_string(),
+            datatype: ColumnDataType::String.into(),
+            semantic_type: SemanticType::Field.into(),
+            datatype_extension: None,
+            options: None,
+        },
+    ];
+}
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LogIngesterQueryParams {
@@ -387,22 +407,7 @@ pub async fn loki_ingest(
         .context(DecodeOtlpRequestSnafu)?;
 
     // init schemas
-    let mut schemas: Vec<ColumnSchema> = vec![
-        ColumnSchema {
-            column_name: "greptime_timestamp".to_string(),
-            datatype: ColumnDataType::TimestampNanosecond.into(),
-            semantic_type: SemanticType::Timestamp.into(),
-            datatype_extension: None,
-            options: None,
-        },
-        ColumnSchema {
-            column_name: "line".to_string(),
-            datatype: ColumnDataType::String.into(),
-            semantic_type: SemanticType::Field.into(),
-            datatype_extension: None,
-            options: None,
-        },
-    ];
+    let mut schemas = LOKI_INIT_SCHEMAS.clone();
 
     let mut global_label_key_index: HashMap<String, i32> = HashMap::new();
     global_label_key_index.insert("greptime_timestamp".to_string(), 0);
