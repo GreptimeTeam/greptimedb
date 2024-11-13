@@ -49,6 +49,7 @@ RUN yum install -y epel-release \
 
 WORKDIR /greptime
 COPY --from=builder /out/target/${OUTPUT_DIR}/greptime /greptime/bin/
+COPY --from=builder /out/target/${OUTPUT_DIR}/build/tikv-jemalloc-sys-*/out/build/bin/jeprof /greptime/bin/
 ENV PATH /greptime/bin/:$PATH
 
 ENTRYPOINT ["greptime"]
