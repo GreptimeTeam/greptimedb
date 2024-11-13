@@ -398,6 +398,7 @@ fn proto_value_type_match(column_type: ColumnDataType, value_type: ColumnDataTyp
     match (column_type, value_type) {
         (ct, vt) if ct == vt => true,
         (ColumnDataType::Vector, ColumnDataType::Binary) => true,
+        (ColumnDataType::Json, ColumnDataType::Binary) => true,
         _ => false,
     }
 }

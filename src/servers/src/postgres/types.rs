@@ -27,7 +27,9 @@ use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
-use datatypes::types::{vector_type_value_to_string, IntervalType, TimestampType};
+use datatypes::types::{
+    json_type_value_to_string, vector_type_value_to_string, IntervalType, TimestampType,
+};
 use datatypes::value::ListValue;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
@@ -350,13 +352,17 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<String>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Json(_) => {
+        &ConcreteDataType::Json(j) => {
             let array = value_list
                 .items()
                 .iter()
                 .map(|v| match v {
                     Value::Null => Ok(None),
-                    Value::Binary(v) => Ok(Some(jsonb::to_string(v))),
+                    Value::Binary(v) => {
+                        let s = json_type_value_to_string(v, &j.format)
+                            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                        Ok(Some(s))
+                    }
                     _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
                         err_msg: format!("Invalid list item type, find {v:?}, expected json",),
                     }))),
@@ -412,7 +418,11 @@ pub(super) fn encode_value(
         Value::Float64(v) => builder.encode_field(&v.0),
         Value::String(v) => builder.encode_field(&v.as_utf8()),
         Value::Binary(v) => match datatype {
-            ConcreteDataType::Json(_) => builder.encode_field(&jsonb::to_string(v)),
+            ConcreteDataType::Json(j) => {
+                let s = json_type_value_to_string(v, &j.format)
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                builder.encode_field(&s)
+            }
             ConcreteDataType::Vector(d) => {
                 let s = vector_type_value_to_string(v, d.dim)
                     .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
