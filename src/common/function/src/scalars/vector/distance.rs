@@ -21,7 +21,7 @@ use common_query::prelude::Signature;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::value::ValueRef;
-use datatypes::vectors::{Float32VectorBuilder, MutableVector, Vector, VectorRef};
+use datatypes::vectors::{Float64VectorBuilder, MutableVector, Vector, VectorRef};
 use snafu::ensure;
 
 use crate::function::{Function, FunctionContext};
@@ -41,7 +41,7 @@ macro_rules! define_distance_function {
             }
 
             fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-                Ok(ConcreteDataType::float32_datatype())
+                Ok(ConcreteDataType::float64_datatype())
             }
 
             fn signature(&self) -> Signature {
@@ -71,7 +71,7 @@ macro_rules! define_distance_function {
                 let arg1 = &columns[1];
 
                 let size = arg0.len();
-                let mut result = Float32VectorBuilder::with_capacity(size);
+                let mut result = Float64VectorBuilder::with_capacity(size);
                 if size == 0 {
                     return Ok(result.to_vector());
                 }
@@ -104,7 +104,7 @@ macro_rules! define_distance_function {
                         let f = <f32 as simsimd::SpatialSimilarity>::$similarity_method;
                         // Safe: checked if the length of the vectors match
                         let d = f(vec0.as_ref(), vec1.as_ref()).unwrap();
-                        result.push(Some(d as f32));
+                        result.push(Some(d));
                     } else {
                         result.push_null();
                     }
