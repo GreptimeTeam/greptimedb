@@ -30,12 +30,12 @@ use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
 use crate::memtable::partition_tree::dedup::DedupReader;
-use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::shard::{
     BoxedDataBatchSource, Shard, ShardMerger, ShardNode, ShardSource,
 };
 use crate::memtable::partition_tree::shard_builder::ShardBuilder;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PkId};
+use crate::memtable::stats::WriteMetrics;
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 use crate::read::{Batch, BatchBuilder};
 use crate::row_converter::{McmpRowCodec, RowCodec};

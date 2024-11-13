@@ -33,11 +33,11 @@ use table::predicate::Predicate;
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result, SerializeFieldSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::partition::{
     Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionContext,
 };
 use crate::memtable::partition_tree::PartitionTreeConfig;
+use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::dedup::LastNonNullIter;
