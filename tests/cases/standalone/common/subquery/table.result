@@ -1,0 +1,164 @@
+-- From https://github.com/duckdb/duckdb/tree/main/test/sql/subquery/table
+-- aliasing
+CREATE TABLE a(ts TIMESTAMP TIME INDEX, i INTEGER);
+
+Affected Rows: 0
+
+insert into a values (1, 42);
+
+Affected Rows: 1
+
+select * from (select i as j from a group by j) where j = 42;
+
++----+
+| j  |
++----+
+| 42 |
++----+
+
+select * from (select i as j from a group by i) where j = 42;
+
++----+
+| j  |
++----+
+| 42 |
++----+
+
+DROP TABLE a;
+
+Affected Rows: 0
+
+-- nested table subquery
+CREATE TABLE test (ts TIMESTAMP TIME INDEX, i INTEGER, j INTEGER);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (0, 3, 4), (1, 4, 5), (2, 5, 6);
+
+Affected Rows: 3
+
+SELECT * FROM (SELECT i, j FROM (SELECT j AS i, i AS j FROM (SELECT j AS i, i AS j FROM test) AS a) AS a) AS a, (SELECT i+1 AS r,j FROM test) AS b, test WHERE a.i=b.r AND test.j=a.i ORDER BY 1;
+
++---+---+---+---+-------------------------+---+---+
+| i | j | r | j | ts                      | i | j |
++---+---+---+---+-------------------------+---+---+
+| 4 | 5 | 4 | 4 | 1970-01-01T00:00:00     | 3 | 4 |
+| 5 | 6 | 5 | 5 | 1970-01-01T00:00:00.001 | 4 | 5 |
++---+---+---+---+-------------------------+---+---+
+
+SELECT i FROM (SELECT i + 1 AS i FROM (SELECT i + 1 AS i FROM (SELECT i + 1 AS i FROM test)));
+
++---+
+| i |
++---+
+| 6 |
+| 7 |
+| 8 |
++---+
+
+DROP TABLE test;
+
+Affected Rows: 0
+
+-- subquery union
+SELECT * FROM (SELECT 42) UNION ALL SELECT * FROM (SELECT 43);
+
++-----------+
+| Int64(42) |
++-----------+
+| 42        |
+| 43        |
++-----------+
+
+-- table subquery
+CREATE TABLE test (ts TIMESTAMP TIME INDEX, i INTEGER, j INTEGER);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (0, 3, 4), (1, 4, 5), (2, 5, 6);
+
+Affected Rows: 3
+
+SELECT * FROM (SELECT i, j AS d FROM test ORDER BY i) AS b;
+
++---+---+
+| i | d |
++---+---+
+| 3 | 4 |
+| 4 | 5 |
+| 5 | 6 |
++---+---+
+
+SELECT b.d FROM (SELECT i * 2 + j AS d FROM test) AS b;
+
++----+
+| d  |
++----+
+| 10 |
+| 13 |
+| 16 |
++----+
+
+SELECT a.i,a.j,b.r,b.j FROM (SELECT i, j FROM test) AS a INNER JOIN (SELECT i+1 AS r,j FROM test) AS b ON a.i=b.r ORDER BY 1;
+
++---+---+---+---+
+| i | j | r | j |
++---+---+---+---+
+| 4 | 5 | 4 | 4 |
+| 5 | 6 | 5 | 5 |
++---+---+---+---+
+
+SELECT * FROM (SELECT i, j FROM test) AS a, (SELECT i+1 AS r,j FROM test) AS b, test WHERE a.i=b.r AND test.j=a.i ORDER BY 1;
+
++---+---+---+---+-------------------------+---+---+
+| i | j | r | j | ts                      | i | j |
++---+---+---+---+-------------------------+---+---+
+| 4 | 5 | 4 | 4 | 1970-01-01T00:00:00     | 3 | 4 |
+| 5 | 6 | 5 | 5 | 1970-01-01T00:00:00.001 | 4 | 5 |
++---+---+---+---+-------------------------+---+---+
+
+DROP TABLE test;
+
+Affected Rows: 0
+
+-- test unamed subquery
+SELECT * FROM (SELECT 42);
+
++-----------+
+| Int64(42) |
++-----------+
+| 42        |
++-----------+
+
+SELECT * FROM (SELECT 42), (SELECT 43);
+
++-----------+-----------+
+| Int64(42) | Int64(43) |
++-----------+-----------+
+| 42        | 43        |
++-----------+-----------+
+
+SELECT * FROM (VALUES (42, 43));
+
++---------+---------+
+| column1 | column2 |
++---------+---------+
+| 42      | 43      |
++---------+---------+
+
+SELECT * FROM (SELECT 42), (SELECT 43), (SELECT 44), (SELECT 45);
+
++-----------+-----------+-----------+-----------+
+| Int64(42) | Int64(43) | Int64(44) | Int64(45) |
++-----------+-----------+-----------+-----------+
+| 42        | 43        | 44        | 45        |
++-----------+-----------+-----------+-----------+
+
+SELECT * FROM (SELECT * FROM (SELECT 42), (SELECT 43)) JOIN (SELECT 44) ON (true) JOIN (SELECT 45) ON (true);
+
++-----------+-----------+-----------+-----------+
+| Int64(42) | Int64(43) | Int64(44) | Int64(45) |
++-----------+-----------+-----------+-----------+
+| 42        | 43        | 44        | 45        |
++-----------+-----------+-----------+-----------+
+
