@@ -580,6 +580,9 @@ type RequestBuffer = Vec<WorkerRequest>;
 #[derive(Default)]
 pub(crate) struct StalledRequests {
     /// Stalled requests.
+    ///
+    /// Key: RegionId
+    /// Value: (estimated size, stalled requests)
     pub(crate) requests: HashMap<RegionId, (usize, Vec<SenderWriteRequest>)>,
     /// Estimated size of all stalled requests.
     pub(crate) estimated_size: usize,
