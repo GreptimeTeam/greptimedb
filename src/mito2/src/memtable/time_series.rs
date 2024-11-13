@@ -42,6 +42,7 @@ use crate::error::{
 };
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
+use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
@@ -140,8 +141,9 @@ impl TimeSeriesMemtable {
     }
 
     /// Updates memtable stats.
-    fn update_stats(&self, stats: LocalStats) {
-        self.alloc_tracker.on_allocation(stats.allocated);
+    fn update_stats(&self, stats: WriteMetrics) {
+        self.alloc_tracker
+            .on_allocation(stats.key_bytes + stats.value_bytes);
 
         loop {
             let current_min = self.min_timestamp.load(Ordering::Relaxed);
@@ -184,7 +186,7 @@ impl TimeSeriesMemtable {
         }
     }
 
-    fn write_key_value(&self, kv: KeyValue, stats: &mut LocalStats) -> Result<()> {
+    fn write_key_value(&self, kv: KeyValue, stats: &mut WriteMetrics) -> Result<()> {
         ensure!(
             kv.num_primary_keys() == self.row_codec.num_fields(),
             PrimaryKeyLengthMismatchSnafu {
@@ -195,9 +197,9 @@ impl TimeSeriesMemtable {
         let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
         let fields = kv.fields().collect::<Vec<_>>();
 
-        stats.allocated += fields.iter().map(|v| v.data_size()).sum::<usize>();
+        stats.value_bytes += fields.iter().map(|v| v.data_size()).sum::<usize>();
         let (series, series_allocated) = self.series_set.get_or_add_series(primary_key_encoded);
-        stats.allocated += series_allocated;
+        stats.key_bytes += series_allocated;
 
         // safety: timestamp of kv must be both present and a valid timestamp value.
         let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
@@ -223,13 +225,13 @@ impl Memtable for TimeSeriesMemtable {
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
-        let mut local_stats = LocalStats::default();
+        let mut local_stats = WriteMetrics::default();
 
         for kv in kvs.iter() {
             self.write_key_value(kv, &mut local_stats)?;
         }
-        local_stats.allocated += kvs.num_rows() * std::mem::size_of::<Timestamp>();
-        local_stats.allocated += kvs.num_rows() * std::mem::size_of::<OpType>();
+        local_stats.value_bytes += kvs.num_rows() * std::mem::size_of::<Timestamp>();
+        local_stats.value_bytes += kvs.num_rows() * std::mem::size_of::<OpType>();
 
         // TODO(hl): this maybe inaccurate since for-iteration may return early.
         // We may lift the primary key length check out of Memtable::write
@@ -241,11 +243,11 @@ impl Memtable for TimeSeriesMemtable {
     }
 
     fn write_one(&self, key_value: KeyValue) -> Result<()> {
-        let mut local_stats = LocalStats::default();
-        let res = self.write_key_value(key_value, &mut local_stats);
-        local_stats.allocated += std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>();
+        let mut metrics = WriteMetrics::default();
+        let res = self.write_key_value(key_value, &mut metrics);
+        metrics.value_bytes += std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>();
 
-        self.update_stats(local_stats);
+        self.update_stats(metrics);
         self.num_rows.fetch_add(1, Ordering::Relaxed);
         res
     }
@@ -356,22 +358,6 @@ impl Memtable for TimeSeriesMemtable {
             self.dedup,
             self.merge_mode,
         ))
-    }
-}
-
-struct LocalStats {
-    allocated: usize,
-    min_ts: i64,
-    max_ts: i64,
-}
-
-impl Default for LocalStats {
-    fn default() -> Self {
-        LocalStats {
-            allocated: 0,
-            min_ts: i64::MAX,
-            max_ts: i64::MIN,
-        }
     }
 }
 

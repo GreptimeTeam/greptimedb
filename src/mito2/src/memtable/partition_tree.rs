@@ -18,7 +18,6 @@ pub(crate) mod data;
 mod dedup;
 mod dict;
 mod merger;
-mod metrics;
 mod partition;
 mod shard;
 mod shard_builder;
@@ -38,8 +37,8 @@ use table::predicate::Predicate;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::tree::PartitionTree;
+use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,

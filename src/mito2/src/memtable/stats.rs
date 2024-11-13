@@ -14,16 +14,16 @@
 
 //! Internal metrics of the memtable.
 
-/// Metrics of writing the partition tree.
-pub struct WriteMetrics {
+/// Metrics of writing memtables.
+pub(crate) struct WriteMetrics {
     /// Size allocated by keys.
-    pub key_bytes: usize,
+    pub(crate) key_bytes: usize,
     /// Size allocated by values.
-    pub value_bytes: usize,
+    pub(crate) value_bytes: usize,
     /// Minimum timestamp.
-    pub min_ts: i64,
+    pub(crate) min_ts: i64,
     /// Maximum timestamp
-    pub max_ts: i64,
+    pub(crate) max_ts: i64,
 }
 
 impl Default for WriteMetrics {

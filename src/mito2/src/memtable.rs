@@ -42,6 +42,7 @@ use crate::sst::file::FileTimeRange;
 pub mod bulk;
 pub mod key_values;
 pub mod partition_tree;
+mod stats;
 pub mod time_partition;
 pub mod time_series;
 pub(crate) mod version;

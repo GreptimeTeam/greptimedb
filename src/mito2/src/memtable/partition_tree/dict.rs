@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use datatypes::arrow::array::{Array, ArrayBuilder, BinaryArray, BinaryBuilder};
 
-use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::PkIndex;
+use crate::memtable::stats::WriteMetrics;
 use crate::metrics::MEMTABLE_DICT_BYTES;
 
 /// Maximum keys in a [DictBlock].
