@@ -916,3 +916,220 @@ DROP TABLE requests;
 
 Affected Rows: 0
 
+-- blog usecase
+CREATE TABLE velocity (
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    left_wheel FLOAT,
+    right_wheel FLOAT,
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+CREATE TABLE avg_speed (
+    avg_speed DOUBLE,
+    start_window TIMESTAMP TIME INDEX,
+    end_window TIMESTAMP,
+    update_at TIMESTAMP,
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_avg_speed SINK TO avg_speed AS
+SELECT
+    avg((left_wheel + right_wheel) / 2)
+FROM
+    velocity
+WHERE
+    left_wheel > 0.5
+    AND right_wheel > 0.5
+    AND left_wheel < 60
+    AND right_wheel < 60
+GROUP BY
+    tumble(ts, '5 second');
+
+Affected Rows: 0
+
+INSERT INTO
+    velocity
+VALUES
+    ("2021-07-01 00:00:00.200", 0.0, 0.7),
+    ("2021-07-01 00:00:00.200", 0.0, 61.0),
+    ("2021-07-01 00:00:02.500", 2.0, 1.0,);
+
+Affected Rows: 3
+
+ADMIN FLUSH_FLOW('calc_avg_speed');
+
++------------------------------------+
+| ADMIN FLUSH_FLOW('calc_avg_speed') |
++------------------------------------+
+| 1                                  |
++------------------------------------+
+
+SELECT
+    avg_speed,
+    start_window
+FROM
+    avg_speed;
+
++-----------+---------------------+
+| avg_speed | start_window        |
++-----------+---------------------+
+| 1.5       | 2021-07-01T00:00:00 |
++-----------+---------------------+
+
+INSERT INTO
+    velocity
+VALUES
+    ("2021-07-01 00:00:05.100", 5.0, 4.0),
+    ("2021-07-01 00:00:09.600", 2.3, 2.1);
+
+Affected Rows: 2
+
+ADMIN FLUSH_FLOW('avg_speed');
+
+Error: 8001(FlowNotFound), Flow not found: 'greptime.avg_speed'
+
+SELECT
+    avg_speed,
+    start_window
+FROM
+    avg_speed;
+
++-----------+---------------------+
+| avg_speed | start_window        |
++-----------+---------------------+
+| 1.5       | 2021-07-01T00:00:00 |
++-----------+---------------------+
+
+DROP FLOW calc_avg_speed;
+
+Affected Rows: 0
+
+DROP TABLE velocity;
+
+Affected Rows: 0
+
+DROP TABLE avg_speed;
+
+Affected Rows: 0
+
+-- user guide example
+CREATE TABLE `ngx_access_log` (
+  `client` STRING NULL,
+  `ua_platform` STRING NULL,
+  `referer` STRING NULL,
+  `method` STRING NULL,
+  `endpoint` STRING NULL,
+  `trace_id` STRING NULL FULLTEXT,
+  `protocol` STRING NULL,
+  `status` SMALLINT UNSIGNED NULL,
+  `size` DOUBLE NULL,
+  `agent` STRING NULL,
+  `access_time` TIMESTAMP(3) NOT NULL,
+  TIME INDEX (`access_time`)
+)
+WITH(
+  append_mode = 'true'
+);
+
+Affected Rows: 0
+
+CREATE TABLE `ngx_statistics` (
+  `status` SMALLINT UNSIGNED NULL,
+  `total_logs` BIGINT NULL,
+  `min_size` DOUBLE NULL,
+  `max_size` DOUBLE NULL,
+  `avg_size` DOUBLE NULL,
+  `high_size_count` BIGINT NULL,
+  `time_window` TIMESTAMP time index,
+  `update_at` TIMESTAMP NULL,
+  PRIMARY KEY (`status`)
+);
+
+Affected Rows: 0
+
+CREATE FLOW ngx_aggregation
+SINK TO ngx_statistics
+COMMENT 'Aggregate statistics for ngx_access_log'
+AS
+SELECT
+    status,
+    count(client) AS total_logs,
+    min(size) as min_size,
+    max(size) as max_size,
+    avg(size) as avg_size,
+    sum(case when `size` > 550 then 1 else 0 end) as high_size_count,
+    date_bin(INTERVAL '1 minutes', access_time) as time_window,
+FROM ngx_access_log
+GROUP BY
+    status,
+    time_window;
+
+Affected Rows: 0
+
+INSERT INTO ngx_access_log 
+VALUES
+    ("android", "Android", "referer", "GET", "/api/v1", "trace_id", "HTTP", 200, 1000, "agent", "2021-07-01 00:00:01.000"),
+    ("ios", "iOS", "referer", "GET", "/api/v1", "trace_id", "HTTP", 200, 500, "agent", "2021-07-01 00:00:30.500"),
+    ("android", "Android", "referer", "GET", "/api/v1", "trace_id", "HTTP", 200, 600, "agent", "2021-07-01 00:01:01.000"),
+    ("ios", "iOS", "referer", "GET", "/api/v1", "trace_id", "HTTP", 404, 700, "agent", "2021-07-01 00:01:01.500");
+
+Affected Rows: 4
+
+ADMIN FLUSH_FLOW('ngx_aggregation');
+
++-------------------------------------+
+| ADMIN FLUSH_FLOW('ngx_aggregation') |
++-------------------------------------+
+| 1                                   |
++-------------------------------------+
+
+SELECT status, total_logs, min_size, max_size, avg_size, high_size_count, time_window FROM ngx_statistics;
+
++--------+------------+----------+----------+----------+-----------------+---------------------+
+| status | total_logs | min_size | max_size | avg_size | high_size_count | time_window         |
++--------+------------+----------+----------+----------+-----------------+---------------------+
+| 200    | 2          | 500.0    | 1000.0   | 750.0    | 1               | 2021-07-01T00:00:00 |
+| 200    | 1          | 600.0    | 600.0    | 600.0    | 1               | 2021-07-01T00:01:00 |
+| 404    | 1          | 700.0    | 700.0    | 700.0    | 1               | 2021-07-01T00:01:00 |
++--------+------------+----------+----------+----------+-----------------+---------------------+
+
+INSERT INTO ngx_access_log 
+VALUES
+    ("android", "Android", "referer", "GET", "/api/v1", "trace_id", "HTTP", 200, 500, "agent", "2021-07-01 00:01:01.000"),
+    ("ios", "iOS", "referer", "GET", "/api/v1", "trace_id", "HTTP", 404, 800, "agent", "2021-07-01 00:01:01.500");
+
+Affected Rows: 2
+
+ADMIN FLUSH_FLOW('ngx_aggregation');
+
++-------------------------------------+
+| ADMIN FLUSH_FLOW('ngx_aggregation') |
++-------------------------------------+
+| 1                                   |
++-------------------------------------+
+
+SELECT status, total_logs, min_size, max_size, avg_size, high_size_count, time_window FROM ngx_statistics;
+
++--------+------------+----------+----------+----------+-----------------+---------------------+
+| status | total_logs | min_size | max_size | avg_size | high_size_count | time_window         |
++--------+------------+----------+----------+----------+-----------------+---------------------+
+| 200    | 2          | 500.0    | 1000.0   | 750.0    | 1               | 2021-07-01T00:00:00 |
+| 200    | 2          | 500.0    | 600.0    | 550.0    | 1               | 2021-07-01T00:01:00 |
+| 404    | 2          | 700.0    | 800.0    | 750.0    | 2               | 2021-07-01T00:01:00 |
++--------+------------+----------+----------+----------+-----------------+---------------------+
+
+DROP FLOW ngx_aggregation;
+
+Affected Rows: 0
+
+DROP TABLE ngx_statistics;
+
+Affected Rows: 0
+
+DROP TABLE ngx_access_log;
+
+Affected Rows: 0
+

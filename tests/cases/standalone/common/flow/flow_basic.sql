@@ -559,7 +559,7 @@ VALUES
     ("2021-07-01 00:00:05.100", 5.0, 4.0),
     ("2021-07-01 00:00:09.600", 2.3, 2.1);
 
-ADMIN FLUSH_FLOW('avg_speed');
+ADMIN FLUSH_FLOW('calc_avg_speed');
 
 SELECT
     avg_speed,
@@ -646,3 +646,36 @@ DROP FLOW ngx_aggregation;
 DROP TABLE ngx_statistics;
 
 DROP TABLE ngx_access_log;
+
+CREATE TABLE android_log (
+    `log` STRING,
+    ts TIMESTAMP(9),
+    TIME INDEX(ts)
+);
+
+CREATE TABLE android_log_abnormal (
+    crash BIGINT NULL,
+    fatal BIGINT NULL,
+    backtrace BIGINT NULL,
+    anr BIGINT NULL,
+    time_window TIMESTAMP(9) TIME INDEX,
+    update_at TIMESTAMP,
+);
+
+CREATE FLOW calc_android_log_abnormal
+SINK TO android_log_abnormal
+AS
+SELECT
+    count(case when `log` like '%am_crash%' then 1 else 0 end) as crash,
+    count(case when `log` like '%FATAL EXCEPTION%' then 1 else 0 end) as fatal,
+    count(case when `log` like '%backtrace%' then 1 else 0 end) as backtrace,
+    count(case when `log` like '%am_anr%' then 1 else 0 end) as anr,
+    date_bin(INTERVAL '5 minutes', ts) as time_window,
+FROM android_log
+GROUP BY
+    time_window;
+
+INSERT INTO android_log values
+("am_crash", "2021-07-01 00:01:01.000");
+
+SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
