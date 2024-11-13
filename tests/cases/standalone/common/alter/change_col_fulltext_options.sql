@@ -29,7 +29,7 @@ SELECT * FROM test WHERE MATCHES(message, 'hello');
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE test;
 
-ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(enable = 'false');
+ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT;
 
 SHOW CREATE TABLE test;
 
@@ -39,7 +39,7 @@ SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');
 
-ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(enable = 'false');
+ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT;
 
 SHOW CREATE TABLE test;
 
