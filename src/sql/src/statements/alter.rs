@@ -76,7 +76,7 @@ pub enum AlterTableOperation {
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
     RenameTable { new_table_name: String },
-    /// `MODIFY COLUMN <column_name> SET FULLTEXT [WITH <options>]`
+    /// `MODIFY COLUMN <column_name> [SET | UNSET] FULLTEXT [WITH <options>]`
     ChangeColumnFulltext {
         column_name: Ident,
         options: FulltextOptions,
