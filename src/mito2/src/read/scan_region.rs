@@ -29,7 +29,7 @@ use smallvec::SmallVec;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
@@ -868,14 +868,14 @@ impl StreamContext {
 /// List to manages the builders to create file ranges.
 struct RangeBuilderList {
     mem_builders: Vec<StdMutex<Option<MemRangeBuilder>>>,
-    file_builders: Vec<Mutex<Option<FileRangeBuilder>>>,
+    file_builders: Vec<RwLock<Option<FileRangeBuilder>>>,
 }
 
 impl RangeBuilderList {
     /// Creates a new [ReaderBuilderList] with the given number of memtables and files.
     fn new(num_memtables: usize, num_files: usize) -> Self {
         let mem_builders = (0..num_memtables).map(|_| StdMutex::new(None)).collect();
-        let file_builders = (0..num_files).map(|_| Mutex::new(None)).collect();
+        let file_builders = (0..num_files).map(|_| RwLock::new(None)).collect();
         Self {
             mem_builders,
             file_builders,
@@ -891,13 +891,27 @@ impl RangeBuilderList {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<()> {
         let file_index = index.index - self.mem_builders.len();
-        let mut builder_opt = self.file_builders[file_index].lock().await;
-        match &mut *builder_opt {
+        let builder_opt = self.file_builders[file_index].read().await;
+        match &*builder_opt {
+            // happy, fast path that should be parallel.
             Some(builder) => builder.build_ranges(index.row_group_index, ranges),
             None => {
-                let builder = input.prune_file(file_index, reader_metrics).await?;
-                builder.build_ranges(index.row_group_index, ranges);
-                *builder_opt = Some(builder);
+                {
+                    // init the builder.
+                    // drop the reader lock explicitly to avoid deadlock.
+                    drop(builder_opt);
+                    let mut builder_write = self.file_builders[file_index].write().await;
+                    if builder_write.is_none() {
+                        let builder = input.prune_file(file_index, reader_metrics).await?;
+                        *builder_write = Some(builder);
+                    } // else it is already init
+                }
+                let reacquire_read = self.file_builders[file_index].read().await;
+                if let Some(builder) = &*reacquire_read {
+                    builder.build_ranges(index.row_group_index, ranges);
+                } else {
+                    unreachable!("builder should be initialized");
+                }
             }
         }
         Ok(())
