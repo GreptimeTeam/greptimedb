@@ -144,46 +144,7 @@ impl TimeSeriesMemtable {
     fn update_stats(&self, stats: WriteMetrics) {
         self.alloc_tracker
             .on_allocation(stats.key_bytes + stats.value_bytes);
-
-        loop {
-            let current_min = self.min_timestamp.load(Ordering::Relaxed);
-            if stats.min_ts >= current_min {
-                break;
-            }
-
-            let Err(updated) = self.min_timestamp.compare_exchange(
-                current_min,
-                stats.min_ts,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) else {
-                break;
-            };
-
-            if updated == stats.min_ts {
-                break;
-            }
-        }
-
-        loop {
-            let current_max = self.max_timestamp.load(Ordering::Relaxed);
-            if stats.max_ts <= current_max {
-                break;
-            }
-
-            let Err(updated) = self.max_timestamp.compare_exchange(
-                current_max,
-                stats.max_ts,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) else {
-                break;
-            };
-
-            if updated == stats.max_ts {
-                break;
-            }
-        }
+        stats.update_timestamp_range(&self.max_timestamp, &self.min_timestamp);
     }
 
     fn write_key_value(&self, kv: KeyValue, stats: &mut WriteMetrics) -> Result<()> {
