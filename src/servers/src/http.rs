@@ -613,17 +613,22 @@ impl HttpServerBuilder {
         validator: Option<LogValidatorRef>,
         ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
     ) -> Self {
-        Self {
-            router: self.router.nest(
-                &format!("/{HTTP_API_VERSION}/events"),
-                HttpServer::route_log(LogState {
-                    log_handler: handler,
-                    log_validator: validator,
-                    ingest_interceptor,
-                }),
-            ),
-            ..self
-        }
+        let log_state = LogState {
+            log_handler: handler,
+            log_validator: validator,
+            ingest_interceptor,
+        };
+        let router = self.router.nest(
+            &format!("/{HTTP_API_VERSION}/events"),
+            HttpServer::route_log(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/loki"),
+            HttpServer::route_loki(log_state),
+        );
+
+        Self { router, ..self }
     }
 
     pub fn with_plugins(self, plugins: Plugins) -> Self {
@@ -760,10 +765,15 @@ impl HttpServer {
             .with_state(metrics_handler)
     }
 
+    fn route_loki<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            .route("/api/v1/push", routing::post(event::loki_ingest))
+            .with_state(log_state)
+    }
+
     fn route_log<S>(log_state: LogState) -> Router<S> {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
-            .route("/loki/api/v1/push", routing::post(event::loki_ingest))
             .route(
                 "/pipelines/:pipeline_name",
                 routing::post(event::add_pipeline),

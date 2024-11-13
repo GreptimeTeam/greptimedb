@@ -389,7 +389,7 @@ pub async fn loki_ingest(
     // init schemas
     let mut schemas: Vec<ColumnSchema> = vec![
         ColumnSchema {
-            column_name: "timestamp".to_string(),
+            column_name: "greptime_timestamp".to_string(),
             datatype: ColumnDataType::TimestampNanosecond.into(),
             semantic_type: SemanticType::Timestamp.into(),
             datatype_extension: None,
@@ -405,7 +405,7 @@ pub async fn loki_ingest(
     ];
 
     let mut global_label_key_index: HashMap<String, i32> = HashMap::new();
-    global_label_key_index.insert("timestamp".to_string(), 0);
+    global_label_key_index.insert("greptime_timestamp".to_string(), 0);
     global_label_key_index.insert("line".to_string(), 1);
 
     let mut rows = vec![];

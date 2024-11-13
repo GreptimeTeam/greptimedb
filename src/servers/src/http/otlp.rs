@@ -78,7 +78,7 @@ pub async fn traces(
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportTraceServiceResponse>> {
     let db = query_ctx.get_db_string();
-    let table_name = table_name.unwrap_or(TRACE_TABLE_NAME.to_string());
+    let table_name = table_name.unwrap_or_else(|| TRACE_TABLE_NAME.to_string());
 
     query_ctx.set_channel(Channel::Otlp);
     let query_ctx = Arc::new(query_ctx);
@@ -108,7 +108,7 @@ pub async fn logs(
     SelectInfoWrapper(select_info): SelectInfoWrapper,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportLogsServiceResponse>> {
-    let tablename = tablename.unwrap_or("opentelemetry_logs".to_string());
+    let tablename = tablename.unwrap_or_else(|| "opentelemetry_logs".to_string());
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
     let query_ctx = Arc::new(query_ctx);

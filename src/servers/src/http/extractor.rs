@@ -28,6 +28,8 @@ use crate::http::header::constants::{
     GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
 };
 
+/// Axum extractor for optional target log table name from HTTP header
+/// using [`GREPTIME_LOG_TABLE_NAME_HEADER_NAME`] as key.
 pub struct LogTableName(pub Option<String>);
 
 #[async_trait]
@@ -43,6 +45,8 @@ where
     }
 }
 
+/// Axum extractor for optional target trace table name from HTTP header
+/// using [`GREPTIME_TRACE_TABLE_NAME_HEADER_NAME`] as key.
 pub struct TraceTableName(pub Option<String>);
 
 #[async_trait]
@@ -58,6 +62,9 @@ where
     }
 }
 
+/// Axum extractor for select keys from HTTP header,
+/// to extract and uplift key-values from OTLP attributes.
+/// See [`SelectInfo`] for more details.
 pub struct SelectInfoWrapper(pub SelectInfo);
 
 #[async_trait]
@@ -84,6 +91,8 @@ where
     }
 }
 
+/// Axum extractor for optional Pipeline name and version
+/// from HTTP headers.
 pub struct PipelineInfo {
     pub pipeline_name: Option<String>,
     pub pipeline_version: Option<String>,
