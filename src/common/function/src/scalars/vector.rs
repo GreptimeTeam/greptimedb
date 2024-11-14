@@ -12,18 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod aggregate;
-pub(crate) mod date;
-pub mod expression;
-#[cfg(feature = "geo")]
-pub mod geo;
-pub mod json;
-pub mod matches;
-pub mod math;
-pub mod numpy;
-pub mod vector;
+mod distance;
 
-#[cfg(test)]
-pub(crate) mod test;
-pub(crate) mod timestamp;
-pub mod udf;
+use std::sync::Arc;
+
+use distance::{CosDistanceFunction, DotProductFunction, L2SqDistanceFunction};
+
+use crate::function_registry::FunctionRegistry;
+
+pub(crate) struct VectorFunction;
+
+impl VectorFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(CosDistanceFunction));
+        registry.register(Arc::new(DotProductFunction));
+        registry.register(Arc::new(L2SqDistanceFunction));
+    }
+}

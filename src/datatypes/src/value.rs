@@ -1089,7 +1089,7 @@ macro_rules! impl_as_for_value_ref {
     };
 }
 
-impl ValueRef<'_> {
+impl<'a> ValueRef<'a> {
     define_data_type_func!(ValueRef);
 
     /// Returns true if this is null.
@@ -1098,12 +1098,12 @@ impl ValueRef<'_> {
     }
 
     /// Cast itself to binary slice.
-    pub fn as_binary(&self) -> Result<Option<&[u8]>> {
+    pub fn as_binary(&self) -> Result<Option<&'a [u8]>> {
         impl_as_for_value_ref!(self, Binary)
     }
 
     /// Cast itself to string slice.
-    pub fn as_string(&self) -> Result<Option<&str>> {
+    pub fn as_string(&self) -> Result<Option<&'a str>> {
         impl_as_for_value_ref!(self, String)
     }
 
