@@ -14,15 +14,22 @@
 
 //! Structs for partition ranges.
 
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
 use common_time::Timestamp;
+use parquet::arrow::arrow_reader::RowSelection;
 use smallvec::{smallvec, SmallVec};
 use store_api::region_engine::PartitionRange;
 
 use crate::cache::CacheManager;
-use crate::memtable::MemtableRef;
+use crate::error::Result;
+use crate::memtable::{MemtableRange, MemtableRef};
 use crate::read::scan_region::ScanInput;
 use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
+use crate::sst::parquet::file_range::{FileRange, FileRangeContextRef};
 use crate::sst::parquet::format::parquet_row_group_time_range;
+use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 const ALL_ROW_GROUPS: i64 = -1;
@@ -332,6 +339,160 @@ fn maybe_split_ranges_for_seq_scan(ranges: Vec<RangeMeta>) -> Vec<RangeMeta> {
     }
 
     new_ranges
+}
+
+/// Builder to create file ranges.
+#[derive(Default)]
+pub(crate) struct FileRangeBuilder {
+    /// Context for the file.
+    /// None indicates nothing to read.
+    context: Option<FileRangeContextRef>,
+    /// Row selections for each row group to read.
+    /// It skips the row group if it is not in the map.
+    row_groups: BTreeMap<usize, Option<RowSelection>>,
+}
+
+impl FileRangeBuilder {
+    /// Builds a file range builder from context and row groups.
+    pub(crate) fn new(
+        context: FileRangeContextRef,
+        row_groups: BTreeMap<usize, Option<RowSelection>>,
+    ) -> Self {
+        Self {
+            context: Some(context),
+            row_groups,
+        }
+    }
+
+    /// Builds file ranges to read.
+    /// Negative `row_group_index` indicates all row groups.
+    pub(crate) fn build_ranges(&self, row_group_index: i64, ranges: &mut SmallVec<[FileRange; 2]>) {
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        if row_group_index >= 0 {
+            let row_group_index = row_group_index as usize;
+            // Scans one row group.
+            let Some(row_selection) = self.row_groups.get(&row_group_index) else {
+                return;
+            };
+            ranges.push(FileRange::new(
+                context,
+                row_group_index,
+                row_selection.clone(),
+            ));
+        } else {
+            // Scans all row groups.
+            ranges.extend(
+                self.row_groups
+                    .iter()
+                    .map(|(row_group_index, row_selection)| {
+                        FileRange::new(context.clone(), *row_group_index, row_selection.clone())
+                    }),
+            );
+        }
+    }
+}
+
+/// Builder to create mem ranges.
+pub(crate) struct MemRangeBuilder {
+    /// Ranges of a memtable.
+    row_groups: BTreeMap<usize, MemtableRange>,
+}
+
+impl MemRangeBuilder {
+    /// Builds a mem range builder from row groups.
+    pub(crate) fn new(row_groups: BTreeMap<usize, MemtableRange>) -> Self {
+        Self { row_groups }
+    }
+
+    /// Builds mem ranges to read in the memtable.
+    /// Negative `row_group_index` indicates all row groups.
+    fn build_ranges(&self, row_group_index: i64, ranges: &mut SmallVec<[MemtableRange; 2]>) {
+        if row_group_index >= 0 {
+            let row_group_index = row_group_index as usize;
+            // Scans one row group.
+            let Some(range) = self.row_groups.get(&row_group_index) else {
+                return;
+            };
+            ranges.push(range.clone());
+        } else {
+            ranges.extend(self.row_groups.values().cloned());
+        }
+    }
+}
+
+/// List to manages the builders to create file ranges.
+/// Each scan partition should have its own list. Mutex inside this list is used to allow moving
+/// the list to different streams in the same partition.
+pub(crate) struct RangeBuilderList {
+    num_memtables: usize,
+    mem_builders: Mutex<Vec<Option<MemRangeBuilder>>>,
+    file_builders: Mutex<Vec<Option<Arc<FileRangeBuilder>>>>,
+}
+
+impl RangeBuilderList {
+    /// Creates a new [ReaderBuilderList] with the given number of memtables and files.
+    pub(crate) fn new(num_memtables: usize, num_files: usize) -> Self {
+        let mem_builders = (0..num_memtables).map(|_| None).collect();
+        let file_builders = (0..num_files).map(|_| None).collect();
+        Self {
+            num_memtables,
+            mem_builders: Mutex::new(mem_builders),
+            file_builders: Mutex::new(file_builders),
+        }
+    }
+
+    /// Builds file ranges to read the row group at `index`.
+    pub(crate) async fn build_file_ranges(
+        &self,
+        input: &ScanInput,
+        index: RowGroupIndex,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<SmallVec<[FileRange; 2]>> {
+        let mut ranges = SmallVec::new();
+        let file_index = index.index - self.num_memtables;
+        let builder_opt = self.get_file_builder(file_index);
+        match builder_opt {
+            Some(builder) => builder.build_ranges(index.row_group_index, &mut ranges),
+            None => {
+                let builder = input.prune_file(file_index, reader_metrics).await?;
+                builder.build_ranges(index.row_group_index, &mut ranges);
+                self.set_file_builder(file_index, Arc::new(builder));
+            }
+        }
+        Ok(ranges)
+    }
+
+    /// Builds mem ranges to read the row group at `index`.
+    pub(crate) fn build_mem_ranges(
+        &self,
+        input: &ScanInput,
+        index: RowGroupIndex,
+    ) -> SmallVec<[MemtableRange; 2]> {
+        let mut ranges = SmallVec::new();
+        let mut mem_builders = self.mem_builders.lock().unwrap();
+        match &mut mem_builders[index.index] {
+            Some(builder) => builder.build_ranges(index.row_group_index, &mut ranges),
+            None => {
+                let builder = input.prune_memtable(index.index);
+                builder.build_ranges(index.row_group_index, &mut ranges);
+                mem_builders[index.index] = Some(builder);
+            }
+        }
+
+        ranges
+    }
+
+    fn get_file_builder(&self, index: usize) -> Option<Arc<FileRangeBuilder>> {
+        let file_builders = self.file_builders.lock().unwrap();
+        file_builders[index].clone()
+    }
+
+    fn set_file_builder(&self, index: usize, builder: Arc<FileRangeBuilder>) {
+        let mut file_builders = self.file_builders.lock().unwrap();
+        file_builders[index] = Some(builder);
+    }
 }
 
 #[cfg(test)]

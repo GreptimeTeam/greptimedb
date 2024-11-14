@@ -30,10 +30,9 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
+use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::scan_util::{
-    scan_file_ranges_with_builder, scan_mem_ranges, PartitionMetrics, RangeBuilder,
-};
+use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
 use crate::read::{Batch, ScannerMetrics};
 
 /// Scans a region without providing any output ordering guarantee.
@@ -86,19 +85,31 @@ impl UnorderedScan {
         stream_ctx: Arc<StreamContext>,
         part_range_id: usize,
         part_metrics: PartitionMetrics,
-        range_builder: Arc<RangeBuilder>,
+        range_builder_list: Arc<RangeBuilderList>,
     ) -> impl Stream<Item = Result<Batch>> {
         stream! {
             // Gets range meta.
             let range_meta = &stream_ctx.ranges[part_range_id];
             for index in &range_meta.row_group_indices {
                 if stream_ctx.is_mem_range_index(*index) {
-                    let stream = scan_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index, range_meta.time_range);
+                    let stream = scan_mem_ranges(
+                        stream_ctx.clone(),
+                        part_metrics.clone(),
+                        *index,
+                        range_meta.time_range,
+                        range_builder_list.clone(),
+                    );
                     for await batch in stream {
                         yield batch;
                     }
                 } else {
-                    let stream = scan_file_ranges_with_builder(stream_ctx.clone(), part_metrics.clone(), *index, "unordered_scan_files", range_builder.clone());
+                    let stream = scan_file_ranges(
+                        stream_ctx.clone(),
+                        part_metrics.clone(),
+                        *index,
+                        "unordered_scan_files",
+                        range_builder_list.clone(),
+                    );
                     for await batch in stream {
                         yield batch;
                     }
@@ -139,7 +150,10 @@ impl UnorderedScan {
             part_metrics.on_first_poll();
 
             let cache = &stream_ctx.input.cache_manager;
-            let range_builder = Arc::new(RangeBuilder::default());
+            let range_builder_list = Arc::new(RangeBuilderList::new(
+                stream_ctx.input.num_memtables(),
+                stream_ctx.input.num_files(),
+            ));
             // Scans each part.
             for part_range in part_ranges {
                 let mut metrics = ScannerMetrics::default();
@@ -153,7 +167,7 @@ impl UnorderedScan {
                     stream_ctx.clone(),
                     part_range.identifier,
                     part_metrics.clone(),
-                    range_builder.clone(),
+                    range_builder_list.clone(),
                 );
                 for await batch in stream {
                     let batch = batch.map_err(BoxedError::new).context(ExternalSnafu)?;
