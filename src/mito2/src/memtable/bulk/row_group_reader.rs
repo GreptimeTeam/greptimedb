@@ -28,7 +28,7 @@ use snafu::ResultExt;
 
 use crate::error;
 use crate::error::ReadDataPartSnafu;
-use crate::memtable::bulk::part_reader::BulkIterContextRef;
+use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::page_reader::RowGroupCachedReader;
 use crate::sst::parquet::reader::{RowGroupReaderBase, RowGroupReaderVirtual};
