@@ -57,6 +57,7 @@ impl Flownode for FlowWorkerManager {
                 comment,
                 sql,
                 flow_options,
+                or_replace: _,
             })) => {
                 let source_table_ids = source_table_ids.into_iter().map(|id| id.id).collect_vec();
                 let sink_table_name = [
