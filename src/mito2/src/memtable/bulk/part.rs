@@ -50,6 +50,7 @@ use crate::memtable::BoxedBatchIterator;
 use crate::row_converter::{McmpRowCodec, RowCodec};
 use crate::sst::parquet::file_range::RangeBase;
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
+use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::reader::SimpleFilterContext;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::to_sst_arrow_schema;
@@ -218,18 +219,19 @@ impl BulkPartEncoder {
 
         let mut buf = Vec::with_capacity(4096);
         let arrow_schema = arrow_record_batch.schema();
-        {
+
+        let file_metadata = {
             let mut writer =
                 ArrowWriter::try_new(&mut buf, arrow_schema, self.writer_props.clone())
                     .context(EncodeMemtableSnafu)?;
             writer
                 .write(&arrow_record_batch)
                 .context(EncodeMemtableSnafu)?;
-            let _metadata = writer.finish().context(EncodeMemtableSnafu)?;
-        }
+            writer.finish().context(EncodeMemtableSnafu)?
+        };
 
         let buf = Bytes::from(buf);
-        let parquet_metadata = load_metadata(&buf)?;
+        let parquet_metadata = Arc::new(parse_parquet_metadata(file_metadata)?);
 
         Ok(Some(BulkPart {
             data: buf,
