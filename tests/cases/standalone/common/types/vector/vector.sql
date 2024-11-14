@@ -11,48 +11,53 @@ SELECT * FROM t;
 -- SQLNESS PROTOCOL POSTGRES
 SELECT * FROM t;
 
-SELECT cos_distance(v, '[0.0, 0.0, 0.0]') FROM t;
+SELECT round(cos_distance(v, '[0.0, 0.0, 0.0]'), 14) FROM t;
 
-SELECT *, cos_distance(v, '[0.0, 0.0, 0.0]') as d FROM t ORDER BY d;
+SELECT *, round(cos_distance(v, '[0.0, 0.0, 0.0]'), 14) as d FROM t ORDER BY d;
 
-SELECT cos_distance('[1.0, 2.0, 3.0]', v) FROM t;
+SELECT round(cos_distance('[1.0, 2.0, 3.0]', v), 14) FROM t;
 
-SELECT *, cos_distance('[1.0, 2.0, 3.0]', v) as d FROM t ORDER BY d;
+SELECT *, round(cos_distance('[1.0, 2.0, 3.0]', v), 14) as d FROM t ORDER BY d;
 
-SELECT cos_distance(v, v) FROM t;
+SELECT round(cos_distance(v, v), 14) FROM t;
 
+-- Unexpected dimension --
 SELECT cos_distance(v, '[1.0]') FROM t;
 
+-- Invalid type --
 SELECT cos_distance(v, 1.0) FROM t;
 
+SELECT round(l2sq_distance(v, '[0.0, 0.0, 0.0]'), 14) FROM t;
 
-SELECT l2sq_distance(v, '[0.0, 0.0, 0.0]') FROM t;
+SELECT *, round(l2sq_distance(v, '[0.0, 0.0, 0.0]'), 14) as d FROM t ORDER BY d;
 
-SELECT *, l2sq_distance(v, '[0.0, 0.0, 0.0]') as d FROM t ORDER BY d;
+SELECT round(l2sq_distance('[1.0, 2.0, 3.0]', v), 14) FROM t;
 
-SELECT l2sq_distance('[1.0, 2.0, 3.0]', v) FROM t;
+SELECT *, round(l2sq_distance('[1.0, 2.0, 3.0]', v), 14) as d FROM t ORDER BY d;
 
-SELECT *, l2sq_distance('[1.0, 2.0, 3.0]', v) as d FROM t ORDER BY d;
+SELECT round(l2sq_distance(v, v), 14) FROM t;
 
-SELECT l2sq_distance(v, v) FROM t;
-
+-- Unexpected dimension --
 SELECT l2sq_distance(v, '[1.0]') FROM t;
 
+-- Invalid type --
 SELECT l2sq_distance(v, 1.0) FROM t;
 
 
-SELECT dot_product(v, '[0.0, 0.0, 0.0]') FROM t;
+SELECT round(dot_product(v, '[0.0, 0.0, 0.0]'), 14) FROM t;
 
-SELECT *, dot_product(v, '[0.0, 0.0, 0.0]') as d FROM t ORDER BY d;
+SELECT *, round(dot_product(v, '[0.0, 0.0, 0.0]'), 14) as d FROM t ORDER BY d;
 
-SELECT dot_product('[1.0, 2.0, 3.0]', v) FROM t;
+SELECT round(dot_product('[1.0, 2.0, 3.0]', v), 14) FROM t;
 
-SELECT *, dot_product('[1.0, 2.0, 3.0]', v) as d FROM t ORDER BY d;
+SELECT *, round(dot_product('[1.0, 2.0, 3.0]', v), 14) as d FROM t ORDER BY d;
 
-SELECT dot_product(v, v) FROM t;
+SELECT round(dot_product(v, v), 14) FROM t;
 
+-- Unexpected dimension --
 SELECT dot_product(v, '[1.0]') FROM t;
 
+-- Invalid type --
 SELECT dot_product(v, 1.0) FROM t;
 
 -- Unexpected dimension --

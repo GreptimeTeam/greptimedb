@@ -137,7 +137,7 @@ fn parse_if_constant_string(arg: &Arc<dyn Vector>) -> Result<Option<Vec<f32>>> {
     arg.get_ref(0)
         .as_string()
         .unwrap() // Safe: checked if it is a string
-        .map(parse_vector_from_string)
+        .map(parse_f32_vector_from_string)
         .transpose()
 }
 
@@ -153,7 +153,7 @@ fn as_vector(arg: ValueRef<'_>) -> Result<Option<Cow<'_, [f32]>>> {
         ConcreteDataType::String(_) => arg
             .as_string()
             .unwrap() // Safe: checked if it is a string
-            .map(|s| Ok(Cow::Owned(parse_vector_from_string(s)?)))
+            .map(|s| Ok(Cow::Owned(parse_f32_vector_from_string(s)?)))
             .transpose(),
         ConcreteDataType::Null(_) => Ok(None),
         _ => InvalidFuncArgsSnafu {
@@ -181,7 +181,7 @@ fn binary_as_vector(bytes: &[u8]) -> Result<&[f32]> {
 
 /// Parse a string to a vector value.
 /// Valid inputs are strings like "[1.0, 2.0, 3.0]".
-fn parse_vector_from_string(s: &str) -> Result<Vec<f32>> {
+fn parse_f32_vector_from_string(s: &str) -> Result<Vec<f32>> {
     let trimmed = s.trim();
     if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
         return InvalidFuncArgsSnafu {
@@ -446,13 +446,13 @@ mod tests {
 
     #[test]
     fn test_parse_vector_from_string() {
-        let result = parse_vector_from_string("[1.0, 2.0, 3.0]").unwrap();
+        let result = parse_f32_vector_from_string("[1.0, 2.0, 3.0]").unwrap();
         assert_eq!(result, vec![1.0, 2.0, 3.0]);
 
-        let result = parse_vector_from_string("[]").unwrap();
+        let result = parse_f32_vector_from_string("[]").unwrap();
         assert_eq!(result, Vec::<f32>::new());
 
-        let result = parse_vector_from_string("[1.0, a, 3.0]");
+        let result = parse_f32_vector_from_string("[1.0, a, 3.0]");
         assert!(result.is_err());
     }
 
