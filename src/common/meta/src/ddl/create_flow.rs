@@ -286,6 +286,7 @@ impl From<&CreateFlowData> for CreateRequest {
             sink_table_name: Some(value.task.sink_table_name.clone().into()),
             // Always be true
             create_if_not_exists: true,
+            or_replace: true,
             expire_after: value.task.expire_after.map(|value| ExpireAfter { value }),
             comment: value.task.comment.clone(),
             sql: value.task.sql.clone(),
