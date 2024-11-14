@@ -80,10 +80,10 @@ impl Arbitrary<'_> for FuzzInput {
         let rows = rng.gen_range(128..1024);
         let inserts = rng.gen_range(2..8);
         Ok(FuzzInput {
-            partitions,
-            columns,
-            rows,
             seed,
+            columns,
+            partitions,
+            rows,
             inserts,
         })
     }
@@ -138,10 +138,10 @@ async fn insert_values<R: Rng + 'static>(
     input: FuzzInput,
     table_ctx: &TableContextRef,
     rng: &mut R,
-) -> Result<Vec<InsertIntoExpr>> {
+    insert_exprs: &[InsertIntoExpr],
+) -> Result<()> {
     // Inserts data into the table
-    let insert_exprs = generate_insert_exprs(input, rng, table_ctx.clone())?;
-    for insert_expr in &insert_exprs {
+    for insert_expr in insert_exprs {
         let translator = InsertIntoExprTranslator;
         let sql = translator.translate(insert_expr)?;
         let result = ctx
@@ -167,7 +167,7 @@ async fn insert_values<R: Rng + 'static>(
             compact_table(&ctx.greptime, &table_ctx.name).await?;
         }
     }
-    Ok(insert_exprs)
+    Ok(())
 }
 
 async fn validate_insert_exprs(
@@ -277,7 +277,9 @@ async fn execute_region_migration(ctx: FuzzContext, input: FuzzInput) -> Result<
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
 
     let table_ctx = Arc::new(TableContext::from(&create_expr));
-    let insert_exprs = insert_values(&ctx, input, &table_ctx, &mut rng).await?;
+    let mut insert_exprs = generate_insert_exprs(input, &mut rng, table_ctx.clone())?;
+    let remaining_insert_exprs = insert_exprs.split_off(insert_exprs.len() / 2);
+    insert_values(&ctx, input, &table_ctx, &mut rng, &insert_exprs).await?;
 
     // Fetches region distribution
     let partitions = fetch_partitions(&ctx.greptime, table_ctx.name.clone()).await?;
@@ -319,7 +321,7 @@ async fn execute_region_migration(ctx: FuzzContext, input: FuzzInput) -> Result<
     // Values validation
     validate_insert_exprs(&ctx, &table_ctx, &insert_exprs).await?;
 
-    let insert_exprs = insert_values(&ctx, input, &table_ctx, &mut rng).await?;
+    insert_values(&ctx, input, &table_ctx, &mut rng, &remaining_insert_exprs).await?;
     // Recovers region distribution
     let migrations = migrations
         .into_iter()
@@ -338,7 +340,7 @@ async fn execute_region_migration(ctx: FuzzContext, input: FuzzInput) -> Result<
     // Triggers region migrations
     migrate_regions(&ctx, &migrations).await?;
     // Values validation
-    validate_insert_exprs(&ctx, &table_ctx, &insert_exprs).await?;
+    validate_insert_exprs(&ctx, &table_ctx, &remaining_insert_exprs).await?;
 
     // Cleans up
     let sql = format!("DROP TABLE {}", table_ctx.name);
