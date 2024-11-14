@@ -21,6 +21,7 @@ use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, Simple
 use common_meta::key::datanode_table::RegionInfo;
 use common_meta::RegionIdent;
 use common_procedure::Status;
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
@@ -144,6 +145,7 @@ impl OpenCandidateRegion {
         match receiver.await? {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
+                info!("Received open region reply: {:?}", reply);
                 let InstructionReply::OpenRegion(SimpleReply { result, error }) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),

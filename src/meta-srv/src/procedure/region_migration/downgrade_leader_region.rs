@@ -165,6 +165,7 @@ impl DowngradeLeaderRegion {
         match receiver.await? {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
+                info!("Downgrade region reply: {:?}", reply);
                 let InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id,
                     exists,
