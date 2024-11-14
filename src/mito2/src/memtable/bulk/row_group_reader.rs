@@ -31,7 +31,7 @@ use crate::error::ReadDataPartSnafu;
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::page_reader::RowGroupCachedReader;
-use crate::sst::parquet::reader::{RowGroupReaderBase, RowGroupReaderVirtual};
+use crate::sst::parquet::reader::{RowGroupReaderBase, RowGroupReaderContext};
 use crate::sst::parquet::row_group::{ColumnChunkIterator, RowGroupBase};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
@@ -142,11 +142,7 @@ impl RowGroups for MemtableRowGroupPageFetcher<'_> {
     }
 }
 
-pub(crate) struct BulkPartVirt {
-    context: BulkIterContextRef,
-}
-
-impl RowGroupReaderVirtual for BulkPartVirt {
+impl RowGroupReaderContext for BulkIterContextRef {
     fn map_result(
         &self,
         result: Result<Option<RecordBatch>, ArrowError>,
@@ -155,11 +151,11 @@ impl RowGroupReaderVirtual for BulkPartVirt {
     }
 
     fn read_format(&self) -> &ReadFormat {
-        self.context.read_format()
+        self.as_ref().read_format()
     }
 }
 
-pub(crate) type MemtableRowGroupReader = RowGroupReaderBase<BulkPartVirt>;
+pub(crate) type MemtableRowGroupReader = RowGroupReaderBase<BulkIterContextRef>;
 
 pub(crate) struct MemtableRowGroupReaderBuilder {
     context: BulkIterContextRef,
@@ -213,11 +209,6 @@ impl MemtableRowGroupReaderBuilder {
             row_selection,
         )
         .context(ReadDataPartSnafu)?;
-        Ok(MemtableRowGroupReader::create(
-            BulkPartVirt {
-                context: self.context.clone(),
-            },
-            reader,
-        ))
+        Ok(MemtableRowGroupReader::create(self.context.clone(), reader))
     }
 }
