@@ -54,7 +54,8 @@ impl AlterTableProcedure {
             AlterKind::DropColumns { .. }
             | AlterKind::ModifyColumnTypes { .. }
             | AlterKind::ChangeTableOptions { .. }
-            | AlterKind::ChangeColumnFulltext { .. } => {}
+            | AlterKind::SetColumnFulltext { .. }
+            | AlterKind::UnsetColumnFulltext { .. } => {}
         }
 
         Ok(new_info)

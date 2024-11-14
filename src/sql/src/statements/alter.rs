@@ -76,11 +76,13 @@ pub enum AlterTableOperation {
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
     RenameTable { new_table_name: String },
-    /// `MODIFY COLUMN <column_name> [SET | UNSET] FULLTEXT [WITH <options>]`
-    ChangeColumnFulltext {
+    /// `MODIFY COLUMN <column_name> SET FULLTEXT [WITH <options>]`
+    SetColumnFulltext {
         column_name: Ident,
         options: FulltextOptions,
     },
+    /// `MODIFY COLUMN <column_name> UNSET FULLTEXT`
+    UnsetColumnFulltext { column_name: Ident },
 }
 
 impl Display for AlterTableOperation {
@@ -123,19 +125,15 @@ impl Display for AlterTableOperation {
 
                 Ok(())
             }
-            AlterTableOperation::ChangeColumnFulltext {
+            AlterTableOperation::SetColumnFulltext {
                 column_name,
                 options,
-            } => match options.enable {
-                true => {
-                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)?;
-                    Ok(())
-                }
-                false => {
-                    write!(f, "MODIFY COLUMN {column_name} UNSET FULLTEXT")?;
-                    Ok(())
-                }
-            },
+            } => {
+                write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)
+            }
+            AlterTableOperation::UnsetColumnFulltext { column_name } => {
+                write!(f, "MODIFY COLUMN {column_name} UNSET FULLTEXT")
+            }
         }
     }
 }
@@ -262,6 +260,27 @@ ALTER TABLE monitor RENAME monitor_new"#,
                 assert_eq!(
                     r#"
 ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(analyzer=English, case_sensitive=false)"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a UNSET FULLTEXT";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::Alter { .. });
+
+        match &stmts[0] {
+            Statement::Alter(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor MODIFY COLUMN a UNSET FULLTEXT"#,
                     &new_sql
                 );
             }
