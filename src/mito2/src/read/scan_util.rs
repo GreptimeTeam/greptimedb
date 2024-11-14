@@ -22,10 +22,10 @@ use common_telemetry::debug;
 use futures::Stream;
 use prometheus::IntGauge;
 use smallvec::SmallVec;
-use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::metrics::IN_PROGRESS_SCAN;
 use crate::read::range::RowGroupIndex;
 use crate::read::scan_region::{FileRangeBuilder, ScanInput, StreamContext};
 use crate::read::{Batch, ScannerMetrics, Source};
@@ -45,6 +45,7 @@ struct PartitionMetricsInner {
     first_poll: Duration,
     metrics: ScannerMetrics,
     reader_metrics: ReaderMetrics,
+    in_progress_scan: IntGauge,
 }
 
 impl PartitionMetricsInner {
@@ -60,6 +61,7 @@ impl Drop for PartitionMetricsInner {
     fn drop(&mut self) {
         self.on_finish();
         self.metrics.observe_metrics();
+        self.in_progress_scan.dec();
 
         debug!(
             "{} finished, region_id: {}, partition: {}, first_poll: {:?}, metrics: {:?}, reader_metrics: {:?}",
@@ -80,6 +82,8 @@ impl PartitionMetrics {
         query_start: Instant,
         metrics: ScannerMetrics,
     ) -> Self {
+        let partition_str = partition.to_string();
+        let in_progress_scan = IN_PROGRESS_SCAN.with_label_values(&[scanner_type, &partition_str]);
         let inner = PartitionMetricsInner {
             region_id,
             partition,
@@ -88,6 +92,7 @@ impl PartitionMetrics {
             first_poll: Duration::default(),
             metrics,
             reader_metrics: ReaderMetrics::default(),
+            in_progress_scan,
         };
         Self(Arc::new(Mutex::new(inner)))
     }
