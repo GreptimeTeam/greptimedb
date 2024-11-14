@@ -438,16 +438,12 @@ impl EngineInner {
             channel_size: self.config.parallel_scan_channel_size,
         };
 
-        let scan_region = ScanRegion::new(
-            version,
-            region.access_layer.clone(),
-            request,
-            Some(cache_manager),
-        )
-        .with_parallelism(scan_parallelism)
-        .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
-        .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
-        .with_start_time(query_start);
+        let scan_region =
+            ScanRegion::new(version, region.access_layer.clone(), request, cache_manager)
+                .with_parallelism(scan_parallelism)
+                .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
+                .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
+                .with_start_time(query_start);
 
         Ok(scan_region)
     }

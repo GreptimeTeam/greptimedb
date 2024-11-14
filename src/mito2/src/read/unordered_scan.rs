@@ -135,7 +135,7 @@ impl UnorderedScan {
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
-            let cache = stream_ctx.input.cache_manager.as_deref();
+            let cache = &stream_ctx.input.cache_manager;
             // Scans each part.
             for part_range in part_ranges {
                 let mut metrics = ScannerMetrics::default();

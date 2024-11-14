@@ -167,7 +167,7 @@ pub(crate) struct ScanRegion {
     /// Scan request.
     request: ScanRequest,
     /// Cache.
-    cache_manager: Option<CacheManagerRef>,
+    cache_manager: CacheManagerRef,
     /// Parallelism to scan.
     parallelism: ScanParallelism,
     /// Whether to ignore inverted index.
@@ -184,7 +184,7 @@ impl ScanRegion {
         version: VersionRef,
         access_layer: AccessLayerRef,
         request: ScanRequest,
-        cache_manager: Option<CacheManagerRef>,
+        cache_manager: CacheManagerRef,
     ) -> ScanRegion {
         ScanRegion {
             version,
@@ -381,17 +381,12 @@ impl ScanRegion {
         }
 
         let file_cache = || -> Option<FileCacheRef> {
-            let cache_manager = self.cache_manager.as_ref()?;
-            let write_cache = cache_manager.write_cache()?;
+            let write_cache = self.cache_manager.write_cache()?;
             let file_cache = write_cache.file_cache();
             Some(file_cache)
         }();
 
-        let index_cache = self
-            .cache_manager
-            .as_ref()
-            .and_then(|c| c.index_cache())
-            .cloned();
+        let index_cache = self.cache_manager.index_cache().cloned();
 
         InvertedIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
@@ -471,7 +466,7 @@ pub(crate) struct ScanInput {
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
     /// Cache.
-    pub(crate) cache_manager: Option<CacheManagerRef>,
+    pub(crate) cache_manager: CacheManagerRef,
     /// Ignores file not found error.
     ignore_file_not_found: bool,
     /// Parallelism to scan data.
@@ -502,7 +497,7 @@ impl ScanInput {
             predicate: None,
             memtables: Vec::new(),
             files: Vec::new(),
-            cache_manager: None,
+            cache_manager: CacheManagerRef::default(),
             ignore_file_not_found: false,
             parallelism: ScanParallelism::default(),
             inverted_index_applier: None,
@@ -545,7 +540,7 @@ impl ScanInput {
 
     /// Sets cache for this query.
     #[must_use]
-    pub(crate) fn with_cache(mut self, cache: Option<CacheManagerRef>) -> Self {
+    pub(crate) fn with_cache(mut self, cache: CacheManagerRef) -> Self {
         self.cache_manager = cache;
         self
     }
