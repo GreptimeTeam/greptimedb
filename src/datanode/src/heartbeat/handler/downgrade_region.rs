@@ -74,6 +74,7 @@ impl HandlerContext {
 
             // Ignores flush request
             if !writable {
+                warn!("Region: {region_id} is not writable, flush_timeout: {:?}", flush_timeout);
                 return self.downgrade_to_follower_gracefully(region_id).await;
             }
 
