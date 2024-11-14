@@ -20,24 +20,11 @@ use parquet::arrow::ProjectionMask;
 use parquet::file::metadata::ParquetMetaData;
 
 use crate::error;
+use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::row_group_reader::{
     MemtableRowGroupReader, MemtableRowGroupReaderBuilder,
 };
 use crate::read::Batch;
-use crate::sst::parquet::file_range::RangeBase;
-use crate::sst::parquet::format::ReadFormat;
-
-pub(crate) type BulkIterContextRef = Arc<BulkIterContext>;
-
-pub(crate) struct BulkIterContext {
-    pub(crate) base: RangeBase,
-}
-
-impl BulkIterContext {
-    pub(crate) fn read_format(&self) -> &ReadFormat {
-        &self.base.read_format
-    }
-}
 
 /// Iterator for reading data inside a bulk part.
 pub struct BulkPartIter {
