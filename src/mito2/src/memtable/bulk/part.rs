@@ -180,7 +180,7 @@ pub struct BulkPartMeta {
 pub struct BulkPartEncoder {
     metadata: RegionMetadataRef,
     pk_encoder: McmpRowCodec,
-    row_group_size: Option<usize>,
+    row_group_size: usize,
     dedup: bool,
     writer_props: Option<WriterProperties>,
 }
@@ -189,15 +189,15 @@ impl BulkPartEncoder {
     pub(crate) fn new(
         metadata: RegionMetadataRef,
         dedup: bool,
-        row_group_size: Option<usize>,
+        row_group_size: usize,
     ) -> BulkPartEncoder {
         let codec = McmpRowCodec::new_with_primary_keys(&metadata);
-        let writer_props = row_group_size.map(|size| {
+        let writer_props = Some(
             WriterProperties::builder()
-                .set_write_batch_size(size)
-                .set_max_row_group_size(size)
-                .build()
-        });
+                .set_write_batch_size(row_group_size)
+                .set_max_row_group_size(row_group_size)
+                .build(),
+        );
         Self {
             metadata,
             pk_encoder: codec,
@@ -837,7 +837,7 @@ mod tests {
                 .mutation
             })
             .collect::<Vec<_>>();
-        let encoder = BulkPartEncoder::new(metadata, true, None);
+        let encoder = BulkPartEncoder::new(metadata, true, 1024);
         encoder.encode_mutations(&mutations).unwrap().unwrap()
     }
 
@@ -905,7 +905,7 @@ mod tests {
                     .mutation
             })
             .collect::<Vec<_>>();
-        let encoder = BulkPartEncoder::new(metadata, true, Some(100));
+        let encoder = BulkPartEncoder::new(metadata, true, 100);
         encoder.encode_mutations(&mutations).unwrap().unwrap()
     }
 
