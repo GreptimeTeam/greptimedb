@@ -171,7 +171,7 @@ impl ProjectionMapper {
     pub(crate) fn convert(
         &self,
         batch: &Batch,
-        cache_manager: Option<&CacheManager>,
+        cache_manager: &CacheManager,
     ) -> common_recordbatch::error::Result<RecordBatch> {
         debug_assert_eq!(self.batch_fields.len(), batch.fields().len());
         debug_assert!(self
@@ -204,15 +204,12 @@ impl ProjectionMapper {
             match index {
                 BatchIndex::Tag(idx) => {
                     let value = &pk_values[*idx];
-                    let vector = match cache_manager {
-                        Some(cache) => repeated_vector_with_cache(
-                            &column_schema.data_type,
-                            value,
-                            num_rows,
-                            cache,
-                        )?,
-                        None => new_repeated_vector(&column_schema.data_type, value, num_rows)?,
-                    };
+                    let vector = repeated_vector_with_cache(
+                        &column_schema.data_type,
+                        value,
+                        num_rows,
+                        cache_manager,
+                    )?;
                     columns.push(vector);
                 }
                 BatchIndex::Timestamp => {
@@ -360,7 +357,7 @@ mod tests {
         // With vector cache.
         let cache = CacheManager::builder().vector_cache_size(1024).build();
         let batch = new_batch(0, &[1, 2], &[(3, 3), (4, 4)], 3);
-        let record_batch = mapper.convert(&batch, Some(&cache)).unwrap();
+        let record_batch = mapper.convert(&batch, &cache).unwrap();
         let expect = "\
 +---------------------+----+----+----+----+
 | ts                  | k0 | k1 | v0 | v1 |
@@ -380,7 +377,7 @@ mod tests {
         assert!(cache
             .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(3))
             .is_none());
-        let record_batch = mapper.convert(&batch, Some(&cache)).unwrap();
+        let record_batch = mapper.convert(&batch, &cache).unwrap();
         assert_eq!(expect, print_record_batch(record_batch));
     }
 
@@ -401,7 +398,8 @@ mod tests {
         );
 
         let batch = new_batch(0, &[1, 2], &[(4, 4)], 3);
-        let record_batch = mapper.convert(&batch, None).unwrap();
+        let cache = CacheManager::builder().vector_cache_size(1024).build();
+        let record_batch = mapper.convert(&batch, &cache).unwrap();
         let expect = "\
 +----+----+
 | v1 | k0 |
