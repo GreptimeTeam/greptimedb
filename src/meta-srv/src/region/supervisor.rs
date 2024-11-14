@@ -19,8 +19,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
-use common_meta::key::MAINTENANCE_KEY;
-use common_meta::kv_backend::KvBackendRef;
+use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use common_meta::leadership_notifier::LeadershipChangeListener;
 use common_meta::peer::PeerLookupServiceRef;
 use common_meta::{ClusterId, DatanodeId};
@@ -216,8 +215,8 @@ pub struct RegionSupervisor {
     selector: SelectorRef,
     /// Region migration manager.
     region_migration_manager: RegionMigrationManagerRef,
-    // TODO(weny): find a better way
-    kv_backend: KvBackendRef,
+    /// The maintenance mode manager.
+    maintenance_mode_manager: MaintenanceModeManagerRef,
     /// Peer lookup service
     peer_lookup: PeerLookupServiceRef,
 }
@@ -288,7 +287,7 @@ impl RegionSupervisor {
         selector_context: SelectorContext,
         selector: SelectorRef,
         region_migration_manager: RegionMigrationManagerRef,
-        kv_backend: KvBackendRef,
+        maintenance_mode_manager: MaintenanceModeManagerRef,
         peer_lookup: PeerLookupServiceRef,
     ) -> Self {
         Self {
@@ -297,7 +296,7 @@ impl RegionSupervisor {
             selector_context,
             selector,
             region_migration_manager,
-            kv_backend,
+            maintenance_mode_manager,
             peer_lookup,
         }
     }
@@ -346,7 +345,7 @@ impl RegionSupervisor {
         if regions.is_empty() {
             return;
         }
-        match self.is_maintenance_mode().await {
+        match self.is_maintenance_mode_enabled().await {
             Ok(false) => {}
             Ok(true) => {
                 info!("Maintenance mode is enabled, skip failover");
@@ -382,11 +381,11 @@ impl RegionSupervisor {
         }
     }
 
-    pub(crate) async fn is_maintenance_mode(&self) -> Result<bool> {
-        self.kv_backend
-            .exists(MAINTENANCE_KEY.as_bytes())
+    pub(crate) async fn is_maintenance_mode_enabled(&self) -> Result<bool> {
+        self.maintenance_mode_manager
+            .maintenance_mode()
             .await
-            .context(error::KvBackendSnafu)
+            .context(error::MaintenanceModeManagerSnafu)
     }
 
     async fn do_failover(
@@ -479,6 +478,7 @@ pub(crate) mod tests {
     use std::time::Duration;
 
     use common_meta::ddl::RegionFailureDetectorController;
+    use common_meta::key::maintenance;
     use common_meta::peer::Peer;
     use common_meta::test_util::NoopPeerLookupService;
     use common_time::util::current_time_millis;
@@ -505,7 +505,9 @@ pub(crate) mod tests {
             env.procedure_manager().clone(),
             context_factory,
         ));
-        let kv_backend = env.kv_backend();
+        let maintenance_mode_manager = Arc::new(maintenance::MaintenanceModeManager::new(
+            env.kv_backend().clone(),
+        ));
         let peer_lookup = Arc::new(NoopPeerLookupService);
         let (tx, rx) = RegionSupervisor::channel();
 
@@ -516,7 +518,7 @@ pub(crate) mod tests {
                 selector_context,
                 selector,
                 region_migration_manager,
-                kv_backend,
+                maintenance_mode_manager,
                 peer_lookup,
             ),
             tx,

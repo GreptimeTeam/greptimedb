@@ -27,6 +27,7 @@ use common_meta::ddl::{
 use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::maintenance::MaintenanceModeManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
@@ -195,6 +196,9 @@ impl MetasrvBuilder {
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
+        let maintenance_mode_manager = Arc::new(MaintenanceModeManager::new(
+            leader_cached_kv_backend.clone() as _,
+        ));
         let selector_ctx = SelectorContext {
             server_addr: options.server_addr.clone(),
             datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
@@ -304,7 +308,7 @@ impl MetasrvBuilder {
                 selector_ctx.clone(),
                 selector.clone(),
                 region_migration_manager.clone(),
-                leader_cached_kv_backend.clone() as _,
+                maintenance_mode_manager.clone(),
                 peer_lookup_service.clone(),
             );
 
@@ -375,6 +379,7 @@ impl MetasrvBuilder {
             procedure_executor: ddl_manager,
             wal_options_allocator,
             table_metadata_manager,
+            maintenance_mode_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
                 Some(metasrv_home),
                 meta_peer_client,
