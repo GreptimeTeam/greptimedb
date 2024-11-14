@@ -44,15 +44,13 @@ use table::predicate::Predicate;
 
 use crate::error;
 use crate::error::{ComputeArrowSnafu, EncodeMemtableSnafu, NewRecordBatchSnafu, Result};
-use crate::memtable::bulk::part_reader::{BulkIterContext, BulkPartIter};
+use crate::memtable::bulk::context::BulkIterContextRef;
+use crate::memtable::bulk::part_reader::BulkPartIter;
 use crate::memtable::key_values::KeyValuesRef;
 use crate::memtable::BoxedBatchIterator;
 use crate::row_converter::{McmpRowCodec, RowCodec};
-use crate::sst::parquet::file_range::RangeBase;
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
-use crate::sst::parquet::reader::SimpleFilterContext;
-use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::to_sst_arrow_schema;
 
 #[derive(Debug)]
@@ -70,47 +68,14 @@ impl BulkPart {
         &self.metadata
     }
 
-    pub(crate) fn read(
-        &self,
-        projection: Option<&[ColumnId]>,
-        predicate: Option<Predicate>,
-    ) -> Result<Option<BoxedBatchIterator>> {
-        let read_format = self.build_read_format(&projection);
-
+    pub(crate) fn read(&self, context: BulkIterContextRef) -> Result<Option<BoxedBatchIterator>> {
         // use predicate to find row groups to read.
-        let row_groups_to_read = if let Some(predicate) = predicate.as_ref() {
-            self.row_groups_to_read(&read_format, predicate)
-        } else {
-            (0..self.metadata.parquet_metadata.num_row_groups()).collect()
-        };
+        let row_groups_to_read = context.row_groups_to_read(&self.metadata.parquet_metadata);
 
         if row_groups_to_read.is_empty() {
             // All row groups are filtered.
             return Ok(None);
         }
-
-        let mut filters = if let Some(predicate) = predicate {
-            predicate
-                .exprs()
-                .iter()
-                .filter_map(|expr| {
-                    SimpleFilterContext::new_opt(&self.metadata.region_metadata, None, expr)
-                })
-                .collect::<Vec<_>>()
-        } else {
-            vec![]
-        };
-
-        //todo(hl): looks like memtable range/iter does not pass time range related parameters.
-        let context = Arc::new(BulkIterContext {
-            base: RangeBase {
-                filters,
-                read_format,
-                codec: McmpRowCodec::new_with_primary_keys(&self.metadata.region_metadata),
-                // we don't need to compat batch since all batch in memtable have the same schema.
-                compat_batch: None,
-            },
-        });
 
         let iter = BulkPartIter::try_new(
             context,
@@ -119,47 +84,6 @@ impl BulkPart {
             self.data.clone(),
         )?;
         Ok(Some(Box::new(iter) as BoxedBatchIterator))
-    }
-
-    fn build_read_format(&self, projection: &Option<&[ColumnId]>) -> ReadFormat {
-        let region_metadata = self.metadata.region_metadata.clone();
-        let read_format = if let Some(column_ids) = &projection {
-            ReadFormat::new(region_metadata, column_ids.iter().copied())
-        } else {
-            // No projection, lists all column ids to read.
-            ReadFormat::new(
-                region_metadata.clone(),
-                region_metadata
-                    .column_metadatas
-                    .iter()
-                    .map(|col| col.column_id),
-            )
-        };
-
-        read_format
-    }
-
-    /// Prunes row groups by stats.
-    fn row_groups_to_read(
-        &self,
-        read_format: &ReadFormat,
-        predicate: &Predicate,
-    ) -> VecDeque<usize> {
-        let region_meta = read_format.metadata();
-        let row_groups = self.metadata.parquet_metadata.row_groups();
-        // expected_metadata is set to None since we always expect region metadata of memtable is up-to-date.
-        let stats = RowGroupPruningStats::new(row_groups, read_format, None);
-        predicate
-            .prune_with_stats(&stats, region_meta.schema.arrow_schema())
-            .iter()
-            .zip(0..self.metadata.parquet_metadata.num_row_groups())
-            .filter_map(|(selected, row_group)| {
-                if !*selected {
-                    return None;
-                }
-                Some(row_group)
-            })
-            .collect::<VecDeque<_>>()
     }
 }
 
@@ -523,6 +447,7 @@ mod tests {
     use datatypes::vectors::{Float64Vector, TimestampMillisecondVector};
 
     use super::*;
+    use crate::memtable::bulk::context::BulkIterContext;
     use crate::sst::parquet::format::ReadFormat;
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
@@ -867,9 +792,14 @@ mod tests {
             },
         ]);
 
-        let projection = &[4];
+        let projection = &[4u32];
+
         let mut reader = part
-            .read(Some(projection), None)
+            .read(Arc::new(BulkIterContext::new(
+                part.metadata.region_metadata.clone(),
+                &Some(projection.as_slice()),
+                None,
+            )))
             .unwrap()
             .expect("expect at least one row group");
 
@@ -910,8 +840,13 @@ mod tests {
     }
 
     fn check_prune_row_group(part: &BulkPart, predicate: Option<Predicate>, expected_rows: usize) {
+        let context = Arc::new(BulkIterContext::new(
+            part.metadata.region_metadata.clone(),
+            &None,
+            predicate,
+        ));
         let mut reader = part
-            .read(None, predicate)
+            .read(context)
             .unwrap()
             .expect("expect at least one row group");
         let mut total_rows_read = 0;
@@ -933,15 +868,14 @@ mod tests {
             ("b", 1, (180, 210), 4),
         ]);
 
-        assert!(part
-            .read(
-                None,
-                Some(Predicate::new(vec![datafusion_expr::col("ts").eq(
-                    datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None))
-                ),]))
-            )
-            .unwrap()
-            .is_none());
+        let context = Arc::new(BulkIterContext::new(
+            part.metadata.region_metadata.clone(),
+            &None,
+            Some(Predicate::new(vec![datafusion_expr::col("ts").eq(
+                datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None)),
+            )])),
+        ));
+        assert!(part.read(context).unwrap().is_none());
 
         check_prune_row_group(&part, None, 310);
 
