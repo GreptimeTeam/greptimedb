@@ -58,6 +58,7 @@ RUN python3 -m pip install -r /etc/greptime/requirements.txt
 WORKDIR /greptime
 COPY --from=builder /out/target/${OUTPUT_DIR}/greptime /greptime/bin/
 COPY --from=builder /out/target/${OUTPUT_DIR}/build/tikv-jemalloc-sys-*/out/build/bin/jeprof /greptime/bin/
+RUN chmod +x /greptime/bin/jeprof
 
 ENV PATH /greptime/bin/:$PATH
 
