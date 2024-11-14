@@ -345,9 +345,6 @@ impl StatementExecutor {
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
-            // TODO: write sqlness test for query timeout variables
-            // once the proper channel is configured in the test infra.
-            // The current sqlness test channel is default to Unknown.
             "MAX_EXECUTION_TIME" => match query_ctx.channel() {
                 Channel::Mysql => set_query_timeout(set_var.value, query_ctx)?,
                 Channel::Postgres => {
