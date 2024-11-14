@@ -1041,9 +1041,9 @@ impl ParquetReader {
     }
 }
 
-/// RowGroupReaderVirtual represents the fields that cannot be shared
+/// RowGroupReaderContext represents the fields that cannot be shared
 /// between different `RowGroupReader`s.
-pub(crate) trait RowGroupReaderVirtual: Send {
+pub(crate) trait RowGroupReaderContext: Send {
     fn map_result(
         &self,
         result: std::result::Result<Option<RecordBatch>, ArrowError>,
@@ -1052,34 +1052,29 @@ pub(crate) trait RowGroupReaderVirtual: Send {
     fn read_format(&self) -> &ReadFormat;
 }
 
-pub(crate) struct FileRangeVirt {
-    /// Context for file ranges.
-    pub(crate) context: FileRangeContextRef,
-}
-
-impl RowGroupReaderVirtual for FileRangeVirt {
+impl RowGroupReaderContext for FileRangeContextRef {
     fn map_result(
         &self,
         result: std::result::Result<Option<RecordBatch>, ArrowError>,
     ) -> Result<Option<RecordBatch>> {
         result.context(ArrowReaderSnafu {
-            path: self.context.file_path(),
+            path: self.file_path(),
         })
     }
 
     fn read_format(&self) -> &ReadFormat {
-        self.context.read_format()
+        self.as_ref().read_format()
     }
 }
 
 /// [RowGroupReader] that reads from [FileRange].
-pub(crate) type RowGroupReader = RowGroupReaderBase<FileRangeVirt>;
+pub(crate) type RowGroupReader = RowGroupReaderBase<FileRangeContextRef>;
 
 impl RowGroupReader {
     /// Creates a new reader from file range.
     pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
         Self {
-            virt: FileRangeVirt { context },
+            context,
             reader,
             batches: VecDeque::new(),
             metrics: ReaderMetrics::default(),
@@ -1089,8 +1084,8 @@ impl RowGroupReader {
 
 /// Reader to read a row group of a parquet file.
 pub(crate) struct RowGroupReaderBase<T> {
-    /// Virtual parts of [RowGroupReader] so adapts to different underlying implementation.
-    virt: T,
+    /// Context of [RowGroupReader] so adapts to different underlying implementation.
+    context: T,
     /// Inner parquet reader.
     reader: ParquetRecordBatchReader,
     /// Buffered batches to return.
@@ -1101,12 +1096,12 @@ pub(crate) struct RowGroupReaderBase<T> {
 
 impl<T> RowGroupReaderBase<T>
 where
-    T: RowGroupReaderVirtual,
+    T: RowGroupReaderContext,
 {
     /// Creates a new reader.
-    pub(crate) fn create(virt: T, reader: ParquetRecordBatchReader) -> Self {
+    pub(crate) fn create(context: T, reader: ParquetRecordBatchReader) -> Self {
         Self {
-            virt,
+            context,
             reader,
             batches: VecDeque::new(),
             metrics: ReaderMetrics::default(),
@@ -1120,12 +1115,12 @@ where
 
     /// Gets [ReadFormat] of underlying reader.
     pub(crate) fn read_format(&self) -> &ReadFormat {
-        self.virt.read_format()
+        self.context.read_format()
     }
 
     /// Tries to fetch next [RecordBatch] from the reader.
     fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
-        self.virt.map_result(self.reader.next().transpose())
+        self.context.map_result(self.reader.next().transpose())
     }
 
     /// Returns the next [Batch].
@@ -1145,7 +1140,7 @@ where
             };
             self.metrics.num_record_batches += 1;
 
-            self.virt
+            self.context
                 .read_format()
                 .convert_record_batch(&record_batch, &mut self.batches)?;
             self.metrics.num_batches += self.batches.len();
@@ -1160,7 +1155,7 @@ where
 #[async_trait::async_trait]
 impl<T> BatchReader for RowGroupReaderBase<T>
 where
-    T: RowGroupReaderVirtual,
+    T: RowGroupReaderContext,
 {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         self.next_inner()
