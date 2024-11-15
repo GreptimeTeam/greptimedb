@@ -102,6 +102,7 @@ impl CreateFlowProcedure {
             .await?;
 
         if create_if_not_exists && or_replace {
+            // this is forbidden because not clear what does that mean exactly
             return error::UnsupportedSnafu {
                 operation: "Create flow with both `IF NOT EXISTS` and `OR REPLACE`".to_string(),
             }
@@ -182,7 +183,7 @@ impl CreateFlowProcedure {
                     .map_err(add_peer_context_if_needed(peer.clone()))
             });
         }
-
+        info!("Creating flow({}) on flownodes", self.data.flow_id.unwrap());
         join_all(create_flow)
             .await
             .into_iter()
@@ -219,6 +220,7 @@ impl CreateFlowProcedure {
     }
 
     async fn on_broadcast(&mut self) -> Result<Status> {
+        debug_assert!(self.data.state == CreateFlowState::InvalidateFlowCache);
         // Safety: The flow id must be allocated.
         let flow_id = self.data.flow_id.unwrap();
         let ctx = Context {
@@ -229,10 +231,13 @@ impl CreateFlowProcedure {
             .cache_invalidator
             .invalidate(
                 &ctx,
-                &[CacheIdent::CreateFlow(CreateFlow {
-                    source_table_ids: self.data.source_table_ids.clone(),
-                    flownodes: self.data.peers.clone(),
-                })],
+                &[
+                    CacheIdent::CreateFlow(CreateFlow {
+                        source_table_ids: self.data.source_table_ids.clone(),
+                        flownodes: self.data.peers.clone(),
+                    }),
+                    CacheIdent::FlowId(flow_id),
+                ],
             )
             .await?;
 

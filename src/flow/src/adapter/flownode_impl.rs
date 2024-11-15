@@ -69,7 +69,7 @@ impl Flownode for FlowWorkerManager {
                 let args = CreateFlowArgs {
                     flow_id: task_id.id as u64,
                     sink_table_name,
-                    source_table_ids: source_table_ids,
+                    source_table_ids,
                     create_if_not_exists,
                     or_replace,
                     expire_after,
