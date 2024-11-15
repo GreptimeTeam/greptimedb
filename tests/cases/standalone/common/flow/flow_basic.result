@@ -259,7 +259,7 @@ SHOW CREATE FLOW filter_numbers_basic;
 +----------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
 | Flow                 | Create Flow                                                                                                                                  |
 +----------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
-| filter_numbers_basic | CREATE OR REPLACE FLOW IF NOT EXISTS filter_numbers_basic                                                                                    |
+| filter_numbers_basic | CREATE FLOW IF NOT EXISTS filter_numbers_basic                                                                                               |
 |                      | SINK TO out_num_cnt_basic                                                                                                                    |
 |                      | AS SELECT INTERVAL '1 day 1 second', INTERVAL '1 month 1 day 1 second', INTERVAL '1 year 1 month' FROM numbers_input_basic WHERE number > 10 |
 +----------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
