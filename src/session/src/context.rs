@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
@@ -281,6 +282,22 @@ impl QueryContext {
 
     pub fn set_warning(&self, msg: String) {
         self.mutable_query_context_data.write().unwrap().warning = Some(msg);
+    }
+
+    pub fn query_timeout(&self) -> Option<Duration> {
+        self.mutable_session_data.read().unwrap().query_timeout
+    }
+
+    pub fn query_timeout_as_millis(&self) -> u128 {
+        let timeout = self.mutable_session_data.read().unwrap().query_timeout;
+        if let Some(t) = timeout {
+            return t.as_millis();
+        }
+        0
+    }
+
+    pub fn set_query_timeout(&self, timeout: Duration) {
+        self.mutable_session_data.write().unwrap().query_timeout = Some(timeout);
     }
 }
 

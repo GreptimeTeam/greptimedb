@@ -7714,6 +7714,7 @@ name = "operator"
 version = "0.9.5"
 dependencies = [
  "api",
+ "async-stream",
  "async-trait",
  "catalog",
  "chrono",

@@ -23,6 +23,7 @@ use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
 use table::metadata::TableType;
+use tokio::time::error::Elapsed;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -777,6 +778,14 @@ pub enum Error {
         location: Location,
         json: String,
     },
+
+    #[snafu(display("Canceling statement due to statement timeout"))]
+    StatementTimeout {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: Elapsed,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -924,6 +933,7 @@ impl ErrorExt for Error {
             Error::BuildRecordBatch { source, .. } => source.status_code(),
 
             Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
+            Error::StatementTimeout { .. } => StatusCode::Cancelled,
         }
     }
 
