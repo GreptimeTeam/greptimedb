@@ -170,7 +170,7 @@ impl ParserContext<'_> {
                     self.parse_alter_column_fulltext(column_name)
                 } else {
                     let data_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
-                    Ok(AlterTableOperation::ChangeColumnType {
+                    Ok(AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type: data_type,
                     })
@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_alter_change_column_type() {
+    fn test_parse_alter_modify_column_type() {
         let sql_1 = "ALTER TABLE my_metric_1 MODIFY COLUMN a STRING";
         let result_1 = ParserContext::create_with_dialect(
             sql_1,
@@ -427,10 +427,10 @@ mod tests {
                 let alter_operation = alter_table.alter_operation();
                 assert_matches!(
                     alter_operation,
-                    AlterTableOperation::ChangeColumnType { .. }
+                    AlterTableOperation::ModifyColumnType { .. }
                 );
                 match alter_operation {
-                    AlterTableOperation::ChangeColumnType {
+                    AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
                     } => {
@@ -461,10 +461,10 @@ mod tests {
                 let alter_operation = alter_table.alter_operation();
                 assert_matches!(
                     alter_operation,
-                    AlterTableOperation::ChangeColumnType { .. }
+                    AlterTableOperation::ModifyColumnType { .. }
                 );
                 match alter_operation {
-                    AlterTableOperation::ChangeColumnType {
+                    AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
                     } => {
@@ -492,10 +492,10 @@ mod tests {
                 let alter_operation = alter_table.alter_operation();
                 assert_matches!(
                     alter_operation,
-                    AlterTableOperation::ChangeColumnType { .. }
+                    AlterTableOperation::ModifyColumnType { .. }
                 );
                 match alter_operation {
-                    AlterTableOperation::ChangeColumnType {
+                    AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
                     } => {
