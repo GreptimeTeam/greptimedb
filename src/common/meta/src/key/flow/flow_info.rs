@@ -26,7 +26,7 @@ use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
-use crate::kv_backend::txn::Txn;
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::FlownodeId;
 
@@ -209,6 +209,32 @@ impl FlowInfoManager {
     )> {
         let key = FlowInfoKey::new(flow_id).to_bytes();
         let txn = Txn::put_if_not_exists(key.clone(), flow_value.try_as_raw_value()?);
+
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(key)),
+        ))
+    }
+
+    /// Builds a update flow transaction.
+    /// It is expected that the `__flow/info/{flow_id}` IS ALREADY occupied.
+    /// Otherwise, the transaction will retrieve existing value and fail.
+    pub(crate) fn build_update_txn(
+        &self,
+        flow_id: FlowId,
+        flow_value: &FlowInfoValue,
+    ) -> Result<(
+        Txn,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> FlowInfoDecodeResult,
+    )> {
+        let key = FlowInfoKey::new(flow_id).to_bytes();
+        let txn = Txn::new()
+            .when(vec![Compare::new(key.clone(), CompareOp::NotEqual, None)])
+            .and_then(vec![TxnOp::Put(
+                key.clone(),
+                flow_value.try_as_raw_value()?,
+            )])
+            .or_else(vec![TxnOp::Get(key.clone())]);
 
         Ok((
             txn,

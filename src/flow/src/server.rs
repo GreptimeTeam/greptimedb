@@ -48,7 +48,7 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::FlowWorkerManagerRef;
+use crate::adapter::{CreateFlowArgs, FlowWorkerManagerRef};
 use crate::error::{
     CacheRequiredSnafu, ExternalSnafu, FlowNotFoundSnafu, ListFlowsSnafu, ParseAddrSnafu,
     ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
@@ -355,23 +355,23 @@ impl FlownodeBuilder {
                 info.sink_table_name().schema_name.clone(),
                 info.sink_table_name().table_name.clone(),
             ];
-            manager
-                .create_flow(
-                    flow_id as _,
-                    sink_table_name,
-                    info.source_table_ids(),
-                    true,
-                    info.expire_after(),
-                    Some(info.comment().clone()),
-                    info.raw_sql().clone(),
-                    info.options().clone(),
-                    Some(
-                        QueryContextBuilder::default()
-                            .current_catalog(info.catalog_name().clone())
-                            .build(),
-                    ),
-                )
-                .await?;
+            let args = CreateFlowArgs {
+                flow_id: flow_id as _,
+                sink_table_name,
+                source_table_ids: info.source_table_ids().to_vec(),
+                create_if_not_exists: true,
+                or_replace: true,
+                expire_after: info.expire_after(),
+                comment: Some(info.comment().clone()),
+                sql: info.raw_sql().clone(),
+                flow_options: info.options().clone(),
+                query_ctx: Some(
+                    QueryContextBuilder::default()
+                        .current_catalog(info.catalog_name().clone())
+                        .build(),
+                ),
+            };
+            manager.create_flow(args).await?;
         }
 
         Ok(cnt)

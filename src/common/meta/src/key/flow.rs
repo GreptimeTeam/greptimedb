@@ -230,6 +230,93 @@ impl FlowMetadataManager {
         Ok(())
     }
 
+    /// Update metadata for flow and returns an error if old metadata IS NOT exists.
+    pub async fn update_flow_metadata(
+        &self,
+        flow_id: FlowId,
+        flow_info: FlowInfoValue,
+        flow_routes: Vec<(FlowPartitionId, FlowRouteValue)>,
+    ) -> Result<()> {
+        let (create_flow_flow_name_txn, on_create_flow_flow_name_failure) = self
+            .flow_name_manager
+            .build_update_txn(&flow_info.catalog_name, &flow_info.flow_name, flow_id)?;
+
+        let (create_flow_txn, on_create_flow_failure) = self
+            .flow_info_manager
+            .build_update_txn(flow_id, &flow_info)?;
+
+        let create_flow_routes_txn = self
+            .flow_route_manager
+            .build_create_txn(flow_id, flow_routes.clone())?;
+
+        let create_flownode_flow_txn = self
+            .flownode_flow_manager
+            .build_create_txn(flow_id, flow_info.flownode_ids().clone());
+
+        let create_table_flow_txn = self.table_flow_manager.build_create_txn(
+            flow_id,
+            flow_routes
+                .into_iter()
+                .map(|(partition_id, route)| (partition_id, TableFlowValue { peer: route.peer }))
+                .collect(),
+            flow_info.source_table_ids(),
+        )?;
+
+        let txn = Txn::merge_all(vec![
+            create_flow_flow_name_txn,
+            create_flow_txn,
+            create_flow_routes_txn,
+            create_flownode_flow_txn,
+            create_table_flow_txn,
+        ]);
+        info!(
+            "Creating flow {}.{}({}), with {} txn operations",
+            flow_info.catalog_name,
+            flow_info.flow_name,
+            flow_id,
+            txn.max_operations()
+        );
+
+        let mut resp = self.kv_backend.txn(txn).await?;
+        if !resp.succeeded {
+            let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
+            let remote_flow_flow_name =
+                on_create_flow_flow_name_failure(&mut set)?.with_context(|| {
+                    error::UnexpectedSnafu {
+                        err_msg: format!(
+                        "Reads the empty flow name during the creating flow, flow_id: {flow_id}"
+                    ),
+                    }
+                })?;
+
+            if remote_flow_flow_name.flow_id() != flow_id {
+                info!(
+                    "Trying to create flow {}.{}({}), but flow({}) already exists",
+                    flow_info.catalog_name,
+                    flow_info.flow_name,
+                    flow_id,
+                    remote_flow_flow_name.flow_id()
+                );
+
+                return error::FlowAlreadyExistsSnafu {
+                    flow_name: format!("{}.{}", flow_info.catalog_name, flow_info.flow_name),
+                }
+                .fail();
+            }
+
+            let remote_flow =
+                on_create_flow_failure(&mut set)?.with_context(|| error::UnexpectedSnafu {
+                    err_msg: format!(
+                        "Reads the empty flow during the creating flow, flow_id: {flow_id}"
+                    ),
+                })?;
+            let op_name = "creating flow";
+            ensure_values!(*remote_flow, flow_info, op_name);
+        }
+
+        Ok(())
+    }
+
     fn flow_metadata_keys(&self, flow_id: FlowId, flow_value: &FlowInfoValue) -> Vec<Vec<u8>> {
         let source_table_ids = flow_value.source_table_ids();
         let mut keys =

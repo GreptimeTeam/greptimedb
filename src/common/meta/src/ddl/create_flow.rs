@@ -28,6 +28,7 @@ use common_procedure::{
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
+use futures::TryStreamExt;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -75,6 +76,7 @@ impl CreateFlowProcedure {
                 source_table_ids: vec![],
                 query_context,
                 state: CreateFlowState::Prepare,
+                flow_already_exists: false,
             },
         }
     }
@@ -90,6 +92,7 @@ impl CreateFlowProcedure {
         let flow_name = &self.data.task.flow_name;
         let sink_table_name = &self.data.task.sink_table_name;
         let create_if_not_exists = self.data.task.create_if_not_exists;
+        let or_replace = self.data.task.or_replace;
 
         let flow_name_value = self
             .context
@@ -98,16 +101,40 @@ impl CreateFlowProcedure {
             .get(catalog_name, flow_name)
             .await?;
 
+        if create_if_not_exists && or_replace {
+            return error::UnsupportedSnafu {
+                operation: "Create flow with both `IF NOT EXISTS` and `OR REPLACE`".to_string(),
+            }
+            .fail();
+        }
+
         if let Some(value) = flow_name_value {
             ensure!(
-                create_if_not_exists,
+                create_if_not_exists || or_replace,
                 error::FlowAlreadyExistsSnafu {
                     flow_name: format_full_flow_name(catalog_name, flow_name),
                 }
             );
 
             let flow_id = value.flow_id();
-            return Ok(Status::done_with_output(flow_id));
+            if create_if_not_exists {
+                info!("Flow already exists, flow_id: {}", flow_id);
+                return Ok(Status::done_with_output(flow_id));
+            }
+
+            let flow_id = value.flow_id();
+            let peers = self
+                .context
+                .flow_metadata_manager
+                .flow_route_manager()
+                .routes(flow_id)
+                .map_ok(|(_, value)| value.peer)
+                .try_collect::<Vec<_>>()
+                .await?;
+            self.data.flow_id = Some(flow_id);
+            self.data.peers = peers;
+            info!("Replacing flow, flow_id: {}", flow_id);
+            self.data.flow_already_exists = true;
         }
 
         //  Ensures sink table doesn't exist.
@@ -128,7 +155,9 @@ impl CreateFlowProcedure {
         }
 
         self.collect_source_tables().await?;
-        self.allocate_flow_id().await?;
+        if self.data.flow_id.is_none() {
+            self.allocate_flow_id().await?;
+        }
         self.data.state = CreateFlowState::CreateFlows;
 
         Ok(Status::executing(true))
@@ -170,13 +199,21 @@ impl CreateFlowProcedure {
     async fn on_create_metadata(&mut self) -> Result<Status> {
         // Safety: The flow id must be allocated.
         let flow_id = self.data.flow_id.unwrap();
-        // TODO(weny): Support `or_replace`.
         let (flow_info, flow_routes) = (&self.data).into();
-        self.context
-            .flow_metadata_manager
-            .create_flow_metadata(flow_id, flow_info, flow_routes)
-            .await?;
-        info!("Created flow metadata for flow {flow_id}");
+        if self.data.flow_already_exists {
+            self.context
+                .flow_metadata_manager
+                .update_flow_metadata(flow_id, flow_info, flow_routes)
+                .await?;
+            info!("Replaced flow metadata for flow {flow_id}");
+        } else {
+            self.context
+                .flow_metadata_manager
+                .create_flow_metadata(flow_id, flow_info, flow_routes)
+                .await?;
+            info!("Created flow metadata for flow {flow_id}");
+        }
+
         self.data.state = CreateFlowState::InvalidateFlowCache;
         Ok(Status::executing(true))
     }
@@ -270,6 +307,7 @@ pub struct CreateFlowData {
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
     pub(crate) query_context: QueryContext,
+    pub(crate) flow_already_exists: bool,
 }
 
 impl From<&CreateFlowData> for CreateRequest {
@@ -284,9 +322,9 @@ impl From<&CreateFlowData> for CreateRequest {
                 .map(|table_id| api::v1::TableId { id: *table_id })
                 .collect_vec(),
             sink_table_name: Some(value.task.sink_table_name.clone().into()),
-            // Always be true
+            // Always be true to ensure idempotent in case of retry
             create_if_not_exists: true,
-            or_replace: true,
+            or_replace: value.task.or_replace,
             expire_after: value.task.expire_after.map(|value| ExpireAfter { value }),
             comment: value.task.comment.clone(),
             sql: value.task.sql.clone(),

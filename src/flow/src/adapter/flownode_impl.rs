@@ -28,7 +28,7 @@ use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
-use crate::adapter::FlowWorkerManager;
+use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
 use crate::error::InternalSnafu;
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
@@ -57,7 +57,7 @@ impl Flownode for FlowWorkerManager {
                 comment,
                 sql,
                 flow_options,
-                or_replace: _,
+                or_replace,
             })) => {
                 let source_table_ids = source_table_ids.into_iter().map(|id| id.id).collect_vec();
                 let sink_table_name = [
@@ -66,20 +66,19 @@ impl Flownode for FlowWorkerManager {
                     sink_table_name.table_name,
                 ];
                 let expire_after = expire_after.map(|e| e.value);
-                let ret = self
-                    .create_flow(
-                        task_id.id as u64,
-                        sink_table_name,
-                        &source_table_ids,
-                        create_if_not_exists,
-                        expire_after,
-                        Some(comment),
-                        sql,
-                        flow_options,
-                        query_ctx,
-                    )
-                    .await
-                    .map_err(to_meta_err)?;
+                let args = CreateFlowArgs {
+                    flow_id: task_id.id as u64,
+                    sink_table_name,
+                    source_table_ids: source_table_ids,
+                    create_if_not_exists,
+                    or_replace,
+                    expire_after,
+                    comment: Some(comment),
+                    sql,
+                    flow_options,
+                    query_ctx,
+                };
+                let ret = self.create_flow(args).await.map_err(to_meta_err)?;
                 METRIC_FLOW_TASK_COUNT.inc();
                 Ok(FlowResponse {
                     affected_flows: ret
