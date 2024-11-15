@@ -221,7 +221,7 @@ pub struct InMemoryRowGroup<'a> {
     region_id: RegionId,
     file_id: FileId,
     row_group_idx: usize,
-    cache_manager: Option<CacheManagerRef>,
+    cache_manager: CacheManagerRef,
     file_path: &'a str,
     /// Object store.
     object_store: ObjectStore,
@@ -238,7 +238,7 @@ impl<'a> InMemoryRowGroup<'a> {
         file_id: FileId,
         parquet_meta: &'a ParquetMetaData,
         row_group_idx: usize,
-        cache_manager: Option<CacheManagerRef>,
+        cache_manager: CacheManagerRef,
         file_path: &'a str,
         object_store: ObjectStore,
     ) -> Self {
@@ -291,21 +291,19 @@ impl<'a> InMemoryRowGroup<'a> {
             let assigned_columns = self.base.assign_dense_chunk(projection, chunk_data);
 
             // Put fetched data to cache if necessary.
-            if let Some(cache) = &self.cache_manager {
-                for (col_idx, data) in assigned_columns {
-                    let column = self.base.metadata.column(col_idx);
-                    if !cache_uncompressed_pages(column) {
-                        // For columns that have multiple uncompressed pages, we only cache the compressed page
-                        // to save memory.
-                        let page_key = PageKey::new_compressed(
-                            self.region_id,
-                            self.file_id,
-                            self.row_group_idx,
-                            col_idx,
-                        );
-                        cache
-                            .put_pages(page_key, Arc::new(PageValue::new_compressed(data.clone())));
-                    }
+            for (col_idx, data) in assigned_columns {
+                let column = self.base.metadata.column(col_idx);
+                if !cache_uncompressed_pages(column) {
+                    // For columns that have multiple uncompressed pages, we only cache the compressed page
+                    // to save memory.
+                    let page_key = PageKey::new_compressed(
+                        self.region_id,
+                        self.file_id,
+                        self.row_group_idx,
+                        col_idx,
+                    );
+                    self.cache_manager
+                        .put_pages(page_key, Arc::new(PageValue::new_compressed(data.clone())));
                 }
             }
         }
@@ -332,7 +330,8 @@ impl<'a> InMemoryRowGroup<'a> {
                         self.row_group_idx,
                         idx,
                     );
-                    self.base.column_uncompressed_pages[idx] = self.cache_manager.get_pages(&page_key);
+                    self.base.column_uncompressed_pages[idx] =
+                        self.cache_manager.get_pages(&page_key);
                 } else {
                     // Fetches the compressed page from the cache.
                     let page_key = PageKey::new_compressed(
@@ -393,7 +392,6 @@ impl<'a> InMemoryRowGroup<'a> {
         }
 
         let page_reader = self.base.column_reader(i)?;
-
 
         let column = self.base.metadata.column(i);
         if cache_uncompressed_pages(column) {
