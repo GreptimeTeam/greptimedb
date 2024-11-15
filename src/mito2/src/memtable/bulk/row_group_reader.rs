@@ -21,16 +21,13 @@ use datatypes::arrow::error::ArrowError;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowGroups, RowSelection};
 use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
 use parquet::column::page::{PageIterator, PageReader};
-use parquet::errors::ParquetError;
 use parquet::file::metadata::ParquetMetaData;
-use parquet::file::reader::SerializedPageReader;
 use snafu::ResultExt;
 
 use crate::error;
 use crate::error::ReadDataPartSnafu;
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::sst::parquet::format::ReadFormat;
-use crate::sst::parquet::page_reader::RowGroupCachedReader;
 use crate::sst::parquet::reader::{RowGroupReaderBase, RowGroupReaderContext};
 use crate::sst::parquet::row_group::{ColumnChunkIterator, RowGroupBase};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
@@ -62,6 +59,7 @@ impl<'a> MemtableRowGroupPageFetcher<'a> {
                 page_locations,
                 row_count,
                 column_chunks: vec![None; metadata.columns().len()],
+                // the cached `column_uncompressed_pages` would never be used in Memtable readers.
                 column_uncompressed_pages: vec![None; metadata.columns().len()],
             },
             bytes,
@@ -102,31 +100,8 @@ impl<'a> MemtableRowGroupPageFetcher<'a> {
 
     /// Creates a page reader to read column at `i`.
     fn column_page_reader(&self, i: usize) -> parquet::errors::Result<Box<dyn PageReader>> {
-        if let Some(cached_pages) = &self.base.column_uncompressed_pages[i] {
-            debug_assert!(!cached_pages.row_group.is_empty());
-            // Hits the row group level page cache.
-            return Ok(Box::new(RowGroupCachedReader::new(&cached_pages.row_group)));
-        }
-
-        let page_reader = match &self.base.column_chunks[i] {
-            None => {
-                return Err(ParquetError::General(format!(
-                    "Invalid column index {i}, column was not fetched"
-                )))
-            }
-            Some(data) => {
-                let page_locations = self.base.page_locations.map(|index| index[i].clone());
-                SerializedPageReader::new(
-                    data.clone(),
-                    self.base.metadata.column(i),
-                    self.base.row_count,
-                    page_locations,
-                )?
-            }
-        };
-
-        // This column don't cache uncompressed pages.
-        Ok(Box::new(page_reader))
+        let reader = self.base.column_reader(i)?;
+        Ok(Box::new(reader))
     }
 }
 

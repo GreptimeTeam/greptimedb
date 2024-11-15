@@ -188,6 +188,32 @@ impl<'a> RowGroupBase<'a> {
         }
         res
     }
+
+    /// Create [PageReader] from [RowGroupBase::column_chunks]
+    pub(crate) fn column_reader(
+        &self,
+        col_idx: usize,
+    ) -> Result<SerializedPageReader<ColumnChunkData>> {
+        let page_reader = match &self.column_chunks[col_idx] {
+            None => {
+                return Err(ParquetError::General(format!(
+                    "Invalid column index {col_idx}, column was not fetched"
+                )))
+            }
+            Some(data) => {
+                let page_locations = self.page_locations.map(|index| index[col_idx].clone());
+                SerializedPageReader::new(
+                    data.clone(),
+                    self.metadata.column(col_idx),
+                    self.row_count,
+                    page_locations,
+                )?
+            }
+        };
+
+        // This column don't cache uncompressed pages.
+        Ok(page_reader)
+    }
 }
 
 /// An in-memory collection of column chunks
@@ -366,22 +392,7 @@ impl<'a> InMemoryRowGroup<'a> {
             return Ok(Box::new(RowGroupCachedReader::new(&cached_pages.row_group)));
         }
 
-        let page_reader = match &self.base.column_chunks[i] {
-            None => {
-                return Err(ParquetError::General(format!(
-                    "Invalid column index {i}, column was not fetched"
-                )))
-            }
-            Some(data) => {
-                let page_locations = self.base.page_locations.map(|index| index[i].clone());
-                SerializedPageReader::new(
-                    data.clone(),
-                    self.base.metadata.column(i),
-                    self.base.row_count,
-                    page_locations,
-                )?
-            }
-        };
+        let page_reader = self.base.column_reader(i)?;
 
 
         let column = self.base.metadata.column(i);
