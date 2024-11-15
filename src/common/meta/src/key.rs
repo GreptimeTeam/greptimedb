@@ -90,6 +90,7 @@
 pub mod catalog_name;
 pub mod datanode_table;
 pub mod flow;
+pub mod maintenance;
 pub mod node_address;
 mod schema_metadata_manager;
 pub mod schema_name;
