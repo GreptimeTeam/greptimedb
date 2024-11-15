@@ -196,9 +196,7 @@ impl MetasrvBuilder {
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
-        let maintenance_mode_manager = Arc::new(MaintenanceModeManager::new(
-            leader_cached_kv_backend.clone() as _,
-        ));
+        let maintenance_mode_manager = Arc::new(MaintenanceModeManager::new(kv_backend.clone()));
         let selector_ctx = SelectorContext {
             server_addr: options.server_addr.clone(),
             datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
