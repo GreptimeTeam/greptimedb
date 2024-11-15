@@ -505,9 +505,8 @@ pub(crate) mod tests {
             env.procedure_manager().clone(),
             context_factory,
         ));
-        let maintenance_mode_manager = Arc::new(maintenance::MaintenanceModeManager::new(
-            env.kv_backend().clone(),
-        ));
+        let maintenance_mode_manager =
+            Arc::new(maintenance::MaintenanceModeManager::new(env.kv_backend()));
         let peer_lookup = Arc::new(NoopPeerLookupService);
         let (tx, rx) = RegionSupervisor::channel();
 
