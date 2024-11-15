@@ -33,7 +33,7 @@ use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 
-use crate::region_request::{AddColumn, AddColumnLocation, AlterKind, ChangeColumnType};
+use crate::region_request::{AddColumn, AddColumnLocation, AlterKind, ModifyColumnType};
 use crate::storage::consts::is_internal_column;
 use crate::storage::{ColumnId, RegionId};
 
@@ -552,7 +552,7 @@ impl RegionMetadataBuilder {
         match kind {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
-            AlterKind::ChangeColumnTypes { columns } => self.change_column_types(columns),
+            AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns),
             AlterKind::ChangeColumnFulltext {
                 column_name,
                 options,
@@ -642,11 +642,11 @@ impl RegionMetadataBuilder {
     }
 
     /// Changes columns type to the metadata if exist.
-    fn change_column_types(&mut self, columns: Vec<ChangeColumnType>) {
+    fn modify_column_types(&mut self, columns: Vec<ModifyColumnType>) {
         let mut change_type_map: HashMap<_, _> = columns
             .into_iter()
             .map(
-                |ChangeColumnType {
+                |ModifyColumnType {
                      column_name,
                      target_type,
                  }| (column_name, target_type),
@@ -1265,8 +1265,8 @@ mod test {
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
-            .alter(AlterKind::ChangeColumnTypes {
-                columns: vec![ChangeColumnType {
+            .alter(AlterKind::ModifyColumnTypes {
+                columns: vec![ModifyColumnType {
                     column_name: "b".to_string(),
                     target_type: ConcreteDataType::string_datatype(),
                 }],

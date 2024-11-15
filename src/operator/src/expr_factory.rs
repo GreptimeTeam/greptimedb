@@ -18,9 +18,9 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, Analyzer, ChangeColumnFulltext, ChangeColumnType,
-    ChangeColumnTypes, ChangeTableOptions, ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr,
-    CreateTableExpr, CreateViewExpr, DropColumn, DropColumns, ExpireAfter, RenameTable,
+    AddColumn, AddColumns, AlterExpr, Analyzer, ChangeColumnFulltext, ChangeTableOptions,
+    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
     SemanticType, TableName,
 };
 use common_error::ext::BoxedError;
@@ -501,7 +501,7 @@ pub(crate) fn to_alter_expr(
                 location: location.as_ref().map(From::from),
             }],
         }),
-        AlterTableOperation::ChangeColumnType {
+        AlterTableOperation::ModifyColumnType {
             column_name,
             target_type,
         } => {
@@ -510,8 +510,8 @@ pub(crate) fn to_alter_expr(
             let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
                 .map(|w| w.to_parts())
                 .context(ColumnDataTypeSnafu)?;
-            Kind::ChangeColumnTypes(ChangeColumnTypes {
-                change_column_types: vec![ChangeColumnType {
+            Kind::ModifyColumnTypes(ModifyColumnTypes {
+                modify_column_types: vec![ModifyColumnType {
                     column_name: column_name.value,
                     target_type: target_type as i32,
                     target_type_extension,
@@ -803,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_alter_change_column_type_expr() {
+    fn test_to_alter_modify_column_type_expr() {
         let sql = "ALTER TABLE monitor MODIFY COLUMN mem_usage STRING;";
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -819,22 +819,22 @@ mod tests {
         let expr = to_alter_expr(alter_table.clone(), &QueryContext::arc()).unwrap();
         let kind = expr.kind.unwrap();
 
-        let Kind::ChangeColumnTypes(ChangeColumnTypes {
-            change_column_types,
+        let Kind::ModifyColumnTypes(ModifyColumnTypes {
+            modify_column_types,
         }) = kind
         else {
             unreachable!()
         };
 
-        assert_eq!(1, change_column_types.len());
-        let change_column_type = &change_column_types[0];
+        assert_eq!(1, modify_column_types.len());
+        let modify_column_type = &modify_column_types[0];
 
-        assert_eq!("mem_usage", change_column_type.column_name);
+        assert_eq!("mem_usage", modify_column_type.column_name);
         assert_eq!(
             ColumnDataType::String as i32,
-            change_column_type.target_type
+            modify_column_type.target_type
         );
-        assert!(change_column_type.target_type_extension.is_none());
+        assert!(modify_column_type.target_type_extension.is_none());
     }
 
     fn new_test_table_names() -> Vec<TableName> {

@@ -91,7 +91,7 @@ fn create_proto_alter_kind(
                 add_columns,
             })))
         }
-        Kind::ChangeColumnTypes(x) => Ok(Some(alter_request::Kind::ChangeColumnTypes(x.clone()))),
+        Kind::ModifyColumnTypes(x) => Ok(Some(alter_request::Kind::ModifyColumnTypes(x.clone()))),
         Kind::DropColumns(x) => {
             let drop_columns = x
                 .drop_columns
@@ -123,8 +123,8 @@ mod tests {
     use api::v1::region::region_request::Body;
     use api::v1::region::RegionColumnDef;
     use api::v1::{
-        region, AddColumn, AddColumnLocation, AddColumns, AlterExpr, ChangeColumnType,
-        ChangeColumnTypes, ColumnDataType, ColumnDef as PbColumnDef, SemanticType,
+        region, AddColumn, AddColumnLocation, AddColumns, AlterExpr, ColumnDataType,
+        ColumnDef as PbColumnDef, ModifyColumnType, ModifyColumnTypes, SemanticType,
     };
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use store_api::storage::{RegionId, TableId};
@@ -284,8 +284,8 @@ mod tests {
                 catalog_name: DEFAULT_CATALOG_NAME.to_string(),
                 schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name,
-                kind: Some(Kind::ChangeColumnTypes(ChangeColumnTypes {
-                    change_column_types: vec![ChangeColumnType {
+                kind: Some(Kind::ModifyColumnTypes(ModifyColumnTypes {
+                    modify_column_types: vec![ModifyColumnType {
                         column_name: "cpu".to_string(),
                         target_type: ColumnDataType::String as i32,
                         target_type_extension: None,
@@ -306,9 +306,9 @@ mod tests {
         assert_eq!(alter_region_request.schema_version, 1);
         assert_eq!(
             alter_region_request.kind,
-            Some(region::alter_request::Kind::ChangeColumnTypes(
-                ChangeColumnTypes {
-                    change_column_types: vec![ChangeColumnType {
+            Some(region::alter_request::Kind::ModifyColumnTypes(
+                ModifyColumnTypes {
+                    modify_column_types: vec![ModifyColumnType {
                         column_name: "cpu".to_string(),
                         target_type: ColumnDataType::String as i32,
                         target_type_extension: None,

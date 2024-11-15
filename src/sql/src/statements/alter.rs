@@ -66,7 +66,7 @@ pub enum AlterTableOperation {
         location: Option<AddColumnLocation>,
     },
     /// `MODIFY <column_name> [target_type]`
-    ChangeColumnType {
+    ModifyColumnType {
         column_name: Ident,
         target_type: DataType,
     },
@@ -101,7 +101,7 @@ impl Display for AlterTableOperation {
             AlterTableOperation::RenameTable { new_table_name } => {
                 write!(f, r#"RENAME {new_table_name}"#)
             }
-            AlterTableOperation::ChangeColumnType {
+            AlterTableOperation::ModifyColumnType {
                 column_name,
                 target_type,
             } => {
