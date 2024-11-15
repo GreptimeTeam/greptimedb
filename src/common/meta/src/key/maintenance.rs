@@ -41,7 +41,7 @@ impl MaintenanceModeManager {
             value: vec![],
             prev_kv: false,
         };
-        self.kv_backend.put(req.clone()).await?;
+        self.kv_backend.put(req).await?;
         Ok(())
     }
 
@@ -52,7 +52,7 @@ impl MaintenanceModeManager {
             value: vec![],
             prev_kv: false,
         };
-        self.kv_backend.put(req.clone()).await?;
+        self.kv_backend.put(req).await?;
         Ok(())
     }
 
