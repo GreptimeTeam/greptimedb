@@ -175,7 +175,7 @@ Error: 1004(InvalidArguments), Invalid column option, column name: time, error: 
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'English', case_sensitive = 'true');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: message, error: Cannot change analyzer or case_sensitive if FULLTEXT index is set before
+Error: 1004(InvalidArguments), Invalid column option, column name: message, error: Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: Chinese, previous case_sensitive: true
 
 DROP TABLE test;
 

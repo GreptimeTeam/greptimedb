@@ -892,8 +892,8 @@ fn set_column_fulltext_options(
                 && current_options.case_sensitive == options.case_sensitive,
             InvalidColumnOptionSnafu {
                 column_name,
-                msg: "Cannot change analyzer or case_sensitive if FULLTEXT index is set before"
-                    .to_string(),
+                msg: format!("Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: {}, previous case_sensitive: {}",
+                current_options.analyzer, current_options.case_sensitive),
             }
         );
     }
