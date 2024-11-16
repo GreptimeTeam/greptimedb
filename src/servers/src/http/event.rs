@@ -30,10 +30,12 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, Json, TypedHeader};
 use bytes::Bytes;
+use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use lazy_static::lazy_static;
+use loki_api::prost_types::Timestamp;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::PipelineVersion;
@@ -49,6 +51,7 @@ use crate::error::{
     PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
 use crate::http::extractor::LogTableName;
+use crate::http::header::CONTENT_TYPE_PROTOBUF_STR;
 use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
@@ -64,17 +67,20 @@ use crate::query_handler::LogHandlerRef;
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
 const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
 
+const LOKI_TABLE_NAME: &str = "loki_logs";
+const LOKI_LINE_COLUMN: &str = "line";
+
 lazy_static! {
     static ref LOKI_INIT_SCHEMAS: Vec<ColumnSchema> = vec![
         ColumnSchema {
-            column_name: "greptime_timestamp".to_string(),
+            column_name: GREPTIME_TIMESTAMP.to_string(),
             datatype: ColumnDataType::TimestampNanosecond.into(),
             semantic_type: SemanticType::Timestamp.into(),
             datatype_extension: None,
             options: None,
         },
         ColumnSchema {
-            column_name: "line".to_string(),
+            column_name: LOKI_LINE_COLUMN.to_string(),
             datatype: ColumnDataType::String.into(),
             semantic_type: SemanticType::Field.into(),
             datatype_extension: None,
@@ -394,12 +400,12 @@ pub async fn loki_ingest(
     let ctx = Arc::new(ctx);
     let db = ctx.get_db_string();
     let db_str = db.as_str();
-    let table_name = table_name.unwrap_or("loki_logs".to_string());
+    let table_name = table_name.unwrap_or(LOKI_TABLE_NAME.to_string());
     let exec_timer = Instant::now();
 
     // decompress req
     ensure!(
-        &content_type.to_string() == "application/x-protobuf",
+        content_type.to_string() == CONTENT_TYPE_PROTOBUF_STR,
         UnsupportedContentTypeSnafu { content_type }
     );
     let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
@@ -410,8 +416,8 @@ pub async fn loki_ingest(
     let mut schemas = LOKI_INIT_SCHEMAS.clone();
 
     let mut global_label_key_index: HashMap<String, i32> = HashMap::new();
-    global_label_key_index.insert("greptime_timestamp".to_string(), 0);
-    global_label_key_index.insert("line".to_string(), 1);
+    global_label_key_index.insert(GREPTIME_TIMESTAMP.to_string(), 0);
+    global_label_key_index.insert(LOKI_LINE_COLUMN.to_string(), 1);
 
     let mut rows = vec![];
 
@@ -439,9 +445,7 @@ pub async fn loki_ingest(
             }
             // insert ts and line
             row[0] = GreptimeValue {
-                value_data: Some(ValueData::TimestampNanosecondValue(
-                    ts.seconds * 1000000000 + ts.nanos as i64,
-                )),
+                value_data: Some(ValueData::TimestampNanosecondValue(prost_ts_to_nano(&ts))),
             };
             row[1] = GreptimeValue {
                 value_data: Some(ValueData::StringValue(line)),
@@ -703,6 +707,11 @@ pub struct LogState {
     pub ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
 }
 
+#[inline]
+fn prost_ts_to_nano(ts: &Timestamp) -> i64 {
+    ts.seconds * 1_000_000_000 + ts.nanos as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -736,5 +745,17 @@ mod tests {
         )
         .to_string();
         assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
+    }
+
+    #[test]
+    fn test_ts_to_nano() {
+        // ts = 1731748568804293888
+        // seconds = 1731748568
+        // nano = 804293888
+        let ts = Timestamp {
+            seconds: 1731748568,
+            nanos: 804293888,
+        };
+        assert_eq!(prost_ts_to_nano(&ts), 1731748568804293888);
     }
 }
