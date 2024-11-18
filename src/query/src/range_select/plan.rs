@@ -773,6 +773,8 @@ impl RangeSelect {
                         } else {
                             vec![]
                         };
+                        let distinct = aggr.distinct;
+                        // TODO(discord9): add default null treatment?
 
                         let input_phy_exprs = self.create_physical_expr_list(
                             matches!(
@@ -786,7 +788,7 @@ impl RangeSelect {
                         match &aggr.func_def {
                             AggregateFunctionDefinition::BuiltIn(fun) => create_aggr_expr(
                                 fun,
-                                false,
+                                distinct,
                                 &input_phy_exprs,
                                 &order_by,
                                 &input_schema,
@@ -801,7 +803,7 @@ impl RangeSelect {
                                 &input_schema,
                                 name,
                                 false,
-                                false,
+                                distinct,
                             ),
                         }
                     }
