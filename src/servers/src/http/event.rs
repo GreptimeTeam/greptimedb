@@ -400,7 +400,7 @@ pub async fn loki_ingest(
     let ctx = Arc::new(ctx);
     let db = ctx.get_db_string();
     let db_str = db.as_str();
-    let table_name = table_name.unwrap_or(LOKI_TABLE_NAME.to_string());
+    let table_name = table_name.unwrap_or_else(|| LOKI_TABLE_NAME.to_string());
     let exec_timer = Instant::now();
 
     // decompress req
