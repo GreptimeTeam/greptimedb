@@ -224,7 +224,7 @@ impl CreateFlowProcedure {
         {
             self.context
                 .flow_metadata_manager
-                .update_flow_metadata(flow_id, &flow_info, prev_flow_value, flow_routes)
+                .update_flow_metadata(flow_id, prev_flow_value, &flow_info, flow_routes)
                 .await?;
             info!("Replaced flow metadata for flow {flow_id}");
         } else {

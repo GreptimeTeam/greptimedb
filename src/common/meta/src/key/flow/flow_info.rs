@@ -236,15 +236,15 @@ impl FlowInfoManager {
     pub(crate) fn build_update_txn(
         &self,
         flow_id: FlowId,
-        flow_value: &FlowInfoValue,
-        prev_flow_value: &DeserializedValueWithBytes<FlowInfoValue>,
+        current_flow_value: &DeserializedValueWithBytes<FlowInfoValue>,
+        new_flow_value: &FlowInfoValue,
     ) -> Result<(
         Txn,
         impl FnOnce(&mut TxnOpGetResponseSet) -> FlowInfoDecodeResult,
     )> {
         let key = FlowInfoKey::new(flow_id).to_bytes();
-        let raw_value = flow_value.try_as_raw_value()?;
-        let prev_value = prev_flow_value.get_raw_bytes();
+        let raw_value = new_flow_value.try_as_raw_value()?;
+        let prev_value = current_flow_value.get_raw_bytes();
         let txn = Txn::new()
             .when(vec![
                 Compare::new(key.clone(), CompareOp::NotEqual, None),

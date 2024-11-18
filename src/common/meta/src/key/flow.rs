@@ -234,17 +234,20 @@ impl FlowMetadataManager {
     pub async fn update_flow_metadata(
         &self,
         flow_id: FlowId,
-        flow_info: &FlowInfoValue,
-        prev_flow_info: &DeserializedValueWithBytes<FlowInfoValue>,
+        current_flow_info: &DeserializedValueWithBytes<FlowInfoValue>,
+        new_flow_info: &FlowInfoValue,
         flow_routes: Vec<(FlowPartitionId, FlowRouteValue)>,
     ) -> Result<()> {
-        let (create_flow_flow_name_txn, on_create_flow_flow_name_failure) = self
-            .flow_name_manager
-            .build_update_txn(&flow_info.catalog_name, &flow_info.flow_name, flow_id)?;
+        let (create_flow_flow_name_txn, on_create_flow_flow_name_failure) =
+            self.flow_name_manager.build_update_txn(
+                &new_flow_info.catalog_name,
+                &new_flow_info.flow_name,
+                flow_id,
+            )?;
 
         let (create_flow_txn, on_create_flow_failure) =
             self.flow_info_manager
-                .build_update_txn(flow_id, flow_info, prev_flow_info)?;
+                .build_update_txn(flow_id, current_flow_info, new_flow_info)?;
 
         let create_flow_routes_txn = self
             .flow_route_manager
@@ -252,7 +255,7 @@ impl FlowMetadataManager {
 
         let create_flownode_flow_txn = self
             .flownode_flow_manager
-            .build_create_txn(flow_id, flow_info.flownode_ids().clone());
+            .build_create_txn(flow_id, new_flow_info.flownode_ids().clone());
 
         let create_table_flow_txn = self.table_flow_manager.build_create_txn(
             flow_id,
@@ -260,7 +263,7 @@ impl FlowMetadataManager {
                 .into_iter()
                 .map(|(partition_id, route)| (partition_id, TableFlowValue { peer: route.peer }))
                 .collect(),
-            flow_info.source_table_ids(),
+            new_flow_info.source_table_ids(),
         )?;
 
         let txn = Txn::merge_all(vec![
@@ -272,8 +275,8 @@ impl FlowMetadataManager {
         ]);
         info!(
             "Creating flow {}.{}({}), with {} txn operations",
-            flow_info.catalog_name,
-            flow_info.flow_name,
+            new_flow_info.catalog_name,
+            new_flow_info.flow_name,
             flow_id,
             txn.max_operations()
         );
@@ -293,8 +296,8 @@ impl FlowMetadataManager {
             if remote_flow_flow_name.flow_id() != flow_id {
                 info!(
                     "Trying to updating flow {}.{}({}), but flow({}) already exists with a different flow id",
-                    flow_info.catalog_name,
-                    flow_info.flow_name,
+                    new_flow_info.catalog_name,
+                    new_flow_info.flow_name,
                     flow_id,
                     remote_flow_flow_name.flow_id()
                 );
@@ -304,8 +307,8 @@ impl FlowMetadataManager {
                         "Reads different flow id when updating flow({2}.{3}), prev flow id = {0}, updating with flow id = {1}",
                         remote_flow_flow_name.flow_id(),
                         flow_id,
-                        flow_info.catalog_name,
-                        flow_info.flow_name,
+                        new_flow_info.catalog_name,
+                        new_flow_info.flow_name,
                     ),
                 }.fail();
             }
@@ -317,7 +320,7 @@ impl FlowMetadataManager {
                     ),
                 })?;
             let op_name = "updating flow";
-            ensure_values!(*remote_flow, flow_info.clone(), op_name);
+            ensure_values!(*remote_flow, new_flow_info.clone(), op_name);
         }
 
         Ok(())
@@ -693,8 +696,8 @@ mod tests {
         flow_metadata_manager
             .update_flow_metadata(
                 flow_id,
-                &new_flow_value,
                 &DeserializedValueWithBytes::from_inner(flow_value.clone()),
+                &new_flow_value,
                 flow_routes.clone(),
             )
             .await
@@ -792,8 +795,8 @@ mod tests {
         flow_metadata_manager
             .update_flow_metadata(
                 flow_id,
-                &flow_value,
                 &DeserializedValueWithBytes::from_inner(flow_value.clone()),
+                &flow_value,
                 flow_routes.clone(),
             )
             .await
@@ -802,8 +805,8 @@ mod tests {
         let err = flow_metadata_manager
             .update_flow_metadata(
                 flow_id + 1,
-                &flow_value,
                 &DeserializedValueWithBytes::from_inner(flow_value.clone()),
+                &flow_value,
                 flow_routes,
             )
             .await
@@ -859,8 +862,8 @@ mod tests {
         let err = flow_metadata_manager
             .update_flow_metadata(
                 flow_id,
-                &flow_value,
                 &DeserializedValueWithBytes::from_inner(flow_value.clone()),
+                &flow_value,
                 flow_routes.clone(),
             )
             .await
