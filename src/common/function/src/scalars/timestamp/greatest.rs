@@ -38,6 +38,20 @@ pub struct GreatestFunction;
 
 const NAME: &str = "greatest";
 
+macro_rules! gt_time_types {
+    ($ty: ident, $columns:expr) => {{
+        let column1 = $columns[0].to_arrow_array();
+        let column2 = $columns[1].to_arrow_array();
+
+        let column1 = column1.as_primitive::<$ty>();
+        let column2 = column2.as_primitive::<$ty>();
+        let boolean_array = gt(&column1, &column2).context(ArrowComputeSnafu)?;
+
+        let result = zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
+        Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)
+    }};
+}
+
 impl Function for GreatestFunction {
     fn name(&self) -> &str {
         NAME
@@ -107,57 +121,20 @@ impl Function for GreatestFunction {
                     zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
                 Ok(Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)?)
             }
-            ConcreteDataType::Date(_) => {
-                let column1 = columns[0].to_arrow_array();
-                let column1 = column1.as_primitive::<Date32Type>();
-                let column2 = columns[1].to_arrow_array();
-                let column2 = column2.as_primitive::<Date32Type>();
-                let boolean_array = gt(&column1, &column2).context(ArrowComputeSnafu)?;
-                let result =
-                    zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
-                Ok(Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)?)
-            }
-            ConcreteDataType::DateTime(_) => {
-                let column1 = columns[0].to_arrow_array();
-                let column1 = column1.as_primitive::<Date64Type>();
-                let column2 = columns[1].to_arrow_array();
-                let column2 = column2.as_primitive::<Date64Type>();
-                let boolean_array = gt(&column1, &column2).context(ArrowComputeSnafu)?;
-                let result =
-                    zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
-                Ok(Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)?)
-            }
-            ConcreteDataType::Timestamp(ts_type) => {
-                let column1 = columns[0].to_arrow_array();
-                let column2 = columns[1].to_arrow_array();
-
-                let boolean_array = match ts_type {
-                    TimestampType::Second(_) => {
-                        let column1 = column1.as_primitive::<TimestampSecondType>();
-                        let column2 = column2.as_primitive::<TimestampSecondType>();
-                        gt(&column1, &column2).context(ArrowComputeSnafu)?
-                    }
-                    TimestampType::Millisecond(_) => {
-                        let column1 = column1.as_primitive::<TimestampMillisecondType>();
-                        let column2 = column2.as_primitive::<TimestampMillisecondType>();
-                        gt(&column1, &column2).context(ArrowComputeSnafu)?
-                    }
-                    TimestampType::Microsecond(_) => {
-                        let column1 = column1.as_primitive::<TimestampMicrosecondType>();
-                        let column2 = column2.as_primitive::<TimestampMicrosecondType>();
-                        gt(&column1, &column2).context(ArrowComputeSnafu)?
-                    }
-                    TimestampType::Nanosecond(_) => {
-                        let column1 = column1.as_primitive::<TimestampNanosecondType>();
-                        let column2 = column2.as_primitive::<TimestampNanosecondType>();
-                        gt(&column1, &column2).context(ArrowComputeSnafu)?
-                    }
-                };
-
-                let result =
-                    zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
-                Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)
-            }
+            ConcreteDataType::Date(_) => gt_time_types!(Date32Type, columns),
+            ConcreteDataType::DateTime(_) => gt_time_types!(Date64Type, columns),
+            ConcreteDataType::Timestamp(ts_type) => match ts_type {
+                TimestampType::Second(_) => gt_time_types!(TimestampSecondType, columns),
+                TimestampType::Millisecond(_) => {
+                    gt_time_types!(TimestampMillisecondType, columns)
+                }
+                TimestampType::Microsecond(_) => {
+                    gt_time_types!(TimestampMicrosecondType, columns)
+                }
+                TimestampType::Nanosecond(_) => {
+                    gt_time_types!(TimestampNanosecondType, columns)
+                }
+            },
             _ => UnsupportedInputDataTypeSnafu {
                 function: NAME,
                 datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
