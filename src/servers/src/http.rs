@@ -999,6 +999,7 @@ mod test {
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
+    use header::constants::GREPTIME_DB_HEADER_TIMEOUT;
     use query::parser::PromQuery;
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
@@ -1109,7 +1110,7 @@ mod test {
         let now = Instant::now();
         let res = client
             .get("/test/timeout")
-            .header("timeout", "20ms")
+            .header(GREPTIME_DB_HEADER_TIMEOUT, "20ms")
             .send()
             .await;
         assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);

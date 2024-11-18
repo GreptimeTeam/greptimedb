@@ -25,9 +25,13 @@ use tokio::time::Sleep;
 use tower::timeout::error::Elapsed;
 use tower::{BoxError, Layer, Service};
 
+use crate::http::header::constants::GREPTIME_DB_HEADER_TIMEOUT;
+
 /// [`Timeout`] response future
 ///
 /// [`Timeout`]: crate::timeout::Timeout
+///
+/// Modified from https://github.com/tower-rs/tower/blob/8b84b98d93a2493422a0ecddb6251f292a904cff/tower/src/timeout/future.rs
 #[derive(Debug)]
 #[pin_project]
 pub struct ResponseFuture<T> {
@@ -68,15 +72,17 @@ where
 }
 
 /// Applies a timeout to requests via the supplied inner service.
+///
+/// Modified from https://github.com/tower-rs/tower/blob/8b84b98d93a2493422a0ecddb6251f292a904cff/tower/src/timeout/layer.rs
 #[derive(Debug, Clone)]
 pub struct DynamicTimeoutLayer {
-    timeout: Duration,
+    default_timeout: Duration,
 }
 
 impl DynamicTimeoutLayer {
     /// Create a timeout from a duration
-    pub fn new(timeout: Duration) -> Self {
-        DynamicTimeoutLayer { timeout }
+    pub fn new(default_timeout: Duration) -> Self {
+        DynamicTimeoutLayer { default_timeout }
     }
 }
 
@@ -84,24 +90,26 @@ impl<S> Layer<S> for DynamicTimeoutLayer {
     type Service = DynamicTimeout<S>;
 
     fn layer(&self, service: S) -> Self::Service {
-        DynamicTimeout::new(service, self.timeout)
+        DynamicTimeout::new(service, self.default_timeout)
     }
 }
 
+/// Modified from https://github.com/tower-rs/tower/blob/8b84b98d93a2493422a0ecddb6251f292a904cff/tower/src/timeout/mod.rs
 #[derive(Clone)]
 pub struct DynamicTimeout<S> {
     inner: S,
-    timeout: Duration,
+    default_timeout: Duration,
 }
 
 impl<S> DynamicTimeout<S> {
     /// Create a new [`DynamicTimeout`] with the given timeout
-    pub fn new(inner: S, timeout: Duration) -> Self {
-        DynamicTimeout { inner, timeout }
+    pub fn new(inner: S, default_timeout: Duration) -> Self {
+        DynamicTimeout {
+            inner,
+            default_timeout,
+        }
     }
 }
-
-const USER_TIMEOUT_HEADER: &str = "timeout";
 
 impl<S> Service<Request<Body>> for DynamicTimeout<S>
 where
@@ -122,7 +130,7 @@ where
     fn call(&mut self, request: Request<Body>) -> Self::Future {
         let user_timeout = request
             .headers()
-            .get(USER_TIMEOUT_HEADER)
+            .get(GREPTIME_DB_HEADER_TIMEOUT)
             .and_then(|value| {
                 value
                     .to_str()
@@ -130,7 +138,7 @@ where
                     .and_then(|value| humantime::parse_duration(value).ok())
             });
         let response = self.inner.call(request);
-        let sleep = tokio::time::sleep(user_timeout.unwrap_or(self.timeout));
+        let sleep = tokio::time::sleep(user_timeout.unwrap_or(self.default_timeout));
         ResponseFuture::new(response, sleep)
     }
 }
