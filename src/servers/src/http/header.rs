@@ -39,6 +39,7 @@ pub mod constants {
 
     // LEGACY HEADERS - KEEP IT UNMODIFIED
     pub const GREPTIME_DB_HEADER_FORMAT: &str = "x-greptime-format";
+    pub const GREPTIME_DB_HEADER_TIMEOUT: &str = "x-greptime-timeout";
     pub const GREPTIME_DB_HEADER_EXECUTION_TIME: &str = "x-greptime-execution-time";
     pub const GREPTIME_DB_HEADER_METRICS: &str = "x-greptime-metrics";
     pub const GREPTIME_DB_HEADER_NAME: &str = "x-greptime-db-name";

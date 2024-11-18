@@ -45,7 +45,6 @@ use serde_json::Value;
 use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
-use tower::timeout::TimeoutLayer;
 use tower::ServiceBuilder;
 use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::trace::TraceLayer;
@@ -101,6 +100,9 @@ pub mod greptime_result_v1;
 pub mod influxdb_result_v1;
 pub mod json_result;
 pub mod table_result;
+mod timeout;
+
+pub(crate) use timeout::DynamicTimeoutLayer;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
@@ -704,7 +706,7 @@ impl HttpServer {
 
     pub fn build(&self, router: Router) -> Router {
         let timeout_layer = if self.options.timeout != Duration::default() {
-            Some(ServiceBuilder::new().layer(TimeoutLayer::new(self.options.timeout)))
+            Some(ServiceBuilder::new().layer(DynamicTimeoutLayer::new(self.options.timeout)))
         } else {
             info!("HTTP server timeout is disabled");
             None
@@ -997,10 +999,12 @@ mod test {
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
+    use header::constants::GREPTIME_DB_HEADER_TIMEOUT;
     use query::parser::PromQuery;
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
+    use tokio::time::Instant;
 
     use super::*;
     use crate::error::Error;
@@ -1062,8 +1066,8 @@ mod test {
         }
     }
 
-    fn timeout() -> TimeoutLayer {
-        TimeoutLayer::new(Duration::from_millis(10))
+    fn timeout() -> DynamicTimeoutLayer {
+        DynamicTimeoutLayer::new(Duration::from_millis(10))
     }
 
     async fn forever() {
@@ -1102,6 +1106,16 @@ mod test {
         let client = TestClient::new(app);
         let res = client.get("/test/timeout").send().await;
         assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+
+        let now = Instant::now();
+        let res = client
+            .get("/test/timeout")
+            .header(GREPTIME_DB_HEADER_TIMEOUT, "20ms")
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+        let elapsed = now.elapsed();
+        assert!(elapsed > Duration::from_millis(15));
     }
 
     #[tokio::test]
