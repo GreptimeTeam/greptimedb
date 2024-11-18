@@ -238,8 +238,9 @@ impl FlowNameManager {
         ))
     }
 
-    /// Builds a update flow name transaction.
-    /// It's expected that the `__flow/name/{catalog}/{flow_name}` IS already occupied.
+    /// Builds a update flow name transaction. Which doesn't change either the name or id, just checking if they are the same.
+    /// It's expected that the `__flow/name/{catalog}/{flow_name}` IS already occupied,
+    /// and both flow name and flow id is the same.
     /// Otherwise, the transaction will retrieve existing value(and fail).
     pub fn build_update_txn(
         &self,
@@ -253,12 +254,14 @@ impl FlowNameManager {
         let key = FlowNameKey::new(catalog_name, flow_name);
         let raw_key = key.to_bytes();
         let flow_flow_name_value = FlowNameValue::new(flow_id);
+        let raw_value = flow_flow_name_value.try_as_raw_value()?;
         let txn = Txn::new()
             .when(vec![Compare::new(
                 raw_key.clone(),
-                CompareOp::NotEqual,
-                None,
+                CompareOp::Equal,
+                Some(raw_value),
             )])
+            // TODO(discord9): make this a no op since it's the same value
             .and_then(vec![TxnOp::Put(
                 raw_key.clone(),
                 flow_flow_name_value.try_as_raw_value()?,

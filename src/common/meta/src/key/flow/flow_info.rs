@@ -217,23 +217,27 @@ impl FlowInfoManager {
     }
 
     /// Builds a update flow transaction.
-    /// It is expected that the `__flow/info/{flow_id}` IS ALREADY occupied.
+    /// It is expected that the `__flow/info/{flow_id}` IS ALREADY occupied and equal to `prev_flow_value`,
+    /// but the new value can be the same, so to allow replace operation to happen even when the value is the same.
     /// Otherwise, the transaction will retrieve existing value and fail.
     pub(crate) fn build_update_txn(
         &self,
         flow_id: FlowId,
         flow_value: &FlowInfoValue,
+        prev_flow_value: &FlowInfoValue,
     ) -> Result<(
         Txn,
         impl FnOnce(&mut TxnOpGetResponseSet) -> FlowInfoDecodeResult,
     )> {
         let key = FlowInfoKey::new(flow_id).to_bytes();
+        let raw_value = flow_value.try_as_raw_value()?;
+        let prev_value = prev_flow_value.try_as_raw_value()?;
         let txn = Txn::new()
-            .when(vec![Compare::new(key.clone(), CompareOp::NotEqual, None)])
-            .and_then(vec![TxnOp::Put(
-                key.clone(),
-                flow_value.try_as_raw_value()?,
-            )])
+            .when(vec![
+                Compare::new(key.clone(), CompareOp::NotEqual, None),
+                Compare::new(key.clone(), CompareOp::Equal, Some(prev_value)),
+            ])
+            .and_then(vec![TxnOp::Put(key.clone(), raw_value.clone())])
             .or_else(vec![TxnOp::Get(key.clone())]);
 
         Ok((

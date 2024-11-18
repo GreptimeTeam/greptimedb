@@ -235,15 +235,16 @@ impl FlowMetadataManager {
         &self,
         flow_id: FlowId,
         flow_info: FlowInfoValue,
+        prev_flow_info: FlowInfoValue,
         flow_routes: Vec<(FlowPartitionId, FlowRouteValue)>,
     ) -> Result<()> {
         let (create_flow_flow_name_txn, on_create_flow_flow_name_failure) = self
             .flow_name_manager
             .build_update_txn(&flow_info.catalog_name, &flow_info.flow_name, flow_id)?;
 
-        let (create_flow_txn, on_create_flow_failure) = self
-            .flow_info_manager
-            .build_update_txn(flow_id, &flow_info)?;
+        let (create_flow_txn, on_create_flow_failure) =
+            self.flow_info_manager
+                .build_update_txn(flow_id, &flow_info, &prev_flow_info)?;
 
         let create_flow_routes_txn = self
             .flow_route_manager
@@ -284,33 +285,38 @@ impl FlowMetadataManager {
                 on_create_flow_flow_name_failure(&mut set)?.with_context(|| {
                     error::UnexpectedSnafu {
                         err_msg: format!(
-                        "Reads the empty flow name during the creating flow, flow_id: {flow_id}"
+                        "Reads the empty flow name during the updating flow, flow_id: {flow_id}"
                     ),
                     }
                 })?;
 
             if remote_flow_flow_name.flow_id() != flow_id {
                 info!(
-                    "Trying to create flow {}.{}({}), but flow({}) already exists",
+                    "Trying to updating flow {}.{}({}), but flow({}) already exists with a different flow id",
                     flow_info.catalog_name,
                     flow_info.flow_name,
                     flow_id,
                     remote_flow_flow_name.flow_id()
                 );
 
-                return error::FlowAlreadyExistsSnafu {
-                    flow_name: format!("{}.{}", flow_info.catalog_name, flow_info.flow_name),
-                }
-                .fail();
+                return error::UnexpectedSnafu {
+                    err_msg: format!(
+                        "Reads different flow id when updating flow({2}.{3}), prev flow id = {0}, updating with flow id = {1}",
+                        remote_flow_flow_name.flow_id(),
+                        flow_id,
+                        flow_info.catalog_name,
+                        flow_info.flow_name,
+                    ),
+                }.fail();
             }
 
             let remote_flow =
                 on_create_flow_failure(&mut set)?.with_context(|| error::UnexpectedSnafu {
                     err_msg: format!(
-                        "Reads the empty flow during the creating flow, flow_id: {flow_id}"
+                        "Reads the empty flow during the updating flow, flow_id: {flow_id}"
                     ),
                 })?;
-            let op_name = "creating flow";
+            let op_name = "updating flow";
             ensure_values!(*remote_flow, flow_info, op_name);
         }
 
@@ -646,5 +652,223 @@ mod tests {
             .unwrap();
         // Ensures all keys are deleted
         assert!(mem_kv.is_empty())
+    }
+
+    #[tokio::test]
+    async fn test_update_flow_metadata() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
+        let flow_id = 10;
+        let flow_value = test_flow_info_value(
+            "flow",
+            [(0, 1u64), (1, 2u64)].into(),
+            vec![1024, 1025, 1026],
+        );
+        let flow_routes = vec![
+            (
+                1u32,
+                FlowRouteValue {
+                    peer: Peer::empty(1),
+                },
+            ),
+            (
+                2,
+                FlowRouteValue {
+                    peer: Peer::empty(2),
+                },
+            ),
+        ];
+        flow_metadata_manager
+            .create_flow_metadata(flow_id, flow_value.clone(), flow_routes.clone())
+            .await
+            .unwrap();
+
+        let new_flow_value = {
+            let mut tmp = flow_value.clone();
+            tmp.raw_sql = "new".to_string();
+            tmp
+        };
+
+        // Update flow instead
+        flow_metadata_manager
+            .update_flow_metadata(
+                flow_id,
+                new_flow_value.clone(),
+                flow_value.clone(),
+                flow_routes.clone(),
+            )
+            .await
+            .unwrap();
+
+        let got = flow_metadata_manager
+            .flow_info_manager()
+            .get(flow_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let routes = flow_metadata_manager
+            .flow_route_manager()
+            .routes(flow_id)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            routes,
+            vec![
+                (
+                    FlowRouteKey::new(flow_id, 1),
+                    FlowRouteValue {
+                        peer: Peer::empty(1),
+                    },
+                ),
+                (
+                    FlowRouteKey::new(flow_id, 2),
+                    FlowRouteValue {
+                        peer: Peer::empty(2),
+                    },
+                ),
+            ]
+        );
+        assert_eq!(got, new_flow_value);
+        let flows = flow_metadata_manager
+            .flownode_flow_manager()
+            .flows(1)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(flows, vec![(flow_id, 0)]);
+        for table_id in [1024, 1025, 1026] {
+            let nodes = flow_metadata_manager
+                .table_flow_manager()
+                .flows(table_id)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(
+                nodes,
+                vec![
+                    (
+                        TableFlowKey::new(table_id, 1, flow_id, 1),
+                        TableFlowValue {
+                            peer: Peer::empty(1)
+                        }
+                    ),
+                    (
+                        TableFlowKey::new(table_id, 2, flow_id, 2),
+                        TableFlowValue {
+                            peer: Peer::empty(2)
+                        }
+                    )
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_flow_metadata_flow_replace_diff_id_err() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
+        let flow_id = 10;
+        let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        let flow_routes = vec![
+            (
+                1u32,
+                FlowRouteValue {
+                    peer: Peer::empty(1),
+                },
+            ),
+            (
+                2,
+                FlowRouteValue {
+                    peer: Peer::empty(2),
+                },
+            ),
+        ];
+        flow_metadata_manager
+            .create_flow_metadata(flow_id, flow_value.clone(), flow_routes.clone())
+            .await
+            .unwrap();
+        // update again with same flow id
+        flow_metadata_manager
+            .update_flow_metadata(
+                flow_id,
+                flow_value.clone(),
+                flow_value.clone(),
+                flow_routes.clone(),
+            )
+            .await
+            .unwrap();
+        // update again with wrong flow id, expected error
+        let err = flow_metadata_manager
+            .update_flow_metadata(
+                flow_id + 1,
+                flow_value.clone(),
+                flow_value.clone(),
+                flow_routes,
+            )
+            .await
+            .unwrap_err();
+        assert_matches!(err, error::Error::Unexpected { .. });
+        assert!(err
+            .to_string()
+            .contains("Reads different flow id when updating flow"));
+    }
+
+    #[tokio::test]
+    async fn test_update_flow_metadata_unexpected_err_prev_value_diff() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
+        let flow_id = 10;
+        let catalog_name = "greptime";
+        let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        let flow_routes = vec![
+            (
+                1u32,
+                FlowRouteValue {
+                    peer: Peer::empty(1),
+                },
+            ),
+            (
+                2,
+                FlowRouteValue {
+                    peer: Peer::empty(2),
+                },
+            ),
+        ];
+        flow_metadata_manager
+            .create_flow_metadata(flow_id, flow_value.clone(), flow_routes.clone())
+            .await
+            .unwrap();
+        // Creates again.
+        let another_sink_table_name = TableName {
+            catalog_name: catalog_name.to_string(),
+            schema_name: "my_schema".to_string(),
+            table_name: "another_sink_table".to_string(),
+        };
+        let flow_value = FlowInfoValue {
+            catalog_name: "greptime".to_string(),
+            flow_name: "flow".to_string(),
+            source_table_ids: vec![1024, 1025, 1026],
+            sink_table_name: another_sink_table_name,
+            flownode_ids: [(0, 1u64)].into(),
+            raw_sql: "raw".to_string(),
+            expire_after: Some(300),
+            comment: "hi".to_string(),
+            options: Default::default(),
+        };
+        let err = flow_metadata_manager
+            .update_flow_metadata(
+                flow_id,
+                flow_value.clone(),
+                flow_value.clone(),
+                flow_routes.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Reads the different value"),
+            "error: {:?}",
+            err
+        );
     }
 }

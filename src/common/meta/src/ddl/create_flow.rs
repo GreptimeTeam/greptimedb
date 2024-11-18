@@ -76,7 +76,7 @@ impl CreateFlowProcedure {
                 source_table_ids: vec![],
                 query_context,
                 state: CreateFlowState::Prepare,
-                flow_already_exists: false,
+                prev_flow_info_value: None,
             },
         }
     }
@@ -135,7 +135,22 @@ impl CreateFlowProcedure {
             self.data.flow_id = Some(flow_id);
             self.data.peers = peers;
             info!("Replacing flow, flow_id: {}", flow_id);
-            self.data.flow_already_exists = true;
+
+            let flow_info_value = self
+                .context
+                .flow_metadata_manager
+                .flow_info_manager()
+                .get(flow_id)
+                .await?;
+
+            ensure!(
+                flow_info_value.is_some(),
+                error::UnexpectedSnafu {
+                    err_msg: format!("Flow info value not found for flow_id: {}", flow_id)
+                }
+            );
+
+            self.data.prev_flow_info_value = flow_info_value;
         }
 
         //  Ensures sink table doesn't exist.
@@ -183,7 +198,10 @@ impl CreateFlowProcedure {
                     .map_err(add_peer_context_if_needed(peer.clone()))
             });
         }
-        info!("Creating flow({}) on flownodes", self.data.flow_id.unwrap());
+        info!(
+            "Creating flow({:?}) on flownodes with peers={:?}",
+            self.data.flow_id, self.data.peers
+        );
         join_all(create_flow)
             .await
             .into_iter()
@@ -201,10 +219,10 @@ impl CreateFlowProcedure {
         // Safety: The flow id must be allocated.
         let flow_id = self.data.flow_id.unwrap();
         let (flow_info, flow_routes) = (&self.data).into();
-        if self.data.flow_already_exists {
+        if let Some(prev_flow_value) = self.data.prev_flow_info_value.as_ref() {
             self.context
                 .flow_metadata_manager
-                .update_flow_metadata(flow_id, flow_info, flow_routes)
+                .update_flow_metadata(flow_id, flow_info, prev_flow_value.clone(), flow_routes)
                 .await?;
             info!("Replaced flow metadata for flow {flow_id}");
         } else {
@@ -312,7 +330,8 @@ pub struct CreateFlowData {
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
     pub(crate) query_context: QueryContext,
-    pub(crate) flow_already_exists: bool,
+    /// For verify if prev value is consistent when need to update flow metadata.
+    pub(crate) prev_flow_info_value: Option<FlowInfoValue>,
 }
 
 impl From<&CreateFlowData> for CreateRequest {
