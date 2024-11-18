@@ -14,7 +14,7 @@
 
 //! Implementation of retrieving logical region's region metadata.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::RegionId;
@@ -65,42 +65,14 @@ impl MetricEngineInner {
             .cloned()
             .unwrap_or_default()
             .into_iter();
-
-        let merged_columns = logical_column_metadata
-            .clone()
+        let mut dedup_columns = logical_column_metadata
             .into_iter()
-            .chain(existing_columns.clone().into_iter());
-
-        let mut id2cnt: BTreeMap<u32, BTreeSet<ColumnMetadata>> = BTreeMap::new();
-
-        let mut dedup_columns = merged_columns
-            .map(|c| {
-                id2cnt
-                    .entry(c.column_id)
-                    .and_modify(|e| {
-                        e.insert(c.clone());
-                    })
-                    .or_insert(BTreeSet::from([c.clone()]));
-                (c.column_id, c)
-            })
+            .chain(existing_columns)
+            .map(|c| (c.column_id, c))
             .collect::<HashMap<_, _>>()
             .values()
             .cloned()
             .collect::<Vec<_>>();
-
-        let non_eq_columns_with_same_id = id2cnt
-            .into_iter()
-            .filter(|(_, v)| v.len() > 1)
-            .collect::<BTreeMap<_, _>>();
-
-        if !non_eq_columns_with_same_id.is_empty() {
-            panic!(
-                "Found {} duplicated column ids: {:?}",
-                non_eq_columns_with_same_id.len(),
-                non_eq_columns_with_same_id
-            );
-        }
-
         // Sort columns on column name to ensure the order
         dedup_columns.sort_unstable_by(|c1, c2| c1.column_schema.name.cmp(&c2.column_schema.name));
         mutable_state.set_logical_columns(logical_region_id, dedup_columns.clone());
