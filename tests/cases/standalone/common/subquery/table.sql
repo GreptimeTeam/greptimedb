@@ -1,5 +1,3 @@
--- From https://github.com/duckdb/duckdb/tree/main/test/sql/subquery/table
-
 -- aliasing
 CREATE TABLE a(ts TIMESTAMP TIME INDEX, i INTEGER);
 

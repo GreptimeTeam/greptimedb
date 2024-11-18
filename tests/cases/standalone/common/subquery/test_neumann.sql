@@ -19,3 +19,5 @@ SELECT s.n, e.course, e.grade FROM students s, exams e WHERE s.id=e.sid AND e.gr
 SELECT n, major FROM students s WHERE EXISTS(SELECT * FROM exams e WHERE e.sid=s.id AND grade=10) OR s.n='Dirk' ORDER BY n;
 
 DROP TABLE students;
+
+DROP TABLE exams;

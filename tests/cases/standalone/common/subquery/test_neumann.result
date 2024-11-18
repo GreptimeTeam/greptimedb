@@ -39,3 +39,16 @@ SELECT s.n, e.course, e.grade FROM students s, exams e WHERE s.id=e.sid AND e.gr
 | Dirk | Graphics         | 7     |
 | Mark | Database Systems | 10    |
 +------+------------------+-------+
+
+SELECT n, major FROM students s WHERE EXISTS(SELECT * FROM exams e WHERE e.sid=s.id AND grade=10) OR s.n='Dirk' ORDER BY n;
+
+Error: 3001(EngineExecuteQuery), DataFusion error: This feature is not implemented: Physical plan does not support logical expression Exists(Exists { subquery: <subquery>, negated: false })
+
+DROP TABLE students;
+
+Affected Rows: 0
+
+DROP TABLE exams;
+
+Affected Rows: 0
+
