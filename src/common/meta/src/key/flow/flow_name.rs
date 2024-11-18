@@ -261,11 +261,6 @@ impl FlowNameManager {
                 CompareOp::Equal,
                 Some(raw_value),
             )])
-            // TODO(discord9): make this a no op since it's the same value
-            .and_then(vec![TxnOp::Put(
-                raw_key.clone(),
-                flow_flow_name_value.try_as_raw_value()?,
-            )])
             .or_else(vec![TxnOp::Get(raw_key.clone())]);
 
         Ok((

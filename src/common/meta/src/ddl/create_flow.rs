@@ -44,7 +44,7 @@ use crate::instruction::{CacheIdent, CreateFlow};
 use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::flow::flow_route::FlowRouteValue;
 use crate::key::table_name::TableNameKey;
-use crate::key::{FlowId, FlowPartitionId};
+use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::{CreateFlowTask, QueryContext};
@@ -140,13 +140,13 @@ impl CreateFlowProcedure {
                 .context
                 .flow_metadata_manager
                 .flow_info_manager()
-                .get(flow_id)
+                .get_raw(flow_id)
                 .await?;
 
             ensure!(
                 flow_info_value.is_some(),
-                error::UnexpectedSnafu {
-                    err_msg: format!("Flow info value not found for flow_id: {}", flow_id)
+                error::FlowNotFoundSnafu {
+                    flow_name: format_full_flow_name(catalog_name, flow_name),
                 }
             );
 
@@ -219,10 +219,12 @@ impl CreateFlowProcedure {
         // Safety: The flow id must be allocated.
         let flow_id = self.data.flow_id.unwrap();
         let (flow_info, flow_routes) = (&self.data).into();
-        if let Some(prev_flow_value) = self.data.prev_flow_info_value.as_ref() {
+        if let Some(prev_flow_value) = self.data.prev_flow_info_value.as_ref()
+            && self.data.task.or_replace
+        {
             self.context
                 .flow_metadata_manager
-                .update_flow_metadata(flow_id, flow_info, prev_flow_value.clone(), flow_routes)
+                .update_flow_metadata(flow_id, &flow_info, prev_flow_value, flow_routes)
                 .await?;
             info!("Replaced flow metadata for flow {flow_id}");
         } else {
@@ -331,7 +333,8 @@ pub struct CreateFlowData {
     pub(crate) source_table_ids: Vec<TableId>,
     pub(crate) query_context: QueryContext,
     /// For verify if prev value is consistent when need to update flow metadata.
-    pub(crate) prev_flow_info_value: Option<FlowInfoValue>,
+    /// only set when `or_replace` is true.
+    pub(crate) prev_flow_info_value: Option<DeserializedValueWithBytes<FlowInfoValue>>,
 }
 
 impl From<&CreateFlowData> for CreateRequest {

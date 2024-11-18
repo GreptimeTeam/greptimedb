@@ -196,6 +196,19 @@ impl FlowInfoManager {
             .transpose()
     }
 
+    /// Returns the [FlowInfoValue] with original bytes of specified `flow_id`.
+    pub async fn get_raw(
+        &self,
+        flow_id: FlowId,
+    ) -> Result<Option<DeserializedValueWithBytes<FlowInfoValue>>> {
+        let key = FlowInfoKey::new(flow_id).to_bytes();
+        self.kv_backend
+            .get(&key)
+            .await?
+            .map(|x| DeserializedValueWithBytes::from_inner_slice(&x.value))
+            .transpose()
+    }
+
     /// Builds a create flow transaction.
     /// It is expected that the `__flow/info/{flow_id}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
@@ -224,14 +237,14 @@ impl FlowInfoManager {
         &self,
         flow_id: FlowId,
         flow_value: &FlowInfoValue,
-        prev_flow_value: &FlowInfoValue,
+        prev_flow_value: &DeserializedValueWithBytes<FlowInfoValue>,
     ) -> Result<(
         Txn,
         impl FnOnce(&mut TxnOpGetResponseSet) -> FlowInfoDecodeResult,
     )> {
         let key = FlowInfoKey::new(flow_id).to_bytes();
         let raw_value = flow_value.try_as_raw_value()?;
-        let prev_value = prev_flow_value.try_as_raw_value()?;
+        let prev_value = prev_flow_value.get_raw_bytes();
         let txn = Txn::new()
             .when(vec![
                 Compare::new(key.clone(), CompareOp::NotEqual, None),
