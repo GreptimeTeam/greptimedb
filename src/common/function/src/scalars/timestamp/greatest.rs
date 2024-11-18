@@ -156,7 +156,7 @@ impl Function for GreatestFunction {
 
                 let result =
                     zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
-                Ok(Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)?)
+                Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)
             }
             _ => UnsupportedInputDataTypeSnafu {
                 function: NAME,
