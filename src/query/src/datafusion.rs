@@ -307,7 +307,7 @@ impl DatafusionQueryEngine {
                     if let LogicalPlan::TableScan(table_scan) = node {
                         let schema = table_scan.source.schema();
 
-                        // found field in outter schema but not in inner schema
+                        // found field in outer schema but not in inner schema
                         let outer_fields: BTreeSet<_> =
                             table_scan.projected_schema.fields().into_iter().collect();
                         let inner_fields = schema.fields().iter().collect::<BTreeSet<_>>();
