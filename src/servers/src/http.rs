@@ -1003,6 +1003,7 @@ mod test {
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
+    use tokio::time::Instant;
 
     use super::*;
     use crate::error::Error;
@@ -1104,6 +1105,16 @@ mod test {
         let client = TestClient::new(app);
         let res = client.get("/test/timeout").send().await;
         assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+
+        let now = Instant::now();
+        let res = client
+            .get("/test/timeout")
+            .header("timeout", "20ms")
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+        let elapsed = now.elapsed();
+        assert!(elapsed > Duration::from_millis(15));
     }
 
     #[tokio::test]
