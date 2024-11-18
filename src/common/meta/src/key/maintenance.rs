@@ -47,17 +47,40 @@ impl MaintenanceModeManager {
 
     /// Unsets maintenance mode.
     pub async fn unset_maintenance_mode(&self) -> Result<()> {
-        let req = PutRequest {
-            key: Vec::from(MAINTENANCE_KEY),
-            value: vec![],
-            prev_kv: false,
-        };
-        self.kv_backend.put(req).await?;
+        self.kv_backend
+            .delete(MAINTENANCE_KEY.as_bytes(), false)
+            .await?;
         Ok(())
     }
 
     /// Returns true if maintenance mode is enabled.
     pub async fn maintenance_mode(&self) -> Result<bool> {
         self.kv_backend.exists(MAINTENANCE_KEY.as_bytes()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::key::maintenance::MaintenanceModeManager;
+    use crate::kv_backend::memory::MemoryKvBackend;
+
+    #[tokio::test]
+    async fn test_maintenance_mode_manager() {
+        let maintenance_mode_manager = Arc::new(MaintenanceModeManager::new(Arc::new(
+            MemoryKvBackend::new(),
+        )));
+        assert!(!maintenance_mode_manager.maintenance_mode().await.unwrap());
+        maintenance_mode_manager
+            .set_maintenance_mode()
+            .await
+            .unwrap();
+        assert!(maintenance_mode_manager.maintenance_mode().await.unwrap());
+        maintenance_mode_manager
+            .unset_maintenance_mode()
+            .await
+            .unwrap();
+        assert!(!maintenance_mode_manager.maintenance_mode().await.unwrap());
     }
 }
