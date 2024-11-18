@@ -36,7 +36,7 @@ use crate::error::{
     self, InvalidAuthHeaderInvisibleASCIISnafu, InvalidAuthHeaderSnafu, InvalidParameterSnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
 };
-use crate::http::error_result::ErrorResponse;
+use crate::http::result::error_result::ErrorResponse;
 use crate::http::HTTP_API_PREFIX;
 use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
 

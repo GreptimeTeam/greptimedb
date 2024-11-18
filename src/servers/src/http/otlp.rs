@@ -12,19 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use core::str;
-use std::result::Result as StdResult;
 use std::sync::Arc;
 
-use axum::extract::{FromRequestParts, State};
-use axum::http::header::HeaderValue;
-use axum::http::request::Parts;
-use axum::http::{header, StatusCode};
+use axum::extract::State;
+use axum::http::header;
 use axum::response::IntoResponse;
-use axum::{async_trait, Extension};
+use axum::Extension;
 use bytes::Bytes;
 use common_telemetry::tracing;
-use http::HeaderMap;
 use opentelemetry_proto::tonic::collector::logs::v1::{
     ExportLogsServiceRequest, ExportLogsServiceResponse,
 };
@@ -35,19 +30,14 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 use pipeline::util::to_pipeline_version;
-use pipeline::{PipelineWay, SelectInfo};
+use pipeline::PipelineWay;
 use prost::Message;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 
-use super::header::constants::GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME;
 use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
-use crate::error::{self, InvalidUtf8ValueSnafu, PipelineSnafu, Result};
-use crate::http::header::constants::{
-    GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME, GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
-    GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
-};
-use crate::otlp::logs::LOG_TABLE_NAME;
+use crate::error::{self, PipelineSnafu, Result};
+use crate::http::extractor::{LogTableName, PipelineInfo, SelectInfoWrapper, TraceTableName};
 use crate::otlp::trace::TRACE_TABLE_NAME;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
@@ -83,18 +73,13 @@ pub async fn metrics(
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "traces"))]
 pub async fn traces(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
-    header: HeaderMap,
+    TraceTableName(table_name): TraceTableName,
     Extension(mut query_ctx): Extension<QueryContext>,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportTraceServiceResponse>> {
     let db = query_ctx.get_db_string();
-    let table_name = extract_string_value_from_header(
-        &header,
-        GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
-        Some(TRACE_TABLE_NAME),
-    )?
-    // safety here, we provide default value for table_name
-    .unwrap();
+    let table_name = table_name.unwrap_or_else(|| TRACE_TABLE_NAME.to_string());
+
     query_ctx.set_channel(Channel::Otlp);
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
@@ -113,139 +98,17 @@ pub async fn traces(
         })
 }
 
-pub struct PipelineInfo {
-    pub pipeline_name: Option<String>,
-    pub pipeline_version: Option<String>,
-}
-
-fn parse_header_value_to_string(header: &HeaderValue) -> Result<String> {
-    String::from_utf8(header.as_bytes().to_vec()).context(InvalidUtf8ValueSnafu)
-}
-
-fn extract_string_value_from_header(
-    headers: &HeaderMap,
-    header: &str,
-    default_table_name: Option<&str>,
-) -> Result<Option<String>> {
-    let table_name = headers.get(header);
-    match table_name {
-        Some(name) => parse_header_value_to_string(name).map(Some),
-        None => match default_table_name {
-            Some(name) => Ok(Some(name.to_string())),
-            None => Ok(None),
-        },
-    }
-}
-
-fn utf8_error(header_name: &str) -> impl Fn(error::Error) -> (StatusCode, String) + use<'_> {
-    move |_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("`{}` header is not valid UTF-8 string type.", header_name),
-        )
-    }
-}
-
-#[async_trait]
-impl<S> FromRequestParts<S> for PipelineInfo
-where
-    S: Send + Sync,
-{
-    type Rejection = (StatusCode, String);
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let headers = &parts.headers;
-        let pipeline_name =
-            extract_string_value_from_header(headers, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME, None)
-                .map_err(utf8_error(GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME))?;
-        let pipeline_version = extract_string_value_from_header(
-            headers,
-            GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
-            None,
-        )
-        .map_err(utf8_error(GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME))?;
-        match (pipeline_name, pipeline_version) {
-            (Some(name), Some(version)) => Ok(PipelineInfo {
-                pipeline_name: Some(name),
-                pipeline_version: Some(version),
-            }),
-            (None, _) => Ok(PipelineInfo {
-                pipeline_name: None,
-                pipeline_version: None,
-            }),
-            (Some(name), None) => Ok(PipelineInfo {
-                pipeline_name: Some(name),
-                pipeline_version: None,
-            }),
-        }
-    }
-}
-
-pub struct TableInfo {
-    table_name: String,
-}
-
-#[async_trait]
-impl<S> FromRequestParts<S> for TableInfo
-where
-    S: Send + Sync,
-{
-    type Rejection = (StatusCode, String);
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let table_name = extract_string_value_from_header(
-            &parts.headers,
-            GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
-            Some(LOG_TABLE_NAME),
-        )
-        .map_err(utf8_error(GREPTIME_LOG_TABLE_NAME_HEADER_NAME))?
-        // safety here, we provide default value for table_name
-        .unwrap();
-
-        Ok(TableInfo { table_name })
-    }
-}
-
-pub struct SelectInfoWrapper(SelectInfo);
-
-#[async_trait]
-impl<S> FromRequestParts<S> for SelectInfoWrapper
-where
-    S: Send + Sync,
-{
-    type Rejection = (StatusCode, String);
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
-        let select = extract_string_value_from_header(
-            &parts.headers,
-            GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME,
-            None,
-        )
-        .map_err(utf8_error(GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME))?;
-
-        match select {
-            Some(name) => {
-                if name.is_empty() {
-                    Ok(SelectInfoWrapper(Default::default()))
-                } else {
-                    Ok(SelectInfoWrapper(SelectInfo::from(name)))
-                }
-            }
-            None => Ok(SelectInfoWrapper(Default::default())),
-        }
-    }
-}
-
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "logs"))]
 pub async fn logs(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(mut query_ctx): Extension<QueryContext>,
     pipeline_info: PipelineInfo,
-    table_info: TableInfo,
+    LogTableName(tablename): LogTableName,
     SelectInfoWrapper(select_info): SelectInfoWrapper,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportLogsServiceResponse>> {
+    let tablename = tablename.unwrap_or_else(|| "opentelemetry_logs".to_string());
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
     let query_ctx = Arc::new(query_ctx);
@@ -272,7 +135,7 @@ pub async fn logs(
     };
 
     handler
-        .logs(request, pipeline_way, table_info.table_name, query_ctx)
+        .logs(request, pipeline_way, tablename, query_ctx)
         .await
         .map(|o| OtlpResponse {
             resp_body: ExportLogsServiceResponse {

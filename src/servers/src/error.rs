@@ -16,6 +16,7 @@ use std::any::Any;
 use std::net::SocketAddr;
 use std::string::FromUtf8Error;
 
+use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{http, Json};
 use base64::DecodeError;
@@ -29,8 +30,6 @@ use headers::ContentType;
 use query::parser::PromQuery;
 use serde_json::json;
 use snafu::{Location, Snafu};
-
-use crate::http::error_result::status_code_to_http_status;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -499,6 +498,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse payload as json5"))]
+    ParseJson5 {
+        #[snafu(source)]
+        error: json5::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported content type: {:?}", content_type))]
     UnsupportedContentType {
         content_type: ContentType,
@@ -631,6 +638,7 @@ impl ErrorExt for Error {
             | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
             | ParseJson { .. }
+            | ParseJson5 { .. }
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }
             | OpenTelemetryLog { .. }
@@ -717,5 +725,51 @@ impl IntoResponse for Error {
             "error": error_msg,
         }));
         (status, body).into_response()
+    }
+}
+
+pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
+    match status_code {
+        StatusCode::Success | StatusCode::Cancelled => HttpStatusCode::OK,
+
+        StatusCode::Unsupported
+        | StatusCode::InvalidArguments
+        | StatusCode::InvalidSyntax
+        | StatusCode::RequestOutdated
+        | StatusCode::RegionAlreadyExists
+        | StatusCode::TableColumnExists
+        | StatusCode::TableAlreadyExists
+        | StatusCode::RegionNotFound
+        | StatusCode::DatabaseNotFound
+        | StatusCode::TableNotFound
+        | StatusCode::TableColumnNotFound
+        | StatusCode::PlanQuery
+        | StatusCode::DatabaseAlreadyExists
+        | StatusCode::FlowNotFound
+        | StatusCode::FlowAlreadyExists => HttpStatusCode::BAD_REQUEST,
+
+        StatusCode::AuthHeaderNotFound
+        | StatusCode::InvalidAuthHeader
+        | StatusCode::UserNotFound
+        | StatusCode::UnsupportedPasswordType
+        | StatusCode::UserPasswordMismatch
+        | StatusCode::RegionReadonly => HttpStatusCode::UNAUTHORIZED,
+
+        StatusCode::PermissionDenied | StatusCode::AccessDenied => HttpStatusCode::FORBIDDEN,
+
+        StatusCode::RateLimited => HttpStatusCode::TOO_MANY_REQUESTS,
+
+        StatusCode::RegionNotReady
+        | StatusCode::TableUnavailable
+        | StatusCode::RegionBusy
+        | StatusCode::StorageUnavailable
+        | StatusCode::External => HttpStatusCode::SERVICE_UNAVAILABLE,
+
+        StatusCode::Internal
+        | StatusCode::Unexpected
+        | StatusCode::IllegalState
+        | StatusCode::Unknown
+        | StatusCode::RuntimeResourcesExhausted
+        | StatusCode::EngineExecuteQuery => HttpStatusCode::INTERNAL_SERVER_ERROR,
     }
 }

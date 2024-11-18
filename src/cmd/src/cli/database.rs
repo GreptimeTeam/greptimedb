@@ -19,8 +19,8 @@ use base64::Engine;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use humantime::format_duration;
 use serde_json::Value;
-use servers::http::greptime_result_v1::GreptimedbV1Response;
 use servers::http::header::constants::GREPTIME_DB_HEADER_TIMEOUT;
+use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::GreptimeQueryOutput;
 use snafu::ResultExt;
 

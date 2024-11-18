@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::http::{HeaderValue, StatusCode as HttpStatusCode};
+use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use common_error::ext::ErrorExt;
@@ -21,6 +21,7 @@ use common_telemetry::{debug, error};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::error::status_code_to_http_status;
 use crate::http::header::constants::GREPTIME_DB_HEADER_ERROR_CODE;
 use crate::http::header::GREPTIME_DB_HEADER_EXECUTION_TIME;
 
@@ -85,51 +86,5 @@ impl IntoResponse for ErrorResponse {
         let status_code = status_code_to_http_status(&status);
 
         (status_code, resp).into_response()
-    }
-}
-
-pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
-    match status_code {
-        StatusCode::Success | StatusCode::Cancelled => HttpStatusCode::OK,
-
-        StatusCode::Unsupported
-        | StatusCode::InvalidArguments
-        | StatusCode::InvalidSyntax
-        | StatusCode::RequestOutdated
-        | StatusCode::RegionAlreadyExists
-        | StatusCode::TableColumnExists
-        | StatusCode::TableAlreadyExists
-        | StatusCode::RegionNotFound
-        | StatusCode::DatabaseNotFound
-        | StatusCode::TableNotFound
-        | StatusCode::TableColumnNotFound
-        | StatusCode::PlanQuery
-        | StatusCode::DatabaseAlreadyExists
-        | StatusCode::FlowNotFound
-        | StatusCode::FlowAlreadyExists => HttpStatusCode::BAD_REQUEST,
-
-        StatusCode::AuthHeaderNotFound
-        | StatusCode::InvalidAuthHeader
-        | StatusCode::UserNotFound
-        | StatusCode::UnsupportedPasswordType
-        | StatusCode::UserPasswordMismatch
-        | StatusCode::RegionReadonly => HttpStatusCode::UNAUTHORIZED,
-
-        StatusCode::PermissionDenied | StatusCode::AccessDenied => HttpStatusCode::FORBIDDEN,
-
-        StatusCode::RateLimited => HttpStatusCode::TOO_MANY_REQUESTS,
-
-        StatusCode::RegionNotReady
-        | StatusCode::TableUnavailable
-        | StatusCode::RegionBusy
-        | StatusCode::StorageUnavailable
-        | StatusCode::External => HttpStatusCode::SERVICE_UNAVAILABLE,
-
-        StatusCode::Internal
-        | StatusCode::Unexpected
-        | StatusCode::IllegalState
-        | StatusCode::Unknown
-        | StatusCode::RuntimeResourcesExhausted
-        | StatusCode::EngineExecuteQuery => HttpStatusCode::INTERNAL_SERVER_ERROR,
     }
 }

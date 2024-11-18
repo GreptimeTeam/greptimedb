@@ -32,12 +32,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
-use super::header::{collect_plan_metrics, GREPTIME_DB_HEADER_METRICS};
-use super::prometheus::{
+use crate::error::{
+    status_code_to_http_status, CollectRecordbatchSnafu, Result, UnexpectedResultSnafu,
+};
+use crate::http::header::{collect_plan_metrics, GREPTIME_DB_HEADER_METRICS};
+use crate::http::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusResponse,
 };
-use crate::error::{CollectRecordbatchSnafu, Result, UnexpectedResultSnafu};
-use crate::http::error_result::status_code_to_http_status;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PrometheusJsonResponse {

@@ -161,6 +161,19 @@ lazy_static! {
             &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
         )
         .unwrap();
+    pub static ref METRIC_LOKI_LOGS_INGESTION_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_loki_logs_ingestion_counter",
+        "servers loki logs ingestion counter",
+        &[METRIC_DB_LABEL]
+    )
+    .unwrap();
+    pub static ref METRIC_LOKI_LOGS_INGESTION_ELAPSED: HistogramVec =
+        register_histogram_vec!(
+            "greptime_servers_loki_logs_ingestion_elapsed",
+            "servers loki logs ingestion elapsed",
+            &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
+        )
+        .unwrap();
     pub static ref METRIC_HTTP_LOGS_TRANSFORM_ELAPSED: HistogramVec =
         register_histogram_vec!(
             "greptime_servers_http_logs_transform_elapsed",

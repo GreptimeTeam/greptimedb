@@ -372,6 +372,7 @@ pub enum Channel {
     Grpc = 6,
     Influx = 7,
     Opentsdb = 8,
+    Loki = 9,
 }
 
 impl From<u32> for Channel {
@@ -385,6 +386,7 @@ impl From<u32> for Channel {
             6 => Self::Grpc,
             7 => Self::Influx,
             8 => Self::Opentsdb,
+            9 => Self::Loki,
 
             _ => Self::Unknown,
         }
@@ -412,6 +414,7 @@ impl Display for Channel {
             Channel::Grpc => write!(f, "grpc"),
             Channel::Influx => write!(f, "influx"),
             Channel::Opentsdb => write!(f, "opentsdb"),
+            Channel::Loki => write!(f, "loki"),
             Channel::Unknown => write!(f, "unknown"),
         }
     }

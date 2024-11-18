@@ -6194,6 +6194,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "loki-api"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "674883a98273598ac3aad4301724c56734bea90574c5033af067e8f9fb5eb399"
+dependencies = [
+ "prost 0.12.6",
+ "prost-types 0.12.6",
+]
+
+[[package]]
 name = "lrlex"
 version = "0.13.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10988,8 +10998,10 @@ dependencies = [
  "hyper 0.14.30",
  "influxdb_line_protocol",
  "itertools 0.10.5",
+ "json5",
  "jsonb",
  "lazy_static",
+ "loki-api",
  "mime_guess",
  "mysql_async",
  "notify",
@@ -12387,6 +12399,7 @@ dependencies = [
  "futures-util",
  "hex",
  "itertools 0.10.5",
+ "loki-api",
  "meta-client",
  "meta-srv",
  "moka",
