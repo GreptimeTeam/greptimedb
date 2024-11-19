@@ -86,7 +86,7 @@ pub struct ExportCommand {
     auth_basic: Option<String>,
 
     /// The timeout of invoking the database.
-    #[clap(long, value_parser = humantime::parse_duration)]
+    #[clap(long, value_parser = humantime::parse_duration, default_value = "180s")]
     timeout: Option<Duration>,
 }
 
