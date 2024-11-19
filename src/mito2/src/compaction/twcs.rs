@@ -16,7 +16,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 
-use common_telemetry::{debug, info};
+use common_telemetry::{info, trace};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
@@ -114,7 +114,7 @@ impl TwcsPicker {
                 // Files in window exceeds file num limit
                 vec![enforce_file_num(&files.files, max_files)]
             } else {
-                debug!("Skip building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, ", active_window, *window, max_runs, found_runs);
+                trace!("Skip building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, ", active_window, *window, max_runs, found_runs);
                 continue;
             };
 

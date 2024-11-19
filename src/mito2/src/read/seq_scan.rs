@@ -36,6 +36,7 @@ use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
+use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
 use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
@@ -131,12 +132,17 @@ impl SeqScan {
         part_metrics: &PartitionMetrics,
     ) -> Result<BoxedBatchReader> {
         let mut sources = Vec::new();
+        let range_builder_list = Arc::new(RangeBuilderList::new(
+            stream_ctx.input.num_memtables(),
+            stream_ctx.input.num_files(),
+        ));
         for part_range in partition_ranges {
             build_sources(
                 stream_ctx,
                 part_range,
                 compaction,
                 part_metrics,
+                range_builder_list.clone(),
                 &mut sources,
             );
         }
@@ -219,10 +225,21 @@ impl SeqScan {
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
+            let range_builder_list = Arc::new(RangeBuilderList::new(
+                stream_ctx.input.num_memtables(),
+                stream_ctx.input.num_files(),
+            ));
             // Scans each part.
             for part_range in partition_ranges {
                 let mut sources = Vec::new();
-                build_sources(&stream_ctx, &part_range, compaction, &part_metrics, &mut sources);
+                build_sources(
+                    &stream_ctx,
+                    &part_range,
+                    compaction,
+                    &part_metrics,
+                    range_builder_list.clone(),
+                    &mut sources,
+                );
 
                 let mut reader =
                     Self::build_reader_from_sources(&stream_ctx, sources, semaphore.clone())
@@ -353,6 +370,7 @@ fn build_sources(
     part_range: &PartitionRange,
     compaction: bool,
     part_metrics: &PartitionMetrics,
+    range_builder_list: Arc<RangeBuilderList>,
     sources: &mut Vec<Source>,
 ) {
     // Gets range meta.
@@ -365,6 +383,7 @@ fn build_sources(
                 part_metrics.clone(),
                 *index,
                 range_meta.time_range,
+                range_builder_list.clone(),
             );
             Box::pin(stream) as _
         } else {
@@ -373,8 +392,13 @@ fn build_sources(
             } else {
                 "seq_scan_files"
             };
-            let stream =
-                scan_file_ranges(stream_ctx.clone(), part_metrics.clone(), *index, read_type);
+            let stream = scan_file_ranges(
+                stream_ctx.clone(),
+                part_metrics.clone(),
+                *index,
+                read_type,
+                range_builder_list.clone(),
+            );
             Box::pin(stream) as _
         };
         sources.push(Source::Stream(stream));
