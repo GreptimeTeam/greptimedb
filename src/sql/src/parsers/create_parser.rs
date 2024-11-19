@@ -792,7 +792,7 @@ impl<'a> ParserContext<'a> {
             TokenWithLocation {
                 token: Token::Word(w),
                 ..
-            } if w.value == INVERTED => {
+            } if w.value.eq_ignore_ascii_case(INVERTED) => {
                 self.parser
                     .expect_keyword(Keyword::INDEX)
                     .context(error::UnexpectedSnafu {
@@ -1867,7 +1867,7 @@ ENGINE=mito";
                              cpu float64 default 0,
                              memory float64,
                              TIME INDEX (ts),
-                             INVERTED INDEX()
+                             inverted index()
                              ) engine=mito;
          ";
         let result =
