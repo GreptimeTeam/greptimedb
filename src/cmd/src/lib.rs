@@ -45,7 +45,7 @@ lazy_static::lazy_static! {
 
 /// wait for the close signal, for unix platform it's SIGINT or SIGTERM
 #[cfg(unix)]
-async fn start_wait_for_close_signal() -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn start_wait_for_close_signal() -> std::io::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -64,7 +64,7 @@ async fn start_wait_for_close_signal() -> std::result::Result<(), Box<dyn std::e
 
 /// wait for the close signal, for non-unix platform it's ctrl-c
 #[cfg(not(unix))]
-async fn start_wait_for_close_signal() -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn start_wait_for_close_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
